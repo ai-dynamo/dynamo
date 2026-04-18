@@ -1,8 +1,10 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: FlexKV
+sidebar-title: FlexKV
 ---
+
+# FlexKV Integration
 
 ## Introduction
 
@@ -18,19 +20,52 @@ title: FlexKV
 
 ## Prerequisites
 
-1. **Dynamo installed** with vLLM support
+1. **Dynamo installed** with vLLM support.
 2. **Infrastructure services running**:
+
    ```bash
    docker compose -f deploy/docker-compose.yml up -d
    ```
-3. **FlexKV dependencies** (for SSD offloading):
-   ```bash
-   apt install liburing-dev libxxhash-dev
+
+3. **FlexKV runtime package installed in the container.** The Dynamo vLLM
+   container does **not** ship with the FlexKV Python runtime pre-installed.
+   If it is missing, `FlexKVConnectorV1` will fail to load with:
+
+   ```text
+   ImportError: FlexKV is not installed. Please install it to use FlexKVConnectorV1.
    ```
+
+   Install FlexKV from source inside the container (or on the host used for
+   the `dynamo.vllm` worker):
+
+   ```bash
+   # System build dependencies
+   apt install -y liburing-dev libxxhash-dev libhiredis-dev git
+
+   # Build and install FlexKV from source
+   git clone https://github.com/taco-project/FlexKV.git /opt/flexkv
+   cd /opt/flexkv
+   ./build.sh --release
+   ```
+
+   See the upstream
+   [FlexKV install instructions](https://github.com/taco-project/FlexKV#how-to-use)
+   for the authoritative steps and version compatibility notes.
+
+4. **Optional: SSD offloading system packages.** Only needed if you plan to
+   use the CPU + SSD tiered cache configuration below. `liburing-dev` and
+   `libxxhash-dev` are already required by the FlexKV build above; no
+   additional packages are needed for SSD offloading on top of the standard
+   install.
 
 ## Quick Start
 
 ### Enable FlexKV
+
+> **Make sure the FlexKV runtime is installed in the container first**
+> (see [Prerequisites](#prerequisites), step 3). Setting
+> `DYNAMO_USE_FLEXKV=1` without the FlexKV Python package installed will
+> fail with `ImportError: FlexKV is not installed`.
 
 Set the `DYNAMO_USE_FLEXKV` environment variable and use the `--kv-transfer-config` flag:
 
@@ -88,26 +123,81 @@ python -m dynamo.vllm \
 
 ## Disaggregated Serving
 
-FlexKV can be used with disaggregated prefill/decode serving. The prefill worker uses FlexKV for KV cache offloading, while NIXL handles KV transfer between prefill and decode workers.
+> **Experimental.** Disaggregated prefill/decode with FlexKV is **not a
+> fully supported configuration in Dynamo 1.1.0**. The snippet below is
+> provided for reference only and is expected to require additional setup
+> beyond what is documented here. For production disaggregated serving,
+> prefer KVBM (see the
+> [KVBM guide](../components/kvbm/kvbm-guide.md)) or LMCache (see the
+> [LMCache integration guide](./lmcache-integration.md)).
+
+For disaggregated prefill/decode, the prefill worker must wrap
+`FlexKVConnectorV1` together with `NixlConnector` inside Dynamo's
+`PdConnector`; using `FlexKVConnectorV1` on its own on the prefill worker is
+**not supported** and will fail at startup. The decode worker uses
+`NixlConnector` by itself.
+
+### Supported connector combinations for disaggregated serving
+
+| Prefill worker `kv_connector`                                 | Decode worker `kv_connector` | Status              |
+| ------------------------------------------------------------- | ---------------------------- | ------------------- |
+| `PdConnector` wrapping `DynamoConnector` + `NixlConnector`    | `NixlConnector`              | Supported (KVBM)    |
+| `PdConnector` wrapping `LMCacheConnectorV1` + `NixlConnector` | `NixlConnector`              | Supported (LMCache) |
+| `PdConnector` wrapping `FlexKVConnectorV1` + `NixlConnector`  | `NixlConnector`              | Experimental        |
+| `FlexKVConnectorV1` directly (no `PdConnector` wrapper)       | `NixlConnector`              | **Not supported**   |
+
+Using `FlexKVConnectorV1` directly on the prefill worker, or placing it as
+anything other than the first connector inside `PdConnector`, currently
+raises:
+
+```text
+TypeError: Expected first connector to be DynamoConnector or LMCacheConnectorV1, got FlexKVConnectorV1
+```
+
+### Reference launch script (experimental)
+
+See [`examples/backends/vllm/launch/disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)
+for the reference launch script kept in sync with the code. The relevant
+prefill-worker configuration is:
 
 ```bash
 # Terminal 1: Start frontend
 python -m dynamo.frontend &
 
-# Terminal 2: Decode worker (without FlexKV)
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+# Terminal 2: Decode worker (NIXL only, no FlexKV)
+CUDA_VISIBLE_DEVICES=0 \
+  python -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
-# Terminal 3: Prefill worker (with FlexKV)
+# Terminal 3: Prefill worker (FlexKV + NIXL, wrapped in PdConnector)
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYNAMO_USE_FLEXKV=1 \
 FLEXKV_CPU_CACHE_GB=32 \
 CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
-  --model Qwen/Qwen3-0.6B \
-  --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+    --model Qwen/Qwen3-0.6B \
+    --is-prefill-worker \
+    --kv-transfer-config '{
+      "kv_connector":"PdConnector",
+      "kv_role":"kv_both",
+      "kv_connector_extra_config":{
+        "connectors":[
+          {"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},
+          {"kv_connector":"NixlConnector","kv_role":"kv_both"}
+        ]
+      },
+      "kv_connector_module_path":"kvbm.vllm_integration.connector"
+    }' \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```
+
+Because disaggregated FlexKV is experimental, expect to hit additional
+unlisted requirements (FlexKV build variants, NIXL side-channel
+configuration, connector ordering validation in
+`kvbm.vllm_integration.connector.pd_connector.PdConnector`). Track
+[DYN-2722](https://linear.app/nvidia/issue/DYN-2722) for the support-status
+roadmap.
 
 ## Configuration
 
