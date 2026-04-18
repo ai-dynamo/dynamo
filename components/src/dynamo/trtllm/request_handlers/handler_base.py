@@ -107,13 +107,8 @@ class TRTLLMEngineQuiesceController:
                 "TRT-LLM does not expose _collective_rpc; skipping %s", method
             )
             return
-        try:
-            rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
-        except Exception:
-            if method != "wakeup":
-                raise
-            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
-            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+
+        rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
 
     @staticmethod
     def _release_gms_weights() -> None:
