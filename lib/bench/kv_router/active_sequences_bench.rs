@@ -7,7 +7,7 @@ use common::*;
 
 use clap::Parser;
 use common::NoopSequencePublisher;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
 use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
@@ -289,13 +289,15 @@ async fn run_benchmark(
         all_latencies.extend(task.await??);
     }
 
-    if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
+    // Keep the post-run drain check out of the measured benchmark interval.
+    let total_duration = progress.elapsed();
+    multi.assert_completely_drained(Instant::now());
+
+    if total_duration > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
         eprintln!(
             "WARNING: Benchmarker could not keep up. Rerun with a larger --benchmark-duration-ms."
         );
     }
-
-    let total_duration = progress.elapsed();
     let total_ops = all_latencies.len();
 
     let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
@@ -311,10 +313,13 @@ async fn run_benchmark(
     };
 
     println!(
-        "Ops Throughput: {} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
-        ops_throughput
+        "Ops Throughput: offered={} ops/s achieved={} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
+        offered_ops_throughput, ops_throughput
     );
-    println!("Block Throughput: {} block ops/s", block_throughput);
+    println!(
+        "Block Throughput: offered={} block ops/s achieved={} block ops/s",
+        offered_block_throughput, block_throughput
+    );
     println!("Latency p99: {}us", latency_p99_us);
 
     Ok(BenchmarkResults {
@@ -384,11 +389,12 @@ async fn apply_entry(
                 SequenceRequest {
                     request_id,
                     token_sequence: Some(block_hashes),
-                    isl,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: Some(output_length as u32),
-                    prefill_load_hint: None,
+                    prefill_load_hint: Some(PrefillLoadHint {
+                        initial_effective_prefill_tokens: isl,
+                        expected_prefill_duration: None,
+                    }),
                     worker,
                     lora_name: None,
                 },
@@ -501,6 +507,7 @@ async fn run_tests() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    init_sequence_logging(args.common.sequence_logs);
 
     if args.common.test {
         return run_tests().await;

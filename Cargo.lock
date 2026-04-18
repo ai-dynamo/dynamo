@@ -2310,7 +2310,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-bench"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2328,6 +2328,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -2342,20 +2343,19 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
  "dashmap",
- "derive-getters",
  "derive_builder",
  "dynamo-runtime",
  "dynamo-tokens",
@@ -2374,6 +2374,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tower 0.5.3",
  "tracing",
  "uuid",
  "validator",
@@ -2383,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -2483,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2501,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2530,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dynamo-protocols",
@@ -2548,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2565,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2580,6 +2581,7 @@ dependencies = [
  "chrono",
  "console-subscriber",
  "criterion 0.5.1",
+ "crossbeam-queue",
  "cudarc",
  "dashmap",
  "derive-getters",
@@ -2640,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -4455,7 +4457,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -4463,7 +4465,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -4483,7 +4485,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4523,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap 4.6.0",
  "cudarc",
@@ -4534,7 +4536,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4564,7 +4566,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -4620,7 +4622,7 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
 name = "libdynamo_llm"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-once-cell",

@@ -10,11 +10,14 @@ try:
 except ImportError:
     pytest.skip("msgspec required for FPM tests", allow_module_level=True)
 
-from dynamo.common.forward_pass_metrics import (
-    ForwardPassMetrics,
-    QueuedRequestMetrics,
-    ScheduledRequestMetrics,
-)
+try:
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        QueuedRequestMetrics,
+        ScheduledRequestMetrics,
+    )
+except ImportError:
+    pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
@@ -99,7 +102,6 @@ def _make_config(**overrides) -> PlannerConfig:
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_predictor="constant",
-        no_operation=True,
         backend="vllm",
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,

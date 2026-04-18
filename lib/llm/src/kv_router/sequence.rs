@@ -24,6 +24,8 @@ use std::sync::Arc;
 use super::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+#[cfg(test)]
+use dynamo_kv_router::protocols::PrefillLoadHint;
 
 /// Concrete [`SequencePublisher`] backed by NATS [`EventPublisher`] and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
@@ -145,56 +147,11 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime};
     use tokio::time::Instant;
 
-    #[test]
-    fn test_active_sequences_shared_blocks() {
-        let block_size = 4;
-        let mut seq_manager = ActiveSequences::new(block_size);
-        let decay_now = Instant::now();
-
-        seq_manager.add_request(
-            "request_1".to_string(),
-            Some(vec![1, 2, 3]),
-            12,
-            0,
-            None,
-            decay_now,
-        );
-        assert_eq!(seq_manager.active_blocks(), 3);
-        assert_eq!(seq_manager.active_tokens(decay_now), 12);
-
-        seq_manager.add_request(
-            "request_2".to_string(),
-            Some(vec![4]),
-            4,
-            0,
-            None,
-            decay_now,
-        );
-        assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(decay_now), 16);
-
-        seq_manager.add_request(
-            "request_3".to_string(),
-            Some(vec![1, 2, 3, 4]),
-            16,
-            4,
-            None,
-            decay_now,
-        );
-        assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(decay_now), 16);
-
-        seq_manager.free(&"request_2".to_string(), decay_now);
-        assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(decay_now), 12);
-
-        seq_manager.free(&"request_3".to_string(), decay_now);
-        assert_eq!(seq_manager.active_blocks(), 3);
-        assert_eq!(seq_manager.active_tokens(decay_now), 12);
-
-        seq_manager.free(&"request_1".to_string(), decay_now);
-        assert_eq!(seq_manager.active_blocks(), 0);
-        assert_eq!(seq_manager.active_tokens(decay_now), 0);
+    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: None,
+        })
     }
 
     #[tokio::test]
@@ -244,11 +201,9 @@ mod tests {
             SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: Some(vec![0, 1, 2]),
-                isl: 12,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(12),
                 worker: WorkerWithDpRank::new(0, 0),
                 lora_name: None,
             },
@@ -259,11 +214,9 @@ mod tests {
             SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: Some(vec![3, 4]),
-                isl: 8,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(8),
                 worker: WorkerWithDpRank::new(0, 1),
                 lora_name: None,
             },
@@ -274,11 +227,9 @@ mod tests {
             SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: Some(vec![0, 1, 2, 3]),
-                isl: 16,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(16),
                 worker: WorkerWithDpRank::new(1, 0),
                 lora_name: None,
             },
@@ -403,11 +354,9 @@ mod tests {
             SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: None,
-                isl: 12,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(12),
                 worker: WorkerWithDpRank::from_worker_id(0),
                 lora_name: None,
             },
@@ -418,11 +367,9 @@ mod tests {
             SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: None,
-                isl: 8,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(8),
                 worker: WorkerWithDpRank::from_worker_id(1),
                 lora_name: None,
             },
@@ -433,11 +380,9 @@ mod tests {
             SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: None,
-                isl: 16,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(16),
                 worker: WorkerWithDpRank::from_worker_id(2),
                 lora_name: None,
             },

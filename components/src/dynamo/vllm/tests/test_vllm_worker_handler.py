@@ -74,14 +74,18 @@ def _make_handler(
     """Construct a handler with BaseWorkerHandler.__init__ bypassed."""
     if config is None:
         config = _make_config()
+    model_config = MagicMock(enable_prompt_embeds=True)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
-        return mod.DecodeWorkerHandler(
+        handler = mod.DecodeWorkerHandler(
             runtime=MagicMock(),
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
+            model_config=model_config,
             encode_worker_client=encode_worker_client,
         )
+    handler.model_config = model_config
+    return handler
 
 
 def _make_raw_frontend_request(image_urls: list[str] | None = None) -> dict:
@@ -317,14 +321,17 @@ def _make_decode_handler(
 ) -> mod.DecodeWorkerHandler:
     """Construct a DecodeWorkerHandler with mocked internals."""
     config = _make_config(model=model, disaggregation_mode=disaggregation_mode)
+    model_config = MagicMock(enable_prompt_embeds=True)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
             runtime=MagicMock(),
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
+            model_config=model_config,
         )
     handler.config = config
+    handler.model_config = model_config
     handler.enable_multimodal = True
     handler.image_loader = MagicMock()
     handler.embedding_loader = None
@@ -462,14 +469,17 @@ def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler
     config = _make_config(
         model=model, is_prefill_worker=True, disaggregation_mode="PREFILL"
     )
+    model_config = MagicMock(enable_prompt_embeds=True)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.PrefillWorkerHandler(
             runtime=MagicMock(),
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
+            model_config=model_config,
         )
     handler.config = config
+    handler.model_config = model_config
     return handler
 
 

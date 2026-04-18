@@ -6,10 +6,10 @@
 The bridge (Rust, PyO3) runs the offline simulation step-by-step.
 This adapter sits between the bridge and the planner state machine:
 
-    Bridge.advance_to(tick_ms) → raw metrics dict
-    Adapter._build_tick_input() → TickInput
-    StateMachine.on_tick() → PlannerEffects
-    Adapter → Bridge.apply_scaling(prefill, decode)
+    Bridge.advance_to(tick_ms) -> raw metrics dict
+    Adapter._build_tick_input() -> TickInput
+    StateMachine.on_tick() -> PlannerEffects
+    Adapter -> Bridge.apply_scaling(prefill, decode)
 
 Supports both aggregated and disaggregated topologies. No I/O, no runtime
 dependencies. Fully deterministic when used with offline replay.
@@ -38,6 +38,8 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
+from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
+from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ class ReplayPlannerReport:
     scaling_events: list[ScalingEvent] = field(default_factory=list)
     diagnostics_log: list[TickDiagnostics] = field(default_factory=list)
     total_ticks: int = 0
+    html_report_path: Optional[str] = None
 
 
 def _build_fpm_from_dict(d: dict[str, Any]) -> ForwardPassMetrics:
@@ -129,9 +132,22 @@ class ReplayPlannerAdapter:
         self._prefill_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
         self._decode_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
 
-        # Scaling targets — used as `expected` in WorkerCounts
+        # Scaling targets -- used as `expected` in WorkerCounts
         self._scaling_target_prefill: Optional[int] = None
         self._scaling_target_decode: Optional[int] = None
+
+        # Diagnostics recorder for HTML report generation
+        decode_max_kv = (
+            capabilities.decode.max_kv_tokens
+            if capabilities and capabilities.decode
+            else None
+        )
+        self._recorder = DiagnosticsRecorder(
+            config=planner_config, max_kv_tokens=decode_max_kv
+        )
+        self._cumulative_gpu_hours: float = 0.0
+        self._last_tick_s: float = 0.0
+        self._last_traffic: Metrics = Metrics()
 
         if warmup_observations:
             self._sm.warm_load_predictors(warmup_observations)
@@ -155,6 +171,9 @@ class ReplayPlannerAdapter:
             diagnostics_log.append(effects.diagnostics)
             total_ticks += 1
 
+            # Update GPU-hours and record diagnostics snapshot
+            self._record_diagnostics(tick_input, effects, result)
+
             # Clear scaling targets once active counts match
             active_p = result["active_prefill_count"]
             active_d = result["active_decode_count"]
@@ -177,11 +196,40 @@ class ReplayPlannerAdapter:
             next_tick = effects.next_tick
 
         trace_report = self._bridge.finalize()
+        html_report_path = self._recorder.finalize()
         return ReplayPlannerReport(
             trace_report=trace_report,
             scaling_events=scaling_events,
             diagnostics_log=diagnostics_log,
             total_ticks=total_ticks,
+            html_report_path=html_report_path,
+        )
+
+    def _record_diagnostics(
+        self,
+        tick_input: TickInput,
+        effects: PlannerEffects,
+        result: dict[str, Any],
+    ) -> None:
+        """Update GPU-hours tracking and feed the diagnostics recorder."""
+        if not self._recorder.enabled:
+            return
+
+        now_s = tick_input.now_s
+        if self._last_tick_s > 0.0:
+            dt_h = (now_s - self._last_tick_s) / 3600.0
+            num_p = result["active_prefill_count"]
+            num_d = result["active_decode_count"]
+            gpu_p = self._config.prefill_engine_num_gpu or 0
+            gpu_d = self._config.decode_engine_num_gpu or 0
+            self._cumulative_gpu_hours += (num_p * gpu_p + num_d * gpu_d) * dt_h
+        self._last_tick_s = now_s
+
+        self._recorder.record(
+            tick_input,
+            effects,
+            self._last_traffic,
+            self._cumulative_gpu_hours,
         )
 
     def _apply_scaling(
@@ -369,14 +417,26 @@ class ReplayPlannerAdapter:
 
         traffic = None
         if tick.need_traffic_metrics:
-            t = result.get("traffic", {})
+            t = self._bridge.drain_traffic()
             duration_s = t.get("duration_s", 0.0)
             if duration_s > 0:
+                num_req = float(t.get("num_req", 0))
                 traffic = TrafficObservation(
                     duration_s=duration_s,
-                    num_req=float(t.get("num_req", 0)),
+                    num_req=num_req,
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
+                )
+                # Stash observed TTFT/ITL for the diagnostics recorder.
+                # When num_req == 0, the Rust accumulator returns 0 as a
+                # placeholder; only record latency values when we actually
+                # observed requests in this window.
+                self._last_traffic = Metrics(
+                    ttft=t.get("avg_ttft_ms") if num_req > 0 else None,
+                    itl=t.get("avg_itl_ms") if num_req > 0 else None,
+                    num_req=traffic.num_req,
+                    isl=traffic.isl,
+                    osl=traffic.osl,
                 )
 
         return TickInput(

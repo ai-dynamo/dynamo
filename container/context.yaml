@@ -91,7 +91,7 @@ sglang:
     runtime_image: ubuntu
     runtime_image_tag: "24.04"
     sglang_ref: v0.5.9
-  nixl_ref: 0.10.0
+  nixl_ref: v1.0.1
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
@@ -104,7 +104,7 @@ trtllm:
     runtime_image_tag: 26.02-cuda13.1-runtime-ubuntu24.04
   nixl_ref: 0.10.1
   enable_media_ffmpeg: "false"
-  enable_gpu_memory_service: "false"
+  enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/
