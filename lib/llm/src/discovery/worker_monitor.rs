@@ -255,10 +255,10 @@ impl WorkerLoadState {
         all_dp_ranks.iter().all(|&dp_rank| {
             // Check 1: prefill tokens threshold (absolute token count)
             if let Some(&active_tokens) = self.active_prefill_tokens.get(&dp_rank) {
-                if let Some(abs_threshold) = active_prefill_tokens_threshold {
-                    if active_tokens > abs_threshold {
-                        return true;  // This dp_rank is busy due to absolute token threshold
-                    }
+                if let Some(abs_threshold) = active_prefill_tokens_threshold
+                    && active_tokens > abs_threshold
+                {
+                    return true; // This dp_rank is busy due to absolute token threshold
                 }
 
                 // Check 2: prefill tokens threshold (fraction of max_num_batched_tokens
@@ -1055,5 +1055,4 @@ mod tests {
 
         assert!(state.is_busy(None, None, Some(2.0)));
     }
-
 }
