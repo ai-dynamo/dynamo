@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import sys
 from contextlib import nullcontext
 from typing import List, Optional
@@ -29,12 +30,22 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
-from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
+from gpu_memory_service.integrations.vllm.model_loader import (
+    get_mx_load_context,
+    register_gms_loader,
+)
 from gpu_memory_service.integrations.vllm.patches import (
     apply_shadow_mode_patches,
     patch_memory_snapshot,
 )
-from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
+from gpu_memory_service.integrations.vllm.utils import (
+    configure_gms_logging,
+    is_shadow_mode,
+)
+
+# Configure logging before anything else — vLLM only sets up "vllm" loggers,
+# so gpu_memory_service and modelexpress logs would be silently dropped.
+configure_gms_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +60,19 @@ patch_memory_snapshot()
 apply_shadow_mode_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
+
+# MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency)
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress import configure_vllm_logging
+        from modelexpress.load_strategy import publish_metadata, unpublish_metadata
+
+        configure_vllm_logging()
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -216,12 +240,20 @@ class GMSWorker(Worker):
         NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
               which segfaults on already-unmapped GMS memory.
 
+        When MX is active, deregisters NIXL memory and marks STALE before unmap.
+
         Handles two cases for KV cache:
         1. Normal: KV cache was allocated via GMS, unmap + abort
         2. Shadow: KV cache was skipped at startup, manager has no allocations
            (unmap_all_vas is a no-op, abort disconnects)
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
+
+        # Unpublish MX metadata before GMS unmap (CUDA handles still valid).
+        # Stops heartbeat + worker gRPC server, marks STALE on MX server.
+        mx_ctx = get_mx_load_context()
+        if mx_ctx is not None:
+            unpublish_metadata(mx_ctx)
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
         weights_manager = get_gms_client_memory_manager("weights")
@@ -256,6 +288,8 @@ class GMSWorker(Worker):
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration.
+
+        When MX is active, re-registers NIXL memory and marks READY after remap.
 
         Handles two cases for KV cache:
         1. Normal: KV cache was allocated at startup, reconnect + reallocate + remap
@@ -295,6 +329,11 @@ class GMSWorker(Worker):
             except ConnectionError as e:
                 logger.error("Fatal: cannot connect to GMS during remap: %s", e)
                 sys.exit(1)
+
+            # Re-register MX after GMS remap (new handles, same VAs)
+            mx_ctx = get_mx_load_context()
+            if mx_ctx is not None:
+                publish_metadata(mx_ctx)
 
         if "kv_cache" in tags:
             # Check if KV cache was skipped at startup (shadow engine mode)

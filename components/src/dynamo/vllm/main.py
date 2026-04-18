@@ -472,6 +472,7 @@ def setup_vllm_engine(
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
+                configure_mx_ports,
                 validate_cudagraph_mode,
             )
 
@@ -483,6 +484,7 @@ def setup_vllm_engine(
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
             validate_cudagraph_mode(engine_args)
+            configure_mx_ports(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
