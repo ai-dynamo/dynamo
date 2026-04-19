@@ -438,7 +438,11 @@ impl RouterHandles {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<u64, QueryRouterResult> {
+    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
         self.prefill_router
             .query_prefill_worker(
                 tokens,
@@ -449,7 +453,6 @@ impl RouterHandles {
                 allowed_worker_ids,
             )
             .await
-            .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
@@ -1143,12 +1146,15 @@ pub unsafe extern "C" fn route_prefill_request(
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
     let result = handles.runtime.secondary().block_on(async {
-        let prefill_worker_id = handles
+        let (prefill_worker_id, prefill_dp_rank) = handles
             .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
             .await?;
 
+        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
+
         tracing::info!(
             prefill_worker_id = prefill_worker_id,
+            prefill_dp_rank = prefill_dp_rank,
             token_count = tokens.len(),
             "Routed prefill request"
         );

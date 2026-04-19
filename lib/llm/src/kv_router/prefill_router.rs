@@ -292,16 +292,16 @@ impl PrefillRouter {
         &self,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
-    ) -> Option<(u64, u32, BootstrapInfo)> {
+    ) -> Option<(u64, Option<u32>, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
         self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
-            let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank).unwrap_or(0);
+            let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank);
             tracing::debug!(
                 worker_id = id,
-                dp_rank = dp_rank,
+                dp_rank = ?dp_rank,
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
@@ -346,7 +346,7 @@ impl PrefillRouter {
 
         tracing::debug!(
             worker_id = worker_id,
-            dp_rank = dp_rank,
+            dp_rank = ?dp_rank,
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
@@ -513,7 +513,7 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(u64, Option<u32>)> {
         let prefill_router = self
             .prefill_router
             .get()
@@ -534,7 +534,7 @@ impl PrefillRouter {
                         allowed_worker_ids,
                     )
                     .await?;
-                Ok((worker.worker_id, worker.dp_rank))
+                Ok((worker.worker_id, Some(worker.dp_rank)))
             }
             InnerPrefillRouter::SimpleRouter(r) => {
                 let worker_id = if update_states {
@@ -543,7 +543,7 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, 0))
+                Ok((worker_id, None))
             }
         }
     }
@@ -633,7 +633,7 @@ impl
 
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
+                routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());

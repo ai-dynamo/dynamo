@@ -450,3 +450,154 @@ fn test_no_tool_choice_outputs_normal_text() {
     );
     assert!(response.choices[0].delta.tool_calls.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// tool_choice=named + tool_call_parser enforcement (CodeRabbit PR #7589)
+// ---------------------------------------------------------------------------
+
+/// Build a raw streaming response chunk with arbitrary text content.
+fn make_text_chunk(
+    text: &str,
+    finish: bool,
+) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
+    };
+    #[allow(deprecated)]
+    dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+            id: "test-named-parser".to_string(),
+            choices: vec![ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    role: Some(Role::Assistant),
+                    content: Some(ChatCompletionMessageContent::Text(text.to_string())),
+                    tool_calls: None,
+                    function_call: None,
+                    refusal: None,
+                    reasoning_content: None,
+                },
+                finish_reason: if finish {
+                    Some(dynamo_protocols::types::FinishReason::Stop)
+                } else {
+                    None
+                },
+                stop_reason: None,
+                logprobs: None,
+            }],
+            created: 1234567890,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+    }
+}
+
+/// Apply jail with both a tool_call_parser and a named_tool_filter, returning all chunks.
+async fn apply_jail_named_with_parser(
+    chunks: Vec<
+        dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    >,
+    parser: &str,
+    named_tool: &str,
+) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
+    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
+
+    let input = stream::iter(chunks.into_iter().map(|r| Annotated {
+        data: Some(r),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }));
+
+    let jail = JailedStream::builder()
+        .tool_call_parser(parser)
+        .named_tool_filter(named_tool)
+        .build();
+    let out = jail.apply_with_finish_reason(input);
+    tokio::pin!(out);
+    out.filter_map(|ann| async move { ann.data })
+        .collect()
+        .await
+}
+
+/// When tool_choice=named, a tool_call_parser is configured, and the model emits
+/// the **correct** tool, the parsed tool call must pass through with the right name.
+#[tokio::test]
+async fn test_named_tool_with_parser_correct_tool_passes() {
+    // Hermes format: <tool_call>{"name":"get_weather","arguments":{...}}\n</tool_call>
+    let hermes_payload = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}\n</tool_call>";
+
+    let chunks = vec![
+        make_text_chunk(hermes_payload, false),
+        make_text_chunk("", true), // final empty chunk with finish_reason
+    ];
+
+    let responses = apply_jail_named_with_parser(chunks, "hermes", "get_weather").await;
+
+    // Should have at least one response with tool calls
+    let tool_call_response = responses
+        .iter()
+        .find(|r| {
+            r.inner
+                .choices
+                .first()
+                .and_then(|c| c.delta.tool_calls.as_ref())
+                .is_some()
+        })
+        .expect("expected a response with tool calls for the correct named tool");
+
+    let tool_calls = tool_call_response.inner.choices[0]
+        .delta
+        .tool_calls
+        .as_ref()
+        .unwrap();
+    assert_eq!(tool_calls.len(), 1, "expected exactly one tool call");
+    assert_eq!(
+        tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+        Some("get_weather"),
+        "tool call name should be get_weather"
+    );
+}
+
+/// When tool_choice=named, a tool_call_parser is configured, and the model emits
+/// the **wrong** tool, the parsed call must be filtered out (not emitted).
+/// Regression test for CodeRabbit review on PR #7589.
+#[tokio::test]
+async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
+    // Model emits "search" but we required "get_weather"
+    let hermes_wrong_tool = "<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"Paris weather\"}}\n</tool_call>";
+
+    let chunks = vec![
+        make_text_chunk(hermes_wrong_tool, false),
+        make_text_chunk("", true),
+    ];
+
+    let responses = apply_jail_named_with_parser(chunks, "hermes", "get_weather").await;
+
+    // No response should contain a tool call for the wrong tool
+    for r in &responses {
+        if let Some(choice) = r.inner.choices.first()
+            && let Some(tool_calls) = &choice.delta.tool_calls
+        {
+            for tc in tool_calls {
+                let name = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.name.as_deref())
+                    .unwrap_or("");
+                assert_ne!(
+                    name, "search",
+                    "wrong tool 'search' should have been filtered by named_tool_filter"
+                );
+            }
+        }
+    }
+}
