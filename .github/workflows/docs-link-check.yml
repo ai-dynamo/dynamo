@@ -41,6 +41,7 @@ jobs:
             --exclude-all-private
             --exclude 0.0.0.0
             --exclude "https://helm\.sh(/.*)?$"
+            --exclude "https://www\.conventionalcommits\.org(/.*)?$"
             --verbose
             --host-concurrency 10
             --host-request-interval 1s
