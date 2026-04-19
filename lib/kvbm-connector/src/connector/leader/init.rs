@@ -337,6 +337,9 @@ impl ConnectorLeader {
         let registry = BlockRegistry::builder()
             .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
             .build();
+        self.shared_registry
+            .set(registry.clone())
+            .map_err(|_| anyhow!("shared_registry already set"))?;
         tracing::debug!("Block registry created");
 
         tracing::debug!(

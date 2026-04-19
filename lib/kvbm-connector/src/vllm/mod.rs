@@ -5,10 +5,12 @@
 //!
 //! Provides trait-based abstractions for vLLM configuration and integration.
 
+pub mod cache_manager;
 pub mod config;
 pub mod layout;
 
 // pub mod connector;
 // pub mod scheduler;
 
+pub use cache_manager::RustKvCacheManager;
 pub use config::{KvbmVllmConfig, VllmAttentionConfig, VllmParallelConfig};

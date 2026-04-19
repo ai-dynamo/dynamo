@@ -37,6 +37,8 @@ fn is_available() -> bool {
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_available, m)?)?;
     m.add_class::<vllm::PyKvbmVllmConfig>()?;
+    m.add_class::<vllm::PyRustKvCacheManager>()?;
+    m.add_class::<vllm::PyG1BlockManagerHandle>()?;
     m.add_class::<torch::PyTensor>()?;
     m.add_class::<runtime::PyKvbmRuntime>()?;
 
