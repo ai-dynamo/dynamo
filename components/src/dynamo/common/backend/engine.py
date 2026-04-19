@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-import sys
 from typing import TYPE_CHECKING, Any, Optional, TypedDict
 
 if sys.version_info >= (3, 11):
