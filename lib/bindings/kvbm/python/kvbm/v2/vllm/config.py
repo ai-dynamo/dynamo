@@ -154,12 +154,12 @@ def _get_cache_dtype_bytes(vllm_config: VllmConfig) -> int:
     dtype_str = str(cache_dtype).lower()
     model_dtype_str = str(model_dtype).lower()
 
-    if "float16" in dtype_str or "fp16" in dtype_str or "half" in dtype_str:
+    if "bfloat16" in dtype_str or "bf16" in dtype_str:
+        return 2
+    elif "float16" in dtype_str or "fp16" in dtype_str or "half" in dtype_str:
         return 2
     elif "float32" in dtype_str or "fp32" in dtype_str or "float" in dtype_str:
         return 4
-    elif "bfloat16" in dtype_str or "bf16" in dtype_str:
-        return 2
     elif "int8" in dtype_str or "fp8" in dtype_str:
         return 1
     elif "auto" in dtype_str:
