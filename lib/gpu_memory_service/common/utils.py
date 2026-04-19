@@ -6,7 +6,7 @@
 import logging
 import os
 import tempfile
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ def fail(message: str, *args, exc_info=None) -> NoReturn:
 
 
 _uuid_cache: dict[int, str] = {}
+_CHECKPOINT_SAVE_COMPLETE_FILE = "gms-checkpoint-save-complete"
 
 
 def invalidate_uuid_cache() -> None:
@@ -51,6 +52,14 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         _uuid_cache[device] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+
+
+def get_checkpoint_save_complete_path() -> Optional[str]:
+    """Return the shared sentinel path used to signal GMS save completion."""
+    socket_dir = os.environ.get("GMS_SOCKET_DIR")
+    if not socket_dir:
+        return None
+    return os.path.join(socket_dir, _CHECKPOINT_SAVE_COMPLETE_FILE)
 
 
 def wait_for_weights_socket(device: int) -> None:

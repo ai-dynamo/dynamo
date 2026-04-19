@@ -18,7 +18,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from gpu_memory_service.common.cuda_utils import list_devices
-from gpu_memory_service.common.utils import get_socket_path, wait_for_weights_socket
+from gpu_memory_service.common.utils import (
+    get_checkpoint_save_complete_path,
+    get_socket_path,
+    wait_for_weights_socket,
+)
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 
 logging.basicConfig(
@@ -45,6 +49,7 @@ def _save_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
 def main() -> None:
     checkpoint_dir = os.environ["GMS_CHECKPOINT_DIR"]
     max_workers = int(os.environ.get("GMS_SAVE_WORKERS", "8"))
+    ready_path = get_checkpoint_save_complete_path()
 
     devices = list_devices()
     logger.info("Starting GMS save for %d devices", len(devices))
@@ -58,6 +63,10 @@ def main() -> None:
             future.result()
     elapsed = time.monotonic() - t0
     logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
+    if ready_path is not None:
+        with open(ready_path, "w", encoding="utf-8") as handle:
+            handle.write("ready")
+        logger.info("Marked GMS save complete: %s", ready_path)
 
     logger.info("Save complete; sleeping until pod terminates")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
