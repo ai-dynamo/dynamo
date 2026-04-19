@@ -89,6 +89,11 @@ jobs:
     container:
       image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-sglang-runtime-test-cuda12 #d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-trtllm-runtime-test-cuda13
       env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
     permissions:
@@ -109,8 +114,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Run Sanity Check on Runtime Image
         shell: bash
+        # Run from the container's baked-in workspace, not the GHA checkout,
+        # so the sanity check reflects what the image actually ships.
+        working-directory: /workspace
         run: |
-
           set +e
           python ./deploy/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
@@ -120,11 +127,16 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
-      - name: Run CPU-only tests (parallelized)
+      - name: Run CPU-only tests (parallelized) from /workspace
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        # pytest runs from the container's baked-in /workspace (see action's
+        # container_workspace input below), NOT from the GHA checkout at
+        # $GITHUB_WORKSPACE. Composite-action steps don't inherit the caller's
+        # working-directory, so it is passed as an explicit input instead.
         uses: ./.github/actions/pytest-local
         with:
+          container_workspace: /workspace
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
@@ -132,11 +144,12 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           framework: ${{ inputs.test_suite_name }}
-      # - name: Run GPU tests (sequential)
+      # - name: Run GPU tests (sequential) from /workspace
       #   timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
       #   if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
       #   uses: ./.github/actions/pytest-local
       #   with:
+      #     container_workspace: /workspace
       #     pytest_marks: ${{ inputs.gpu_test_markers }}
       #     test_suite_name: ${{ inputs.test_suite_name }}
       #     test_type: "pre_merge_gpu"
