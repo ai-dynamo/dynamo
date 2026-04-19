@@ -42,9 +42,8 @@ runs:
   steps:
     - name: Verify GPU visibility
       if: contains(inputs.pytest_marks, 'gpu')
-      shell: bash
+      shell: python
       run: |
-        python3 - <<'PY'
         import sys
         import torch
         available = torch.cuda.is_available()
@@ -54,8 +53,12 @@ runs:
         print(f"GPU count: {count}")
         print(f"GPU Name: {name}")
         if not available:
+            # DEBUG ONLY — remove before merging to main. Sleeps 10 minutes
+            # so the container can be exec'd into to inspect GPU state.
+            import time
+            print("Sleeping 10 minutes for debugging; remove before merging.", flush=True)
+            time.sleep(600)
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
-        PY
 
     - name: Run pytest
       shell: bash
@@ -161,7 +164,7 @@ runs:
         exit ${TEST_EXIT_CODE}
 
     - name: Upload Test Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always()
       with:
         name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
@@ -169,7 +172,7 @@ runs:
         retention-days: 7
 
     - name: Upload Allure Results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always()
       with:
         name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
