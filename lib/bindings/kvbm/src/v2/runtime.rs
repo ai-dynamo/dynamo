@@ -4,7 +4,7 @@
 //! Python bindings for KvbmRuntime.
 //!
 //! Provides a PyO3 wrapper around the Rust KvbmRuntime, enabling Python code
-//! to build and interact with the KVBM runtime infrastructure including Nova
+//! to build and interact with the KVBM runtime infrastructure including Velo
 //! for distributed communication.
 
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use crate::to_pyerr;
 /// The runtime contains the shared infrastructure for KVBM operations:
 /// - Tokio runtime for async execution
 /// - NixlAgent for RDMA/UCX transfers
-/// - Nova for distributed RPC
+/// - Velo for distributed RPC
 #[pyclass(name = "KvbmRuntime")]
 pub struct PyKvbmRuntime {
     inner: Arc<KvbmRuntime>,
@@ -37,7 +37,7 @@ impl PyKvbmRuntime {
 impl PyKvbmRuntime {
     /// Build a KvbmRuntime configured for a worker role.
     ///
-    /// This creates a runtime with Nova configured for worker-side operations.
+    /// This creates a runtime with Velo configured for worker-side operations.
     /// Configuration is loaded from environment variables (KVBM_* prefix) with
     /// the "worker" profile selected (merges `profile.worker.*` values).
     ///
@@ -82,7 +82,7 @@ impl PyKvbmRuntime {
 
     /// Build a KvbmRuntime configured for a leader/scheduler role.
     ///
-    /// This creates a runtime with Nova configured for leader-side operations.
+    /// This creates a runtime with Velo configured for leader-side operations.
     /// Configuration is loaded from environment variables (KVBM_* prefix) with
     /// the "leader" profile selected (merges `profile.leader.*` values).
     ///
@@ -126,7 +126,7 @@ impl PyKvbmRuntime {
         })
     }
 
-    /// Get Nova peer information for this runtime instance.
+    /// Get Velo peer information for this runtime instance.
     ///
     /// Returns the instance ID and worker address as bytes, which can be
     /// serialized and sent to remote instances for peer discovery.
@@ -151,10 +151,10 @@ impl PyKvbmRuntime {
         Ok((instance_id_bytes, worker_address_bytes))
     }
 
-    /// Register a remote peer with this runtime's Nova instance.
+    /// Register a remote peer with this runtime's Velo instance.
     ///
     /// This allows the runtime to establish connections to the remote peer
-    /// for Nova active message communication.
+    /// for Velo active message communication.
     ///
     /// Args:
     ///     instance_id_bytes: 16-byte UUID of the remote instance
@@ -201,7 +201,7 @@ impl PyKvbmRuntime {
     /// Wait for a handler to become available on a remote instance.
     ///
     /// This is CRITICAL to call after `register_peer` and before sending any
-    /// RPCs to that peer. Nova performs an asynchronous handshake after peer
+    /// RPCs to that peer. Velo performs an asynchronous handshake after peer
     /// registration to discover available handlers. Without waiting, RPCs
     /// may fail or hang because the handler isn't yet discoverable.
     ///
@@ -228,12 +228,12 @@ impl PyKvbmRuntime {
         let instance_id = InstanceId::from(uuid);
 
         // Use the runtime's tokio handle to block on the async wait
-        let nova = self.inner.messenger().clone();
+        let velo = self.inner.messenger().clone();
         let handler_name = handler_name.to_string();
 
         self.inner
             .handle()
-            .block_on(async move { nova.wait_for_handler(instance_id, &handler_name).await })
+            .block_on(async move { velo.wait_for_handler(instance_id, &handler_name).await })
             .map_err(to_pyerr)
     }
 }

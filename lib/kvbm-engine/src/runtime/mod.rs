@@ -7,7 +7,7 @@
 //! all downstream managers and services:
 //! - Tokio runtime (for async execution)
 //! - NixlAgent (for RDMA/UCX transfers)
-//! - Nova (for distributed RPC)
+//! - Velo (for distributed RPC)
 //!
 //! # Usage
 //!
@@ -18,7 +18,7 @@
 //! // Build with custom config and injected components
 //! let config = KvbmConfig::extract_from(
 //!     KvbmConfig::figment()
-//!         .merge(("nova.backend.tcp_port", 8080u16))
+//!         .merge(("velo.backend.tcp_port", 8080u16))
 //! )?;
 //! let runtime = KvbmRuntime::builder(config)
 //!     .with_runtime_handle(Handle::current())
@@ -50,10 +50,10 @@ use velo::Messenger;
 /// all downstream managers and services:
 /// - Tokio runtime (for async execution)
 /// - NixlAgent (for RDMA/UCX transfers)
-/// - Nova (for distributed RPC)
+/// - Velo (for distributed RPC)
 ///
 /// The `LocalEventSystem` is available via `event_system()` which
-/// returns the system from Nova.
+/// returns the system from Velo.
 pub struct KvbmRuntime {
     pub(crate) config: KvbmConfig,
     pub(crate) runtime: RuntimeHandle,

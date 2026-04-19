@@ -6,7 +6,7 @@
 //! This implements the "inverted control pattern" where:
 //! 1. Decode creates a local session (finds local matches, holds blocks)
 //! 2. Decode sends the session_id to Prefill (out-of-band)
-//! 3. Prefill attaches to the session on Decode via Nova
+//! 3. Prefill attaches to the session on Decode via Velo
 //! 4. Prefill controls the session remotely (queries state, triggers staging, pulls blocks)
 
 use anyhow::Result;

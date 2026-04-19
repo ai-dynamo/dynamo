@@ -9,9 +9,9 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use kvbm_connector::TensorDescriptor;
 use kvbm_connector::connector::leader::scheduler::KvConnectorMetadata;
 use kvbm_connector::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
+use kvbm_connector::TensorDescriptor;
 
 use crate::to_pyerr;
 use crate::v2::torch::Tensor;
@@ -32,7 +32,7 @@ impl PyConnectorWorker {
     /// Create a new ConnectorWorker from a KvbmRuntime.
     ///
     /// Args:
-    ///     runtime: The KvbmRuntime instance (provides Nova for communication)
+    ///     runtime: The KvbmRuntime instance (provides Velo for communication)
     ///
     /// Returns:
     ///     ConnectorWorker: The worker instance ready for KV cache registration.
@@ -144,7 +144,7 @@ impl PyConnectorWorker {
     /// Always callable - returns immediately if no action is needed for this layer.
     /// On the last layer with a pending forward pass event, records a CUDA event
     /// on the provided stream and spawns an async task that waits for the event
-    /// before triggering the Nova forward pass event.
+    /// before triggering the Velo forward pass event.
     ///
     /// Args:
     ///     layer_index: The layer index being saved
@@ -201,7 +201,7 @@ impl PyConnectorWorker {
     ///
     /// Called by the worker executor (vLLM) to check which requests have
     /// completed onboarding or offloading. The leader populates this state
-    /// via Nova messages after detecting all workers have completed transfers.
+    /// via Velo messages after detecting all workers have completed transfers.
     ///
     /// Returns:
     ///     tuple: (Optional[set[str]], Optional[set[str]]) for (offload_ids, onboard_ids)

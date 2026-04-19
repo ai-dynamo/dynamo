@@ -54,13 +54,13 @@ impl WorkerTransfers for VeloWorkerClient {
         let bytes = Bytes::from(serde_json::to_vec(&message)?);
 
         // Spawn a task for the remote instance
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote_instance = self.remote;
 
         // Use unary (not am_sync) to wait for transfer completion
         self.messenger.tracker().spawn_on(
             async move {
-                let result = nova
+                let result = velo
                     .unary("kvbm.worker.local_transfer")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
@@ -105,13 +105,13 @@ impl WorkerTransfers for VeloWorkerClient {
 
         let bytes = Bytes::from(serde_json::to_vec(&message)?);
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote_instance = self.remote;
 
         self.messenger.tracker().spawn_on(
             async move {
                 // Use unary instead of am_sync for explicit response handling
-                let result = nova
+                let result = velo
                     .unary("kvbm.worker.remote_onboard")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
@@ -156,13 +156,13 @@ impl WorkerTransfers for VeloWorkerClient {
 
         let bytes = Bytes::from(serde_json::to_vec(&message)?);
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote_instance = self.remote;
 
         self.messenger.tracker().spawn_on(
             async move {
                 // Use unary instead of am_sync for explicit response handling
-                let result = nova
+                let result = velo
                     .unary("kvbm.worker.remote_offload")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
@@ -199,14 +199,14 @@ impl WorkerTransfers for VeloWorkerClient {
         let event = self.messenger.events().new_event()?;
         let awaiter = self.messenger.events().awaiter(event.handle())?;
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote_instance = self.remote;
         let connected = self.connected_instances.clone();
         let target_instance = instance_id;
 
         self.messenger.tracker().spawn_on(
             async move {
-                let result = nova
+                let result = velo
                     .unary("kvbm.worker.connect_remote")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
@@ -256,12 +256,12 @@ impl WorkerTransfers for VeloWorkerClient {
         let event = self.messenger.events().new_event()?;
         let awaiter = self.messenger.events().awaiter(event.handle())?;
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote_instance = self.remote;
 
         self.messenger.tracker().spawn_on(
             async move {
-                let result = nova
+                let result = velo
                     .unary("kvbm.worker.remote_onboard_for_instance")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
@@ -437,11 +437,11 @@ impl ObjectBlockOps for VeloWorkerClient {
             }
         };
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote = self.remote;
 
         Box::pin(async move {
-            let result = nova
+            let result = velo
                 .unary("kvbm.worker.object_has_blocks")
                 .ok()
                 .map(|u| u.raw_payload(bytes).instance(remote).send());
@@ -478,11 +478,11 @@ impl ObjectBlockOps for VeloWorkerClient {
             Err(_) => return Box::pin(async move { keys.into_iter().map(Err).collect() }),
         };
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote = self.remote;
 
         Box::pin(async move {
-            let result = nova
+            let result = velo
                 .unary("kvbm.worker.object_put_blocks")
                 .ok()
                 .map(|u| u.raw_payload(bytes).instance(remote).send());
@@ -520,11 +520,11 @@ impl ObjectBlockOps for VeloWorkerClient {
             Err(_) => return Box::pin(async move { keys.into_iter().map(Err).collect() }),
         };
 
-        let nova = self.messenger.clone();
+        let velo = self.messenger.clone();
         let remote = self.remote;
 
         Box::pin(async move {
-            let result = nova
+            let result = velo
                 .unary("kvbm.worker.object_get_blocks")
                 .ok()
                 .map(|u| u.raw_payload(bytes).instance(remote).send());

@@ -50,7 +50,7 @@ class SchedulerConnectorWorker:
         import kvbm
 
         if kvbm.v2.is_available():
-            # Note: ConnectorWorker requires a KvbmRuntime which needs Nova setup.
+            # Note: ConnectorWorker requires a KvbmRuntime which needs Velo setup.
             # For now, we'll initialize the Rust worker lazily during register_kv_caches
             # when we have access to the actual tensors.
             print(
@@ -115,7 +115,7 @@ class SchedulerConnectorWorker:
         # Try to initialize Rust worker if bindings are available
         try:
             # Create runtime and worker
-            # Note: This requires Nova to be set up properly.
+            # Note: This requires Velo to be set up properly.
             # For now, we're just documenting the flow - actual initialization
             # requires runtime environment setup.
             pass  # TODO: Wire up when KvbmRuntime initialization is ready

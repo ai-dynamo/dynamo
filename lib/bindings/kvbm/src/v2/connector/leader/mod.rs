@@ -4,7 +4,7 @@
 //! Python bindings for ConnectorLeader.
 //!
 //! Provides a PyO3 wrapper around the Rust ConnectorLeader, enabling Python code
-//! to send Nova RPCs to workers for leader-driven initialization.
+//! to send Velo RPCs to workers for leader-driven initialization.
 
 use pyo3::Bound;
 use pyo3::prelude::*;
@@ -27,7 +27,7 @@ pub use scheduler::PySchedulerOutput;
 
 /// Python wrapper for WorkerClient.
 ///
-/// This client provides leader-specific coordination operations via Nova RPC.
+/// This client provides leader-specific coordination operations via Velo RPC.
 /// It is separate from KvbmRuntime because the runtime is shared infrastructure
 /// while this client handles leader-to-worker RPC communication during initialization.
 ///
@@ -53,10 +53,10 @@ impl PyConnectorLeader {
     /// Create a new ConnectorLeader from a KvbmRuntime.
     ///
     /// Args:
-    ///     runtime: The KvbmRuntime instance to use for Nova RPC communication
+    ///     runtime: The KvbmRuntime instance to use for Velo RPC communication
     ///
     /// Raises:
-    ///     RuntimeError: If the runtime doesn't have a Nova instance
+    ///     RuntimeError: If the runtime doesn't have a Velo instance
     #[new]
     pub fn new(runtime: &PyKvbmRuntime, block_size: usize) -> PyResult<Self> {
         let runtime = runtime.inner();
@@ -179,9 +179,9 @@ impl PyConnectorLeader {
         Ok(bytes)
     }
 
-    /// Register a worker peer with Nova.
+    /// Register a worker peer with Velo.
     ///
-    /// This registers the worker as a Nova peer so the leader can communicate
+    /// This registers the worker as a Velo peer so the leader can communicate
     /// with it via RPC. Workers should be registered in rank order (0, 1, 2, ...).
     ///
     /// Args:

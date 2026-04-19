@@ -1220,7 +1220,7 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
         // Event awaiting is cheap, we must never skip awaiting a precondition
         while let Some(mut batch) = self.input_rx.recv().await {
             let output_tx = self.output_tx.clone();
-            let nova = self.leader.messenger().clone();
+            let velo = self.leader.messenger().clone();
 
             // Spawn task for each batch - unbounded
             tokio::spawn(async move {
@@ -1229,7 +1229,7 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
                     tracing::debug!(?event_handle, "Awaiting precondition for batch");
 
                     // Create awaiter (returns Result<LocalEventWaiter, Error>)
-                    let awaiter_result = nova.events().awaiter(event_handle);
+                    let awaiter_result = velo.events().awaiter(event_handle);
 
                     match awaiter_result {
                         Ok(awaiter) => {

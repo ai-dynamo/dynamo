@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Nova-based RPC implementation for distributed worker communication.
+//! Velo-based RPC implementation for distributed worker communication.
 //!
 //! # RPC Pattern Guidelines
 //!
-//! This module uses only two Nova RPC patterns:
+//! This module uses only two Velo RPC patterns:
 //!
 //! 1. **`am_send` (fire-and-forget)**: Use when no response is needed.
 //!    - Client sends message and returns immediately

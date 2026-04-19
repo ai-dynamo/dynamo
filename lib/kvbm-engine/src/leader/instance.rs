@@ -65,7 +65,7 @@ use super::{
 ///   leaders can initiate sessions and exchange metadata.
 #[derive(Clone)]
 pub struct InstanceLeader {
-    /// Nova instance for distributed communication.
+    /// Velo instance for distributed communication.
     messenger: Arc<Messenger>,
 
     /// Block registry for deduplication.
@@ -133,9 +133,9 @@ pub struct InstanceLeaderBuilder {
 impl InstanceLeaderBuilder {
     /// Initialize builder with components from KvbmRuntime.
     ///
-    /// This extracts Nova from the runtime. Use this when the runtime
+    /// This extracts Velo from the runtime. Use this when the runtime
     /// has already been constructed and you want the leader to share
-    /// the same Nova instance for distributed communication.
+    /// the same Velo instance for distributed communication.
     ///
     /// # Example
     /// ```ignore
@@ -218,7 +218,7 @@ impl InstanceLeaderBuilder {
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
-            .ok_or_else(|| anyhow::anyhow!("Nova instance required"))?;
+            .ok_or_else(|| anyhow::anyhow!("Velo instance required"))?;
         let transport = Arc::new(MessageTransport::velo(messenger.clone()));
 
         // Create event system for notification aggregation
@@ -311,15 +311,15 @@ impl InstanceLeader {
         &self.registry
     }
 
-    /// Get a reference to the Nova instance.
+    /// Get a reference to the Velo instance.
     ///
-    /// This provides access to the Nova distributed system for features
+    /// This provides access to the Velo distributed system for features
     /// like event coordination and cross-instance communication.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
     }
 
-    /// Get the tokio runtime handle from Nova.
+    /// Get the tokio runtime handle from Velo.
     ///
     /// This handle should be used for spawning background tasks that need to
     /// run on the KVBM runtime's executor (e.g., offload engine pipelines).
@@ -508,7 +508,7 @@ impl InstanceLeader {
         InstanceLeaderBuilder::default()
     }
 
-    /// Register Nova handlers for leader-to-leader communication.
+    /// Register Velo handlers for leader-to-leader communication.
     ///
     /// This must be called after construction to enable distributed onboarding.
     pub fn register_handlers(&self) -> Result<()> {
@@ -947,7 +947,7 @@ impl InstanceLeader {
         }
     }
 
-    /// Get the session sessions map (for Nova handler registration).
+    /// Get the session sessions map (for Velo handler registration).
     #[expect(dead_code)]
     pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
         self.session_sessions.clone()

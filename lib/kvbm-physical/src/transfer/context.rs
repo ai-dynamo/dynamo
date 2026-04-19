@@ -70,7 +70,7 @@ impl TransferConfigBuilder {
     /// Initialize builder with event system and tokio handle.
     ///
     /// This sets the event_system and tokio runtime handle, ensuring consistency
-    /// with Nova's event system. Use this when the runtime has already been
+    /// with Velo's event system. Use this when the runtime has already been
     /// constructed and you want components to share the same event notification
     /// infrastructure.
     pub fn from_event_system_and_handle(
