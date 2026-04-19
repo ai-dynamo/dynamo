@@ -50,7 +50,7 @@ dynamo-mocker = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-dynamo-kv-router = { workspace = true, features = ["bench"] }
+dynamo-kv-router = { workspace = true, features = ["bench", "shard-metrics"] }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }

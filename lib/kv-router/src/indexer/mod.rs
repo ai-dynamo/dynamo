@@ -31,6 +31,7 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+mod branch_sharded;
 mod kv_indexer;
 mod local;
 mod metrics;
@@ -48,6 +49,7 @@ pub mod radix_tree;
 mod tests;
 
 // Re-export everything that was public in the old single-file module.
+pub use branch_sharded::*;
 pub use kv_indexer::*;
 pub use local::*;
 pub use metrics::*;

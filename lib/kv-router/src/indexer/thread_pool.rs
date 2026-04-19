@@ -12,7 +12,9 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
-use super::{KvIndexerInterface, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerTask};
+use super::{
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -130,6 +132,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// Get a reference to the underlying backend.
     pub fn backend(&self) -> &T {
         &self.backend
+    }
+
+    /// Get a cloned `Arc` to the underlying backend.
+    ///
+    /// Useful when a caller needs to hand off an owned `Arc<T>` to a blocking
+    /// task (e.g. `tokio::task::spawn_blocking`) without cloning the backend
+    /// itself.
+    pub fn backend_arc(&self) -> Arc<T> {
+        Arc::clone(&self.backend)
     }
 
     /// Wait for all worker channels to drain.
@@ -363,5 +374,18 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         curr_size
+    }
+
+    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        vec![ShardSizeSnapshot {
+            shard_idx: 0,
+            worker_count: self.backend.worker_count(),
+            block_count: self.backend.block_count(),
+            node_count: self.backend.node_count(),
+        }]
+    }
+
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        self.backend.node_edge_lengths()
     }
 }
