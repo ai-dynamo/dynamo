@@ -333,6 +333,17 @@ impl ModelWatcher {
                         }
                     };
 
+                    // Filter by namespace — mirror the Added-event guard so we never
+                    // attempt to remove a model card that was skipped during registration.
+                    if !namespace_filter.matches(&model_card_instance_id.namespace) {
+                        tracing::debug!(
+                            model_namespace = model_card_instance_id.namespace,
+                            namespace_filter = ?namespace_filter,
+                            "Skipping removal event due to namespace filter"
+                        );
+                        continue;
+                    }
+
                     match self
                         .handle_delete(model_card_instance_id, &namespace_filter)
                         .await
