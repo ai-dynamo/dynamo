@@ -696,6 +696,10 @@ pub struct ChatChoice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
+    /// Flag indicating whether this choice includes reasoning content.
+    /// Set to `true` when `message.reasoning_content` is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_reasoning: Option<bool>,
 }
 
 /// Non-streaming chat completion response.
@@ -757,6 +761,10 @@ pub struct ChatChoiceStream {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
+    /// Flag indicating whether this choice includes reasoning content.
+    /// Set to `true` when `delta.reasoning_content` is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_reasoning: Option<bool>,
 }
 
 /// Streaming chat completion response with extended choices.

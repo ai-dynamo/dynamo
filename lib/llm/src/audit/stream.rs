@@ -223,6 +223,7 @@ pub fn final_response_to_one_chunk_stream(
             finish_reason: ch.finish_reason,
             stop_reason: ch.stop_reason.clone(),
             logprobs: ch.logprobs.clone(),
+            has_reasoning: ch.has_reasoning,
         };
         choices.push(choice);
     }
@@ -280,6 +281,7 @@ mod tests {
             finish_reason: None,
             stop_reason: None,
             logprobs: None,
+            has_reasoning: None,
         };
 
         let response = NvCreateChatCompletionStreamResponse {
@@ -321,6 +323,7 @@ mod tests {
             finish_reason: Some(FinishReason::Stop),
             stop_reason: None,
             logprobs: None,
+            has_reasoning: None,
         };
 
         let response = NvCreateChatCompletionStreamResponse {
@@ -454,6 +457,7 @@ mod tests {
                             finish_reason: None,
                             stop_reason: None,
                             logprobs: None,
+                            has_reasoning: None,
                         }
                     }],
                     created: 1234567890,
