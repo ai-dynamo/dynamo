@@ -17,6 +17,12 @@ import json
 import kvbm
 import pytest
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+]
+
 if not kvbm.v2.is_available():
     pytest.skip(
         "kvbm v2 feature not compiled; skipping KvbmRequest tests",
