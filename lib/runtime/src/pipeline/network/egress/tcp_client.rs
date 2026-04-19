@@ -664,19 +664,41 @@ impl TcpConnection {
             None
         };
 
-        // Bounded admission: block until a slot is free (channel_buffer hard limit).
-        // The permit is held for the duration of this call and released on drop,
-        // whether the caller returns normally, errors out, or the enclosing
-        // tokio::time::timeout drops this future mid-flight.
-        // This prevents unbounded SegQueue growth and heap OOM under overload.
-        // encode() runs AFTER acquire so callers blocked on the semaphore do not
-        // hold a pre-allocated encoded frame, bounding peak memory to
-        // channel_buffer * frame_size per connection.
-        let _permit = self
-            .admission
-            .acquire()
-            .await
-            .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
+        // Bounded admission (channel_buffer hard limit). Permit is held for the
+        // call and released on drop on every exit path -- Prevents unbounded SegQueue growth.
+        //
+        // Fast path: try_acquire() is a synchronous atomic decrement; the
+        // previous unconditional .acquire().await forced a Tokio scheduler
+        // round-trip even when a permit was free
+        //
+        // Slow path: on NoPermits, fall back to .acquire().await (preserves
+        // OOM bound and back-pressure) and re-check health after parking --
+        // the fast-path permit is granted ns after the pre-check above, so a
+        // second atomic load on that path would be redundant.
+        let _permit = match self.admission.try_acquire() {
+            Ok(p) => p,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                let permit = self
+                    .admission
+                    .acquire()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
+                // Re-check health: the connection may have gone unhealthy while
+                // we were parked on the semaphore. Fail fast so the caller can
+                // retry on a fresh connection rather than pushing to a dead
+                // submit_queue.
+                if !self.healthy.load(Ordering::Relaxed) {
+                    anyhow::bail!("Connection unhealthy (tasks failed)");
+                }
+                if self.closed.load(Ordering::Acquire) {
+                    anyhow::bail!("Connection closed (writer exited)");
+                }
+                permit
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                anyhow::bail!("Connection closed (admission gate shut)");
+            }
+        };
 
         // encode() called here — after admission is granted — so the frame is
         // only allocated once we have capacity to process it.
@@ -684,16 +706,6 @@ impl TcpConnection {
         let encoded_data = request_msg.encode()?;
 
         let (response_tx, response_rx) = oneshot::channel();
-
-        // Re-check health: the connection may have gone unhealthy while we
-        // were waiting for a permit.  Fail fast so the caller can retry on a
-        // fresh connection rather than pushing to a dead submit_queue.
-        if !self.healthy.load(Ordering::Relaxed) {
-            anyhow::bail!("Connection unhealthy (tasks failed)");
-        }
-        if self.closed.load(Ordering::Acquire) {
-            anyhow::bail!("Connection closed (writer exited)");
-        }
 
         // Increment inflight and attach a RAII guard that decrements it on ALL
         // exit paths: normal return, `?` propagation, tokio::time::timeout
