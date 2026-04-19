@@ -1,19 +1,16 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::ConnectorLeader;
 use kvbm_engine::offload::ExternalBlock;
 
-use crate::{
-    G1, G2, InstanceId,
-    connector::leader::slot::RequestSlot,
-};
+use crate::{G1, G2, InstanceId, connector::leader::slot::RequestSlot};
 use kvbm_common::BlockId;
 use kvbm_logical::blocks::ImmutableBlock;
 
 use derive_builder::Builder;
-use velo::EventHandle;
 use serde::{Deserialize, Serialize};
+use velo::EventHandle;
 
 use anyhow::Result;
 use std::{collections::HashMap, sync::Arc, time::Instant};

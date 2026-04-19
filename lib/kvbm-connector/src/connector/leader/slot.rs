@@ -8,9 +8,9 @@ use dynamo_tokens::TokenBlockSequence;
 
 use super::Request;
 use super::scheduler::CachedRequestData;
+use kvbm_common::{BlockId, SequenceHash};
 use kvbm_engine::leader::FindMatchesResult;
 use kvbm_engine::offload::TransferHandle;
-use kvbm_common::{BlockId, SequenceHash};
 use kvbm_logical::KvbmSequenceHashProvider;
 
 use crate::common::{AssignedBlockId, BlockAssignmentOps, BlockAssignmentStorage};
@@ -516,6 +516,12 @@ pub struct RequestSlot {
     /// with external tokens to load. Consumed by `process_scheduler_output` to build
     /// the `KvConnectorMetadata.intra_pass_load` field.
     pending_intra_pass: Option<IntraPassPending>,
+
+    /// Number of cache blocks queried for the active match attempt.
+    match_query_blocks: usize,
+
+    /// Prevent duplicate matched-token metric emission during repeated polling.
+    matched_tokens_reported: bool,
 }
 
 impl std::fmt::Debug for RequestSlot {
@@ -589,7 +595,9 @@ impl RequestSlot {
             self.sequence.blocks().len()
         );
 
-        let range = self.block_matches.apply_new_blocks(block_ids, self.sequence.blocks());
+        let range = self
+            .block_matches
+            .apply_new_blocks(block_ids, self.sequence.blocks());
 
         tracing::debug!(
             "after applying new blocks: assigned_blocks_count: {}; unassigned_blocks_count: {}; token_block_count: {}",
@@ -652,6 +660,8 @@ impl RequestSlot {
             finished_evaluating: false,
             match_requires_reset: false,
             pending_intra_pass: None,
+            match_query_blocks: 0,
+            matched_tokens_reported: false,
         })
     }
 
@@ -661,6 +671,12 @@ impl RequestSlot {
 
     pub fn request_id(&self) -> &str {
         &self.request.request_id
+    }
+
+    /// Borrow the raw KV transfer params JSON carried on this slot's
+    /// request, if any. Callers decide whether absence is fatal.
+    pub fn kv_transfer_params(&self) -> Option<&serde_json::Value> {
+        self.request.kv_transfer_params()
     }
 
     /// Get the current transaction state (read-only).
@@ -731,6 +747,24 @@ impl RequestSlot {
 
     pub fn set_match_requires_reset(&mut self, requires_reset: bool) {
         self.match_requires_reset = requires_reset;
+    }
+
+    pub fn set_match_query_blocks(&mut self, match_query_blocks: usize) {
+        self.match_query_blocks = match_query_blocks;
+        self.matched_tokens_reported = false;
+    }
+
+    pub fn match_query_blocks(&self) -> usize {
+        self.match_query_blocks
+    }
+
+    pub fn mark_matched_tokens_reported(&mut self) -> bool {
+        if self.matched_tokens_reported {
+            false
+        } else {
+            self.matched_tokens_reported = true;
+            true
+        }
     }
 
     pub fn advance_evaluated_tokens(&mut self, num_tokens: usize) {
@@ -941,6 +975,8 @@ impl RequestSlot {
 
         // Clear the reset flag
         self.match_requires_reset = false;
+        self.match_query_blocks = 0;
+        self.matched_tokens_reported = false;
 
         // NOTE: Do NOT clear pending_intra_pass here. By the time reset_for_preemption
         // is called (in process_scheduler_output), update_state_after_alloc has already
@@ -1545,7 +1581,10 @@ mod tests {
 
             // And hashes match expected sequence order
             for (i, expected_hash) in expected_hashes.iter().enumerate().take(5) {
-                assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                assert_eq!(
+                    slot.block_matches.assigned_blocks[i].sequence_hash(),
+                    *expected_hash
+                );
             }
         }
 
@@ -1591,7 +1630,10 @@ mod tests {
                         assert!(slot.block_matches.unassigned_blocks.is_empty());
 
                         for (i, expected_hash) in expected_hashes.iter().enumerate().take(fewer) {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                            assert_eq!(
+                                slot.block_matches.assigned_blocks[i].sequence_hash(),
+                                *expected_hash
+                            );
                             assert_eq!(slot.block_matches.assigned_blocks[i].block_id(), i);
                         }
                     }
@@ -1610,7 +1652,10 @@ mod tests {
                         for (i, expected_hash) in
                             expected_hashes.iter().enumerate().take(available_blocks)
                         {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                            assert_eq!(
+                                slot.block_matches.assigned_blocks[i].sequence_hash(),
+                                *expected_hash
+                            );
                             assert_eq!(slot.block_matches.assigned_blocks[i].block_id(), i);
                         }
                     }
@@ -1631,7 +1676,10 @@ mod tests {
                         for (i, expected_hash) in
                             expected_hashes.iter().enumerate().take(available_blocks)
                         {
-                            assert_eq!(slot.block_matches.assigned_blocks[i].sequence_hash(), *expected_hash);
+                            assert_eq!(
+                                slot.block_matches.assigned_blocks[i].sequence_hash(),
+                                *expected_hash
+                            );
                             assert_eq!(slot.block_matches.assigned_blocks[i].block_id(), i);
                         }
 
@@ -2264,7 +2312,7 @@ mod tests {
         /// Returns (num_computed_tokens, FindMatchesResult).
         fn create_mock_onboarding_state() -> (usize, FindMatchesResult) {
             // Create a Ready result with no blocks for testing purposes
-            let ready_result = ReadyResult::new(vec![]);
+            let ready_result = ReadyResult::new(vec![], Default::default());
             (100, FindMatchesResult::Ready(ready_result))
         }
 
@@ -3010,13 +3058,7 @@ mod tests {
             let total_tokens = num_complete_blocks * TEST_BLOCK_SIZE + partial_tokens;
             let tokens: Vec<u32> = (0..total_tokens as u32).collect();
 
-            let request = Request::new(
-                "test-request",
-                tokens,
-                None,
-                None,
-                None,
-            );
+            let request = Request::new("test-request", tokens, None, None, None);
 
             RequestSlot::new(request, TEST_BLOCK_SIZE).expect("Failed to create RequestSlot")
         }

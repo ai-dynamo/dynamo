@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_memory::nixl::NixlAgent;
 use kvbm_config::KvbmConfig;
+use kvbm_observability::{KvbmObservability, SharedKvbmObservability};
 use tokio::runtime::{Handle, Runtime};
 use velo::Messenger;
 
@@ -39,6 +40,7 @@ pub struct KvbmRuntimeBuilder {
     runtime: Option<RuntimeHandle>,
     messenger: Option<Arc<Messenger>>,
     nixl_agent: Option<NixlAgent>,
+    observability: Option<SharedKvbmObservability>,
 }
 
 impl KvbmRuntimeBuilder {
@@ -49,6 +51,7 @@ impl KvbmRuntimeBuilder {
             runtime: None,
             messenger: None,
             nixl_agent: None,
+            observability: None,
         }
     }
 
@@ -89,17 +92,23 @@ impl KvbmRuntimeBuilder {
         self
     }
 
+    /// Use an existing observability registry and metric handles.
+    pub fn with_observability(mut self, observability: SharedKvbmObservability) -> Self {
+        self.observability = Some(observability);
+        self
+    }
+
     /// Build runtime for leader role.
     pub async fn build_leader(self) -> Result<super::KvbmRuntime> {
-        self.build_internal().await
+        self.build_internal("leader").await
     }
 
     /// Build runtime for worker role.
     pub async fn build_worker(self) -> Result<super::KvbmRuntime> {
-        self.build_internal().await
+        self.build_internal("worker").await
     }
 
-    async fn build_internal(self) -> Result<super::KvbmRuntime> {
+    async fn build_internal(self, role: &'static str) -> Result<super::KvbmRuntime> {
         // 1. Tokio runtime - use provided or build from config
         let runtime = match self.runtime {
             Some(rt) => rt,
@@ -129,11 +138,26 @@ impl KvbmRuntimeBuilder {
             },
         };
 
+        // 4. Observability - shared registry and metric handles
+        let observability = match self.observability {
+            Some(observability) => observability,
+            None => Arc::new(KvbmObservability::new()?),
+        };
+        observability.set_external_labels(vec![
+            (
+                "instance_id".to_string(),
+                messenger.instance_id().to_string(),
+            ),
+            ("role".to_string(), role.to_string()),
+        ]);
+        observability.start_server(self.config.metrics.enabled, self.config.metrics.port);
+
         Ok(super::KvbmRuntime {
             config: self.config,
             runtime,
             messenger,
             nixl_agent,
+            observability,
         })
     }
 }

@@ -61,24 +61,39 @@ pub struct HostCacheConfig {
 impl HostCacheConfig {
     /// Compute the number of blocks based on configuration and block size.
     ///
-    /// Priority: explicit num_blocks > computed from cache_size_gb
-    ///
-    /// # Arguments
-    /// * `bytes_per_block` - Size of each block in bytes
-    ///
-    /// # Returns
-    /// Number of blocks, or None if neither num_blocks nor cache_size_gb is set,
-    /// or if bytes_per_block is zero.
+    /// Selection rules:
+    /// - Neither `num_blocks` nor `cache_size_gb` set: returns `None`. Callers
+    ///   must treat this as an unconfigured tier and fail loudly rather than
+    ///   falling back to an implicit default.
+    /// - Only one set: that value is used.
+    /// - Both set: the maximum of the explicit `num_blocks` and the value
+    ///   derived from `cache_size_gb` wins, and an INFO log is emitted
+    ///   enumerating both candidates so operators can see which was picked.
     pub fn compute_num_blocks(&self, bytes_per_block: usize) -> Option<usize> {
         if bytes_per_block == 0 {
             return None;
         }
-        self.num_blocks.or_else(|| {
-            self.cache_size_gb.map(|gb| {
-                // Convert GB to bytes and divide by block size
-                ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize
-            })
-        })
+        let from_gb = self
+            .cache_size_gb
+            .map(|gb| ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize);
+        match (self.num_blocks, from_gb) {
+            (None, None) => None,
+            (Some(n), None) => Some(n),
+            (None, Some(n)) => Some(n),
+            (Some(explicit), Some(derived)) => {
+                let picked = explicit.max(derived);
+                tracing::info!(
+                    tier = "host",
+                    explicit_num_blocks = explicit,
+                    cache_size_gb = self.cache_size_gb.unwrap_or(0.0),
+                    derived_num_blocks = derived,
+                    bytes_per_block,
+                    picked,
+                    "HostCacheConfig: both num_blocks and cache_size_gb set — using the larger value"
+                );
+                Some(picked)
+            }
+        }
     }
 
     /// Check if host cache is enabled (has any configuration).
@@ -116,24 +131,34 @@ pub struct DiskCacheConfig {
 impl DiskCacheConfig {
     /// Compute the number of blocks based on configuration and block size.
     ///
-    /// Priority: explicit num_blocks > computed from cache_size_gb
-    ///
-    /// # Arguments
-    /// * `bytes_per_block` - Size of each block in bytes
-    ///
-    /// # Returns
-    /// Number of blocks, or None if neither num_blocks nor cache_size_gb is set,
-    /// or if bytes_per_block is zero.
+    /// Same selection rules as [`HostCacheConfig::compute_num_blocks`]:
+    /// neither → `None`, one → that value, both → `max(...)` with an INFO
+    /// log enumerating both candidates.
     pub fn compute_num_blocks(&self, bytes_per_block: usize) -> Option<usize> {
         if bytes_per_block == 0 {
             return None;
         }
-        self.num_blocks.or_else(|| {
-            self.cache_size_gb.map(|gb| {
-                // Convert GB to bytes and divide by block size
-                ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize
-            })
-        })
+        let from_gb = self
+            .cache_size_gb
+            .map(|gb| ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize);
+        match (self.num_blocks, from_gb) {
+            (None, None) => None,
+            (Some(n), None) => Some(n),
+            (None, Some(n)) => Some(n),
+            (Some(explicit), Some(derived)) => {
+                let picked = explicit.max(derived);
+                tracing::info!(
+                    tier = "disk",
+                    explicit_num_blocks = explicit,
+                    cache_size_gb = self.cache_size_gb.unwrap_or(0.0),
+                    derived_num_blocks = derived,
+                    bytes_per_block,
+                    picked,
+                    "DiskCacheConfig: both num_blocks and cache_size_gb set — using the larger value"
+                );
+                Some(picked)
+            }
+        }
     }
 
     /// Check if disk cache is enabled (has any configuration).
@@ -183,29 +208,64 @@ mod tests {
     }
 
     #[test]
-    fn test_host_cache_explicit_blocks() {
+    fn test_host_cache_only_num_blocks() {
         let config = HostCacheConfig {
             num_blocks: Some(1000),
-            cache_size_gb: Some(10.0), // Should be ignored
+            cache_size_gb: None,
         };
-
-        // With 1MB blocks, explicit num_blocks takes priority
         let bytes_per_block = 1_000_000;
         assert_eq!(config.compute_num_blocks(bytes_per_block), Some(1000));
         assert!(config.is_enabled());
     }
 
     #[test]
-    fn test_host_cache_from_size_gb() {
+    fn test_host_cache_only_size_gb() {
         let config = HostCacheConfig {
             num_blocks: None,
-            cache_size_gb: Some(10.0), // 10 GB
+            cache_size_gb: Some(10.0),
         };
-
-        // With 1MB blocks: 10GB / 1MB = 10,000 blocks
+        // 10GB / 1MB = 10_000 blocks
         let bytes_per_block = 1_000_000;
         assert_eq!(config.compute_num_blocks(bytes_per_block), Some(10_000));
         assert!(config.is_enabled());
+    }
+
+    #[test]
+    fn test_host_cache_both_explicit_wins() {
+        // explicit num_blocks (20_000) > derived from 10GB @ 1MB (10_000)
+        let config = HostCacheConfig {
+            num_blocks: Some(20_000),
+            cache_size_gb: Some(10.0),
+        };
+        let bytes_per_block = 1_000_000;
+        assert_eq!(config.compute_num_blocks(bytes_per_block), Some(20_000));
+    }
+
+    #[test]
+    fn test_host_cache_both_derived_wins() {
+        // derived from 10GB @ 1MB (10_000) > explicit num_blocks (500)
+        let config = HostCacheConfig {
+            num_blocks: Some(500),
+            cache_size_gb: Some(10.0),
+        };
+        let bytes_per_block = 1_000_000;
+        assert_eq!(config.compute_num_blocks(bytes_per_block), Some(10_000));
+    }
+
+    #[test]
+    fn test_host_cache_neither_returns_none() {
+        let config = HostCacheConfig::default();
+        assert_eq!(config.compute_num_blocks(1_000_000), None);
+        assert!(!config.is_enabled());
+    }
+
+    #[test]
+    fn test_host_cache_bytes_per_block_zero() {
+        let config = HostCacheConfig {
+            num_blocks: Some(100),
+            cache_size_gb: Some(1.0),
+        };
+        assert_eq!(config.compute_num_blocks(0), None);
     }
 
     #[test]
@@ -216,6 +276,56 @@ mod tests {
         assert!(!config.use_gds);
         assert!(config.storage_path.is_none());
         assert!(!config.is_enabled());
+    }
+
+    #[test]
+    fn test_disk_cache_only_num_blocks() {
+        let config = DiskCacheConfig {
+            num_blocks: Some(1000),
+            cache_size_gb: None,
+            use_gds: false,
+            storage_path: None,
+        };
+        assert_eq!(config.compute_num_blocks(1_000_000), Some(1000));
+    }
+
+    #[test]
+    fn test_disk_cache_only_size_gb() {
+        let config = DiskCacheConfig {
+            num_blocks: None,
+            cache_size_gb: Some(10.0),
+            use_gds: false,
+            storage_path: None,
+        };
+        assert_eq!(config.compute_num_blocks(1_000_000), Some(10_000));
+    }
+
+    #[test]
+    fn test_disk_cache_both_explicit_wins() {
+        let config = DiskCacheConfig {
+            num_blocks: Some(20_000),
+            cache_size_gb: Some(10.0),
+            use_gds: false,
+            storage_path: None,
+        };
+        assert_eq!(config.compute_num_blocks(1_000_000), Some(20_000));
+    }
+
+    #[test]
+    fn test_disk_cache_both_derived_wins() {
+        let config = DiskCacheConfig {
+            num_blocks: Some(500),
+            cache_size_gb: Some(10.0),
+            use_gds: false,
+            storage_path: None,
+        };
+        assert_eq!(config.compute_num_blocks(1_000_000), Some(10_000));
+    }
+
+    #[test]
+    fn test_disk_cache_neither_returns_none() {
+        let config = DiskCacheConfig::default();
+        assert_eq!(config.compute_num_blocks(1_000_000), None);
     }
 
     #[test]

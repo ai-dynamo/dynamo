@@ -6,17 +6,17 @@ use std::sync::Arc;
 
 use super::ConnectorLeader;
 
-use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
 use crate::connector::worker::ConnectorWorkerClient;
-use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
-use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
+use crate::{G1, G2, G3, InstanceId};
+use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::object::{ObjectLockManager, create_lock_manager, create_object_client};
 use kvbm_engine::offload::{
     ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker, PipelineBuilder,
     S3PresenceChecker, create_policy_from_config,
 };
-use crate::{G1, G2, G3, InstanceId};
+use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
+use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
+use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 
 use anyhow::{Context, Result, anyhow, bail};
 use velo::{PeerInfo, WorkerAddress};
@@ -205,8 +205,7 @@ impl ConnectorLeader {
             .config()
             .cache
             .host
-            .compute_num_blocks(bytes_per_block)
-            .unwrap_or(0);
+            .compute_num_blocks(bytes_per_block);
 
         let disk_block_count = self
             .runtime
@@ -215,6 +214,29 @@ impl ConnectorLeader {
             .disk
             .as_ref()
             .and_then(|dc| dc.compute_num_blocks(bytes_per_block));
+
+        // Mirror v1 sanity_check: at least one cache tier must produce a
+        // non-zero block count, otherwise the leader has nothing to offload to.
+        // Fail loudly rather than silently falling back to zero host blocks.
+        let host_ok = host_block_count.is_some_and(|n| n > 0);
+        let disk_ok = disk_block_count.is_some_and(|n| n > 0);
+        if !host_ok && !disk_ok {
+            bail!(
+                "KVBM Configuration Error: At least one cache tier must be configured.\n\
+                \n\
+                Configure CPU cache (G2) for CPU memory offloading:\n\
+                • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
+                • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
+                \n\
+                OR configure disk cache (G3) for direct GPU->Disk offloading:\n\
+                • DYN_KVBM_DISK_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_DISK_CACHE_GB=8)\n\
+                • DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>\n\
+                \n\
+                Note: If only disk cache is configured, KVBM will offload directly from GPU (G1) to Disk (G3), bypassing CPU memory (G2)."
+            );
+        }
+
+        let host_block_count = host_block_count.unwrap_or(0);
 
         tracing::info!(
             host_block_count,
@@ -322,12 +344,14 @@ impl ConnectorLeader {
             page_size = reference_config.page_size,
             "Building G2 manager"
         );
+        let logical_metrics = self.runtime.observability().logical_aggregator();
         let g2_manager = Arc::new(
             BlockManager::<G2>::builder()
                 .block_count(host_block_count)
                 .block_size(reference_config.page_size)
                 .registry(registry.clone())
                 .with_lineage_backend()
+                .aggregator(logical_metrics.clone())
                 .duplication_policy(BlockDuplicationPolicy::Reject)
                 .build()
                 .expect("Should build G2 manager"),
@@ -347,6 +371,7 @@ impl ConnectorLeader {
                     .block_size(reference_config.page_size)
                     .registry(registry.clone())
                     .with_lineage_backend()
+                    .aggregator(logical_metrics.clone())
                     .duplication_policy(BlockDuplicationPolicy::Reject)
                     .build()
                     .expect("Should build G3 manager"),
@@ -499,8 +524,7 @@ impl ConnectorLeader {
             // Get parallel_worker from leader - it implements ObjectBlockOps and fans out to all workers
             if let Some(parallel_worker) = leader.parallel_worker() {
                 // parallel_worker implements ObjectBlockOps, we can cast it to the trait object
-                let object_ops: Arc<dyn kvbm_engine::object::ObjectBlockOps> =
-                    parallel_worker;
+                let object_ops: Arc<dyn kvbm_engine::object::ObjectBlockOps> = parallel_worker;
 
                 // Create S3 presence checker using the parallel worker
                 // When has_blocks is called, it queries all workers who check S3 with their rank-prefixed keys

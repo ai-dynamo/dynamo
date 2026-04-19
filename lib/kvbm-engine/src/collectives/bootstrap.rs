@@ -130,9 +130,8 @@ impl NcclBootstrap {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(8 + 128);
         bytes.extend_from_slice(&(self.world_size as u64).to_le_bytes());
-        // Convert NcclByte array to u8 for serialization
         for &byte in &self.nccl_id.internal {
-            bytes.push(byte as u8);
+            bytes.push(byte);
         }
         bytes
     }

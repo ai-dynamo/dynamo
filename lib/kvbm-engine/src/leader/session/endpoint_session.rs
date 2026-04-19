@@ -10,7 +10,7 @@
 //! - Holds blocks in G2 via RAII (`BlockHolder`)
 //! - Processes Attach/BlocksPulled/Detach messages
 //! - Supports layerwise transfer notifications
-//! - Can be owned by various handlers (Nova active message, local API, etc.)
+//! - Can be owned by various handlers (Velo active message, local API, etc.)
 //!
 //! # Usage
 //!

@@ -65,7 +65,7 @@ use super::{
 ///   leaders can initiate sessions and exchange metadata.
 #[derive(Clone)]
 pub struct InstanceLeader {
-    /// Nova instance for distributed communication.
+    /// Velo instance for distributed communication.
     messenger: Arc<Messenger>,
 
     /// Block registry for deduplication.
@@ -133,9 +133,9 @@ pub struct InstanceLeaderBuilder {
 impl InstanceLeaderBuilder {
     /// Initialize builder with components from KvbmRuntime.
     ///
-    /// This extracts Nova from the runtime. Use this when the runtime
+    /// This extracts Velo from the runtime. Use this when the runtime
     /// has already been constructed and you want the leader to share
-    /// the same Nova instance for distributed communication.
+    /// the same Velo instance for distributed communication.
     ///
     /// # Example
     /// ```ignore
@@ -218,7 +218,7 @@ impl InstanceLeaderBuilder {
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
-            .ok_or_else(|| anyhow::anyhow!("Nova instance required"))?;
+            .ok_or_else(|| anyhow::anyhow!("Velo instance required"))?;
         let transport = Arc::new(MessageTransport::velo(messenger.clone()));
 
         // Create event system for notification aggregation
@@ -311,15 +311,15 @@ impl InstanceLeader {
         &self.registry
     }
 
-    /// Get a reference to the Nova instance.
+    /// Get a reference to the Velo instance.
     ///
-    /// This provides access to the Nova distributed system for features
+    /// This provides access to the Velo distributed system for features
     /// like event coordination and cross-instance communication.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
     }
 
-    /// Get the tokio runtime handle from Nova.
+    /// Get the tokio runtime handle from Velo.
     ///
     /// This handle should be used for spawning background tasks that need to
     /// run on the KVBM runtime's executor (e.g., offload engine pipelines).
@@ -508,7 +508,7 @@ impl InstanceLeader {
         InstanceLeaderBuilder::default()
     }
 
-    /// Register Nova handlers for leader-to-leader communication.
+    /// Register Velo handlers for leader-to-leader communication.
     ///
     /// This must be called after construction to enable distributed onboarding.
     pub fn register_handlers(&self) -> Result<()> {
@@ -947,7 +947,7 @@ impl InstanceLeader {
         }
     }
 
-    /// Get the session sessions map (for Nova handler registration).
+    /// Get the session sessions map (for Velo handler registration).
     #[expect(dead_code)]
     pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
         self.session_sessions.clone()
@@ -1159,22 +1159,32 @@ impl Leader for InstanceLeader {
         let needs_remote_search =
             options.search_remote && (has_remote_leaders || has_object_client);
         let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
+        let local_g2_count = matched_g2_blocks.len();
+        let local_g3_count = matched_g3_blocks.len();
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: 0,
+                    object_blocks: 0,
+                },
             )));
         }
 
         // AsyncSession path: G3 blocks found or remote search enabled
         let session_id = SessionId::from(Uuid::new_v4());
-        let local_g2_count = matched_g2_blocks.len();
-        let local_g3_count = matched_g3_blocks.len();
 
         // AsyncSession: staging locally and/or remote searching
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
+        let match_breakdown = Arc::new(Mutex::new(super::MatchBreakdown {
+            host_blocks: local_g2_count,
+            disk_blocks: local_g3_count,
+            object_blocks: 0,
+        }));
 
         // Store session state to keep blocks alive
         let state = SessionState {
@@ -1200,6 +1210,7 @@ impl Leader for InstanceLeader {
                 session_id,
                 status_rx,
                 all_g2_blocks,
+                match_breakdown,
                 None, // No session handle for local-only staging (yet)
             )));
         }
@@ -1230,6 +1241,7 @@ impl Leader for InstanceLeader {
             self.transport.clone(),
             status_tx.clone(),
             all_g2_blocks.clone(),
+            match_breakdown.clone(),
             control_rx.unwrap_or_else(|| {
                 let (_, rx) = mpsc::channel(1);
                 rx
@@ -1256,6 +1268,7 @@ impl Leader for InstanceLeader {
             session_id,
             status_rx,
             all_g2_blocks,
+            match_breakdown,
             session_handle,
         )))
     }

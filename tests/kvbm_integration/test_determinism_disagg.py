@@ -107,9 +107,7 @@ class LLMServerManager:
         self.env.update(
             {
                 "RUST_BACKTRACE": "1",
-                # DynamoConnector connection settings
-                "NATS_SERVER": "nats://localhost:4222",
-                "ETCD_ENDPOINTS": "http://localhost:2379",
+                # DynamoConnector connection settings (from runtime_services fixture env)
             }
         )
 

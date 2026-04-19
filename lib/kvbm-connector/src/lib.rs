@@ -23,5 +23,16 @@ pub use config::{AttentionConfig, IntegrationsConfig, ParallelConfig};
 pub use kvbm_common::{BlockId, SequenceHash};
 pub use kvbm_engine::{G1, G2, G3, G4, InstanceId, KvbmRuntime};
 
+// Re-exports for bindings — runtime construction
+pub use kvbm_config::KvbmConfig;
+pub use kvbm_engine::{KvbmRuntimeBuilder, PeerInfo, WorkerAddress};
+
+// Re-exports for bindings — memory/tensor types (already in public API via ConnectorWorkerInterface)
+pub use dynamo_memory::{MemoryDescriptor, StorageKind, TensorDescriptor};
+pub mod memory {
+    //! Re-exports from `dynamo-memory` for bindings convenience.
+    pub use dynamo_memory::nixl;
+}
+
 #[cfg(feature = "testing")]
 pub mod testing;

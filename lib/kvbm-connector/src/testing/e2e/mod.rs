@@ -9,7 +9,7 @@
 #[cfg(test)]
 mod find_blocks;
 
-#[cfg(feature = "s3")]
+#[cfg(all(test, feature = "s3"))]
 mod s3_object;
 
 #[cfg(test)]
@@ -22,7 +22,7 @@ mod tests {
     /// Test that a TestConnectorCluster can be created with 2 instances.
     ///
     /// This verifies:
-    /// 1. Multiple instances can be created with cross-registered Nova
+    /// 1. Multiple instances can be created with cross-registered Velo
     /// 2. Workers are initialized successfully
     /// 3. InstanceLeaders are created and accessible
     /// 4. Sessions can be established between instances

@@ -10,27 +10,27 @@
 //! - Mock KV cache tensors for testing without GPU allocation
 
 use anyhow::{Context, Result, anyhow};
-use kvbm_config::{KvbmConfig, NixlConfig};
 use dynamo_memory::nixl::NixlDescriptor;
 use dynamo_memory::{MemoryDescriptor, StorageKind, TensorDescriptor};
-use velo::Messenger;
-use velo::WorkerAddress;
 use figment::Figment;
 use figment::providers::{Format, Json};
+use kvbm_config::{KvbmConfig, NixlConfig};
 use serde::Serialize;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use velo::Messenger;
+use velo::WorkerAddress;
 
-use kvbm_physical::layout::{BlockDimension, PhysicalLayout};
 use crate::BlockId;
-use kvbm_engine::leader::InstanceLeader;
+use crate::SequenceHash;
 use crate::connector::leader::ConnectorLeader;
 use crate::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
-use crate::SequenceHash;
-use kvbm_physical::layout::LayoutConfig;
-use kvbm_physical::transfer::{BlockChecksum, FillPattern};
 use crate::{InstanceId, KvbmRuntime};
+use kvbm_engine::leader::InstanceLeader;
+use kvbm_physical::layout::LayoutConfig;
+use kvbm_physical::layout::{BlockDimension, PhysicalLayout};
+use kvbm_physical::transfer::{BlockChecksum, FillPattern};
 
 use kvbm_engine::testing::{managers, messenger, physical, token_blocks};
 
@@ -372,8 +372,8 @@ impl TestConnectorWorker {
         block_ids: &[BlockId],
         pattern: FillPattern,
     ) -> Result<HashMap<BlockId, BlockChecksum>> {
-        use kvbm_engine::worker::WorkerTransfers;
         use kvbm_common::LogicalLayoutHandle;
+        use kvbm_engine::worker::WorkerTransfers;
         use kvbm_physical::TransferOptions;
 
         let direct_worker = self
@@ -442,8 +442,8 @@ impl TestConnectorWorker {
         &self,
         block_ids: &[BlockId],
     ) -> Result<HashMap<BlockId, BlockChecksum>> {
-        use kvbm_engine::worker::WorkerTransfers;
         use kvbm_common::LogicalLayoutHandle;
+        use kvbm_engine::worker::WorkerTransfers;
         use kvbm_physical::TransferOptions;
 
         let direct_worker = self
@@ -1257,7 +1257,8 @@ impl TestConnectorInstanceBuilder {
         // 4. Build LEADER runtime AFTER workers
         let leader_config = self.test_config.build_leader_config()?;
         let leader_runtime = {
-            let mut builder = KvbmRuntime::builder(leader_config).with_messenger(leader_nova.clone());
+            let mut builder =
+                KvbmRuntime::builder(leader_config).with_messenger(leader_nova.clone());
             if let Some(rt) = &self.shared_runtime {
                 builder = builder.with_runtime(rt.clone());
             }

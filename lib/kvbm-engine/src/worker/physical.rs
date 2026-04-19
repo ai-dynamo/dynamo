@@ -16,12 +16,12 @@ pub use replicated::ReplicatedDataWorker;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[cfg(feature = "nccl")]
 use cudarc::driver::CudaEvent;
 use derive_builder::Builder;
 use futures::future::BoxFuture;
 
 use crate::object::ObjectBlockOps;
+use kvbm_common::KvbmTransferRoute;
 use kvbm_physical::layout::PhysicalLayout;
 use kvbm_physical::{
     manager::{SerializedLayout, TransferManager},
@@ -204,6 +204,90 @@ impl PhysicalWorker {
         Ok(BounceBuffer::from_handle(handle, block_ids))
     }
 
+    fn annotate_options(
+        &self,
+        mut options: TransferOptions,
+        route: Option<KvbmTransferRoute>,
+    ) -> TransferOptions {
+        if options.metric_route.is_none() {
+            options.metric_route = route;
+        }
+        options
+    }
+
+    fn local_route(
+        src: LogicalLayoutHandle,
+        dst: LogicalLayoutHandle,
+    ) -> Option<KvbmTransferRoute> {
+        match (src, dst) {
+            (LogicalLayoutHandle::G1, LogicalLayoutHandle::G2) => {
+                Some(KvbmTransferRoute::OffloadD2H)
+            }
+            (LogicalLayoutHandle::G2, LogicalLayoutHandle::G1) => {
+                Some(KvbmTransferRoute::OnboardH2D)
+            }
+            (LogicalLayoutHandle::G2, LogicalLayoutHandle::G3) => {
+                Some(KvbmTransferRoute::OffloadH2D)
+            }
+            (LogicalLayoutHandle::G3, LogicalLayoutHandle::G1) => {
+                Some(KvbmTransferRoute::OnboardD2D)
+            }
+            (LogicalLayoutHandle::G3, LogicalLayoutHandle::G2) => {
+                Some(KvbmTransferRoute::OnboardD2D)
+            }
+            (LogicalLayoutHandle::G1, LogicalLayoutHandle::G3) => {
+                Some(KvbmTransferRoute::OffloadD2D)
+            }
+            _ => None,
+        }
+    }
+
+    fn record_object_results(
+        observability: Option<kvbm_observability::SharedKvbmObservability>,
+        route: KvbmTransferRoute,
+        results: &[Result<SequenceHash, SequenceHash>],
+        started_at: std::time::Instant,
+    ) {
+        let Some(observability) = observability else {
+            return;
+        };
+
+        let success_count = results.iter().filter(|r| r.is_ok()).count() as u64;
+        let failure_count = results.iter().filter(|r| r.is_err()).count() as u64;
+
+        if success_count > 0 {
+            observability
+                .compat_metrics()
+                .record_transfer_success(route, success_count);
+        }
+
+        if failure_count > 0 {
+            match route {
+                KvbmTransferRoute::OffloadD2O => observability
+                    .compat_metrics()
+                    .object_write_failures
+                    .inc_by(failure_count),
+                KvbmTransferRoute::OnboardO2D => observability
+                    .compat_metrics()
+                    .object_read_failures
+                    .inc_by(failure_count),
+                _ => {}
+            }
+            observability
+                .transfer_metrics()
+                .record_failure(route, "object_store", failure_count);
+        }
+
+        let outcome = if failure_count > 0 {
+            "failure"
+        } else {
+            "success"
+        };
+        observability
+            .transfer_metrics()
+            .finish_transfer(route, started_at.elapsed(), outcome);
+    }
+
     /// Export serialized layout metadata with proper logical type mappings.
     ///
     /// This exports layouts with their logical types (G1, G2, G3) so that
@@ -273,13 +357,13 @@ impl PhysicalWorker {
     /// - layer_events length doesn't match num_layers
     /// - G1 or G2 handles are not registered
     /// - Any layer transfer fails
-    #[cfg(feature = "nccl")]
     pub fn execute_local_layerwise_onboard(
         &self,
         src_block_ids: &[BlockId],
         dst_block_ids: &[BlockId],
         layer_events: &[Arc<CudaEvent>],
     ) -> Result<()> {
+        let started_at = std::time::Instant::now();
         // Validate block ID lengths match
         if src_block_ids.len() != dst_block_ids.len() {
             return Err(anyhow::anyhow!(
@@ -320,7 +404,7 @@ impl PhysicalWorker {
         );
 
         // Execute transfer for each layer and record event
-        for layer in 0..num_layers {
+        for (layer, event) in layer_events.iter().enumerate().take(num_layers) {
             // Execute single-layer transfer on our dedicated stream
             let options = TransferOptions::builder()
                 .layer_range(layer..layer + 1)
@@ -336,10 +420,24 @@ impl PhysicalWorker {
             )?;
 
             // Record event on the stream for this layer
-            layer_events[layer].record(stream.as_ref())?;
+            event.record(stream.as_ref())?;
         }
 
         tracing::debug!(num_layers, "Layer-wise onboard complete - events recorded");
+
+        if let Some(observability) = self.manager.context().observability() {
+            observability
+                .transfer_metrics()
+                .begin_transfer(KvbmTransferRoute::OnboardH2D);
+            observability
+                .compat_metrics()
+                .record_transfer_success(KvbmTransferRoute::OnboardH2D, dst_block_ids.len() as u64);
+            observability.transfer_metrics().finish_transfer(
+                KvbmTransferRoute::OnboardH2D,
+                started_at.elapsed(),
+                "success",
+            );
+        }
 
         Ok(())
     }
@@ -377,7 +475,7 @@ impl WorkerTransfers for PhysicalWorker {
             &src_block_ids,
             dst_layout,
             &dst_block_ids,
-            options,
+            self.annotate_options(options, Self::local_route(src, dst)),
         )
     }
 
@@ -429,10 +527,23 @@ impl WorkerTransfers for PhysicalWorker {
                 let awaiter = ctx.event_system().awaiter(handle)?;
 
                 // Spawn task to execute object storage read
+                let observability = ctx.observability().cloned();
+                if let Some(observability) = &observability {
+                    observability
+                        .transfer_metrics()
+                        .begin_transfer(KvbmTransferRoute::OnboardO2D);
+                }
+                let started_at = std::time::Instant::now();
                 ctx.tokio().spawn(async move {
                     let results = object_client
                         .get_blocks_with_layout(keys.clone(), dst_physical, block_ids_vec)
                         .await;
+                    Self::record_object_results(
+                        observability,
+                        KvbmTransferRoute::OnboardO2D,
+                        &results,
+                        started_at,
+                    );
 
                     // Check if any failed
                     let failed: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
@@ -501,10 +612,23 @@ impl WorkerTransfers for PhysicalWorker {
                 let awaiter = ctx.event_system().awaiter(handle)?;
 
                 // Spawn task to execute object storage write
+                let observability = ctx.observability().cloned();
+                if let Some(observability) = &observability {
+                    observability
+                        .transfer_metrics()
+                        .begin_transfer(KvbmTransferRoute::OffloadD2O);
+                }
+                let started_at = std::time::Instant::now();
                 ctx.tokio().spawn(async move {
                     let results = object_client
                         .put_blocks_with_layout(keys.clone(), src_physical, block_ids_vec)
                         .await;
+                    Self::record_object_results(
+                        observability,
+                        KvbmTransferRoute::OffloadD2O,
+                        &results,
+                        started_at,
+                    );
 
                     // Check if any failed
                     let failed: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
@@ -591,7 +715,12 @@ impl WorkerTransfers for PhysicalWorker {
             block_ids: src_block_ids,
         };
 
-        self.execute_remote_onboard(descriptor, dst, dst_block_ids, options)
+        self.execute_remote_onboard(
+            descriptor,
+            dst,
+            dst_block_ids,
+            self.annotate_options(options, Self::local_route(remote_logical_type, dst)),
+        )
     }
 }
 
@@ -652,7 +781,24 @@ impl ObjectBlockOps for PhysicalWorker {
 
         // Object client handles rank-based key prefixing internally
         if let Some(client) = self.object_client.as_ref() {
-            client.put_blocks_with_layout(keys, physical_layout, block_ids)
+            let observability = self.manager.context().observability().cloned();
+            if let Some(observability) = &observability {
+                observability
+                    .transfer_metrics()
+                    .begin_transfer(KvbmTransferRoute::OffloadD2O);
+            }
+            let future = client.put_blocks_with_layout(keys, physical_layout, block_ids);
+            Box::pin(async move {
+                let started_at = std::time::Instant::now();
+                let results = future.await;
+                Self::record_object_results(
+                    observability,
+                    KvbmTransferRoute::OffloadD2O,
+                    &results,
+                    started_at,
+                );
+                results
+            })
         } else {
             // No object client configured - return all keys as failed
             tracing::warn!("put_blocks called but no object client configured");
@@ -677,7 +823,24 @@ impl ObjectBlockOps for PhysicalWorker {
 
         // Object client handles rank-based key prefixing internally
         if let Some(client) = self.object_client.as_ref() {
-            client.get_blocks_with_layout(keys, physical_layout, block_ids)
+            let observability = self.manager.context().observability().cloned();
+            if let Some(observability) = &observability {
+                observability
+                    .transfer_metrics()
+                    .begin_transfer(KvbmTransferRoute::OnboardO2D);
+            }
+            let future = client.get_blocks_with_layout(keys, physical_layout, block_ids);
+            Box::pin(async move {
+                let started_at = std::time::Instant::now();
+                let results = future.await;
+                Self::record_object_results(
+                    observability,
+                    KvbmTransferRoute::OnboardO2D,
+                    &results,
+                    started_at,
+                );
+                results
+            })
         } else {
             // No object client configured - return all keys as failed
             tracing::warn!("get_blocks called but no object client configured");
