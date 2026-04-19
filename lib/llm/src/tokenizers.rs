@@ -135,9 +135,11 @@ pub mod traits {
 
     pub trait Tokenizer: Encoder + Decoder {
         fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
+            // Decoder::decode returns DecodeResult (Complete/Partial); the existing
+            // `impl From<DecodeResult> for String` unwraps to the inner string.
             token_ids
                 .iter()
-                .map(|id| self.decode(std::slice::from_ref(id), false))
+                .map(|id| self.decode(std::slice::from_ref(id), false).map(String::from))
                 .collect()
         }
     }
