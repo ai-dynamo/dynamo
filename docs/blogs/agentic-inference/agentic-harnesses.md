@@ -1,18 +1,15 @@
 # Full-Stack Optimizations for Agentic Harnesses with Dynamo
 
-Pointing an agent harness at a new backend is easy. Making the harness feel correct is harder.
-
-Claude Code, OpenClaw, and Codex all depend on details that live above raw token generation: prompt shape, replay order, stream semantics, model metadata, and tool-call readiness. Get those details wrong and the failure mode is not just uglier JSON. It is broken cache reuse, idle tool loops, and clients that behave as if the model is slower or less reliable than it really is.
+Claude Code, OpenClaw, and Codex all depend on details that live above raw token generation: model metadata, and tool-call readiness. Get those details wrong and the failure mode is not just uglier JSON. It is broken cache reuse, idle tool loops, and clients that behave as if the model is slower or less reliable than it really is.
 
 Our [first post](./agentic-inference.md) focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. This post stays closer to the harness boundary. The question here is simpler and more practical: what had to change in Dynamo to make real agent harnesses like Claude Code, OpenClaw, and Codex feel correct, cache-efficient, and fast?
 
-Claude Code is the main anchor throughout. It puts pressure on nearly every layer at once: a large reusable system prompt, Anthropic-flavored API expectations, interleaved reasoning and tool calls, and long-running sessions where small compatibility gaps compound quickly. OpenClaw broadens the story to long-lived and background loops. Codex gives us the `v1/responses` side of the same problem.
+Claude Code is the main anchor throughout. It puts pressure on nearly every layer at once: a large reusable system prompt, Anthropic-flavored API expectations, interleaved reasoning and tool calls, and long-running sessions with complex event-based patterns such as those created by background commands and agent teams. OpenClaw broadens the story to long-lived and background loops while Codex gives us the `v1/responses` side of the same problem.
 
 ## Tiny Setup
 
-This is not a setup post, but it is useful to show the shape of the integration and the knobs that mattered in the experiments.
-
-For Claude Code, the setup we actually used is just an SSH tunnel plus a few environment variables:
+The following minimal example helps make the integration concrete.
+For Claude Code, we used a simple SSH tunnel to a frontend that exposes the Anthropic-compatible API:
 
 ```bash
 autossh -M 0 -f -N \
@@ -20,16 +17,14 @@ autossh -M 0 -f -N \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=no \
-  <gpu-node>
-
+  <gpu-node> && \
 ANTHROPIC_BASE_URL=http://localhost:8000 \
-ANTHROPIC_API_KEY=dummy \
-CLAUDE_MODEL=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
-CLAUDE_CODE_SUBAGENT_MODEL=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+ANTHROPIC_CUSTOM_MODEL_OPTION=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Dynamo NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" \
 claude --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 ```
 
-For OpenClaw, it is the same tunnel pattern with a much thinner client setup:
+For OpenClaw, the Anthropic-compatible path is even thinner:
 
 ```bash
 autossh -M 0 -f -N \
@@ -37,24 +32,16 @@ autossh -M 0 -f -N \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=no \
-  <gpu-node>
-
+  <gpu-node> && \
 ANTHROPIC_BASE_URL=http://localhost:8000 \
-pnpx openclaw
+npx openclaw
 ```
 
-For direct API testing during development, we also hit Dynamo's Responses API directly:
+All experiments in this post were ran against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. Some of the strongest results below are correctness results with clear systems implications; others are quantitative.
 
-```bash
-curl -s http://localhost:8000/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "<model>",
-    "input": "Summarize the router design briefly."
-  }'
-```
+## The Dynamo Graph Deployment (DGD) Settings
 
-The Anthropic-facing frontend configuration used in these experiments looked like this:
+We started the frontend with the Anthropic API compatibility flags shown below:
 
 ```bash
 python -m dynamo.frontend \
@@ -62,64 +49,33 @@ python -m dynamo.frontend \
   --enable-anthropic-api \
   --strip-anthropic-preamble
 ```
+If the frontend and worker are missing these harness-facing switches, the deployment can benchmark well in terms of metrics and still feel wrong and clunky. 
 
-All experiments in the artifact set ran against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. That caveat matters. Some of the strongest results below are correctness results with clear systems implications; others are quantitative. We try to distinguish those cleanly.
+On the frontend side, the key settings to watch for are:
 
-## The DGD Settings That Actually Matter
-
-One thing that became obvious while doing this work is that the speedups do not come from "serving the right model" alone. A harness-friendly deployment needs a specific set of frontend and worker settings turned on together.
-
-On the frontend side, the key settings are:
-
-- `--enable-anthropic-api` so Claude Code and OpenClaw can talk to Dynamo over the API shape they expect.
+- `--enable-anthropic-api` so Claude Code and OpenClaw can talk to Dynamo over the Antrhopic API the default messages API results in a degraded experience and is best avoided.
 - `DYN_STRIP_ANTHROPIC_PREAMBLE=1` so Claude Code's billing header does not destroy prefix stability.
-- `DYN_ENABLE_STREAMING_TOOL_DISPATCH=1` so tool readiness is emitted as structured stream state rather than inferred from deltas.
+- `DYN_ENABLE_STREAMING_TOOL_DISPATCH=1` so tool readiness is emitted as structured stream state rather than inferred from deltas. This means that decoded tool calls can start executing as soon as they are decoded, rather than waiting till the end of turn.
 
 On the worker side, the important settings in this deployment are:
 
-- `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` so tool calls and reasoning blocks are reconstructed in the model-specific format the harness actually needs.
-- `--enable-chunked-prefill`, `--async-scheduling`, and a sufficiently large batching envelope such as `--max-num-seqs` and `--max-num-batched-tokens`, because the harnesses in this post generate long-prefill, multi-turn traffic rather than short single-shot prompts.
-- The model-specific runtime settings that make the chosen backend viable at all for this workload. In our vLLM deployment that included expert parallelism, FP8 KV cache, and the speculative decoding configuration used for Nemotron-3.
+- `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` so tool calls and reasoning blocks are reconstructed in the model-specific format the harness actually needs. For instance, a common pattern is to drop all reasoning tokens from previous turns. Parsers need to handle this correctly, as well as the case of not dropping reasoning tokens for turns with interleaved tool calls, where the reasoning provides crucial context.
 
-It is worth being explicit about what is not part of this story. Secrets such as `HF_TOKEN` obviously need to be provided in your own environment, but they are not what unlocks the harness-side wins. The harness-relevant switches are the API mode, preamble stripping, streaming dispatch, and the correct parser and scheduler configuration.
 
-## Prompt Stability Is Cache Work
+## Prompt Stability Is Key for Cache Re-use
 
-Claude Code sends a lot of reusable prompt scaffolding. That is exactly what you want for KV reuse if the prefix stays stable. The problem is that Claude Code also prepends a session-specific billing header near the very front of the system prompt:
+Claude Code sends thousands of tokens of reusable prompt scaffolding, much of which is designed to be the same acorss different users and sessions. However, at the very front of each prompt is a session-specific billing header which causes cache misses when pointed at custom endpoints that do not strip it out:
 
 ```text
-x-anthropic-billing-header: cc_version=0.2.93; cch=abc123def456;
+x-anthropic-billing-header: cc_version=0.2.93; cch=abc123def456==;
 You are Claude Code, an interactive CLI tool...
 ```
 
-On Anthropic's managed API, this is fine. On a prefix-matched KV cache, it is poison. A varying line at position zero means every new session starts from a different token prefix, so the stable instructions and tool definitions behind it never line up cleanly for reuse.
+These headers poison the KV cache and prevent it from being reused, even across sessions by the same user. A varying line at position zero means every new session starts from a different token prefix, so the stable instructions and tool definitions behind it never line up cleanly for reuse.
 
 That is why Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
 
-```rust
-fn strip_billing_preamble(system: &mut Option<SystemContent>) {
-    if let Some(content) = system {
-        let trimmed = content.text.trim_start();
-        if trimmed.starts_with("x-anthropic-billing-header:")
-            && let Some(newline_pos) = trimmed.find('\n')
-        {
-            content.text = trimmed[newline_pos + 1..].to_string();
-        }
-    }
-}
-```
-
-The artifact set gave us a clean before-and-after story.
-
-First, the Anthropic baseline. Via cc-proxy (a local Anthropic API proxy) in passthrough mode, a 6-request Claude Code session produced `53,992` cache creation tokens and `215,102` cache read tokens. After the first request, the session is effectively all cache reads. That is what good harness behavior looks like: one cold write, then repeated reuse of the same high-value prefix.
-
-Second, the Dynamo-side measurement. On a localhost B200 run with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill.
-
-We also verified the control case: a prompt with no extra header lands at the same fast path as the stripped version. That is useful as validation, but it is not the main comparison. The real question is whether the per-session header stays in the prefix or gets removed before tokenization.
-
-Anthropic is the baseline for how the harness is meant to behave. Dynamo's result is the systems lesson: a harness quirk that looks incidental at the API boundary can destroy cache reuse if it perturbs the prefix too early.
-
-Claude Code gave us a clean example of how harness semantics become serving semantics. On Anthropic's API, the billing preamble is absorbed into managed prompt caching and effectively disappears as an operational concern. On Dynamo, the same line sits at the front of a prefix-matched KV cache. Left untouched, it turns every session into a new prompt. Strip it before tokenization, and the system prompt becomes shareable again across requests and even across sessions that would otherwise differ only in that header.
+The impact of this simple fix is significant. On a Dynamo B200 deploy run with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill. That is a redeuction of 5x in TTFT that would be experienced directly by new users hitting the same deployment or the same user opening up a new session.
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" style="max-width:720px;width:100%;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;border:1px solid #e5e7eb;border-radius:8px">
 <line x1="72" y1="324.0" x2="696" y2="324.0" stroke="#e5e7eb" stroke-width="1"/>
@@ -287,37 +243,23 @@ Claude Code gave us a clean example of how harness semantics become serving sema
 
 <p style="text-align:center;color:#6b7280;font-size:0.9em;margin-top:0.5em"><em>Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168–169 ms TTFT; a varying prefix jumps to ~911 ms.</em></p>
 
-## Reasoning Fidelity Is KV Correctness
+## The nuances of reasoining parsing
 
-Interleaved reasoning is easy to mistake for a rendering problem. It is not. It is a prompt reconstruction problem, which makes it a KV correctness problem.
-
-If a model generates:
-
+Contemporary models produce reasoning in two different types of turns:
+- reasoning followed by a direct response to the user
+- reasoning followed by one or more tool calls
+Agentic models are particularly adept at producing turns where hundreds of thinking and tool calling sections occur within a single turn.
+The reasoning interleaved with tools is essential for the model to be able to track it's own reasoining being each invocation.
 ```text
 <think>reasoning_0</think> tool_call_0 <think>reasoning_1</think> tool_call_1
 ```
-
-then the next turn has to replay that assistant output in the same structural order. If the replay path flattens all reasoning before all tool calls:
-
+Dynamo's implementation now supports this interleaved format, so that the reasoning order on the next turn, whereas it was previously constructed as:
 ```text
 <think>reasoning_0 reasoning_1</think> tool_call_0 tool_call_1
 ```
+This was a result of legacy models emitting single reasoning and tool call passes per turn.
 
-the visible meaning may look similar, but the token sequence is different. That means the KV prefix computed during generation no longer matches the prefix seen on replay.
-
-Dynamo's fix was to preserve reasoning as ordered segments rather than one flattened string:
-
-```rust
-pub enum ReasoningContent {
-    Text(String),
-    Segments(Vec<String>),
-}
-```
-
-The contract matters more than the type name. `segments[i]` is the reasoning that appeared before `tool_calls[i]`, and `segments[N]` is any trailing reasoning after the last tool call. That preserves the original token order instead of reconstructing a lossy approximation.
-
-The important thing we learned here is that ordering was not the only bug. Before we could even ask whether the replayed order was correct, historical reasoning was often missing from the prompt entirely. That made some of the earlier experiments deceptively flat: if prior thinking has already been dropped, then "correct" and "incorrect" interleaving can collapse to the same effective prompt.
-
+We also identified that reasoning was often being alltogether dropped for all turns. It shuld be noted that dropping reasoning tokens for all turns not containing tool calls is established practiced for models such as DeepSeek-R1. This was a particularly pernicious bug to spot, as users were frequently reporting reasoning as being correctly decoded, but they were unable to see that it was being silently malformed or dropped on the input to the next turn. 
 This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The bug had three layers:
 
 1. **Double parsing**: the Anthropic streaming handler applied a second reasoning parser on top of the engine stream, which already had reasoning correctly split. The second parser re-classified all content as reasoning.
@@ -326,31 +268,23 @@ This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/
 
 3. **Template truncation**: Nemotron's chat template defaults `truncate_history_thinking` to `true`, which strips `<think>` content from all assistant turns before the last user message. That is reasonable for ordinary chat, but wrong for agentic turns where prior reasoning explains why tools were called. Some parsers made this even harder to notice. For example, the DeepSeek-R1 parser preserves reasoning on tool-calling turns but drops it on turns without tool calls, which is exactly the wrong shape for a harness that needs the model to remember why those tool calls happened. NVIDIA's own SWE training pipeline sets `truncate_history_thinking: false`; the Anthropic handler now passes that flag automatically when a reasoning parser is configured.
 
-That sequence explains the apparent contradiction in the artifact history. The early ordering experiments did not show a clear delta because historical reasoning was being removed from the replay path. If the thinking is gone, there is little or nothing left for correct and incorrect interleaving to disagree about.
+Once the parser and template path were fixed, the expected behavior finally appeared. Our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, exact replay landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix.
 
-Once the parser and template path were fixed, the expected behavior finally appeared. On a localhost B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, exact replay landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix.
-
-That is the real story for this section. First, the harness must preserve historical reasoning at all. Second, once that reasoning is actually present, it has to be replayed in the right order. A flattened or otherwise incorrect replay can render correctly, pass a casual eyeball test, and still be functionally wrong for KV reuse. Cache reuse depends on token order, not on whether two prompts feel semantically equivalent. Preserving interleaved reasoning and tool calls was therefore less about pretty transcripts and more about making turn `N+1` look exactly like turn `N` did to the cache.
-
-```text
-Original generation:    [think][r0][/think][tool0][think][r1][/think][tool1]
-Correct reconstruction: [think][r0][/think][tool0][think][r1][/think][tool1]  -> cache match
-Flat reconstruction:    [think][r0][r1][/think][tool0][tool1]                  -> prefix diverges
-```
-
-As we push harder on disaggregated serving, this becomes more important, not less. When the prefix has to survive movement across workers and storage tiers, prompt shape stops being an API nicety and becomes part of the cache key story.
+The key takeaway is that the tool parsers and harneses must conform to the expected thinking stripping behavior for each individual model. Dropping thinking tokens for normal turns may result in lower overall KV-cache reuse, as the decoded turn will not match the incoming request on the next turn. In practice, the incremental KV cache from the decode stage is not typically piped back to the prefill worker in disagregated serving. An important learning from this exploration is that one should not exact that the tokens of turn N will arrive for stage N+1 unchanged. Whether or not this is true depends on the tool and reasoning parsers of each model
 
 ## Streaming Actionable State
 
-Streaming tokens is not enough for harnesses. Agent loops need actionable state as soon as it exists: completed tool calls, completed reasoning blocks, and token accounting that clients can trust while the stream is still in flight.
+Streaming tokens is not enough for harnesses. If the client only learns that a tool call is ready at stream end, the harness stays artificially blind even when the model has already made the decision.
 
-The updated artifact set points to a more precise framing than the one we started with. Dynamo's streaming work has three distinct states:
+The updated artifact set points to a more precise framing than the one we started with:
 
-1. the old buffered behavior, where tool-call chunks were withheld until `finish_reason: "tool_calls"`
-2. the current inline-streaming behavior, where tool-call deltas appear as soon as they are generated
-3. the dispatch path, where Dynamo emits a typed `event: tool_call_dispatch` side channel at that same moment
+| State | What the harness sees | When tool readiness becomes visible |
+|-------|------------------------|-------------------------------------|
+| Buffered | tool-call chunks withheld | only at `finish_reason: "tool_calls"` |
+| Inline streaming | regular tool-call deltas | as soon as the model emits them |
+| Dispatch | typed `event: tool_call_dispatch` side channel | at the same structural completion point, but already parsed |
 
-The important change is from state 1 to states 2 and 3. That is where the harness stops being blind until stream end.
+The important change is from the first row to the latter two. That is where the harness stops waiting for stream end to learn that it needs to act.
 
 Without dispatch, the harness sees a regular token stream and has to infer when a tool call is complete by accumulating deltas and waiting for enough structure to be present. With dispatch enabled, Dynamo can emit a typed SSE side channel:
 
@@ -380,11 +314,18 @@ Claude Code compatibility is more than text generation behind an Anthropic-shape
 - acceptance of `cache_control`
 - response shapes that track the Anthropic API closely enough for clients not to trip over them
 
-The fixes in this area were not glamorous, but they mattered. Claude Code does not stop at `GET /v1/models`; it also retrieves the specific connected model. That means the route has to handle identifiers like `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` without treating the slash as a path-segmentation bug. Likewise, a field like `input_tokens` in `message_start` can look minor until you realize the client reads that event early and uses it for context accounting before the stream is over.
+The fixes in this area were not glamorous, but they mattered:
+
+| Surface | Why the harness cares | Failure mode |
+|---------|-----------------------|--------------|
+| `GET /v1/models/{model_id}` | resolves the connected model before use | slashed IDs 404 |
+| `message_start.input_tokens` | does context accounting while the stream is live | early token count stays `0` |
+| thinking blocks | reconstructs typed assistant state | reasoning is flattened or dropped |
+| `cache_control` | preserves Anthropic prompt-pinning semantics | accepted shape diverges from expected behavior |
 
 This is a good example of harness compatibility being more than "the field exists somewhere." Retrieval path, identifier handling, response shape, and timing all matter. A backend can be broadly Anthropic-flavored and still be just off enough to make a harness feel brittle.
 
-One concrete example captures the flavor of these bugs better than a long checklist. Claude Code asks for the connected model directly. On the measured deployment, that lookup still failed:
+One concrete example shows the flavor of these bugs better than a long checklist. Claude Code asks for the connected model directly. On the measured deployment, that lookup failed:
 
 ```text
 GET /v1/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
@@ -426,9 +367,7 @@ Client Request (Responses API)
                 └─► Final Responses object
 ```
 
-Codex surfaced a different failure mode than Claude Code. The issue was not whether Dynamo could generate the next token. It was whether a realistic Responses request could survive an internal round-trip without losing the fields that made it a Responses request in the first place. Preserving those fields turned out to be an architectural concern, not just a serializer concern.
-
-The important point is that protocol fidelity on the Responses side is still part of the serving problem. A lossy conversion path quietly erases the structure the harness depends on.
+Codex surfaced a different failure mode than Claude Code. The issue was not whether Dynamo could generate the next token. It was whether a realistic Responses request could survive an internal round-trip without losing the fields that made it a Responses request in the first place. Preserving those fields turned out to be an architectural concern, not just a serializer concern. On this side of the stack, the main failure mode is quiet loss: the server answers, but the harness loses the metadata it was using to manage the conversation.
 
 The simple text-generation capture is a useful example because it shows both preservation and the remaining gaps in one response. A request as small as:
 
@@ -440,7 +379,7 @@ The simple text-generation capture is a useful example because it shows both pre
 }
 ```
 
-comes back with the Responses-shaped structure intact: a reasoning item, a message item, the original `max_output_tokens`, and the usual top-level fields. At the same time, it shows the current edge of the implementation. `output_tokens_details.reasoning_tokens` is still `0` even though reasoning content is clearly present in the response. That is exactly the kind of detail a Codex-style client notices.
+comes back with the Responses-shaped structure intact: a reasoning item, a message item, the original `max_output_tokens`, and the usual top-level fields. At the same time, it shows an important remaining edge: `output_tokens_details.reasoning_tokens` is `0` even though reasoning content is clearly present in the response. That is exactly the kind of detail a Codex-style client notices.
 
 ## OpenClaw: Integration Testing and Parser Discovery
 
@@ -529,12 +468,19 @@ First, a concrete integration test for the hardest parsing case: two different p
 
 Second, a deployment lesson that is easy to miss in documentation. Parser names in Dynamo describe the output format they consume, not the model they were designed for. A model called Nemotron uses a parser called `qwen3_coder` for its tool calls because the output format matches, not because of any Qwen lineage. When a model appears to reason about tools inline rather than emitting structured tool-call blocks, the first thing to check is whether the configured parser matches the model's actual output format.
 
+## What To Track Now
+
+There are four active fronts where the harness-facing surface is expanding and where future benchmarks will get more interesting.
+
+| Front | What changed | Why rerun it |
+|-------|--------------|--------------|
+| `nvext.agent_hints` | Dynamo now documents `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill` as per-request routing hints | tests whether the harness can steer scheduling rather than only consume it |
+| parser and template coverage | broader parser matrix plus `chat_template.json` prompt formatter artifacts | parser selection errors will show up on more models and more backends |
+| tool-choice edge handling | recent fixes for `tool_choice=required` bypassing format-specific parsers | catches the cases that only appear once a real harness leans on the API contract |
+| tracing and request IDs | request spans and request-ID propagation across the stack | makes fidelity failures attributable instead of anecdotal |
+
 ## Closing the Loop
 
-The architecture from the first post only pays off if the harness-facing layer preserves enough structure for the router and the cache to exploit it. That is the connective tissue between these two posts.
+These subtle changes to the harness integration, ensure that the architecture improvements from the first post pay off. 
 
-Prompt stability affects KV reuse. Replay fidelity affects whether the next turn can hit cache at all. Stream semantics affect when the harness can act. Metadata fidelity affects whether the client can manage context and model selection correctly. None of that is a thin compatibility shim over the "real" serving stack. For agentic workloads, it is part of the serving stack.
-
-Dynamo is open-sourcing several of these layers as standalone Rust crates: tool call parsing, the HTTP frontend, and tokenizer bindings (coming soon). If you want to build a custom serving pipeline rather than deploy the full stack, you can pull in just the pieces you need. The crates carry the same harness-facing correctness guarantees described above without requiring a Dynamo deployment.
-
-For agentic workloads, protocol fidelity is performance work.
+Dynamo now ships several of these layers as standalone Rust crates, including `dynamo-protocols`, `dynamo-parsers`, `dynamo-llm`, and `dynamo-tokens`. If you want to build a custom serving pipeline rather than deploy the full stack, you can pull in just the pieces you need. Those crates carry the same harness-facing correctness concerns described above without requiring a full Dynamo deployment.
