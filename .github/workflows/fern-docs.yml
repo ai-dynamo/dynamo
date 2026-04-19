@@ -156,6 +156,18 @@ jobs:
           path: source-checkout
           fetch-depth: 1
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fernify API reference docs
+        working-directory: source-checkout
+        run: |
+          python3 docs/scripts/fernify_python_api.py
+          python3 docs/scripts/fernify_rust_api.py
+          python3 docs/scripts/fernify_k8s_api.py
+
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -423,6 +435,15 @@ jobs:
 
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
+
+      - name: Update Rust API docs.rs links to release version
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          # Update docs.rs links from /latest to version-pinned URLs
+          # The Rust page was synced from pages-dev, just sed-replace the version
+          find "fern/pages-$TAG/api/rust" \( -name "*.md" -o -name "*.mdx" \) -exec \
+            sed -i "s|docs.rs/\([^/]*\)/latest|docs.rs/\1/$VERSION|g" {} +
 
       - name: Update GitHub links to 'main' to version tag
         run: |
