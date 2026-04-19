@@ -8,10 +8,15 @@ use local_ip_address::Error;
 use std::net::IpAddr;
 
 fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
-    let resolved_ip = resolver.local_ip().or_else(|err| match err {
-        Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-        _ => Err(err),
-    });
+    // Try IPv4 first, then fall back to IPv6 on any error (including StrategyError)
+    let resolved_ip = match resolver.local_ip() {
+        Ok(addr) => Ok(addr),
+        Err(_) => {
+            // Fall back to IPv6 on any IPv4 error, including StrategyError
+            // which can occur in IPv6-only environments
+            resolver.local_ipv6()
+        }
+    };
 
     match resolved_ip {
         Ok(addr) => addr,
@@ -206,5 +211,19 @@ mod tests {
         // IPv4 should NOT be bracketed
         assert!(!result.contains('['), "IPv4 should not contain '['");
         assert_eq!(result, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_ipv6_only_environment_with_ipv4_strategy_error() {
+        // Simulate IPv6-only environment: IPv4 fails with StrategyError,
+        // but IPv6 is available. This reproduces issue #7619.
+        let resolver = MockIpResolver {
+            ipv4_result: Err(Error::LocalIpAddressNotFound),
+            ipv6_result: Ok(IpAddr::from([0xfd00, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7])),
+        };
+
+        let result = get_http_rpc_host_with_resolver(resolver);
+        // Should fall back to IPv6 and bracket it for safe URL construction
+        assert_eq!(result, "[fd00:1:2:3:4:5:6:7]");
     }
 }
