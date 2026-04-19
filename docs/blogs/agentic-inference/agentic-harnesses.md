@@ -243,23 +243,30 @@ The impact of this simple fix is significant. On a Dynamo B200 deploy run with a
 
 <p style="text-align:center;color:#6b7280;font-size:0.9em;margin-top:0.5em"><em>Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168–169 ms TTFT; a varying prefix jumps to ~911 ms.</em></p>
 
-## The nuances of reasoining parsing
+## The Nuances of Reasoning Parsing
 
-Contemporary models produce reasoning in two different types of turns:
+Reasoning replay does not have one universal correct form. Some models intentionally drop prior thinking on ordinary assistant turns. Agentic turns with interleaved tool calls are different: there, the reasoning and tool sequence often needs to survive the round-trip in the same order. The real contract is model-specific and turn-specific.
+
+Contemporary reasoning models tend to produce two different kinds of assistant turns:
 - reasoning followed by a direct response to the user
 - reasoning followed by one or more tool calls
-Agentic models are particularly adept at producing turns where hundreds of thinking and tool calling sections occur within a single turn.
-The reasoning interleaved with tools is essential for the model to be able to track it's own reasoining being each invocation.
+
+Agentic models are especially good at producing turns where many reasoning and tool-call segments appear within a single response. In those cases, the interleaving matters:
+
 ```text
 <think>reasoning_0</think> tool_call_0 <think>reasoning_1</think> tool_call_1
 ```
-Dynamo's implementation now supports this interleaved format, so that the reasoning order on the next turn, whereas it was previously constructed as:
+
+That structure needs to remain intact on replay when the model is expected to remember why each tool was called. Dynamo now supports this interleaved format. Previously, the same turn could be reconstructed as:
+
 ```text
 <think>reasoning_0 reasoning_1</think> tool_call_0 tool_call_1
 ```
-This was a result of legacy models emitting single reasoning and tool call passes per turn.
 
-We also identified that reasoning was often being alltogether dropped for all turns. It shuld be noted that dropping reasoning tokens for all turns not containing tool calls is established practiced for models such as DeepSeek-R1. This was a particularly pernicious bug to spot, as users were frequently reporting reasoning as being correctly decoded, but they were unable to see that it was being silently malformed or dropped on the input to the next turn. 
+That older shape came from legacy models that emitted only a single reasoning span and a single tool-call pass per turn.
+
+We also found a second class of bug: reasoning was often being dropped too aggressively on replay. For some models, dropping prior thinking on turns without tool calls is an established behavior. DeepSeek-R1 is the clearest example. But that same behavior is wrong for interleaved agentic turns where the prior reasoning explains the tool sequence. This was difficult to spot because users could see reasoning being decoded correctly in the outgoing response while it was still being silently malformed or dropped before the next turn.
+
 This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The bug had three layers:
 
 1. **Double parsing**: the Anthropic streaming handler applied a second reasoning parser on top of the engine stream, which already had reasoning correctly split. The second parser re-classified all content as reasoning.
@@ -268,15 +275,14 @@ This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/
 
 3. **Template truncation**: Nemotron's chat template defaults `truncate_history_thinking` to `true`, which strips `<think>` content from all assistant turns before the last user message. That is reasonable for ordinary chat, but wrong for agentic turns where prior reasoning explains why tools were called. Some parsers made this even harder to notice. For example, the DeepSeek-R1 parser preserves reasoning on tool-calling turns but drops it on turns without tool calls, which is exactly the wrong shape for a harness that needs the model to remember why those tool calls happened. NVIDIA's own SWE training pipeline sets `truncate_history_thinking: false`; the Anthropic handler now passes that flag automatically when a reasoning parser is configured.
 
-Once the parser and template path were fixed, the expected behavior finally appeared. Our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, exact replay landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix.
+Once the parser and template path were fixed, the expected behavior finally appeared. In our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, exact replay landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix. The point of that measurement is not that every model should preserve all prior reasoning. It is that, in the cases where reasoning remains part of the replayed prefix, mutating it has a measurable cost.
 
-The key takeaway is that the tool parsers and harneses must conform to the expected thinking stripping behavior for each individual model. Dropping thinking tokens for normal turns may result in lower overall KV-cache reuse, as the decoded turn will not match the incoming request on the next turn. In practice, the incremental KV cache from the decode stage is not typically piped back to the prefill worker in disagregated serving. An important learning from this exploration is that one should not exact that the tokens of turn N will arrive for stage N+1 unchanged. Whether or not this is true depends on the tool and reasoning parsers of each model
+The key takeaway is that the harness, parser, and template path must agree on each model's expected reasoning behavior. Dropping thinking on ordinary turns may be correct for one model and wrong for another. Preserving interleaved reasoning on tool-calling turns may be essential even when ordinary turns are allowed to strip it. In practice, you should not assume that the tokens produced on turn `N` will automatically arrive unchanged as the prefix of turn `N+1`. Whether that is true depends on the reasoning parser, tool parser, and chat template for the model you are serving.
 
 ## Streaming Actionable State
 
 Streaming tokens is not enough for harnesses. If the client only learns that a tool call is ready at stream end, the harness stays artificially blind even when the model has already made the decision.
 
-The updated artifact set points to a more precise framing than the one we started with:
 
 | State | What the harness sees | When tool readiness becomes visible |
 |-------|------------------------|-------------------------------------|
@@ -295,11 +301,11 @@ data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function"
 
 That event tells the harness, in one shot, that the tool call is ready to execute. No client-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness.
 
-The timing result needs to be stated carefully. On the localhost B200 runs, dispatch did not create a large end-to-end wall-time win by itself. The dispatch event fires at essentially the same moment as the inline tool delta. What changed is that the server now exposes tool readiness as a typed protocol event instead of forcing the client to reconstruct it from partial deltas.
+The timing result needs to be stated carefully. In our B200 runs, dispatch did not create a large end-to-end wall-time win by itself. The dispatch event fires at essentially the same moment as the inline tool delta. What changed is that the server now exposes tool readiness as a typed protocol event instead of forcing the client to reconstruct it from partial deltas.
 
 It is still a real systems improvement. A tool call is a state transition, not just another substring in the stream. In the old buffered path, the harness learned about that transition only at stream end. In the current path, it learns about it as soon as the tool call is structurally complete. With dispatch enabled, it learns the same fact in a cleaner form: parsed, typed, and ready to act on.
 
-The localhost multi-turn measurements make the right claim narrower, not weaker. On the 30-city workload, the harness learned about each tool call about `9-10ms` before `finish_reason`, and the cumulative earlier feedback over many turns was real but modest. That is not a dramatic latency chart. It is a protocol improvement that removes blind buffering and gives the harness actionable state immediately.
+The multi-turn measurements make the right claim narrower, not weaker. On the 30-city workload, the harness learned about each tool call about `9-10ms` before `finish_reason`, and the cumulative earlier feedback over many turns was real but modest. That is not a dramatic latency chart. It is a protocol improvement that removes blind buffering and gives the harness actionable state immediately.
 
 The stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
 
@@ -475,7 +481,7 @@ There are four active fronts where the harness-facing surface is expanding and w
 | Front | What changed | Why rerun it |
 |-------|--------------|--------------|
 | `nvext.agent_hints` | Dynamo now documents `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill` as per-request routing hints | tests whether the harness can steer scheduling rather than only consume it |
-| parser and template coverage | broader parser matrix plus `chat_template.json` prompt formatter artifacts | parser selection errors will show up on more models and more backends |
+| parser and template coverage | broader parser matrix plus `chat_template.json` prompt formatter support | parser selection errors will show up on more models and more backends |
 | tool-choice edge handling | recent fixes for `tool_choice=required` bypassing format-specific parsers | catches the cases that only appear once a real harness leans on the API contract |
 | tracing and request IDs | request spans and request-ID propagation across the stack | makes fidelity failures attributable instead of anecdotal |
 
