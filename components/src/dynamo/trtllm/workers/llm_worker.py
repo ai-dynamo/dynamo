@@ -286,6 +286,26 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    # Propagate overridden engine args back to config so that downstream
+    # consumers (e.g. MDC context_length) use the effective values rather
+    # than the stale defaults derived from model metadata.  This is needed
+    # when --extra-engine-args or --override-engine-args change values that
+    # are also stored in config (see https://github.com/ai-dynamo/dynamo/issues/6987).
+    _CONFIG_SYNCED_KEYS = {
+        "max_seq_len": "max_seq_len",
+        "max_batch_size": "max_batch_size",
+        "max_num_tokens": "max_num_tokens",
+    }
+    for arg_key, cfg_attr in _CONFIG_SYNCED_KEYS.items():
+        if arg_key in arg_map and arg_map[arg_key] != getattr(config, cfg_attr):
+            logging.info(
+                "Syncing config.%s from engine args: %s -> %s",
+                cfg_attr,
+                getattr(config, cfg_attr),
+                arg_map[arg_key],
+            )
+            setattr(config, cfg_attr, arg_map[arg_key])
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
