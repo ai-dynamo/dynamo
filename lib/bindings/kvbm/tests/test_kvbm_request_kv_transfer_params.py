@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 import kvbm
+import pytest
 
 if not kvbm.v2.is_available():
     pytest.skip(

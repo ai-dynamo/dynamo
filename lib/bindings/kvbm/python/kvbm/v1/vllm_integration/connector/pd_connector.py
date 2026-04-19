@@ -21,14 +21,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 
 try:
     # vllm >= 0.19.1: nixl_connector module became the `nixl` package
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
-        NixlConnector,
-        NixlHandshakePayload,
-    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnector
 except ImportError:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
         NixlConnector,
-        NixlHandshakePayload,
     )
 
 from vllm.v1.core.sched.output import SchedulerOutput
