@@ -382,3 +382,27 @@ jobs:
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
 
+  # ============================================================================
+  # LINEAR RELEASE SYNC
+  # ============================================================================
+
+  linear-release-sync:
+    name: Sync to Linear Release
+    needs: [prepare-release, release-publish]
+    if: needs.release-publish.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Sync issues to Linear release
+        uses: linear/linear-release-action@v0
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          version: ${{ needs.prepare-release.outputs.version }}
+          name: Dynamo v${{ needs.prepare-release.outputs.version }}
+

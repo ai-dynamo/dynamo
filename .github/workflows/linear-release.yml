@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Linear Release Sync
+
+on:
+  push:
+    branches:
+      - 'release/*.*.*'
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Linear Release command (sync or complete)'
+        required: true
+        type: choice
+        options:
+          - complete
+          - sync
+      version:
+        description: 'Release version (e.g., 1.0.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Bootstrap: run manually with command=complete and the latest shipped
+  # version to establish Linear's baseline before enabling automated syncs.
+  linear-release:
+    name: Linear Release Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine command and version
+        id: params
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "command=${{ inputs.command }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "name=Dynamo v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
+            VERSION="${GITHUB_REF_NAME#release/}"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "name=Dynamo v${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "command=complete" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Linear Release
+        uses: linear/linear-release-action@v0
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: ${{ steps.params.outputs.command }}
+          version: ${{ steps.params.outputs.version }}
+          name: ${{ steps.params.outputs.name }}
