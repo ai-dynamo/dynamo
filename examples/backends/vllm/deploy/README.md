@@ -38,20 +38,35 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 ### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
 Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
 
-### 6. **Deployments with Intel XPU (Optional)** (`agg_xpu_dra.yaml` or `disagg_xpu_dra.yaml`)
-Hardware-specific aggregated/disaggregated deployment using Kubernetes Dynamic Resource Allocation (DRA).
+### 6. **Deployments with Intel XPU (Optional)** (`agg_xpu_dra.yaml`, `disagg_xpu_dra.yaml`, `disagg_xpu_cuda.yaml`, or `disagg_xpu_cuda_rdma.yaml`)
+Hardware-specific aggregated/disaggregated deployments using Kubernetes Dynamic Resource Allocation (DRA) or mixed-device configurations.
 
-**Aggregated Architecture:**
+**Aggregated Architecture** (`agg_xpu_dra.yaml`):
 - `Frontend`: OpenAI-compatible API server
 - `VllmDecodeWorker`: Single worker with XPU target (`VLLM_TARGET_DEVICE=xpu`)
 - GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
 
-**Disaggregated Architecture:**
+**Disaggregated Architecture — XPU prefill + XPU decode** (`disagg_xpu_dra.yaml`):
 - `Frontend`: HTTP API server coordinating between workers
 - `VllmDecodeWorker`: Specialized decode-only worker with XPU target
 - `VllmPrefillWorker`: Specialized prefill-only worker with XPU target
 - GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
 - Communication via NIXL transfer backend with XPU buffer
+
+**Mixed Disaggregated Architecture — XPU prefill + CUDA decode** (`disagg_xpu_cuda.yaml`):
+- `Frontend`: HTTP API server with KV-aware routing (`DYN_ROUTER_MODE=kv`)
+- `DecodeWorker`: CUDA GPU decode worker; KV cache via CPU buffer (`kv_buffer_device: cpu`), UCX over TCP
+- `PrefillWorker`: Intel XPU prefill worker (`VLLM_TARGET_DEVICE=xpu`); GPU via `ResourceClaimTemplate` (`gpu.intel.com`), KV cache via CPU buffer
+- KV events published over ZMQ for cache-aware routing
+
+**Mixed Disaggregated Architecture with RDMA — XPU prefill + CUDA decode** (`disagg_xpu_cuda_rdma.yaml`):
+- `Frontend`: HTTP API server
+- `DecodeWorker`: CUDA GPU decode worker; KV cache transferred directly over RDMA (`kv_buffer_device: cuda`), UCX over InfiniBand (`ib,rc,cuda_copy`)
+- `PrefillWorker`: Intel XPU prefill worker (`VLLM_TARGET_DEVICE=xpu`); KV cache via XPU buffer (`kv_buffer_device: xpu`), UCX over `ib,rc,ud,ze_copy`
+- Both workers claim an RDMA NIC via `ResourceClaimTemplate` (`rdma-dranet`)
+- High-performance GPU-to-GPU KV transfer via NIXL over RDMA fabric
+
+> **Note:** Only `IPC_LOCK` is required — it allows the kernel's IB verbs layer (`ib_umem_get`) to bypass `RLIMIT_MEMLOCK` when pinning RDMA memory regions.
 
 ## CRD Structure
 
@@ -141,6 +156,8 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg_planner.yaml` for SLA-optimized performance
 - Use `agg_xpu_dra.yaml` for aggregated deployment on Intel XPU clusters using Kubernetes DRA
 - Use `disagg_xpu_dra.yaml` for disaggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use `disagg_xpu_cuda.yaml` for mixed disaggregated deployment with XPU prefill and CUDA decode (no RDMA)
+- Use `disagg_xpu_cuda_rdma.yaml` for mixed disaggregated deployment with XPU prefill and CUDA decode over RDMA
 - Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
 
 ### 2. Customize Configuration
@@ -182,7 +199,7 @@ kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 #### Deploy with Intel XPU  (Optional)
 If your cluster uses Intel GPU devices via Kubernetes Dynamic Resource Allocation (DRA), ensure:
 - Your Kubernetes cluster is **v1.34+** (required for DRA API v1), and
-- The [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) is installed.
+- The [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) is installed — see the [XPU DRA usage guide](https://github.com/intel/intel-resource-drivers-for-kubernetes/blob/main/doc/gpu/USAGE.md) for device class setup and claim examples.
 
 Deploy the XPU template (includes the ResourceClaimTemplate):
 ```bash
@@ -203,6 +220,41 @@ kubectl get dynamographdeployment -n $NAMESPACE
 ```
 
 `agg_xpu_dra.yaml` and `disagg_xpu_dra.yaml` are optional hardware-specific templates and do not change the default deployment paths defined by `agg.yaml` and `disagg.yaml`.
+
+##### Mixed XPU + CUDA Disaggregated (no RDMA)
+
+Use `disagg_xpu_cuda.yaml` when your cluster has Intel XPU nodes for prefill and NVIDIA CUDA nodes for decode, without an RDMA fabric:
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy
+kubectl apply -f disagg_xpu_cuda.yaml -n $NAMESPACE
+```
+
+Verify the deployment and XPU resource claims:
+```bash
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get dynamographdeployment -n $NAMESPACE
+kubectl get pods -n $NAMESPACE
+```
+
+##### Mixed XPU + CUDA Disaggregated with RDMA
+
+Use `disagg_xpu_cuda_rdma.yaml` when your cluster has an InfiniBand/RoCE RDMA fabric for high-throughput KV cache transfer between the Intel XPU prefill node and NVIDIA CUDA decode node:
+
+Additional prerequisites:
+- An RDMA-capable network device per node (InfiniBand or RoCE)
+- [DRANet](https://github.com/kubernetes-sigs/dranet?tab=readme-ov-file#installation) installed — provides the `rdma-dranet` device class that exposes RDMA NICs via Kubernetes DRA
+
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy
+kubectl apply -f disagg_xpu_cuda_rdma.yaml -n $NAMESPACE
+```
+
+Verify both XPU and RDMA resource claims:
+```bash
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get dynamographdeployment -n $NAMESPACE
+kubectl get pods -n $NAMESPACE
+```
 
 ### 4. Using Custom Dynamo Frameworks Image for vLLM
 

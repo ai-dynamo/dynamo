@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: xpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: xpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-xpu-nvd
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          env:
+            - name: DYN_ROUTER_MODE
+              value: kv
+
+    DecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - /bin/bash
+            - -c
+            - |
+              CUDA_VISIBLE_DEVICES=0 TRANSFER_LOCAL=0 python3 -m dynamo.vllm \
+                --model Qwen/Qwen3-0.6B \
+                --is-decode-worker --enforce-eager --dtype auto \
+                --block-size 64  \
+                --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cpu", "kv_connector_extra_config":{"enforce_handshake_compat": false}, "enable_permute_local_kv":"True"}'  \
+                --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}'
+          env:
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: UCX_TLS
+              value: "tcp"
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "20096"
+            - name: VLLM_NIXL_DEVICE_TO_DEVICE
+              value: "1"
+            - name: VLLM_KV_CACHE_LAYOUT
+              value: "NHD"
+            - name: PYTHONHASHSEED
+              value: "0"
+
+
+    PrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+            custom:
+              # Increase this value for larger models
+              ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: xpu-resource
+            resourceClaimTemplateName: xpu-template
+        mainContainer:
+          image:  nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - /bin/bash
+          - -c
+          - |
+            python3 -m dynamo.vllm \
+              --model Qwen/Qwen3-0.6B \
+              --is-prefill-worker --block-size 64 --enforce-eager  \
+              --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cpu", "enable_permute_local_kv":"True"}' \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}'
+          resources:
+            claims:
+              - name: xpu-resource
+          env:
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "20099"
+            - name: VLLM_NIXL_DEVICE_TO_DEVICE
+              value: "1"
+            - name: VLLM_KV_CACHE_LAYOUT
+              value: "NHD"
+            - name: UCX_TLS
+              value: "tcp"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: VLLM_TARGET_DEVICE
+              value: xpu
