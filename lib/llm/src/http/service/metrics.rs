@@ -1589,7 +1589,16 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
-        event = event.json_data(data)?;
+        // Serialize to JSON manually so we can escape U+2028 (LINE SEPARATOR) and
+        // U+2029 (PARAGRAPH SEPARATOR). serde_json does not escape these characters
+        // because they are above U+001F, but they cause Python's str.splitlines()
+        // (used by SSE client parsers) to split the data line mid-JSON, producing
+        // truncated JSON that fails to parse.
+        let json = super::serialize_json_for_sse(data).map_err(axum::Error::new)?;
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(sse_data = %json, "SSE event data being serialized");
+        }
+        event = event.data(json);
     }
 
     if let Some(ref msg) = annotated.event {
