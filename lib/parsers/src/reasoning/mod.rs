@@ -14,28 +14,55 @@ pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 
-static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
+#[derive(Debug, Clone, Copy)]
+struct ParserConfig {
+    parser_type: ReasoningParserType,
+    /// chat template arg key that controls reasoning on/off
+    thinking_template_key: &'static str,
+}
+
+impl ParserConfig {
+    fn new(parser_type: ReasoningParserType) -> Self {
+        Self {
+            parser_type,
+            thinking_template_key: "enable_thinking",
+        }
+    }
+
+    fn with_key(parser_type: ReasoningParserType, key: &'static str) -> Self {
+        Self {
+            parser_type,
+            thinking_template_key: key,
+        }
+    }
+}
+
+static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ParserConfig>> = OnceLock::new();
 
 /// Initialize the global reasoning parser map
-fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserType> {
+fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ParserConfig> {
     REASONING_PARSER_MAP.get_or_init(|| {
+        use ReasoningParserType::*;
         let mut map = HashMap::new();
-        map.insert("deepseek_r1", ReasoningParserType::DeepseekR1);
-        map.insert("basic", ReasoningParserType::Basic);
-        map.insert("gpt_oss", ReasoningParserType::GptOss);
-        map.insert("qwen3", ReasoningParserType::Qwen);
-        map.insert("nemotron_deci", ReasoningParserType::NemotronDeci);
-        map.insert("kimi", ReasoningParserType::Kimi);
-        map.insert("kimi_k25", ReasoningParserType::KimiK25);
-        map.insert("step3", ReasoningParserType::Step3);
-        map.insert("mistral", ReasoningParserType::Mistral);
-        map.insert("granite", ReasoningParserType::Granite);
-        map.insert("nemotron_nano", ReasoningParserType::DeepseekR1); // nemotron nano is ...</think>
-        map.insert("nemotron3", ReasoningParserType::DeepseekR1);
-        map.insert("glm45", ReasoningParserType::NemotronDeci); // GLM-4.5/5 is <think>...</think>, no force_reasoning
+        map.insert(
+            "deepseek_r1",
+            ParserConfig::with_key(DeepseekR1, "thinking"),
+        );
+        map.insert("basic", ParserConfig::new(Basic));
+        map.insert("gpt_oss", ParserConfig::new(GptOss));
+        map.insert("qwen3", ParserConfig::new(Qwen));
+        map.insert("nemotron_deci", ParserConfig::new(NemotronDeci));
+        map.insert("kimi", ParserConfig::new(Kimi));
+        map.insert("kimi_k25", ParserConfig::with_key(KimiK25, "thinking"));
+        map.insert("step3", ParserConfig::new(Step3));
+        map.insert("mistral", ParserConfig::new(Mistral));
+        map.insert("granite", ParserConfig::new(Granite));
+        map.insert("nemotron_nano", ParserConfig::new(DeepseekR1)); // nemotron nano is ...</think>
+        map.insert("nemotron3", ParserConfig::new(DeepseekR1));
+        map.insert("glm45", ParserConfig::new(NemotronDeci)); // GLM-4.5/5 is <think>...</think>, no force_reasoning
         map.insert(
             "minimax_append_think",
-            ReasoningParserType::MiniMaxAppendThink,
+            ParserConfig::new(MiniMaxAppendThink),
         );
         map
     })
@@ -44,6 +71,15 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
 /// Get all available reasoning parser names
 pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
     get_reasoning_parser_map().keys().copied().collect()
+}
+
+/// Returns the chat template arg key that controls reasoning for the given parser name
+pub fn get_reasoning_template_key(name: &str) -> &'static str {
+    let normalized = name.to_lowercase();
+    get_reasoning_parser_map()
+        .get(normalized.as_str())
+        .map(|c| c.thinking_template_key)
+        .unwrap_or("enable_thinking")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -217,7 +253,7 @@ impl ReasoningParserType {
         let normalized_name = name.to_lowercase();
 
         match parser_map.get(normalized_name.as_str()) {
-            Some(parser_type) => parser_type.get_reasoning_parser(),
+            Some(config) => config.parser_type.get_reasoning_parser(),
             None => {
                 tracing::warn!(
                     parser_name = name,
@@ -459,5 +495,20 @@ mod tests {
         }
         assert_eq!(all_reasoning, "reasoning done.");
         assert_eq!(all_content, "Hello world");
+    }
+
+    #[test]
+    fn test_get_reasoning_template_key() {
+        // Parsers that default to "enable_thinking"
+        assert_eq!(get_reasoning_template_key("basic"), "enable_thinking");
+        assert_eq!(
+            get_reasoning_template_key("nemotron_nano"),
+            "enable_thinking"
+        );
+        // Parsers that use "thinking" key
+        assert_eq!(get_reasoning_template_key("deepseek_r1"), "thinking");
+        assert_eq!(get_reasoning_template_key("kimi_k25"), "thinking");
+        // Unknown parser falls back to "enable_thinking"
+        assert_eq!(get_reasoning_template_key("nonexistent"), "enable_thinking");
     }
 }
