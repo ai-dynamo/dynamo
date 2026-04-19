@@ -21,6 +21,7 @@ Bring-up flow:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -273,6 +274,21 @@ class SchedulerConnectorLeader:
             # Single-sequence case: already flat
             all_token_ids = [int(token) for token in request.all_token_ids]
 
+        # vLLM carries connector-specific transfer params as a
+        # dict[str, Any] | None on the Request. Access the attribute
+        # directly so a future vLLM rename surfaces as AttributeError
+        # rather than silently masking the regression. Serialize with
+        # allow_nan=False so NaN / Infinity raise ValueError on this
+        # side instead of producing a payload serde_json will reject
+        # with a less informative error; TypeError on unserializable
+        # values likewise propagates unchanged.
+        kv_transfer_params = request.kv_transfer_params
+        kv_transfer_params_json = (
+            json.dumps(kv_transfer_params, allow_nan=False)
+            if kv_transfer_params is not None
+            else None
+        )
+
         kv_request = KvbmRequest(
             request_id=request.request_id,
             tokens=all_token_ids,
@@ -283,6 +299,7 @@ class SchedulerConnectorLeader:
             if getattr(request, "cache_salt", None) is not None
             else None,
             max_tokens=request.max_tokens,
+            kv_transfer_params_json=kv_transfer_params_json,
         )
 
         self.leader.create_slot(kv_request)

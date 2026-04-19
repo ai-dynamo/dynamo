@@ -4509,6 +4509,7 @@ dependencies = [
  "kvbm-physical",
  "oneshot",
  "parking_lot",
+ "proptest",
  "rstest 0.23.0",
  "serde",
  "serde_json",

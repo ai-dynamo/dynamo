@@ -51,6 +51,7 @@ serde_json     = { workspace = true }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = ["json", "redactions"] }
 rstest = "0.23"
+proptest = "1.5.0"
 
 [features]
 static-kernels = ["kvbm-physical/static-kernels"]

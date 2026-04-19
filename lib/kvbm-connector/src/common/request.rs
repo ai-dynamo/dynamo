@@ -9,11 +9,26 @@ use serde::Serialize;
 
 /// Metadata for KVBM request integration.
 ///
-/// This struct holds optional metadata that can be passed from the scheduler
-/// to the connector. Fields will be added as needed.
+/// Holds optional data forwarded from the scheduler (e.g. a vLLM
+/// `Request`) into the connector layer. Today this carries the raw
+/// `kv_transfer_params` JSON as an opaque `serde_json::Value`; a
+/// follow-up change will introduce a typed `TransferParams` that
+/// parses this lazily on demand.
 #[derive(Debug, Clone, Default)]
 pub struct RequestMetadata {
-    // Empty for now - will be extended in the future
+    /// Connector-specific KV transfer parameters, as received from the
+    /// scheduler protocol. `None` when the upstream request did not
+    /// supply any (the common case for non-disaggregated requests).
+    pub kv_transfer_params: Option<serde_json::Value>,
+}
+
+impl RequestMetadata {
+    /// Construct metadata carrying only a `kv_transfer_params` JSON payload.
+    pub fn with_kv_transfer_params(value: serde_json::Value) -> Self {
+        Self {
+            kv_transfer_params: Some(value),
+        }
+    }
 }
 
 /// Minimal representation of a scheduler slot request.
@@ -256,5 +271,209 @@ impl Request {
     /// Get the metadata if present.
     pub fn metadata(&self) -> Option<&RequestMetadata> {
         self.metadata.as_ref()
+    }
+
+    /// Borrow the raw KV transfer params JSON, if any.
+    ///
+    /// Returns `None` when the upstream request did not supply
+    /// `kv_transfer_params`. Callers that require the data decide
+    /// locally whether absence is fatal.
+    pub fn kv_transfer_params(&self) -> Option<&serde_json::Value> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.kv_transfer_params.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    #[test]
+    fn kv_transfer_params_round_trips() {
+        let params = json!({
+            "transfer_id": "abc-123",
+            "do_remote_prefill": true,
+            "remote_block_ids": [1, 2, 3],
+        });
+        let request = Request::with_token_limits(
+            "req-1",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(128),
+            Some(RequestMetadata::with_kv_transfer_params(params.clone())),
+        );
+        assert_eq!(request.kv_transfer_params(), Some(&params));
+    }
+
+    #[test]
+    fn kv_transfer_params_absent_when_no_metadata() {
+        let request = Request::new("req-2", vec![1_u32, 2, 3], None, None, Some(64));
+        assert!(request.kv_transfer_params().is_none());
+    }
+
+    #[test]
+    fn kv_transfer_params_absent_when_metadata_has_none() {
+        let request = Request::with_token_limits(
+            "req-3",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(64),
+            Some(RequestMetadata::default()),
+        );
+        assert!(request.kv_transfer_params().is_none());
+    }
+
+    // -------- Property tests for the FFI boundary --------
+    //
+    // The Python side serializes `dict[str, Any]` with `json.dumps`; the
+    // pyo3 shim deserializes with `serde_json::from_str::<serde_json::Value>`
+    // and hands the result to `RequestMetadata::with_kv_transfer_params`.
+    // These tests mirror that path over arbitrary JSON values that Python
+    // could reasonably produce, and assert the value stored on the request
+    // is byte-for-byte the one we put in.
+
+    /// Strategy: arbitrary JSON value up to bounded depth/size. Deliberately
+    /// keeps primitives inside what `json.dumps` on a plain Python dict
+    /// would emit (no NaN/Infinity — `json.dumps` rejects those by default).
+    fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|n| json!(n)),
+            // finite f64s only — json.dumps does not emit NaN/Inf.
+            any::<f64>()
+                .prop_filter("finite", |f| f.is_finite())
+                .prop_map(|f| json!(f)),
+            ".*".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(
+            4,  // up to 4 levels of nesting
+            32, // target total node count
+            8,  // max children per collection
+            |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..8).prop_map(serde_json::Value::Array),
+                    prop::collection::hash_map(".*", inner, 0..8)
+                        .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+                ]
+            },
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+        /// Any value that Python's `json.dumps` could emit must survive the
+        /// FFI hop: serialize → parse → store on Request → retrieve.
+        #[test]
+        fn ffi_json_string_round_trip(value in arb_json_value()) {
+            // Python side: json.dumps(dict)
+            let wire = serde_json::to_string(&value).expect("serializable");
+            // pyo3 shim side: serde_json::from_str
+            let parsed: serde_json::Value =
+                serde_json::from_str(&wire).expect("valid JSON round-trips");
+            let request = Request::with_token_limits(
+                "req-prop",
+                vec![1_u32, 2, 3],
+                None,
+                None,
+                None,
+                Some(128),
+                Some(RequestMetadata::with_kv_transfer_params(parsed.clone())),
+            );
+            prop_assert_eq!(request.kv_transfer_params(), Some(&parsed));
+            // Transitivity: re-serializing what we stored should equal `wire`'s
+            // canonical form (both sides parsed from the same bytes).
+            prop_assert_eq!(
+                serde_json::to_string(request.kv_transfer_params().unwrap()).unwrap(),
+                serde_json::to_string(&parsed).unwrap()
+            );
+        }
+
+        /// Object-shaped payloads (the common vLLM case: `dict[str, Any]`)
+        /// round-trip and preserve every key. Scoped to top-level objects to
+        /// match the vLLM protocol's shape.
+        #[test]
+        fn top_level_object_preserves_keys(
+            m in prop::collection::hash_map(".{1,16}", arb_json_value(), 0..10)
+        ) {
+            let value = serde_json::Value::Object(m.clone().into_iter().collect());
+            let wire = serde_json::to_string(&value).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+
+            let request = Request::with_token_limits(
+                "req-obj",
+                vec![1_u32],
+                None,
+                None,
+                None,
+                Some(1),
+                Some(RequestMetadata::with_kv_transfer_params(parsed)),
+            );
+            let stored = request
+                .kv_transfer_params()
+                .expect("params present")
+                .as_object()
+                .expect("top-level object");
+            for key in m.keys() {
+                prop_assert!(stored.contains_key(key), "lost key: {key}");
+            }
+            prop_assert_eq!(stored.len(), m.len());
+        }
+    }
+
+    // -------- Spot-check adversarial / boundary cases --------
+
+    #[test]
+    fn malformed_json_is_rejected_by_shim_path() {
+        // Mirrors the pyo3 shim's failure branch without reaching into pyo3.
+        for bad in ["not json", "{unterminated", "", "{\"k\": }"] {
+            let err = serde_json::from_str::<serde_json::Value>(bad);
+            assert!(err.is_err(), "expected {bad:?} to fail to parse");
+        }
+    }
+
+    #[test]
+    fn deeply_nested_json_round_trips() {
+        // vLLM connectors occasionally nest config dicts a few layers deep.
+        let value = json!({
+            "a": {"b": {"c": {"d": [1, 2, {"e": "deep"}]}}},
+        });
+        let wire = serde_json::to_string(&value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let request = Request::with_token_limits(
+            "req-nested",
+            vec![1_u32],
+            None,
+            None,
+            None,
+            Some(1),
+            Some(RequestMetadata::with_kv_transfer_params(parsed.clone())),
+        );
+        assert_eq!(request.kv_transfer_params(), Some(&parsed));
+    }
+
+    #[test]
+    fn unicode_keys_and_values_round_trip() {
+        let value = json!({"日本語": "🚀", "emoji-key-🔑": [1, 2, 3]});
+        let wire = serde_json::to_string(&value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let request = Request::with_token_limits(
+            "req-unicode",
+            vec![1_u32],
+            None,
+            None,
+            None,
+            Some(1),
+            Some(RequestMetadata::with_kv_transfer_params(parsed.clone())),
+        );
+        assert_eq!(request.kv_transfer_params(), Some(&parsed));
     }
 }
