@@ -6,6 +6,26 @@ title: Detailed Installation Guide
 
 Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestration and scaling, using the Dynamo Kubernetes Platform.
 
+## Deployment Scenarios
+
+Choose your deployment scenario based on your environment and goals:
+
+| Scenario | Use Case | Dependency Strategy | Features |
+|----------|----------|-------------------|----------|
+| **Development/PoC** | Testing, prototyping, local development | Use bundled Grove + KAI subcharts | Fast setup, all features included, single Helm install |
+| **Production** | Production workloads, long-term stability | Install Grove + KAI independently | Version control, independent upgrades, stable versioning |
+
+### Quick Reference: Dependency Matrix
+
+| Component | Development/PoC | Production |
+|-----------|-----------------|-----------|
+| **Grove** | Bundled subchart (`install=true`) | Separate Helm install (`enabled=true`) |
+| **KAI Scheduler** | Bundled subchart (`install=true`) | Separate Helm install (`enabled=true`) |
+| **Version Pinning** | Not recommended | Required for stability |
+| **Upgrade Path** | Use main branch | Follow release notes |
+
+See [Dependency Compatibility](#dependency-compatibility) below for version details.
+
 ## Before You Start
 
 Determine your cluster environment:
@@ -144,11 +164,14 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 >
 > For production environments, Grove and KAI Scheduler should be installed **separately** from the dynamo-platform chart. This allows independent lifecycle management, version pinning, and upgrade control.
 >
+> ### Dependency Compatibility
+>
 > **Compatibility Matrix:**
 >
-> | dynamo-platform | kai-scheduler | Grove |
-> |-----------------|---------------|-------|
-> | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
+> | dynamo-platform | kai-scheduler | Grove | Notes |
+> |-----------------|---------------|-------|-------|
+> | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 | Production recommended |
+> | main (dev)      | Latest from main | Latest from main | Development/testing only |
 >
 > After installing them separately, enable Dynamo integration:
 >
