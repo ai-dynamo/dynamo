@@ -12,9 +12,9 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 ## Summary
 
 - **NVLink cannot be used between Kubernetes pods** due to process isolation and GPU partitioning
-- **RDMA (InfiniBand/RoCE) is required** for production disaggregated deployments
+- **RDMA (InfiniBand, RoCE, or AWS EFA) is required** for production disaggregated deployments
 - **Without RDMA, expect 200-500x performance degradation** in Time To First Token (TTFT) — observed ~98s TTFT with TCP vs ~200-500ms with RDMA
-- **UCX is the communication layer** that NIXL uses to transfer KV cache between workers
+- **UCX or libfabric** are the communication layers that NIXL uses to transfer KV cache between workers
 
 ---
 
@@ -23,7 +23,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 ### Communication Stack
 
 <Frame>
-  <img src="../assets/img/disagg-comm-stack.svg" alt="Disaggregated inference communication stack showing NIXL, UCX, and transport layers" />
+  <img src="../assets/img/disagg-comm-stack.svg" alt="Disaggregated inference communication stack showing NIXL, UCX/libfabric, and transport layers" />
 </Frame>
 
 ### Component Responsibilities
@@ -31,7 +31,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 | Component | Role | Location |
 |-----------|------|----------|
 | **NIXL** | High-level KV cache transfer API | Dynamo runtime library |
-| **UCX** | Low-level communication framework | System library |
+| **UCX or libfabric** | Low-level communication framework | System library |
 | **Transports** | Physical data movement | Hardware/kernel drivers |
 
 ---
@@ -115,9 +115,9 @@ When prefill and decode workers are on **different nodes**:
 </Frame>
 
 **Requirements for optimal cross-node performance:**
-- InfiniBand or RoCE network fabric
+- RDMA network fabric (InfiniBand, RoCE, or AWS EFA)
 - GPUDirect RDMA enabled (GPU memory registered with NIC)
-- Proper UCX configuration
+- Proper UCX or libfabric configuration
 
 ---
 
@@ -224,40 +224,112 @@ env:
 
 ### AWS EFA Configuration
 
-> **⚠️ Critical: Zero-Copy RDMA causes crashes on AWS Kernel 6.8+**
->
-> On AWS Ubuntu 24.04 with Kernel ≥6.8, using `UCX_RNDV_SCHEME=get_zcopy` triggers a fatal `NIXL_ERR_BACKEND` crash. The EFA provider cannot register CUDA memory due to incomplete DMA-BUF support in `efa_nv_peermem`.
->
-> **You MUST use the configuration below** — do not copy the standard InfiniBand settings.
+NIXL supports **libfabric** as the backend for AWS EFA deployments. This is the **recommended approach** for disaggregated inference on AWS, achieving ~9.6 GB/s KV transfer bandwidth. See the [AWS EFA with NIXL documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start-nixl.html) for complete setup instructions.
 
-> **Note: NIXL is migrating from UCX to libfabric for AWS**
-> The Dynamo team is transitioning NIXL to use **libfabric** instead of UCX for AWS EFA deployments. This change is driven by:
-> - **Better topology awareness**: libfabric provides hierarchical topology awareness similar to NCCL
-> - **Native EFA support**: libfabric is the recommended communication layer for AWS EFA
->
-> **Current status**: UCX over EFA works but is not recommended for production. Published AWS examples are functional but not performant. Check with the Dynamo team for libfabric availability timeline.
+**Requirements:**
+- EFA installer version **1.47.0** or later
+- Libfabric (installed via EFA installer at `/opt/amazon/efa`)
+- GDRCopy for GPU Direct RDMA operations (GPU Operator v26.x installs this automatically)
+- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-efa-amd64`)
 
-**Required AWS EFA Configuration** (Ubuntu 24.04 + Kernel ≥6.8):
+**Kernel Compatibility:**
+
+GDRCopy v2.5.1 has a build failure on kernel 6.15+ due to a `vm_flags_set` redefinition. Pin your Ubuntu EKS AMI to kernel 6.14 or earlier until GDRCopy v2.5.2 is available in GPU Operator.
+
+| Kernel Version | GDRCopy v2.5.1 | GDRCopy v2.5.2 |
+|----------------|----------------|----------------|
+| 6.14 and below | ✅ Works | ✅ Works |
+| 6.15+ | ❌ Build fails | ✅ Works |
+
+**Pod Anti-Affinity (Required):**
+
+EFA is designed for **cross-node** communication. Prefill and decode workers must be scheduled on **different nodes** to avoid EAGAIN errors during KV transfer.
+
+```yaml
+VllmDecodeWorker:
+  extraPodSpec:
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: nvidia.com/dynamo-component
+                  operator: In
+                  values:
+                    - VllmPrefillWorker
+            topologyKey: kubernetes.io/hostname
+```
+
+**EFA Resource Requests:**
+
+Request EFA interfaces in your pod spec. The p5.48xlarge instance has **32 EFA interfaces** (8 network cards × 4 interfaces each) with 3200 Gbps total bandwidth. The number of interfaces to allocate per worker depends on your deployment:
+
+| Deployment | EFA per Worker | Rationale |
+|------------|----------------|-----------|
+| 1P + 1D per node pair | 4 | Achieved ~9.6 GB/s; leaves 24 interfaces for other pods |
+| Multi-worker per node | 2-4 | Balance between workers sharing the node |
+| Maximum bandwidth | 8-16 | For very large KV cache transfers or TP>1 |
+
+Example with 4 EFA interfaces (validated configuration):
+
+```yaml
+extraPodSpec:
+  mainContainer:
+    securityContext:
+      capabilities:
+        add: ["IPC_LOCK"]
+    resources:
+      limits:
+        vpc.amazonaws.com/efa: "4"
+      requests:
+        vpc.amazonaws.com/efa: "4"
+```
+
+> **Note**: NIXL/libfabric automatically stripes traffic across all allocated EFA interfaces. The 4-interface configuration achieved ~9.6 GB/s in testing, which is sufficient for Llama-3.1-8B KV cache transfers at ISL=8000. Increase the count if your workload requires higher bandwidth (e.g., larger models or higher TP).
+
+**Environment Variables:**
 
 ```yaml
 env:
-  - name: UCX_TLS
-    value: "srd,cuda_copy,tcp"    # SRD is EFA's RDMA transport
-  - name: UCX_RNDV_SCHEME
-    value: "auto"                  # DO NOT use get_zcopy - causes crashes
-  - name: UCX_RNDV_THRESH
-    value: "8192"                  # Avoid CUDA zero-copy for large transfers
+  - name: NIXL_LOG_LEVEL
+    value: "INFO"
+  - name: LD_LIBRARY_PATH
+    value: "/usr/local/nixl/lib/x86_64-linux-gnu:/opt/amazon/efa/lib64:$(LD_LIBRARY_PATH)"
 ```
 
-**Why these settings are mandatory**:
-- `UCX_RNDV_SCHEME=auto` prevents UCX from forcing zero-copy RDMA on CUDA buffers
-- `UCX_RNDV_THRESH=8192` ensures large KV cache transfers use host-staging instead of GPU-direct (which fails)
-- Using `get_zcopy` or threshold `0` will cause `remote invalid RD request` errors and worker crashes
+**vLLM Configuration:**
 
-**Known Limitations**:
-- GPU Direct RDMA is non-functional on AWS EFA with Ubuntu 24.04 + kernel ≥6.8
-- Expect 3x performance degradation compared to InfiniBand (host-staged transfers)
-- For optimal disaggregated performance, consider clusters with InfiniBand/RoCE, or wait for libfabric support on AWS
+```bash
+vllm serve <your-model> \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+```
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `kv_connector` | `NixlConnector` | Enables NIXL for KV-cache transfer |
+| `kv_role` | `kv_both` | Symmetric functionality (producer and consumer) |
+| `kv_buffer_device` | `cuda` | Uses GPU memory for KV-cache buffer |
+| `backends` | `["LIBFABRIC"]` | Routes NIXL traffic over EFA |
+
+**Verification:**
+
+```bash
+# Confirm EFA/libfabric installation
+fi_info -p efa -t FI_EP_RDM
+
+# Verify GDRCopy device
+ls -la /dev/gdrdrv
+
+# Check NIXL initialization in pod logs (should show 32 EFA devices on p5.48xlarge)
+kubectl logs <worker-pod> | grep -i "NIXL\|libfabric\|efa"
+```
+
+**Expected Log Output:**
+
+```text
+NIXL  INFO Loaded backend plugin: LIBFABRIC
+NIXL  INFO Found 32 fabric devices
+```
 
 ---
 
@@ -296,17 +368,22 @@ spec:
 
 ### Infrastructure Prerequisites
 
-1. **RDMA Device Plugin**: Exposes `rdma/ib` resources to Kubernetes
+1. **RDMA Device Plugin**: Exposes `rdma/ib` or `vpc.amazonaws.com/efa` resources to Kubernetes
    ```bash
+   # InfiniBand/RoCE
    kubectl get nodes -o jsonpath='{.items[*].status.allocatable.rdma/ib}'
+   # AWS EFA
+   kubectl get nodes -o jsonpath='{.items[*].status.allocatable.vpc\.amazonaws\.com/efa}'
    ```
 
-2. **InfiniBand/RoCE Network**: Physical RDMA fabric connecting nodes
+2. **RDMA Network**: One of:
+   - InfiniBand or RoCE fabric
+   - AWS EFA (Elastic Fabric Adapter)
 
 3. **GPUDirect RDMA** (optional but recommended):
    - NVIDIA driver with GPUDirect enabled
-   - `nvidia-peermem` kernel module loaded
-   - NIC firmware supporting GPUDirect
+   - `nvidia-peermem` kernel module loaded (InfiniBand/RoCE)
+   - GDRCopy installed (AWS EFA with libfabric)
 
 ---
 
@@ -426,46 +503,61 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 
 ### KV Cache Transfer Overhead
 
-| Configuration | TTFT Overhead | Source |
-|---------------|---------------|--------|
-| Aggregated (baseline) | 0 | No KV transfer needed |
-| Disagg + InfiniBand RDMA with GPUDirect | +200-500ms | *Expected* based on hardware specs |
-| Disagg + RoCE RDMA with GPUDirect | +300-800ms | *Expected* based on hardware specs |
-| Disagg + Host-staged (no GPUDirect) | +1-3s | *Expected* - CPU bottleneck |
-| Disagg + AWS EFA (without GPUDirect) | ~3x slower than aggregated | *Measured* on AWS p5.48xlarge |
-| Disagg + TCP fallback | **+90-100s** | *Measured* ~98s TTFT on AWS p5.48xlarge |
+| Configuration | TTFT Overhead (avg) | KV Transfer BW | Source |
+|---------------|---------------------|----------------|--------|
+| Aggregated (baseline) | 0 | N/A | No KV transfer needed |
+| Disagg + InfiniBand RDMA with GPUDirect | +200-500ms | 20-50 GB/s | *Expected* based on hardware specs |
+| Disagg + RoCE RDMA with GPUDirect | +300-800ms | 10-25 GB/s | *Expected* based on hardware specs |
+| Disagg + AWS EFA with libfabric + GDRCopy | **+40ms** | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000) |
+| Disagg + Host-staged (no GPUDirect) | +1-3s | 1-3 GB/s | *Expected* - CPU bottleneck |
+| Disagg + AWS EFA with UCX (without GPUDirect) | ~3x slower than aggregated | ~1 GB/s | *Measured* on AWS p5.48xlarge |
+| Disagg + TCP fallback | **+90-100s** | ~100 MB/s | *Measured* ~98s TTFT on AWS p5.48xlarge |
 
-> **Note**: InfiniBand/RoCE numbers with GPUDirect are expected values based on hardware specifications and have not been validated. AWS measurements reflect EFA without functional GPUDirect RDMA (see [AWS EFA Configuration](#aws-efa-configuration) for details).
+> **Note**: For AWS EFA deployments, use libfabric with GDRCopy to enable GPUDirect RDMA. UCX on AWS EFA does not support GPUDirect on kernel ≥6.8 and results in severely degraded performance. See [AWS EFA Configuration](#aws-efa-configuration) for setup instructions.
 
 ### When Disaggregated Makes Sense
 
 **Use disaggregated architecture when:**
-- Output sequence length (OSL) > 1000 tokens (overhead amortized)
+- Input sequence length (ISL) ≥ 4000 tokens (5-18% throughput gain)
 - You need independent scaling of prefill vs decode capacity
 - Prefill and decode have different hardware requirements
 
 **Use aggregated architecture when:**
 - Low-latency TTFT is critical
-- Short outputs (OSL under 500 tokens)
+- Input sequences under 2000 tokens (minimal disagg benefit)
 - RDMA is not available
 
 ### Break-Even Analysis
 
-The KV transfer overhead is amortized across output tokens. Example data from **Llama-3.1-8B-Instruct** on AWS p5.48xlarge:
+The KV transfer overhead is amortized across output tokens. **Measured data from Llama-3.1-8B-Instruct** on AWS p5.48xlarge with NIXL+libfabric:
 
 ```text
-Total Latency = TTFT + (OSL × ITL)
+KV Transfer Overhead (TTFT min, unqueued):
+- Aggregated:    ~175ms
+- Disaggregated: ~215ms
+- KV transfer cost: ~40ms
 
-Example (Llama-3.1-8B, ISL=4000):
-- Aggregated:    218ms + (OSL × 8.0ms)
-- Disaggregated: 2400ms + (OSL × 7.8ms)
-
-Break-even: 2400 - 218 = 2182ms overhead
-            2182ms / (8.0 - 7.8)ms per token = 10,910 tokens
-
-At OSL=2000: Disagg is 1.1x slower (acceptable)
-At OSL=100:  Disagg is 3.1x slower (not recommended)
+Performance at ISL=8000, concurrency=10:
+- ITL improvement: 27% faster per-token generation
+- Throughput gain: 18% higher overall throughput
 ```
+
+**Key Insight**: The KV transfer overhead via libfabric+EFA is only **~40ms**. Combined with 27% faster decode (ITL), disaggregated inference delivers **18% higher throughput** for long-context workloads.
+
+| Metric | Aggregated | Disaggregated | Difference |
+|--------|------------|---------------|------------|
+| TTFT (min, unqueued) | 175 ms | 215 ms | +40ms |
+| ITL (avg) | 17.9 ms | 13.1 ms | **-27%** |
+| Throughput (ISL=8000) | 20,131 tok/s | 24,229 tok/s | **+20%** |
+
+**Disagg advantage scales with input length (ISL):**
+
+| ISL | Throughput Δ | ITL Δ | Recommendation |
+|-----|--------------|-------|----------------|
+| 1000 | ~0% | -4% | Use aggregated |
+| 2000 | +3% | -7% | Either works |
+| 4000 | +5% | -12% | Disagg preferred |
+| 8000 | **+18%** | **-27%** | **Disagg strongly preferred** |
 
 ---
 
@@ -503,12 +595,53 @@ kubectl logs <worker-pod> | grep -i "transport\|UCX\|TCP"
 
 **Symptoms**: 3x performance degradation on AWS despite EFA configured
 
-**Root Cause**: GPU Direct RDMA not functional on kernel ≥6.8 with EFA
+**Root Cause**: GPU Direct RDMA not functional on kernel ≥6.8 with EFA when using UCX
 
-**Current Status**: This is a known limitation. Options:
+**Solution**: Use libfabric instead of UCX for AWS EFA deployments. Libfabric with GDRCopy provides efficient GPU Direct RDMA operations on AWS. See the [AWS EFA Configuration](#aws-efa-configuration) section for setup instructions.
+
+**Alternative options** (if libfabric is not available):
 1. Use kernel before 6.8 (Ubuntu 22.04 with kernel 5.15)
 2. Accept host-staging performance penalty
-3. Wait for AWS to update EFA DMA-BUF support
+
+### Problem: EFA EAGAIN errors (fi_read still retrying)
+
+**Symptoms**: Decode worker logs show repeated EAGAIN errors:
+
+```text
+fi_read still retrying EAGAIN on rail 0
+fi_read still retrying EAGAIN on rail 1
+...
+```
+
+**Root Cause**: Prefill and decode workers are scheduled on the **same node**. AWS EFA is designed for cross-node communication and does not function correctly for intra-node transfers.
+
+**Diagnosis**:
+
+```bash
+# Check if workers are on the same node
+kubectl get pods -o wide | grep vllm
+```
+
+If both prefill and decode workers show the same NODE, this is the problem.
+
+**Solution**: Add pod anti-affinity rules to ensure workers are scheduled on different nodes:
+
+```yaml
+VllmDecodeWorker:
+  extraPodSpec:
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: nvidia.com/dynamo-component
+                  operator: In
+                  values:
+                    - VllmPrefillWorker
+            topologyKey: kubernetes.io/hostname
+```
+
+> **Note**: Use `nvidia.com/dynamo-component` as the label key, not `app.kubernetes.io/component`. The Dynamo operator uses this label to identify component types.
 
 ### Problem: Intermittent transfer failures
 
@@ -555,10 +688,16 @@ resources:
 ### Diagnostic Checklist
 
 - [ ] `rdma/ib` resources visible: `kubectl get nodes -o jsonpath='{..allocatable.rdma/ib}'`
+- [ ] NIXL initialized: `kubectl logs <pod> | grep "Backend"`
+- [ ] Transfer bandwidth > 1 GB/s (check Grafana metrics)
+
+**For UCX deployments:**
 - [ ] UCX sees RDMA devices: `ucx_info -d | grep "Transport: rc"`
 - [ ] UCX sees GPU memory: `ucx_info -d | grep "memory types.*cuda"`
-- [ ] NIXL initialized with UCX: `kubectl logs <pod> | grep "Backend UCX"`
-- [ ] Transfer bandwidth > 1 GB/s (check Grafana metrics)
+
+**For libfabric deployments (AWS EFA):**
+- [ ] EFA devices available: `fi_info -p efa`
+- [ ] GDRCopy installed: `ls /dev/gdrdrv`
 
 ---
 
