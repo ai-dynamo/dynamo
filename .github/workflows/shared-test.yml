@@ -88,6 +88,8 @@ jobs:
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'stg-tester-arm-v2' }}
     container:
       image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-trtllm-runtime-test-cuda13
+      env:
+        HOME: /__w/dynamo/dynamo
     permissions:
       contents: read
     services:
