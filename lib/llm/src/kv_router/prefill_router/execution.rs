@@ -171,6 +171,49 @@ impl PrefillRouter {
             .and_then(|o| o.completion_usage.as_ref())
             .and_then(|u| u.prompt_tokens_details.clone());
 
+        if prompt_tokens_details.is_none() {
+            let disaggregated_params = first_output
+                .data
+                .as_ref()
+                .and_then(|o| o.disaggregated_params.as_ref());
+
+            // Validate that bootstrap_host, bootstrap_port, bootstrap_room exist
+            let new_disaggregated_params: serde_json::Value = if let Some(params) =
+                disaggregated_params
+            {
+                let bootstrap_host = params.get("bootstrap_host").and_then(|v| v.as_str());
+                let bootstrap_port = params.get("bootstrap_port").and_then(|v| v.as_u64());
+                let bootstrap_room = params.get("bootstrap_room").and_then(|v| v.as_u64());
+
+                match (bootstrap_host, bootstrap_port, bootstrap_room) {
+                    (Some(host), Some(port), Some(room)) => {
+                        serde_json::json!({
+                            "bootstrap_host": host,
+                            "bootstrap_port": port,
+                            "bootstrap_room": room,
+                        })
+                    }
+                    _ => {
+                        return Err(PrefillError::NoDisaggregatedParams(
+                            "disaggregated_params missing required fields: bootstrap_host, bootstrap_port, or bootstrap_room".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                return Err(PrefillError::NoDisaggregatedParams(
+                    "disaggregated_params field missing in prefill router output".to_string(),
+                ));
+            };
+
+            return Ok((
+                PrefillResult {
+                    disaggregated_params: new_disaggregated_params,
+                    prompt_tokens_details: None,
+                },
+                None,
+            ));
+        }
+
         while let Some(next) = prefill_response.next().await {
             if let Some(o) = next.data.as_ref()
                 && prompt_tokens_details.is_none()

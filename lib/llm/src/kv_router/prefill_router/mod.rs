@@ -18,6 +18,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
+    protocols::common::preprocessor::BootstrapInfo,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::{RequestPhase, RequestTracker},
@@ -191,7 +192,31 @@ impl
                 )
                 .await?;
 
-                Ok(PrefillOutcome::Completed(result))
+                if result.prompt_tokens_details.is_none() {
+                    // Extract bootstrap_host, bootstrap_port, bootstrap_room from disaggregated_params
+                    let params = &result.disaggregated_params;
+                    let bootstrap_host = params.get("bootstrap_host").and_then(|v| v.as_str());
+                    let bootstrap_port = params
+                        .get("bootstrap_port")
+                        .and_then(|v| v.as_u64())
+                        .map(|p| p as u16);
+                    let bootstrap_room = params.get("bootstrap_room").and_then(|v| v.as_u64());
+
+                    if let (Some(host), Some(port), Some(room)) =
+                        (bootstrap_host, bootstrap_port, bootstrap_room)
+                    {
+                        let bootstrap_info = BootstrapInfo {
+                            bootstrap_host: host.to_string(),
+                            bootstrap_port: port,
+                            bootstrap_room: room,
+                        };
+                        Ok(PrefillOutcome::Bootstrap(bootstrap_info))
+                    } else {
+                        Ok(PrefillOutcome::Completed(result))
+                    }
+                } else {
+                    Ok(PrefillOutcome::Completed(result))
+                }
             }
         };
 
