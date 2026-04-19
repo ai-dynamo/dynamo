@@ -8,10 +8,10 @@ on:
     branches:
       - "ops-3433/tester-v2"
 
-concurrency:
-  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
-  group: docker-build-test-${{ github.ref_name }}
-  cancel-in-progress: true
+# concurrency:
+#   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
+#   group: docker-build-test-${{ github.ref_name }}
+#   cancel-in-progress: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
