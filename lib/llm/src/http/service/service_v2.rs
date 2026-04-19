@@ -25,6 +25,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
@@ -58,6 +59,7 @@ pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
+    drt: Option<DistributedRuntime>,
     flags: StateFlags,
     cancel_token: CancellationToken,
 }
@@ -130,6 +132,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             discovery_client,
+            drt: None,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -159,6 +162,16 @@ impl State {
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
+    }
+
+    /// Returns the DistributedRuntime if one was provided at build time.
+    /// This is needed for endpoints that must send RPC calls to worker components.
+    pub fn drt(&self) -> Option<&DistributedRuntime> {
+        self.drt.as_ref()
+    }
+
+    pub(super) fn set_drt(&mut self, drt: DistributedRuntime) {
+        self.drt = Some(drt);
     }
 
     /// Check if the service is shutting down
@@ -264,6 +277,11 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// When set, enables endpoints that need to send RPC calls to worker components
+    /// (e.g. /reset_prefix_cache).
+    #[builder(default = "None")]
+    drt: Option<DistributedRuntime>,
 }
 
 impl HttpService {
@@ -444,7 +462,11 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        let mut state_inner = State::new(model_manager, discovery_client, cancel_token);
+        if let Some(drt) = config.drt {
+            state_inner.set_drt(drt);
+        }
+        let state = Arc::new(state_inner);
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -535,6 +557,10 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
+            super::clear_kv_blocks::clear_kv_blocks_router(
+                state.clone(),
+                Some("/reset_prefix_cache".to_string()),
+            ),
         ];
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
