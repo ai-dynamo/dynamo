@@ -100,38 +100,39 @@ fn is_nvcc_available() -> bool {
 fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
     let arch_flags = get_cuda_arch_flags();
 
-    // Only build tensor_kernels.cu into the library (it has the extern "C" functions)
-    let tensor_kernels_path = cu_files
-        .iter()
-        .find(|p| p.file_stem().unwrap() == "tensor_kernels")
-        .expect("tensor_kernels.cu not found");
+    // Compile each .cu file to a separate object file
+    let mut obj_paths = Vec::new();
+    for cu_file in cu_files {
+        let stem = cu_file.file_stem().unwrap().to_str().unwrap();
+        let obj_path = Path::new(out_dir).join(format!("{}.o", stem));
 
-    let obj_path = Path::new(out_dir).join("kvbm_kernels.o");
+        let mut nvcc_cmd = Command::new("nvcc");
+        nvcc_cmd
+            .arg("-m64")
+            .arg("-c")
+            .arg("-std=c++17")
+            .arg("-O3")
+            .arg("-Xcompiler")
+            .arg("-fPIC")
+            .arg(cu_file)
+            .arg("-o")
+            .arg(&obj_path);
 
-    // Step 1: Compile to object file
-    let mut nvcc_cmd = Command::new("nvcc");
-    nvcc_cmd
-        .arg("-m64")
-        .arg("-c")
-        .arg("-std=c++17")
-        .arg("-O3")
-        .arg("-Xcompiler")
-        .arg("-fPIC")
-        .arg(tensor_kernels_path)
-        .arg("-o")
-        .arg(&obj_path);
+        for flag in &arch_flags {
+            nvcc_cmd.arg(flag);
+        }
 
-    for flag in &arch_flags {
-        nvcc_cmd.arg(flag);
-    }
+        println!(
+            "cargo:warning=Compiling {} to object file...",
+            cu_file.display()
+        );
+        let status = nvcc_cmd.status().expect("Failed to execute nvcc");
 
-    println!("cargo:warning=Compiling tensor_kernels.cu to object file...");
-    let status = nvcc_cmd
-        .status()
-        .expect("Failed to execute nvcc for object file");
+        if !status.success() {
+            panic!("nvcc failed to compile {}", cu_file.display());
+        }
 
-    if !status.success() {
-        panic!("nvcc failed to compile tensor_kernels.cu");
+        obj_paths.push(obj_path);
     }
 
     if use_static {
@@ -139,7 +140,10 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
         let ar_path = Path::new(out_dir).join("libkvbm_kernels.a");
 
         let mut ar_cmd = Command::new("ar");
-        ar_cmd.arg("crus").arg(&ar_path).arg(&obj_path);
+        ar_cmd.arg("crus").arg(&ar_path);
+        for obj in &obj_paths {
+            ar_cmd.arg(obj);
+        }
 
         println!("cargo:warning=Creating static archive libkvbm_kernels.a...");
         let status = ar_cmd
@@ -157,6 +161,7 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
         // Add CUDA runtime library paths and link cudart dynamically
         add_cuda_library_paths();
         println!("cargo:rustc-link-lib=cudart");
+        println!("cargo:rustc-link-lib=cublas");
 
         // CUDA object code compiled by nvcc contains C++ runtime symbols
         // (operator new/delete, __gxx_personality_v0, etc.)
@@ -166,12 +171,11 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
         let so_path = Path::new(out_dir).join("libkvbm_kernels.so");
 
         let mut link_cmd = Command::new("nvcc");
-        link_cmd
-            .arg("-shared")
-            .arg("-o")
-            .arg(&so_path)
-            .arg(&obj_path)
-            .arg("-lcudart");
+        link_cmd.arg("-shared").arg("-o").arg(&so_path);
+        for obj in &obj_paths {
+            link_cmd.arg(obj);
+        }
+        link_cmd.arg("-lcudart");
 
         println!("cargo:warning=Linking kvbm_kernels into shared library...");
         let status = link_cmd
@@ -189,6 +193,7 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
         // Add CUDA runtime library paths
         add_cuda_library_paths();
         println!("cargo:rustc-link-lib=cudart");
+        println!("cargo:rustc-link-lib=cublas");
     }
 }
 
