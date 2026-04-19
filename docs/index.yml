@@ -314,6 +314,32 @@ navigation:
         path: blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
 
+  # ==================== Learning Tutorials ====================
+  - section: Learning Tutorials
+    contents:
+      - section: English
+        path: en/README.md
+        contents:
+          - page: Quick Start
+            path: en/quick-start.md
+          - page: Architecture
+            path: en/architecture.md
+          - page: Math and Systems Theory
+            path: en/math-theory.md
+          - page: Source Tour
+            path: en/source-tour.md
+      - section: 中文
+        path: zh/README.md
+        contents:
+          - page: 快速入门
+            path: zh/quick-start.md
+          - page: 架构原理
+            path: zh/architecture.md
+          - page: 数学与系统原理
+            path: zh/math-theory.md
+          - page: 源码导览
+            path: zh/source-tour.md
+
   # ==================== Documentation ====================
   - section: Documentation
     contents:
