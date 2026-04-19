@@ -40,17 +40,22 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Setup Test Environment
+    - name: Verify GPU visibility
+      if: contains(inputs.pytest_marks, 'gpu')
       shell: bash
       run: |
-        mkdir -p test-results
-
-        PLATFORM_ARCH="${{ inputs.platform_arch }}"
-        if [[ -z "${PLATFORM_ARCH}" ]]; then
-          PLATFORM_ARCH="amd64"
-        fi
-        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
-        echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+        python3 - <<'PY'
+        import sys
+        import torch
+        available = torch.cuda.is_available()
+        count = torch.cuda.device_count() if available else 0
+        name = torch.cuda.get_device_name(0) if available else "None"
+        print(f"Is CUDA available? {available}")
+        print(f"GPU count: {count}")
+        print(f"GPU Name: {name}")
+        if not available:
+            sys.exit("GPU tests requested but torch.cuda.is_available() is False")
+        PY
 
     - name: Run pytest
       shell: bash
@@ -92,15 +97,6 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-
-          # nvidia-smi isn't installed in the test image, so probe the device
-          # files the NVIDIA container runtime mounts in when --gpus is set.
-          if [[ -e /dev/nvidiactl ]] || compgen -G "/dev/nvidia[0-9]*" > /dev/null; then
-            echo "✓ GPU detected"
-          else
-            echo "⚠️  No GPU detected, running in CPU-only mode"
-          fi
-
           case "${{ inputs.parallel_mode }}" in
             "auto")
               PARALLEL_OPTS="-n auto"
@@ -168,7 +164,7 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()
       with:
-        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
 
@@ -176,7 +172,7 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()
       with:
-        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore

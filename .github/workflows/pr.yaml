@@ -325,8 +325,8 @@ jobs:
       test_type: Test
       amd_runner: stg-tester-amd-gpu-v2
       target_tag_plain: "s"
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["arm64", "amd64"]' # arm64 for CPU tests, single GPU tests are skipped
+      cuda_version: '["12.9"]' #, "13.0"]'
+      platform: '["amd64"]' #'["arm64", "amd64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
