@@ -1,0 +1,156 @@
+name: 'Pytest (local)'
+description: 'Run pytest directly on the runner (no docker-in-docker). Assumes the job already runs inside the test container image.'
+inputs:
+  pytest_marks:
+    description: 'Pytest marks'
+    required: true
+    default: 'e2e and vllm and gpu_1 and not slow'
+  test_suite_name:
+    description: 'Test suite name for test metrics'
+    required: false
+    default: 'unknown'
+  test_type:
+    description: 'Test type (unit, e2e, integration)'
+    required: false
+    default: 'e2e'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
+  dry_run:
+    description: 'Run pytest in dry-run mode (collect tests only, do not execute)'
+    required: false
+    default: 'false'
+  hf_token:
+    required: false
+  parallel_mode:
+    description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
+    required: false
+    default: 'auto'
+  framework:
+    description: 'Framework label exported as DYNAMO_TEST_FRAMEWORK'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Test Environment
+      shell: bash
+      run: |
+        mkdir -p test-results
+
+        PLATFORM_ARCH="${{ inputs.platform_arch }}"
+        if [[ -z "${PLATFORM_ARCH}" ]]; then
+          PLATFORM_ARCH="amd64"
+        fi
+        echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
+        echo "🏗️  Platform architecture: ${PLATFORM_ARCH}"
+
+    - name: Run pytest
+      shell: bash
+      env:
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_HOME: /runner/_work/_temp
+        HF_TOKEN: ${{ inputs.hf_token }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+      run: |
+        set +e
+
+        TEST_RESULTS_DIR="$(pwd)/test-results"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+        else
+          echo "🚀 Running pytest in normal mode"
+
+          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+            echo "✓ GPU detected"
+          else
+            echo "⚠️  No GPU detected, running in CPU-only mode"
+          fi
+
+          case "${{ inputs.parallel_mode }}" in
+            "auto")
+              PARALLEL_OPTS="-n auto"
+              echo "📊 Parallelization: auto (use all available cores)"
+              ;;
+            "none"|"0")
+              PARALLEL_OPTS="-n 0"
+              echo "📊 Parallelization: disabled (sequential execution)"
+              ;;
+            *)
+              PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
+              echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
+              ;;
+          esac
+
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        echo "▶️ Executing: ${PYTEST_CMD}"
+        umask 0022
+        bash -c "${PYTEST_CMD}"
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          if [[ -f "${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}" ]]; then
+            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+          else
+            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+          fi
+        fi
+
+        exit 0
+
+    - name: Process Test Results
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+
+        if [[ -f "$JUNIT_FILE" ]]; then
+          echo "✅ JUnit XML generated successfully"
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
+          echo "📝 Renamed XML file to: $JUNIT_NAME"
+        else
+          echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+          TOTAL_TESTS=0
+          FAILED_TESTS=1
+          ERROR_TESTS=0
+        fi
+
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always()
+      with:
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always()
+      with:
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore
