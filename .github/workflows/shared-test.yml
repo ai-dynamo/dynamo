@@ -104,20 +104,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      # - name: Run Sanity Check on Runtime Image
-      #   shell: bash
-      #   run: |
-      #     ls -la 
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          ls -la 
 
-      #     set +e
-      #     python ./dynamo/deploy/sanity_check.py --runtime-check --no-gpu-check
-      #     SANITY_CHECK_EXIT_CODE=$?
-      #     if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-      #       echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-      #       exit ${SANITY_CHECK_EXIT_CODE}
-      #     else
-      #       echo "✅ Sanity check passed"
-      #     fi
+          set +e
+          python ./dynamo/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
       # - name: Run CPU-only tests (parallelized)
       #   if: ${{ inputs.run_cpu_only_tests }}
       #   timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
