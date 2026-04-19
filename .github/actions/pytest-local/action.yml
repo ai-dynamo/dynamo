@@ -31,6 +31,10 @@ inputs:
     description: 'Framework label exported as DYNAMO_TEST_FRAMEWORK'
     required: false
     default: ''
+  container_workspace:
+    description: 'Path inside the container to run pytest from. The image ships the dynamo source/tests here; kept separate from the GitHub Actions checkout at $GITHUB_WORKSPACE.'
+    required: false
+    default: '/workspace'
 
 runs:
   using: "composite"
@@ -60,9 +64,18 @@ runs:
       run: |
         set +e
 
-        TEST_RESULTS_DIR="$(pwd)/test-results"
+        # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
+        TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
+        mkdir -p "${TEST_RESULTS_DIR}"
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
+        if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
+          echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
+          exit 1
+        fi
+        echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
@@ -94,8 +107,9 @@ runs:
           PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
-        echo "▶️ Executing: ${PYTEST_CMD}"
+        echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
         umask 0022
+        cd "${CONTAINER_WORKSPACE}"
         bash -c "${PYTEST_CMD}"
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
