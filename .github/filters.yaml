@@ -28,6 +28,7 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+  - '.coveragerc'
 
 examples:
   - 'recipes/**'
