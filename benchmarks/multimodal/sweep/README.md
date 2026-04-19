@@ -110,3 +110,15 @@ Given the config above with two input files and two configs (`cache-off`,
 | Embedding cache (vLLM serve) | `experiments/embedding_cache/vllm_serve.yaml` | Single-node vLLM |
 | Embedding cache (vLLM E+PD) | `experiments/embedding_cache/vllm_e_pd.yaml` | Disaggregated vLLM E+PD |
 | Embedding cache (TRT-LLM E+PD) | `experiments/embedding_cache/trtllm_e_pd.yaml` | Disaggregated TRT-LLM E+PD |
+
+## Standalone Benchmarks (outside sweep orchestrator)
+
+The following scripts run aiperf directly (no sweep orchestrator):
+
+| Script | Topology | Workload |
+|---|---|---|
+| `../launch_8fe_8w_kv.sh` | 8 frontends (KV routing) + 8 workers + LB proxy | Topology launcher |
+| `../bench_8fe_kv_multiturn.sh` | (uses above topology) | Pinassistant multi-turn (3 turns, 8500+ tokens, 3 images) |
+| `../lb_proxy.py` | Round-robin reverse proxy | Used by launch script |
+
+See script headers for prerequisites (aiperf branch, dataset generation).
