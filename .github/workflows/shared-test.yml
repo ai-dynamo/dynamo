@@ -144,16 +144,16 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           framework: ${{ inputs.test_suite_name }}
-      # - name: Run GPU tests (sequential) from /workspace
-      #   timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-      #   if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-      #   uses: ./.github/actions/pytest-local
-      #   with:
-      #     container_workspace: /workspace
-      #     pytest_marks: ${{ inputs.gpu_test_markers }}
-      #     test_suite_name: ${{ inputs.test_suite_name }}
-      #     test_type: "pre_merge_gpu"
-      #     platform_arch: ${{ matrix.platform }}
-      #     hf_token: ${{ secrets.HF_TOKEN }}
-      #     parallel_mode: 'none'
-      #     framework: ${{ inputs.test_suite_name }}
+      - name: Run GPU tests (sequential) from /workspace
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          framework: ${{ inputs.test_suite_name }}
