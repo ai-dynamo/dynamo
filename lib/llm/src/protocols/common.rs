@@ -54,14 +54,24 @@ const MAX_JSON_SCHEMA_BYTE_LENGTH: usize = 256 * 1024; // 256 KiB
 /// Matches common JSON-schema validator defaults (e.g. ajv's default of 64).
 const MAX_JSON_SCHEMA_NESTING_DEPTH: usize = 64;
 
-/// `std::io::Write` adapter that counts bytes without allocating. Used to
-/// measure the serialized length of a `serde_json::Value` without paying for
-/// `to_string`.
-struct CountingWriter(usize);
+/// `std::io::Write` adapter that counts bytes and short-circuits once `limit`
+/// is exceeded. Returning `Err` from `write` causes `serde_json::to_writer` to
+/// stop walking the value, so a pathological multi-MB schema costs O(limit)
+/// rather than O(input) to reject.
+struct CountingWriter {
+    count: usize,
+    limit: usize,
+}
 
 impl std::io::Write for CountingWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0 += buf.len();
+        self.count = self.count.saturating_add(buf.len());
+        if self.count > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "guided_json byte length limit exceeded",
+            ));
+        }
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -77,16 +87,19 @@ impl std::io::Write for CountingWriter {
 fn json_exceeds_nesting_depth(v: &serde_json::Value, max_depth: usize) -> bool {
     let mut stack: Vec<(&serde_json::Value, usize)> = vec![(v, 1)];
     while let Some((cur, d)) = stack.pop() {
-        if d > max_depth {
-            return true;
-        }
         match cur {
             serde_json::Value::Object(m) => {
+                if d > max_depth {
+                    return true;
+                }
                 for (_, child) in m {
                     stack.push((child, d + 1));
                 }
             }
             serde_json::Value::Array(a) => {
+                if d > max_depth {
+                    return true;
+                }
                 for child in a {
                     stack.push((child, d + 1));
                 }
@@ -520,8 +533,7 @@ impl GuidedDecodingOptions {
 
         if count > 1 {
             return Err(anyhow::anyhow!(
-                "Only one of json, regex, choice, or grammar can be set, but multiple are specified: {:?}",
-                self
+                "Only one of json, regex, choice, or grammar can be set, but multiple are specified"
             ));
         }
 
@@ -584,18 +596,32 @@ impl GuidedDecodingOptions {
         }
 
         if let Some(ref json) = self.json {
-            let mut counter = CountingWriter(0);
-            // serde_json::to_writer is infallible against a writer that itself
-            // never errors; the only error path here would be a Serialize impl
-            // panic, which serde_json::Value cannot trigger.
-            serde_json::to_writer(&mut counter, json).map_err(|e| {
-                anyhow::anyhow!("failed to measure guided_json schema length: {}", e)
-            })?;
-            if counter.0 > MAX_JSON_SCHEMA_BYTE_LENGTH {
+            let mut counter = CountingWriter {
+                count: 0,
+                limit: MAX_JSON_SCHEMA_BYTE_LENGTH,
+            };
+            // CountingWriter returns Err once the byte cap is exceeded, which
+            // short-circuits serde_json::to_writer for pathological payloads.
+            // Any other error from to_writer would be a Serialize impl panic,
+            // which serde_json::Value cannot trigger.
+            if let Err(e) = serde_json::to_writer(&mut counter, json) {
+                if counter.count > MAX_JSON_SCHEMA_BYTE_LENGTH {
+                    return Err(anyhow::anyhow!(
+                        "guided_json schema exceeds maximum byte length of {} (got at least {})",
+                        MAX_JSON_SCHEMA_BYTE_LENGTH,
+                        counter.count
+                    ));
+                }
+                return Err(anyhow::anyhow!(
+                    "failed to measure guided_json schema length: {}",
+                    e
+                ));
+            }
+            if counter.count > MAX_JSON_SCHEMA_BYTE_LENGTH {
                 return Err(anyhow::anyhow!(
                     "guided_json schema exceeds maximum byte length of {} (got {})",
                     MAX_JSON_SCHEMA_BYTE_LENGTH,
-                    counter.0
+                    counter.count
                 ));
             }
             if json_exceeds_nesting_depth(json, MAX_JSON_SCHEMA_NESTING_DEPTH) {
@@ -1081,6 +1107,16 @@ mod tests {
     }
 
     #[test]
+    fn test_guided_json_byte_length_at_limit_accepted() {
+        // (LIMIT-2) `a`s plus the two surrounding JSON-string quotes serialize
+        // to exactly MAX_JSON_SCHEMA_BYTE_LENGTH bytes — at the limit, accepted.
+        let s = "a".repeat(MAX_JSON_SCHEMA_BYTE_LENGTH - 2);
+        let json = serde_json::Value::String(s);
+        let result = GuidedDecodingOptions::validated(Some(json), None, None, None, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_guided_json_nesting_depth_rejected() {
         // Build a chain of `MAX_JSON_SCHEMA_NESTING_DEPTH + 1` nested objects,
         // each `{"a": ...}`. The serialized form stays well under the byte cap.
@@ -1091,5 +1127,17 @@ mod tests {
         let result = GuidedDecodingOptions::validated(Some(value), None, None, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nesting depth"));
+    }
+
+    #[test]
+    fn test_guided_json_nesting_depth_at_limit_accepted() {
+        // Exactly MAX_JSON_SCHEMA_NESTING_DEPTH container levels around a
+        // scalar leaf — at the limit, accepted (depth counts containers only).
+        let mut value = serde_json::json!("leaf");
+        for _ in 0..MAX_JSON_SCHEMA_NESTING_DEPTH {
+            value = serde_json::json!({ "a": value });
+        }
+        let result = GuidedDecodingOptions::validated(Some(value), None, None, None, None, None);
+        assert!(result.is_ok());
     }
 }
