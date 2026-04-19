@@ -549,7 +549,21 @@ impl Leader for KvConnectorLeader {
                 "request_finished called for request_id: {request_id} but slot is not found"
             );
             self.inflight_requests.remove(&request_id);
-            return Ok(false);
+            // We must return `true` here even though the leader slot is gone.
+            //
+            // Within a single call to vLLM's `update_from_output()`, two things
+            // happen in sequence:
+            //   1. Stopped requests call _free_request() → request_finished() (here)
+            //   2. Worker's finished_sending is processed by _update_from_kv_xfer_finished()
+            //
+            // The worker's get_finished() ran during the forward pass and may have
+            // reported this request in finished_sending for this same step. If we
+            // return `false`, vLLM deletes the request from self.requests at step 1.
+            // Then step 2 hits `assert req_id in self.requests` and crashes.
+            //
+            // Returning `true` keeps the request in self.requests so step 2 can
+            // process finished_sending and call _free_blocks() properly.
+            return Ok(true);
         }
 
         // grab the slot
