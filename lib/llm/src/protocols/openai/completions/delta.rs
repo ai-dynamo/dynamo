@@ -9,7 +9,7 @@ use crate::{
         common::{self, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+            nvext::{NvExtProvider, NvExtResponseFieldSelection},
         },
     },
     types::TokenIdType,
@@ -45,20 +45,7 @@ impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        // Enable tracking if:
-        // 1. Client requested timing in extra_fields, OR
-        // 2. query_instance_id annotation is present (needs worker_id tracking for response)
-        let enable_tracking = self
-            .nvext()
-            .map(|nv| {
-                nv.extra_fields
-                    .as_ref()
-                    .is_some_and(|fields| fields.iter().any(|f| f == "timing"))
-                    || nv.annotations.as_ref().is_some_and(|annots| {
-                        annots.iter().any(|a| a.starts_with("query_instance_id"))
-                    })
-            })
-            .unwrap_or(false);
+        let response_fields = NvExtResponseFieldSelection::from_nvext(self.nvext());
 
         let options = DeltaGeneratorOptions {
             enable_usage: self
@@ -74,7 +61,7 @@ impl NvCreateCompletionRequest {
                 .map(|opts| opts.continuous_usage_stats)
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
-            enable_tracking,
+            response_fields,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -86,7 +73,7 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     pub continuous_usage_stats: bool,
     pub enable_logprobs: bool,
-    pub enable_tracking: bool,
+    pub response_fields: NvExtResponseFieldSelection,
 }
 
 pub struct DeltaGenerator {
@@ -124,7 +111,8 @@ impl DeltaGenerator {
         let completion_id = format!("cmpl-{request_id}");
 
         // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
-        // The enable_tracking option only controls whether timing info is included in the response.
+        // `response_fields` only controls which nvext fields are returned to the client;
+        // the tracker still records timing/ITL internally for metrics.
         let tracker = Some(Arc::new(RequestTracker::new()));
 
         Self {
@@ -308,58 +296,37 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let index = delta.index.unwrap_or(0);
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
-        // Get worker_id info from tracker (set by KvPushRouter based on phase)
-        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
-
-        let token_ids = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("token_ids"))
-            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
-        let routed_experts = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("routed_experts"))
-            .cloned();
-
-        // Get timing info if this is the final response (has finish_reason)
-        let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
-            self.tracker.as_ref().map(|tracker| {
-                tracker.record_finish();
-                tracker.get_timing_info()
-            })
-        } else {
-            None
-        };
-
-        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
-        if worker_id_info.is_some()
-            || token_ids.is_some()
-            || timing_info.is_some()
-            || routed_experts.is_some()
+        // Record finish for timing/ITL accounting even when timing is not returned to the client.
+        // Kept at call site because it's a side effect on the tracker — not a gating decision.
+        if finish_reason.is_some()
+            && let Some(ref tracker) = self.tracker
         {
-            let nvext_response = NvExtResponse {
-                worker_id: worker_id_info.clone(),
-                timing: timing_info,
-                token_ids: token_ids.clone(),
-                routed_experts,
-            };
+            tracker.record_finish();
+        }
 
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                response.nvext = Some(nvext_json);
-                if let Some(ref info) = worker_id_info {
-                    tracing::debug!(
-                        "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
-                        info.prefill_worker_id,
-                        info.decode_worker_id
-                    );
-                }
-                if let Some(ref tokens) = token_ids {
-                    tracing::debug!(
-                        "Injected token_ids into completions nvext: {} tokens",
-                        tokens.len()
-                    );
-                }
+        // Build the nvext response payload via the shared gating helper on
+        // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
+        // completions delta generators go through the same helper so the gating
+        // rules stay in one place.
+        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
+            self.tracker.as_ref(),
+            delta.disaggregated_params.as_ref(),
+            finish_reason.is_some(),
+        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
+        {
+            response.nvext = Some(nvext_json);
+            if let Some(ref info) = nvext_response.worker_id {
+                tracing::debug!(
+                    "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
+                    info.prefill_worker_id,
+                    info.decode_worker_id
+                );
+            }
+            if let Some(ref tokens) = nvext_response.token_ids {
+                tracing::debug!(
+                    "Injected token_ids into completions nvext: {} tokens",
+                    tokens.len()
+                );
             }
         }
 
@@ -388,5 +355,149 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
     fn tracker(&self) -> Option<std::sync::Arc<crate::protocols::common::timing::RequestTracker>> {
         self.tracker.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::{self, llm_backend::BackendOutput, timing::WORKER_TYPE_PREFILL};
+    use crate::protocols::openai::DeltaGeneratorExt;
+    use dynamo_protocols::types::{CreateCompletionRequestArgs, Prompt};
+
+    fn create_test_request() -> NvCreateCompletionRequest {
+        let inner = CreateCompletionRequestArgs::default()
+            .model("test-model")
+            .prompt(Prompt::String("test".to_string()))
+            .build()
+            .expect("completion request");
+
+        NvCreateCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    fn make_request_with_nvext(
+        nvext: crate::protocols::openai::nvext::NvExt,
+    ) -> NvCreateCompletionRequest {
+        let mut request = create_test_request();
+        request.nvext = Some(nvext);
+        request
+    }
+
+    fn final_backend_output() -> BackendOutput {
+        BackendOutput {
+            token_ids: vec![1],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: Some(serde_json::json!({
+                "token_ids": [11, 22, 33],
+                "routed_experts": {"layer_0": [1, 3]}
+            })),
+        }
+    }
+
+    #[test]
+    fn test_plain_request_without_extra_fields_omits_nvext() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-no-nvext".to_string());
+        let tracker = generator.tracker().expect("tracker");
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_timing_extra_field_emits_timing_on_final_chunk() {
+        use crate::protocols::openai::nvext::NvExt;
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["timing".to_string()])
+            .build()
+            .unwrap();
+        let mut generator =
+            make_request_with_nvext(nvext).response_generator("req-timing".to_string());
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        let nvext_json = response.nvext.expect("nvext present for timing request");
+        assert!(
+            nvext_json.get("timing").is_some(),
+            "timing should be emitted when extra_fields=[\"timing\"]"
+        );
+        assert!(nvext_json.get("worker_id").is_none());
+        assert!(nvext_json.get("token_ids").is_none());
+        assert!(nvext_json.get("routed_experts").is_none());
+    }
+
+    #[test]
+    fn test_query_instance_id_emits_worker_id_and_token_ids() {
+        use crate::protocols::openai::nvext::NvExt;
+        let nvext = NvExt::builder()
+            .annotations(vec!["query_instance_id:abc".to_string()])
+            .build()
+            .unwrap();
+        let mut generator =
+            make_request_with_nvext(nvext).response_generator("req-qid".to_string());
+        let tracker = generator.tracker().expect("tracker");
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        let nvext_json = response
+            .nvext
+            .expect("nvext present for query_instance_id flow");
+        assert!(nvext_json.get("worker_id").is_some());
+        assert_eq!(
+            nvext_json.get("token_ids"),
+            Some(&serde_json::json!([11, 22, 33]))
+        );
+        // timing is NOT auto-enabled for query_instance_id — it is gated by `extra_fields: ["timing"]`.
+        assert!(nvext_json.get("timing").is_none());
+        assert!(nvext_json.get("routed_experts").is_none());
+    }
+
+    #[test]
+    fn test_routed_experts_extra_field_emits_routed_experts() {
+        use crate::protocols::openai::nvext::NvExt;
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["routed_experts".to_string()])
+            .build()
+            .unwrap();
+        let mut generator =
+            make_request_with_nvext(nvext).response_generator("req-experts".to_string());
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        let nvext_json = response
+            .nvext
+            .expect("nvext present for routed_experts request");
+        assert_eq!(
+            nvext_json.get("routed_experts"),
+            Some(&serde_json::json!({"layer_0": [1, 3]}))
+        );
+        assert!(nvext_json.get("worker_id").is_none());
+        assert!(nvext_json.get("timing").is_none());
+        assert!(nvext_json.get("token_ids").is_none());
     }
 }
