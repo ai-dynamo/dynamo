@@ -90,60 +90,60 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Route buildkit workers
-      id: route-buildkit
-      if: inputs.fresh_builder != 'true'
-      continue-on-error: true
-      shell: bash
-      run: |
-        CUDA_ARG=""
-        if [[ -n "${{ inputs.cuda_version }}" ]]; then
-          CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
-        fi
-        # Strip linux/ prefix (e.g. linux/amd64,linux/arm64 → amd64,arm64)
-        ARCH="${{ inputs.arch }}"
-        ARCH="${ARCH//linux\//}"
-        if [[ "$ARCH" == *","* ]]; then
-          ROUTE_ARCH="all"
-        else
-          ROUTE_ARCH="$ARCH"
-        fi
-        echo "running with --arch ${ROUTE_ARCH} --flavor ${{ inputs.flavor }} $CUDA_ARG"
-        .github/scripts/route_buildkit.sh --arch ${ROUTE_ARCH} --flavor ${{ inputs.flavor }} $CUDA_ARG
+    # - name: Route buildkit workers
+    #   id: route-buildkit
+    #   if: inputs.fresh_builder != 'true'
+    #   continue-on-error: true
+    #   shell: bash
+    #   run: |
+    #     CUDA_ARG=""
+    #     if [[ -n "${{ inputs.cuda_version }}" ]]; then
+    #       CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
+    #     fi
+    #     # Strip linux/ prefix (e.g. linux/amd64,linux/arm64 → amd64,arm64)
+    #     ARCH="${{ inputs.arch }}"
+    #     ARCH="${ARCH//linux\//}"
+    #     if [[ "$ARCH" == *","* ]]; then
+    #       ROUTE_ARCH="all"
+    #     else
+    #       ROUTE_ARCH="$ARCH"
+    #     fi
+    #     echo "running with --arch ${ROUTE_ARCH} --flavor ${{ inputs.flavor }} $CUDA_ARG"
+    #     .github/scripts/route_buildkit.sh --arch ${ROUTE_ARCH} --flavor ${{ inputs.flavor }} $CUDA_ARG
 
-    - name: Prepare worker addresses and platform
-      id: prepare
-      if: inputs.fresh_builder != 'true'
-      shell: bash
-      env:
-        AMD64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_amd64', inputs.flavor)] }}
-        ARM64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_arm64', inputs.flavor)] }}
-      run: |
-        # Strip linux/ prefix (e.g. linux/amd64,linux/arm64 → amd64,arm64)
-        ARCH="${{ inputs.arch }}"
-        ARCH="${ARCH//linux\//}"
-        if [[ "$ARCH" == *","* ]]; then
-          # Multi-arch: combine both worker pools
-          if [[ -n "$AMD64_ADDRS" && -n "$ARM64_ADDRS" ]]; then
-            echo "worker_addresses=${AMD64_ADDRS},${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$AMD64_ADDRS" ]]; then
-            echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$ARM64_ADDRS" ]]; then
-            echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
-          else
-            echo "worker_addresses=" >> "$GITHUB_OUTPUT"
-          fi
-        elif [[ "$ARCH" == "arm64" ]]; then
-          echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
-        else
-          echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"
-        fi
+    # - name: Prepare worker addresses and platform
+    #   id: prepare
+    #   if: inputs.fresh_builder != 'true'
+    #   shell: bash
+    #   env:
+    #     AMD64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_amd64', inputs.flavor)] }}
+    #     ARM64_ADDRS: ${{ steps.route-buildkit.outputs[format('{0}_arm64', inputs.flavor)] }}
+    #   run: |
+    #     # Strip linux/ prefix (e.g. linux/amd64,linux/arm64 → amd64,arm64)
+    #     ARCH="${{ inputs.arch }}"
+    #     ARCH="${ARCH//linux\//}"
+    #     if [[ "$ARCH" == *","* ]]; then
+    #       # Multi-arch: combine both worker pools
+    #       if [[ -n "$AMD64_ADDRS" && -n "$ARM64_ADDRS" ]]; then
+    #         echo "worker_addresses=${AMD64_ADDRS},${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+    #       elif [[ -n "$AMD64_ADDRS" ]]; then
+    #         echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"
+    #       elif [[ -n "$ARM64_ADDRS" ]]; then
+    #         echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+    #       else
+    #         echo "worker_addresses=" >> "$GITHUB_OUTPUT"
+    #       fi
+    #     elif [[ "$ARCH" == "arm64" ]]; then
+    #       echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+    #     else
+    #       echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"
+    #     fi
 
     - name: Bootstrap buildkit
       uses: ./.github/actions/bootstrap-buildkit
       with:
         builder_name: ${{ inputs.builder_name }}
-        buildkit_worker_addresses: ${{ steps.prepare.outputs.worker_addresses }}
+        buildkit_worker_addresses: ''
         fresh_builder: ${{ inputs.fresh_builder }}
         ephemeral_storage: ${{ inputs.ephemeral_storage }}
         namespace: ${{ inputs.namespace }}
