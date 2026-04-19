@@ -48,7 +48,12 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn has_slot(&self, request_id: String) -> bool;
 
-    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
+    fn create_slot(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> anyhow::Result<()>;
 
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
@@ -500,9 +505,18 @@ impl Leader for KvConnectorLeader {
 
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
-    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
-        self.slot_manager()
-            .create_slot(&request.request_id, tokens, request.salt_hash)?;
+    fn create_slot(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> anyhow::Result<()> {
+        self.slot_manager().create_slot(
+            &request.request_id,
+            tokens,
+            request.salt_hash,
+            extra_block_hashes,
+        )?;
 
         self.inflight_requests.insert(request.request_id);
 
@@ -577,9 +591,15 @@ impl PyTrtllmKvConnectorLeader {
         self.connector_leader.has_slot(request_id.to_string())
     }
 
-    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
+    #[pyo3(signature = (request, tokens, extra_block_hashes=None))]
+    fn create_slot(
+        &mut self,
+        request: KvbmRequest,
+        tokens: Vec<u32>,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
+    ) -> PyResult<()> {
         self.connector_leader
-            .create_slot(request, tokens)
+            .create_slot(request, tokens, extra_block_hashes)
             .map_err(to_pyerr)
     }
 }

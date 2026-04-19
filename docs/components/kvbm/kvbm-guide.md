@@ -197,6 +197,44 @@ curl localhost:8000/v1/chat/completions \
 
 > **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
+## Vision Language Model (VLM) Support
+
+KVBM supports KV cache offloading for vision language models (VLMs) with vLLM. Multimodal requests containing images are handled correctly — KVBM incorporates image-specific content hashes into its block hash computation, ensuring that KV blocks corresponding to different images are cached and matched independently, while text-only prefix blocks remain shared across requests.
+
+### Example: Serving a VLM with KVBM
+
+```bash
+DYN_KVBM_CPU_CACHE_GB=20 \
+python -m dynamo.vllm \
+    --model Qwen/Qwen2.5-VL-7B-Instruct \
+    --enforce-eager \
+    --enable-multimodal \
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
+```
+
+### Verify with an Image Request
+
+```bash
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {
+          "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+        }}
+      ]
+    }],
+    "max_tokens": 64
+  }'
+```
+
+> [!NOTE]
+> VLM support requires vLLM with multimodal capabilities. The model must support vision inputs (e.g., Qwen2.5-VL, Qwen3-VL). KVBM aligns its multimodal block hashing with vLLM's native prefix cache — each image's content-addressable identifier (`feature.identifier`, a blake3 digest of the image pixels) is used to uniquify KV blocks that overlap with image tokens.
+
 ## Disaggregated Serving with KVBM
 
 KVBM supports disaggregated serving where prefill and decode operations run on separate workers. KVBM is enabled on the prefill worker to offload KV cache.

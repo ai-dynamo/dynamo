@@ -52,6 +52,7 @@ pub trait SlotManager<R: RequestKey>: Send + Sync {
         request_id: &R,
         tokens: Vec<u32>,
         salt_hash: SaltHash,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
     ) -> Result<(), SlotError>;
 
     fn get_slot(&self, request_id: &R) -> Result<Arc<Mutex<Self::SlotType>>, SlotError>;
@@ -275,6 +276,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
         request_id: &R,
         tokens: Vec<u32>,
         salt_hash: SaltHash,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
     ) -> Result<(), SlotError> {
         tracing::debug!(
             "creating slot with request_id: {}, num_tokens: {}",
@@ -285,6 +287,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             request_id.to_string(),
             tokens.into(),
             salt_hash,
+            extra_block_hashes,
             self.block_manager.clone(),
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
@@ -397,10 +400,12 @@ pub struct VllmConnectorSlot {
 }
 
 impl VllmConnectorSlot {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         request_id: String,
         tokens: Tokens,
         salt_hash: SaltHash,
+        extra_block_hashes: Option<Vec<Option<u64>>>,
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
@@ -409,7 +414,12 @@ impl VllmConnectorSlot {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
         debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
-        let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+        let sequence = TokenBlockSequence::new_with_extra_hashes(
+            tokens,
+            block_size as u32,
+            Some(salt_hash),
+            extra_block_hashes,
+        );
 
         Self {
             request_id,
