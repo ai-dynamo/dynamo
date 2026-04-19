@@ -62,13 +62,43 @@ class EncodeWorkerHandler:
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
+        # Check for encoder device override via environment variable
+        # DYN_ENCODER_DEVICE can be: "auto", "cpu", "cuda", "xpu", or specific device like "cuda:0"
+        encoder_device = os.getenv("DYN_ENCODER_DEVICE", "auto")
+
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
         self.vision_model = load_vision_model(
-            self.model, enforce_eager=self.engine_args.enforce_eager
+            self.model,
+            enforce_eager=self.engine_args.enforce_eager,
+            device=encoder_device,
         )
+
+        # Device verification logging
+        logger.info(f"Requested encoder device (DYN_ENCODER_DEVICE): {encoder_device}")
+
+        # Check what device the vision model is on
+        if hasattr(self.vision_model, "device"):
+            logger.info(f"Vision model device: {self.vision_model.device}")
+        else:
+            # Try to get device from first parameter
+            try:
+                first_param_device = next(self.vision_model.parameters()).device
+                logger.info(
+                    f"Vision model device (from parameters): {first_param_device}"
+                )
+            except (StopIteration, AttributeError):
+                logger.info("Vision model device: Unable to determine")
+
+        # Check CUDA availability and visibility
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+            logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
+
+
         hidden_size = getattr(self.vision_model, "out_hidden_size", None)
         if hidden_size is None:
             hidden_size = getattr(
@@ -248,7 +278,19 @@ class EncodeWorkerHandler:
                     # [gluo FIXME] This is specific to qwen vision processing..
                     # Split concatenated embeddings for each image item.
                     if is_qwen_vl_model(self.model):
-                        merge_size = self.vision_encoder.spatial_merge_size
+                        # For vLLM encoder: spatial_merge_size is directly on vision_encoder
+                        # For HuggingFace: it's on vision_encoder.visual.spatial_merge_size
+                        if hasattr(self.vision_encoder, "spatial_merge_size"):
+                            merge_size = self.vision_encoder.spatial_merge_size
+                        elif hasattr(self.vision_encoder, "visual") and hasattr(
+                            self.vision_encoder.visual, "spatial_merge_size"
+                        ):
+                            merge_size = self.vision_encoder.visual.spatial_merge_size
+                        else:
+                            # Fallback to config
+                            merge_size = getattr(
+                                self.vision_encoder.config, "spatial_merge_size", 2
+                            )
                         sizes = (
                             image_embeds["image_grid_thw"].prod(-1)
                             // merge_size
