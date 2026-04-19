@@ -165,28 +165,6 @@ runs:
         # Exit with the build's exit code
         exit ${BUILD_EXIT_CODE}
 
-    - name: Run Sanity Check on Runtime Image
-      if: inputs.target == 'runtime'
-      shell: bash
-      run: |
-        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
-        echo "Running sanity check on image: $IMAGE_TAG"
-
-        # Run the sanity check script inside the container
-        # The script is located in /workspace/deploy/sanity_check.py in runtime containers
-        export WORKSPACE=/workspace
-
-        set +e
-        docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-        SANITY_CHECK_EXIT_CODE=$?
-        set -e
-        if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-          echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-          exit ${SANITY_CHECK_EXIT_CODE}
-        else
-          echo "✅ Sanity check passed"
-        fi
-
     - name: Capture Build Metrics
       id: metrics
       shell: bash
@@ -229,6 +207,21 @@ runs:
         mkdir -p build-metrics
         METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
+        # Extract additional metadata from the built image
+        if [ -n "$IMAGE_TAG" ]; then
+          PYTHON_VERSION=$(docker run --rm "$IMAGE_TAG" python3 --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+          if [ -z "$PYTHON_VERSION" ]; then
+            PYTHON_VERSION="unknown"
+          fi
+          BASE_IMAGE=$(docker image inspect "$IMAGE_TAG" --format='{{index .Config.Labels "org.opencontainers.image.base.name"}}' 2>/dev/null || echo "unknown")
+          if [ -z "$BASE_IMAGE" ] || [ "$BASE_IMAGE" = "<no value>" ]; then
+            BASE_IMAGE="unknown"
+          fi
+        else
+          PYTHON_VERSION="unknown"
+          BASE_IMAGE="unknown"
+        fi
+
         # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
         {
@@ -236,6 +229,10 @@ runs:
           "target": "${{ inputs.target }}",
           "platform": "${{ inputs.platform }}",
           "platform_arch": "${PLATFORM_ARCH}",
+          "cuda_version": "${{ inputs.cuda_version }}",
+          "image_tag": "${IMAGE_TAG}",
+          "python_version": "${PYTHON_VERSION}",
+          "base_image": "${BASE_IMAGE}",
           "image_size_bytes": ${IMAGE_SIZE_BYTES},
           "build_start_time": "${BUILD_START_TIME}",
           "build_end_time": "${BUILD_END_TIME}",

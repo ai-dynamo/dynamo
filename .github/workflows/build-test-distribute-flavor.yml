@@ -7,21 +7,32 @@ on:
   workflow_call:
     inputs:
       framework:
-        description: 'Framework name (vllm, sglang, trtllm)'
+        description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
         required: true
         type: string
+      builder_flavor:
+        description: 'Optional BuildKit routing flavor override (vllm, sglang, trtllm, general)'
+        required: false
+        type: string
+        default: ''
       target:
         description: 'Target stage for Docker rendering'
         required: true
         type: string
       platform:
-        description: 'Platform to build (amd64 or arm64)'
+        description: 'Docker platform(s) to build (e.g. linux/amd64,linux/arm64)'
         required: true
         type: string
       cuda_version:
         description: 'CUDA version to build (e.g., 12.9, 13.0)'
-        required: true
+        required: false
         type: string
+        default: ''
+      cpu_only:
+        description: 'Build and test this target as a CPU-only image variant'
+        required: false
+        type: boolean
+        default: false
       build_timeout_minutes:
         description: 'Timeout in minutes for the build step'
         required: false
@@ -84,7 +95,7 @@ on:
         required: true
         type: string
       extra_tags:
-        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
+        description: 'Additional tags (newline-separated)'
         required: false
         type: string
         default: ''
@@ -118,6 +129,11 @@ on:
         required: false
         type: boolean
         default: false
+      fresh_builder:
+        description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -129,8 +145,6 @@ on:
         required: true
       AZURE_ACR_PASSWORD:
         required: true
-      CI_TOKEN:
-        required: false
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:
@@ -139,159 +153,109 @@ on:
         required: false
       HF_TOKEN:
         required: false
-    outputs:
-      image_tag:
-        description: 'Image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-${{ inputs.platform }}
-
 jobs:
   # ============================================================================
   # BUILD
   # ============================================================================
   build:
     if: inputs.build_image
-    name: Build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Build ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
     runs-on: prod-builder-v3
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
-      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+      target_tag_plain: ${{ steps.build.outputs.target_tag_plain }}
+      test_tag_plain: ${{ steps.build.outputs.test_tag_plain }}
+      image_variant_label: ${{ steps.build.outputs.image_variant_label }}
+      image_tag_suffix: ${{ steps.build.outputs.image_tag_suffix }}
+      compliance_arches: ${{ steps.compliance-arches.outputs.arches }}
+      test_runners: ${{ steps.test-runners.outputs.runners }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           lfs: true
-      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
-        id: extra-tags
+      - name: Compute compliance arches
+        id: compliance-arches
         shell: bash
-        env:
-          EXTRA_TAGS: ${{ inputs.extra_tags }}
-          CUDA_VERSION: ${{ inputs.cuda_version }}
         run: |
-          CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
-          if [ -n "$EXTRA_TAGS" ]; then
-            RESULT=""
-            while IFS= read -r tag; do
-              if [ -n "$tag" ]; then
-                RESULT+="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${tag}-cuda${CUDA_VERSION_MAJOR}-${{ inputs.platform }}"$'\n'
-              fi
-            done <<< "$EXTRA_TAGS"
-            echo "tags<<EOF" >> $GITHUB_OUTPUT
-            echo "$RESULT" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+          PLATFORM="${{ inputs.platform }}"
+          # Convert comma-separated Docker platform string to JSON array
+          # "linux/amd64,linux/arm64" -> ["linux/amd64","linux/arm64"]
+          # "linux/amd64"             -> ["linux/amd64"]
+          JSON=$(printf '%s\n' ${PLATFORM//,/ } | jq -Rsc '[splits("\n") | select(length>0)]')
+          echo "arches=${JSON}" >> $GITHUB_OUTPUT
+      - name: Compute test runners
+        id: test-runners
+        shell: bash
+        run: |
+          PLATFORM="${{ inputs.platform }}"
+          # Emit a JSON array of {arch, runner} objects for platforms actually being built
+          # "linux/amd64,linux/arm64" -> both runners
+          # "linux/amd64"             -> amd64 runner only (covers EFA and other single-arch)
+          # "linux/arm64"             -> arm64 runner only
+          if [[ "$PLATFORM" == *"amd64"* && "$PLATFORM" == *"arm64"* ]]; then
+            echo 'runners=[{"arch":"amd64","runner":"prod-tester-amd-gpu-v1"},{"arch":"arm64","runner":"prod-tester-arm-v1"}]' >> $GITHUB_OUTPUT
+          elif [[ "$PLATFORM" == *"arm64"* ]]; then
+            echo 'runners=[{"arch":"arm64","runner":"prod-tester-arm-v1"}]' >> $GITHUB_OUTPUT
           else
-            echo "tags=" >> $GITHUB_OUTPUT
+            echo 'runners=[{"arch":"amd64","runner":"prod-tester-amd-gpu-v1"}]' >> $GITHUB_OUTPUT
           fi
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
+      - name: Build
+        id: build
+        uses: ./.github/actions/build-flavor
         with:
+          framework: ${{ inputs.framework }}
+          builder_flavor: ${{ inputs.builder_flavor }}
+          target: ${{ inputs.target }}
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ inputs.cuda_version }}
+          cpu_only: ${{ inputs.cpu_only }}
+          builder_name: ${{ inputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          EFA_SUFFIX=""
-          if [ "${{ inputs.make_efa }}" == "true" ]; then
-            EFA_SUFFIX="-efa"
-          fi
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
-          DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
-          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
-        with:
-          builder_name: ${{ inputs.builder_name }}
-          flavor: ${{ inputs.framework }}
-          arch: ${{ inputs.platform }}
-          cuda_version: ${{ inputs.cuda_version }}
-      - name: Print Build Container inputs
-        run: |
-          echo "=== Build Container Inputs ==="
-          echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
-          echo "framework: ${{ inputs.framework }}"
-          echo "target: runtime"
-          echo "platform: ${{ inputs.platform }}"
-          echo "cuda_version: ${{ inputs.cuda_version }}"
-          echo "no_cache: ${{ inputs.no_cache }}"
-          echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
-          echo "push_image: ${{ inputs.push_image }}"
-          echo "no_load: ${{ inputs.no_load }}"
-      - name: Generate Dockerfile
-        shell: bash
-        run: |
-          echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
-          MAKE_EFA_FLAG=""
-          if [ "${{ inputs.make_efa }}" == "true" ]; then
-            MAKE_EFA_FLAG="--make-efa"
-          fi
-          python ./container/render.py \
-              --target=${{ inputs.target }} \
-              --framework=${{ inputs.framework }} \
-              --platform=${{ inputs.platform }} \
-              --cuda-version=${{ inputs.cuda_version }} \
-              ${MAKE_EFA_FLAG} \
-              --show-result \
-              --output-short-filename
-      - name: Build Container
-        id: build-image
-        timeout-minutes: ${{ inputs.build_timeout_minutes }}
-        uses: ./.github/actions/docker-remote-build
-        with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
-          framework: ${{ inputs.framework }}
-          target: ${{ inputs.target }}
-          platform: ${{ inputs.platform }}
-          cuda_version: ${{ inputs.cuda_version }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          no_cache: ${{ inputs.no_cache }}
-          extra_tags: ${{ steps.extra-tags.outputs.tags }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          build_timeout_minutes: ${{ inputs.build_timeout_minutes }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
-          extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
-      - name: Show summary
-        shell: bash
-        if: ${{ inputs.push_image && inputs.show_summary }}
-        run: |
-          echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          no_cache: ${{ inputs.no_cache }}
+          make_efa: ${{ inputs.make_efa }}
+          fresh_builder: ${{ inputs.fresh_builder }}
+          extra_tags: ${{ inputs.extra_tags }}
+          show_summary: ${{ inputs.push_image && inputs.show_summary }}
 
 
   # ============================================================================
   # TEST
   # ============================================================================
   test:
-    if: ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) && inputs.build_image
+    if: |
+        ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
+        inputs.build_image
     needs: [build]
-    name: Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
-    runs-on: ${{ inputs.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
+    name: Test ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.build.outputs.test_runners) }}
+    runs-on: ${{ matrix.runner }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -304,32 +268,15 @@ jobs:
       - name: Pull relevant images
         shell: bash
         run: |
+          source ./.github/scripts/retry_docker.sh
           start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
-          docker pull quay.io/minio/minio
+          retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
+          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          retry_pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
 
-      - name: Run Sanity Check on Runtime Image
-        shell: bash
-        run: |
-          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
-
-          # Run the sanity check script inside the container
-          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
-          export WORKSPACE=/workspace
-
-          set +e
-          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-          SANITY_CHECK_EXIT_CODE=$?
-          set -e
-          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-            exit ${SANITY_CHECK_EXIT_CODE}
-          else
-            echo "✅ Sanity check passed"
-          fi
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
@@ -339,10 +286,9 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
-          platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'true'
+          platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
@@ -351,15 +297,14 @@ jobs:
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
-        if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
+        if: inputs.run_single_gpu_tests && matrix.arch == 'amd64'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
-          platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'false' # already covered by CPU tests
+          platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
@@ -372,24 +317,22 @@ jobs:
     # Multi-GPU support limited to AMD64 only
     if: |
         inputs.run_multi_gpu_tests &&
-        inputs.build_image &&
-        ( inputs.platform != 'arm64' )
+        inputs.build_image
     needs: [build]
-    name: Multi-gpu Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: Multi-gpu test ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
     runs-on: prod-tester-amd-gpu-4-v1
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -402,9 +345,10 @@ jobs:
       - name: Pull relevant images
         shell: bash
         run: |
+          source ./.github/scripts/retry_docker.sh
           start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
-          docker pull quay.io/minio/minio
+          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          retry_pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
@@ -416,10 +360,9 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
-          platform_arch: ${{ inputs.platform }}
-          enable_mypy: 'false' # already covered by CPU tests
+          platform_arch: amd64
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
@@ -431,11 +374,15 @@ jobs:
   compliance:
     if: inputs.build_image && inputs.push_image
     needs: [build]
-    name: Compliance cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
-    runs-on: ${{ inputs.platform == 'amd64' && 'prod-builder-amd-v1' || 'prod-tester-arm-v1' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJson(needs.build.outputs.compliance_arches) }}
+    name: Compliance ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}-${{ matrix.arch }}
+    runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -444,21 +391,24 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Calculate image URI
+      - name: Calculate image URI and arch suffix
         id: images
         shell: bash
         run: |
-          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          echo "cuda_major=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "image_variant_label=${{ needs.build.outputs.image_variant_label }}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
           echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          # Sanitize arch for artifact name: linux/amd64 -> amd64 (artifact names can't contain /)
+          ARCH="${{ matrix.arch }}"
+          echo "arch_suffix=${ARCH#linux/}" >> $GITHUB_OUTPUT
       - name: Compliance scan
         uses: ./.github/actions/compliance-scan
         with:
           image: ${{ steps.images.outputs.runtime_image }}
-          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-cuda${{ steps.images.outputs.cuda_major }}-${{ inputs.platform }}
+          artifact_name: compliance-${{ inputs.framework }}-${{ inputs.target }}${{ inputs.make_efa && '-efa' || '' }}-${{ steps.images.outputs.image_variant_label }}-${{ steps.images.outputs.arch_suffix }}
+          arch: ${{ matrix.arch }}
           framework: ${{ inputs.framework }}
+          target: ${{ inputs.target }}
           cuda_version: ${{ inputs.cuda_version }}
 
 
@@ -473,23 +423,13 @@ jobs:
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    name: copy ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
     runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Copy image to target registry
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}
@@ -497,12 +437,13 @@ jobs:
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ inputs.platform }}
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.

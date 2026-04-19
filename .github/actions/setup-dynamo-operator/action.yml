@@ -1,0 +1,251 @@
+name: 'Setup Dynamo Operator'
+description: 'Create a vCluster, install the Dynamo platform operator inside it via Helm'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for host cluster access'
+    required: true
+  vcluster_name:
+    description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
+    required: false
+    default: ''
+  vcluster_namespace:
+    description: 'Host namespace where the vCluster will be created (auto-generated if empty)'
+    required: false
+    default: ''
+  registry:
+    description: 'Container registry hostname (e.g. myregistry.azurecr.io)'
+    required: true
+  operator_tag:
+    description: 'Operator image tag (default: main-operator)'
+    required: false
+    default: 'main-operator'
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+  dockerhub_username:
+    description: 'Docker Hub username for helm registry login'
+    required: false
+    default: ''
+  dockerhub_password:
+    description: 'Docker Hub password for helm registry login'
+    required: false
+    default: ''
+  vcluster_k8s_version:
+    description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
+    required: false
+    default: 'v1.32.13'
+
+outputs:
+  namespace:
+    description: 'Host namespace where the vCluster was created'
+    value: ${{ steps.resolve-names.outputs.namespace }}
+  vcluster_name:
+    description: 'Name of the created vCluster'
+    value: ${{ steps.resolve-names.outputs.vcluster_name }}
+  operator_tag:
+    description: 'Resolved operator tag'
+    value: ${{ steps.resolve-names.outputs.operator_tag }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve names
+      id: resolve-names
+      shell: bash
+      env:
+        INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
+          echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
+        else
+          echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ -n "${INPUT_NAMESPACE}" ]; then
+          echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
+        else
+          BRANCH_SANITIZED="${BRANCH//\//-}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup host kubeconfig
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
+        chmod 600 ${{ github.workspace }}/.kubeconfig-host
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
+
+    - name: Install vCluster CLI
+      uses: ./.github/actions/install-vcluster-cli
+
+    - name: Create host namespace
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Create host namespace $NAMESPACE"
+        set -x
+        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+        kubectl label namespaces ${NAMESPACE} \
+          nscleanup/enabled=true \
+          nscleanup/ttl=7200 \
+          ngc-api=enabled \
+          nvcr-imagepull=enabled \
+          --overwrite
+        echo "::endgroup::"
+
+    - name: Create vCluster
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        set -x
+        # The K8s version must be supported by the kr8s Python library used in deploy tests.
+        # This is independent of the host cluster version.
+        vcluster create ${VCLUSTER_NAME} \
+          --namespace ${NAMESPACE} \
+          --connect=false \
+          --upgrade \
+          --set controlPlane.distro.k8s.enabled=true \
+          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}
+        echo "::endgroup::"
+
+    - name: Wait for vCluster pod to be ready
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Wait for vCluster pod"
+        # Give the API server a moment to register the new pod
+        sleep 20
+        kubectl wait --for=condition=ready pod \
+          -l app=vcluster,release=${VCLUSTER_NAME} \
+          -n ${NAMESPACE} \
+          --timeout=900s
+        echo "::endgroup::"
+
+    - name: Connect to vCluster
+      id: connect-vcluster
+      uses: ./.github/actions/connect-vcluster
+      with:
+        host_kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
+        vcluster_name: ${{ steps.resolve-names.outputs.vcluster_name }}
+        vcluster_namespace: ${{ steps.resolve-names.outputs.namespace }}
+
+    - name: Create HF token secret
+      if: inputs.hf_token != ''
+      shell: bash
+      env:
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        echo "::group::Create HF token secret inside vCluster"
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          create secret generic hf-token-secret \
+          --from-literal=HF_TOKEN=${HF_TOKEN} \
+          -n default || true
+        echo "::endgroup::"
+
+    - name: Login to Docker Hub for Helm
+      if: inputs.dockerhub_username != '' && inputs.dockerhub_password != ''
+      shell: bash
+      env:
+        DOCKERHUB_USER: ${{ inputs.dockerhub_username }}
+        DOCKERHUB_PASS: ${{ inputs.dockerhub_password }}
+      run: |
+        echo "${DOCKERHUB_PASS}" | helm registry login registry-1.docker.io -u "${DOCKERHUB_USER}" --password-stdin
+
+    - name: Install Dynamo platform via Helm
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        OPERATOR_TAG: ${{ inputs.operator_tag }}
+      run: |
+        echo "::group::Install Dynamo platform via Helm (inside vCluster)"
+        set -x
+        OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+        echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+
+        KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+        helm upgrade --install dynamo-platform . --namespace default \
+          --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
+          --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set global.grove.install=true \
+          --set global.kai-scheduler.install=false \
+          --debug
+        echo "::endgroup::"
+
+    - name: Wait for operator rollout
+      shell: bash
+      run: |
+        echo "::group::Wait for operator rollout inside vCluster"
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          rollout status deployment -n default --watch --timeout=900s
+        echo "::endgroup::"
+
+    - name: Debug deployment failure
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        set +eo pipefail
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+
+        echo "### VCLUSTER OPERATOR DEPLOYMENT FAILED" | tee -a $GITHUB_STEP_SUMMARY
+
+        echo "::group::Pod status (host namespace)"
+        kubectl get pods -n ${NAMESPACE} -o wide 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Events (host namespace)"
+        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Describe pods (host namespace)"
+        kubectl describe pods -n ${NAMESPACE} 2>&1 || true
+        echo "::endgroup::"
+
+        if [ ! -f "${VKUBECONFIG}" ]; then
+          echo "::warning::vCluster kubeconfig not found — vCluster never connected successfully"
+          echo "- **vCluster kubeconfig missing** — connect-vcluster step failed before writing .kubeconfig-vcluster" >> $GITHUB_STEP_SUMMARY
+          exit 0
+        fi
+
+        echo "::group::Pod status (vCluster)"
+        kubectl --kubeconfig=${VKUBECONFIG} get pods -A -o wide 2>&1 || true
+        echo "::endgroup::"
+
+        NOT_READY=$(kubectl --kubeconfig=${VKUBECONFIG} get pods -n default --no-headers 2>/dev/null \
+          | awk -F'[/ ]+' '$2 != $3 || ($4 != "Running" && $4 != "Completed")')
+        if [ -n "$NOT_READY" ]; then
+          echo "$NOT_READY" | awk '{print "- **" $1 "** | Ready: `" $2 "` | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY
+          echo "$NOT_READY" | awk '{print $1}' | while read POD; do
+            echo "::group::describe pod/$POD"
+            kubectl --kubeconfig=${VKUBECONFIG} describe pod "$POD" -n default 2>&1
+            echo "::endgroup::"
+            echo "::group::logs pod/$POD"
+            kubectl --kubeconfig=${VKUBECONFIG} logs "$POD" -n default --all-containers --tail=80 2>&1
+            echo "::endgroup::"
+          done
+        fi
+
+        echo "::group::Events (vCluster default namespace)"
+        kubectl --kubeconfig=${VKUBECONFIG} get events -n default --sort-by='.lastTimestamp' 2>&1
+        echo "::endgroup::"
