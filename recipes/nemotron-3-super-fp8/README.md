@@ -13,6 +13,7 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 
 | Configuration | GPUs | Backend | Mode | Description |
 |--------------|------|---------|------|-------------|
+| [**trtllm/agg**](trtllm/agg/) | 1x B200/B300 GPU | TensorRT-LLM | Aggregated | Single-worker FP8 deployment for Blackwell |
 | [**vllm/agg**](vllm/agg/) | 4x H100/H200 | vLLM | Aggregated | TP=4, KV-aware routing |
 | [**sglang/agg**](sglang/agg/) | 4x H100/H200 | SGLang | Aggregated | TP=4, KV-aware routing (not working on 0.9.1) |
 | [**trtllm/disagg**](trtllm/disagg/) | 4x H100/H200 | TensorRT-LLM | Disaggregated | TP=2 P/D split, UCX KV transfer |
@@ -21,7 +22,9 @@ These recipes target **Dynamo 1.0**. See [Dynamo 0.9.1 Compatibility](#dynamo-09
 ## Prerequisites
 
 1. **Dynamo Platform installed** -- See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
-2. **GPU cluster** with 4x H100 80GB (or H200) GPUs
+2. **GPU cluster** with either:
+   - 1x B200/B300 GPU for `trtllm/agg`
+   - 4x H100 80GB (or H200) GPUs for the remaining recipes
 3. **HuggingFace token** with access to NVIDIA models
 
 ## Quick Start
@@ -41,7 +44,8 @@ kubectl apply -f model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
 # Deploy (choose one configuration)
-kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f trtllm/disagg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f sglang/agg/deploy.yaml -n ${NAMESPACE}
 # OR: kubectl apply -f sglang/disagg/deploy.yaml -n ${NAMESPACE}
@@ -51,8 +55,10 @@ kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 
 ```bash
 # Port-forward the frontend
+# If deployed trtllm/agg:
+kubectl port-forward svc/nemotron-super-fp8-trtllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 # If deployed vllm/agg:
-kubectl port-forward svc/nemotron-super-fp8-vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
+# kubectl port-forward svc/nemotron-super-fp8-vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 # If deployed trtllm/disagg:
 # kubectl port-forward svc/nemotron-super-fp8-trtllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
 # If deployed sglang/agg:
@@ -109,7 +115,7 @@ To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thi
 ## Routing
 
 - **vLLM** and **SGLang** recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, which helps workloads with shared system prompts or multi-turn conversations.
-- The **TensorRT-LLM** disaggregated recipe uses **round-robin routing**. Nemotron-H on TRT-LLM still requires `enable_block_reuse: false`, so KV overlap routing does not provide a real cache-reuse benefit here and only adds misleading overlap bookkeeping.
+- The **TensorRT-LLM** recipes use **round-robin routing**. Nemotron-H on TRT-LLM still requires `enable_block_reuse: false`, so KV overlap routing does not provide a real cache-reuse benefit here and only adds misleading overlap bookkeeping.
 
 Approximate (hash-based) routing is used for the vLLM and SGLang variants because hybrid Mamba+Attention models do not yet have a reliable KV-event path in these recipes (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM).
 
@@ -125,6 +131,7 @@ Approximate (hash-based) routing is used for the vLLM and SGLang variants becaus
 
 ### TensorRT-LLM
 - Uses PyTorch backend (`backend: pytorch` in engine config)
+- The published **aggregated** FP8 recipe targets **Blackwell** (`trtllm/agg`) and follows [the current single-GPU recommendation from HuggingFace](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8#trt-llm): `TP=1`, `EP=1`, `enable_attention_dp: false`, `max_num_tokens: 8192`, and FP8 KV cache with the Nemotron-H Mamba settings.
 - Block reuse is still not supported for Nemotron-H / Mamba hybrid cache. Set `enable_block_reuse: false` explicitly in all TRT-LLM Nemotron configs. If the field is omitted, current TRT-LLM builds may still start only because the Nemotron model class silently applies a model default of `enable_block_reuse: false`; block reuse is not actually active.
 - The TRT-LLM disaggregated recipe uses `--router-mode round-robin` rather than KV routing. With block reuse disabled, KV-overlap scoring does not correspond to a real runtime win for Nemotron-H.
 - **Disaggregated mode** requires `cache_transceiver_config: backend: UCX`. NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state — only UCX (or MPI) can transfer both attention KV cache and Mamba conv/SSM state between workers.
@@ -160,5 +167,6 @@ These recipes target Dynamo 1.0. To run on 0.9.1 containers, the following chang
 ## Notes
 
 - **Disaggregated mode**: Supported with TRT-LLM via UCX (`trtllm/disagg`) and SGLang via nixl or mooncake (`sglang/disagg`). Not supported with vLLM due to hybrid KV cache incompatibilities. TRT-LLM disagg requires UCX because NIXL/MOONCAKE cannot transfer Mamba SSM state.
+- **Blackwell FP8**: The published `trtllm/agg` recipe is the recommended Blackwell deployment shape for this checkpoint and runs on a single B200/B300 GPU.
 - **Storage class**: Update `storageClassName` in `model-cache/model-cache.yaml` before deploying.
 - **Model size**: ~240GB download; expect 30-60 minutes depending on bandwidth.
