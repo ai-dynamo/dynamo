@@ -7,10 +7,22 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+from collections.abc import AsyncGenerator
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 from transformers import AutoTokenizer
 
 from dynamo.frontend.prepost import _prepare_request
+from dynamo.frontend.vllm_processor import VllmProcessor
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 # Needs vllm packages (gpu_1 container).  No need for parallel marker.
 pytestmark = [
@@ -116,3 +128,167 @@ class TestPrepareRequestToolStripping:
         assert (
             chat_params.chat_template_kwargs["tools"] is None
         ), "No tools in request should produce None tools in template"
+
+
+async def _single_chunk_stream(
+    chunk: dict[str, object],
+) -> AsyncGenerator[dict[str, object], None]:
+    yield chunk
+
+
+@pytest.mark.asyncio
+async def test_generate_and_stream_emits_nvext_routed_experts():
+    processor = VllmProcessor.__new__(VllmProcessor)
+    processor.router = SimpleNamespace(
+        generate=AsyncMock(
+            return_value=_single_chunk_stream(
+                {
+                    "token_ids": [11],
+                    "finish_reason": "stop",
+                    "completion_usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 1,
+                        "total_tokens": 3,
+                    },
+                    "disaggregated_params": {
+                        "routed_experts": "encoded-routed-experts"
+                    },
+                }
+            )
+        )
+    )
+    processor.is_kv_router = False
+    processor.output_processor = SimpleNamespace(
+        add_request=Mock(),
+        process_outputs=Mock(
+            return_value=SimpleNamespace(
+                reqs_to_abort=[],
+                request_outputs=[
+                    SimpleNamespace(
+                        outputs=[
+                            SimpleNamespace(
+                                index=0,
+                                token_ids=[11],
+                                text="hi",
+                                finish_reason="stop",
+                                logprobs=None,
+                            )
+                        ]
+                    )
+                ],
+            )
+        ),
+        request_states={"req-1": object()},
+        abort_requests=Mock(),
+    )
+
+    post = SimpleNamespace(
+        process_output=Mock(
+            return_value={
+                "index": 0,
+                "delta": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+                "logprobs": None,
+            }
+        )
+    )
+    vllm_preproc = SimpleNamespace(request_id="req-1")
+
+    chunks = []
+    async for chunk in processor._generate_and_stream(
+        request_id="frontend-1",
+        request={"model": "dummy-model"},
+        dynamo_preproc={"model": "dummy-model"},
+        tokens=[1, 2],
+        vllm_preproc=vllm_preproc,
+        post=post,
+    ):
+        chunks.append(chunk)
+
+    assert len(chunks) == 1
+    assert chunks[0]["id"] == "frontend-1"
+    assert chunks[0]["model"] == "dummy-model"
+    assert chunks[0]["object"] == "chat.completion.chunk"
+    assert chunks[0]["choices"] == [
+        {
+            "index": 0,
+            "delta": {"role": "assistant", "content": "hi"},
+            "finish_reason": "stop",
+            "logprobs": None,
+        }
+    ]
+    assert chunks[0]["usage"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "total_tokens": 3,
+    }
+    assert chunks[0]["nvext"] == {"routed_experts": "encoded-routed-experts"}
+
+
+@pytest.mark.asyncio
+async def test_generate_and_stream_omits_nvext_when_routed_experts_absent():
+    processor = VllmProcessor.__new__(VllmProcessor)
+    processor.router = SimpleNamespace(
+        generate=AsyncMock(
+            return_value=_single_chunk_stream(
+                {
+                    "token_ids": [12],
+                    "finish_reason": "stop",
+                    "completion_usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 1,
+                        "total_tokens": 3,
+                    },
+                }
+            )
+        )
+    )
+    processor.is_kv_router = False
+    processor.output_processor = SimpleNamespace(
+        add_request=Mock(),
+        process_outputs=Mock(
+            return_value=SimpleNamespace(
+                reqs_to_abort=[],
+                request_outputs=[
+                    SimpleNamespace(
+                        outputs=[
+                            SimpleNamespace(
+                                index=0,
+                                token_ids=[12],
+                                text="ok",
+                                finish_reason="stop",
+                                logprobs=None,
+                            )
+                        ]
+                    )
+                ],
+            )
+        ),
+        request_states={"req-2": object()},
+        abort_requests=Mock(),
+    )
+    post = SimpleNamespace(
+        process_output=Mock(
+            return_value={
+                "index": 0,
+                "delta": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+                "logprobs": None,
+            }
+        )
+    )
+    vllm_preproc = SimpleNamespace(request_id="req-2")
+
+    chunks = []
+    async for chunk in processor._generate_and_stream(
+        request_id="frontend-2",
+        request={"model": "dummy-model"},
+        dynamo_preproc={"model": "dummy-model"},
+        tokens=[1, 2],
+        vllm_preproc=vllm_preproc,
+        post=post,
+    ):
+        chunks.append(chunk)
+
+    assert len(chunks) == 1
+    assert "nvext" not in chunks[0]

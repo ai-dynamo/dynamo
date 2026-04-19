@@ -1535,6 +1535,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             logger.debug(formatted_message)
 
+    def _build_disaggregated_params(
+        self, kv_transfer_params, embedding_params=None, routed_experts=None
+    ):
+        disaggregated_params = {}
+        if kv_transfer_params is not None:
+            disaggregated_params["kv_transfer_params"] = kv_transfer_params
+        if embedding_params is not None:
+            disaggregated_params["embedding_params"] = embedding_params
+        if routed_experts is not None:
+            disaggregated_params["routed_experts"] = base64.b64encode(
+                routed_experts.tobytes()
+            ).decode("utf-8")
+
+        return disaggregated_params if disaggregated_params else None
+
     async def generate_tokens(
         self,
         prompt,
@@ -1584,6 +1599,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 output = res.outputs[0]
                 next_total_toks = len(output.token_ids)
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                disaggregated_params = self._build_disaggregated_params(
+                    None, routed_experts=output.routed_experts
+                )
+                if disaggregated_params is not None:
+                    out["disaggregated_params"] = disaggregated_params
 
                 # Extract logprobs for new tokens if available
                 tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -2072,15 +2092,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 )
 
                 yield output
-
-    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
-        disaggregated_params = {}
-        if kv_transfer_params is not None:
-            disaggregated_params["kv_transfer_params"] = kv_transfer_params
-        if embedding_params is not None:
-            disaggregated_params["embedding_params"] = embedding_params
-
-        return disaggregated_params if disaggregated_params else None
 
     def _build_embedding_params(
         self, multi_modal_data: dict[str, Any]

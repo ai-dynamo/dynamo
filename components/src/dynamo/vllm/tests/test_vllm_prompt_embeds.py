@@ -33,6 +33,9 @@ def mock_handler():
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
+    handler._build_disaggregated_params = (  # type: ignore[attr-defined]
+        BaseWorkerHandler._build_disaggregated_params.__get__(handler)
+    )
     return handler
 
 
@@ -227,3 +230,37 @@ class TestUsageStatistics:
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
         assert result["prompt_tokens_details"] == {"cached_tokens": 3}
+
+
+class TestDisaggregatedParams:
+    """Tests for routed experts transport encoding."""
+
+    def test_build_disaggregated_params_encodes_routed_experts(self, mock_handler):
+        routed_experts = np.array([[1, 7], [3, 9]], dtype=np.int32)
+
+        result = mock_handler._build_disaggregated_params(  # type: ignore[attr-defined]
+            None, routed_experts=routed_experts
+        )
+
+        assert result is not None
+        encoded = result["routed_experts"]
+        assert isinstance(encoded, str)
+        decoded = np.frombuffer(base64.b64decode(encoded), dtype=np.int32)
+        np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
+
+    def test_build_disaggregated_params_merges_existing_transport_fields(
+        self, mock_handler
+    ):
+        result = mock_handler._build_disaggregated_params(  # type: ignore[attr-defined]
+            {"blocks": [1, 2]},
+            embedding_params={"image_grid": [4, 4]},
+            routed_experts=np.array([5, 6], dtype=np.int32),
+        )
+
+        assert result == {
+            "kv_transfer_params": {"blocks": [1, 2]},
+            "embedding_params": {"image_grid": [4, 4]},
+            "routed_experts": base64.b64encode(
+                np.array([5, 6], dtype=np.int32).tobytes()
+            ).decode("utf-8"),
+        }

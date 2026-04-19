@@ -355,6 +355,8 @@ class VllmProcessor:
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
+                disaggregated_params = engine_response.get("disaggregated_params") or {}
+                routed_experts = disaggregated_params.get("routed_experts")
 
                 vllm_response = EngineCoreOutput(
                     request_id=vllm_preproc.request_id,
@@ -388,6 +390,8 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    if routed_experts is not None:
+                        dynamo_out["nvext"] = {"routed_experts": routed_experts}
 
                     yield dynamo_out
         finally:
