@@ -43,7 +43,7 @@ jobs:
       matrix:
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: Copy to ACR cuda${{ matrix.cuda_version }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
-    runs-on: prod-default-small-v2
+    runs-on: prod-skopeo-v1
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
