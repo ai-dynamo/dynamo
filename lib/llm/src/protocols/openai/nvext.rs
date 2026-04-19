@@ -155,6 +155,76 @@ impl NvExtResponseFieldSelection {
         }
         selection
     }
+
+    /// Build the `nvext` response payload for a single response chunk, applying
+    /// per-field gating uniformly across chat and completions delta generators.
+    ///
+    /// Returns `None` when no fields would be emitted, so call sites can skip
+    /// their serialization + debug-tracing blocks entirely. Call sites remain
+    /// responsible for:
+    ///
+    /// - calling `RequestTracker::record_finish()` (a side effect that must run
+    ///   regardless of whether `timing` is returned to the client), and
+    /// - emitting provider-specific debug tracing (`"completions nvext"` vs
+    ///   `"chat completion nvext"` labels) so log filtering still works.
+    ///
+    /// Gating rules match the previous per-site logic byte-for-byte:
+    ///
+    /// - `worker_id` requires the selection flag **and** `tracker.get_worker_info()` to return `Some`.
+    /// - `token_ids` requires the selection flag **and** a `"token_ids"` key on `disaggregated_params`
+    ///   that deserializes into `Vec<u32>`; malformed values silently fall back to `None`.
+    /// - `routed_experts` requires the selection flag **and** a `"routed_experts"` key on
+    ///   `disaggregated_params` (cloned as-is, no validation).
+    /// - `timing` requires the selection flag, `finish_reason_present == true`, **and** a tracker.
+    pub fn build_response_nvext(
+        &self,
+        tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
+        disaggregated_params: Option<&serde_json::Value>,
+        finish_reason_present: bool,
+    ) -> Option<NvExtResponse> {
+        let worker_id = if self.worker_id {
+            tracker.and_then(|t| t.get_worker_info())
+        } else {
+            None
+        };
+
+        let token_ids = if self.token_ids {
+            disaggregated_params
+                .and_then(|params| params.get("token_ids"))
+                .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok())
+        } else {
+            None
+        };
+
+        let routed_experts = if self.routed_experts {
+            disaggregated_params
+                .and_then(|params| params.get("routed_experts"))
+                .cloned()
+        } else {
+            None
+        };
+
+        let timing = if finish_reason_present && self.timing {
+            tracker.map(|t| t.get_timing_info())
+        } else {
+            None
+        };
+
+        if worker_id.is_none()
+            && token_ids.is_none()
+            && routed_experts.is_none()
+            && timing.is_none()
+        {
+            return None;
+        }
+
+        Some(NvExtResponse {
+            worker_id,
+            timing,
+            token_ids,
+            routed_experts,
+        })
+    }
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -577,6 +647,181 @@ mod tests {
                 routed_experts: true,
                 ..Default::default()
             }
+        );
+    }
+
+    // Helpers for build_response_nvext tests -----------------------------
+
+    fn sel_all_false() -> NvExtResponseFieldSelection {
+        NvExtResponseFieldSelection::default()
+    }
+
+    fn tracker_with_prefill_worker()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+        use crate::protocols::common::timing::{RequestTracker, WORKER_TYPE_PREFILL};
+        let tracker = std::sync::Arc::new(RequestTracker::new());
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        tracker
+    }
+
+    fn disagg_params_full() -> serde_json::Value {
+        serde_json::json!({
+            "token_ids": [11u32, 22u32, 33u32],
+            "routed_experts": {"layer_0": [1, 3]},
+        })
+    }
+
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_build_response_nvext_all_false_returns_none() {
+        let sel = sel_all_false();
+        assert!(
+            sel.build_response_nvext(None, None, false).is_none(),
+            "no fields selected → None"
+        );
+        assert!(
+            sel.build_response_nvext(None, None, true).is_none(),
+            "finish_reason alone does not force emission"
+        );
+    }
+
+    #[test]
+    fn test_build_response_nvext_worker_id_only_without_finish() {
+        let sel = NvExtResponseFieldSelection {
+            worker_id: true,
+            ..Default::default()
+        };
+        let tracker = tracker_with_prefill_worker();
+
+        // finish_reason=false: worker_id still emitted (only timing is finish-gated).
+        let out = sel
+            .build_response_nvext(Some(&tracker), None, false)
+            .expect("worker_id should emit regardless of finish_reason");
+
+        assert!(out.worker_id.is_some());
+        assert!(out.timing.is_none());
+        assert!(out.token_ids.is_none());
+        assert!(out.routed_experts.is_none());
+    }
+
+    #[test]
+    fn test_build_response_nvext_timing_suppressed_without_finish() {
+        let sel = NvExtResponseFieldSelection {
+            timing: true,
+            ..Default::default()
+        };
+        let tracker = tracker_with_prefill_worker();
+
+        // timing alone + finish_reason=false → nothing to emit, returns None.
+        assert!(
+            sel.build_response_nvext(Some(&tracker), None, false)
+                .is_none(),
+            "timing is gated on finish_reason_present"
+        );
+    }
+
+    #[test]
+    fn test_build_response_nvext_timing_emitted_on_finish() {
+        let sel = NvExtResponseFieldSelection {
+            timing: true,
+            ..Default::default()
+        };
+        let tracker = tracker_with_prefill_worker();
+
+        let out = sel
+            .build_response_nvext(Some(&tracker), None, true)
+            .expect("timing should emit on finish");
+
+        assert!(out.timing.is_some());
+        assert!(out.worker_id.is_none());
+        assert!(out.token_ids.is_none());
+        assert!(out.routed_experts.is_none());
+    }
+
+    #[test]
+    fn test_build_response_nvext_timing_requires_tracker() {
+        let sel = NvExtResponseFieldSelection {
+            timing: true,
+            ..Default::default()
+        };
+        // finish=true but no tracker → timing not populated → None.
+        assert!(sel.build_response_nvext(None, None, true).is_none());
+    }
+
+    #[test]
+    fn test_build_response_nvext_token_ids_from_disagg_params() {
+        let sel = NvExtResponseFieldSelection {
+            token_ids: true,
+            ..Default::default()
+        };
+        let params = disagg_params_full();
+
+        let out = sel
+            .build_response_nvext(None, Some(&params), false)
+            .expect("token_ids should emit when present");
+
+        assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
+        assert!(out.worker_id.is_none());
+        assert!(out.timing.is_none());
+        assert!(out.routed_experts.is_none());
+    }
+
+    #[test]
+    fn test_build_response_nvext_token_ids_malformed_falls_back_to_none() {
+        let sel = NvExtResponseFieldSelection {
+            token_ids: true,
+            ..Default::default()
+        };
+        // String payload cannot deserialize into Vec<u32> — matches existing `.ok()` behavior.
+        let params = serde_json::json!({ "token_ids": "not-an-array" });
+
+        assert!(
+            sel.build_response_nvext(None, Some(&params), false)
+                .is_none(),
+            "malformed token_ids silently suppressed; nothing else selected → None"
+        );
+    }
+
+    #[test]
+    fn test_build_response_nvext_routed_experts_cloned_as_is() {
+        let sel = NvExtResponseFieldSelection {
+            routed_experts: true,
+            ..Default::default()
+        };
+        let params = disagg_params_full();
+
+        let out = sel
+            .build_response_nvext(None, Some(&params), false)
+            .expect("routed_experts should emit when present");
+
+        assert_eq!(
+            out.routed_experts,
+            Some(serde_json::json!({"layer_0": [1, 3]}))
+        );
+    }
+
+    #[test]
+    fn test_build_response_nvext_combined_emission() {
+        let sel = NvExtResponseFieldSelection {
+            worker_id: true,
+            timing: true,
+            token_ids: true,
+            routed_experts: true,
+        };
+        let tracker = tracker_with_prefill_worker();
+        let params = disagg_params_full();
+
+        let out = sel
+            .build_response_nvext(Some(&tracker), Some(&params), true)
+            .expect("all fields selected and available → Some");
+
+        assert!(out.worker_id.is_some());
+        assert!(out.timing.is_some());
+        assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
+        assert_eq!(
+            out.routed_experts,
+            Some(serde_json::json!({"layer_0": [1, 3]}))
         );
     }
 

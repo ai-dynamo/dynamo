@@ -10,7 +10,7 @@ use crate::{
         common::{self, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            nvext::{NvExtProvider, NvExtResponse, NvExtResponseFieldSelection, TimingInfo},
+            nvext::{NvExtProvider, NvExtResponseFieldSelection},
             token_to_utf8_bytes,
         },
     },
@@ -403,76 +403,36 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         );
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
+        // Kept at call site because it's a side effect on the tracker — not a gating decision.
         if finish_reason.is_some()
             && let Some(ref tracker) = self.tracker
         {
             tracker.record_finish();
         }
 
-        // Get worker_id info from tracker (set by KvPushRouter based on phase)
-        let worker_id_info = if self.options.response_fields.worker_id {
-            self.tracker.as_ref().and_then(|t| t.get_worker_info())
-        } else {
-            None
-        };
-
-        let token_ids = if self.options.response_fields.token_ids {
-            delta
-                .disaggregated_params
-                .as_ref()
-                .and_then(|params| params.get("token_ids"))
-                .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok())
-        } else {
-            None
-        };
-        let routed_experts = if self.options.response_fields.routed_experts {
-            delta
-                .disaggregated_params
-                .as_ref()
-                .and_then(|params| params.get("routed_experts"))
-                .cloned()
-        } else {
-            None
-        };
-
-        // Get timing info if this is the final response (has finish_reason)
-        let timing_info: Option<TimingInfo> =
-            if finish_reason.is_some() && self.options.response_fields.timing {
-                self.tracker
-                    .as_ref()
-                    .map(|tracker| tracker.get_timing_info())
-            } else {
-                None
-            };
-
-        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
-        if worker_id_info.is_some()
-            || token_ids.is_some()
-            || timing_info.is_some()
-            || routed_experts.is_some()
+        // Build the nvext response payload via the shared gating helper on
+        // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
+        // completions delta generators go through the same helper so the gating
+        // rules stay in one place.
+        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
+            self.tracker.as_ref(),
+            delta.disaggregated_params.as_ref(),
+            finish_reason.is_some(),
+        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
-            let nvext_response = NvExtResponse {
-                worker_id: worker_id_info.clone(),
-                timing: timing_info,
-                token_ids: token_ids.clone(),
-                routed_experts,
-            };
-
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                stream_response.nvext = Some(nvext_json);
-                if let Some(ref info) = worker_id_info {
-                    tracing::debug!(
-                        "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                        info.prefill_worker_id,
-                        info.decode_worker_id
-                    );
-                }
-                if let Some(ref tokens) = token_ids {
-                    tracing::debug!(
-                        "Injected token_ids into chat completion nvext: {} tokens",
-                        tokens.len()
-                    );
-                }
+            stream_response.nvext = Some(nvext_json);
+            if let Some(ref info) = nvext_response.worker_id {
+                tracing::debug!(
+                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                    info.prefill_worker_id,
+                    info.decode_worker_id
+                );
+            }
+            if let Some(ref tokens) = nvext_response.token_ids {
+                tracing::debug!(
+                    "Injected token_ids into chat completion nvext: {} tokens",
+                    tokens.len()
+                );
             }
         }
 
