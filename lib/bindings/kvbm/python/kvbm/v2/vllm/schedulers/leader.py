@@ -21,6 +21,7 @@ Bring-up flow:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -273,6 +274,16 @@ class SchedulerConnectorLeader:
             # Single-sequence case: already flat
             all_token_ids = [int(token) for token in request.all_token_ids]
 
+        # vLLM carries connector-specific transfer params as a
+        # dict[str, Any] | None on the Request. Serialize to JSON here so the
+        # Rust side receives a well-defined payload. json.dumps will raise
+        # TypeError on unserializable values — we deliberately let that
+        # propagate so the misconfiguration is loud.
+        kv_transfer_params = getattr(request, "kv_transfer_params", None)
+        kv_transfer_params_json = (
+            json.dumps(kv_transfer_params) if kv_transfer_params is not None else None
+        )
+
         kv_request = KvbmRequest(
             request_id=request.request_id,
             tokens=all_token_ids,
@@ -283,6 +294,7 @@ class SchedulerConnectorLeader:
             if getattr(request, "cache_salt", None) is not None
             else None,
             max_tokens=request.max_tokens,
+            kv_transfer_params_json=kv_transfer_params_json,
         )
 
         self.leader.create_slot(kv_request)

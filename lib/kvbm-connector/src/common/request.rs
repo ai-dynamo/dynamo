@@ -9,11 +9,26 @@ use serde::Serialize;
 
 /// Metadata for KVBM request integration.
 ///
-/// This struct holds optional metadata that can be passed from the scheduler
-/// to the connector. Fields will be added as needed.
+/// Holds optional data forwarded from the scheduler (e.g. a vLLM
+/// `Request`) into the connector layer. Today this carries the raw
+/// `kv_transfer_params` JSON as an opaque `serde_json::Value`; a
+/// follow-up change will introduce a typed `TransferParams` that
+/// parses this lazily on demand.
 #[derive(Debug, Clone, Default)]
 pub struct RequestMetadata {
-    // Empty for now - will be extended in the future
+    /// Connector-specific KV transfer parameters, as received from the
+    /// scheduler protocol. `None` when the upstream request did not
+    /// supply any (the common case for non-disaggregated requests).
+    pub kv_transfer_params: Option<serde_json::Value>,
+}
+
+impl RequestMetadata {
+    /// Construct metadata carrying only a `kv_transfer_params` JSON payload.
+    pub fn with_kv_transfer_params(value: serde_json::Value) -> Self {
+        Self {
+            kv_transfer_params: Some(value),
+        }
+    }
 }
 
 /// Minimal representation of a scheduler slot request.
@@ -256,5 +271,61 @@ impl Request {
     /// Get the metadata if present.
     pub fn metadata(&self) -> Option<&RequestMetadata> {
         self.metadata.as_ref()
+    }
+
+    /// Borrow the raw KV transfer params JSON, if any.
+    ///
+    /// Returns `None` when the upstream request did not supply
+    /// `kv_transfer_params`. Callers that require the data decide
+    /// locally whether absence is fatal.
+    pub fn kv_transfer_params(&self) -> Option<&serde_json::Value> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.kv_transfer_params.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn kv_transfer_params_round_trips() {
+        let params = json!({
+            "transfer_id": "abc-123",
+            "do_remote_prefill": true,
+            "remote_block_ids": [1, 2, 3],
+        });
+        let request = Request::with_token_limits(
+            "req-1",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(128),
+            Some(RequestMetadata::with_kv_transfer_params(params.clone())),
+        );
+        assert_eq!(request.kv_transfer_params(), Some(&params));
+    }
+
+    #[test]
+    fn kv_transfer_params_absent_when_no_metadata() {
+        let request = Request::new("req-2", vec![1_u32, 2, 3], None, None, Some(64));
+        assert!(request.kv_transfer_params().is_none());
+    }
+
+    #[test]
+    fn kv_transfer_params_absent_when_metadata_has_none() {
+        let request = Request::with_token_limits(
+            "req-3",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(64),
+            Some(RequestMetadata::default()),
+        );
+        assert!(request.kv_transfer_params().is_none());
     }
 }

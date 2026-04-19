@@ -673,6 +673,12 @@ impl RequestSlot {
         &self.request.request_id
     }
 
+    /// Borrow the raw KV transfer params JSON carried on this slot's
+    /// request, if any. Callers decide whether absence is fatal.
+    pub fn kv_transfer_params(&self) -> Option<&serde_json::Value> {
+        self.request.kv_transfer_params()
+    }
+
     /// Get the current transaction state (read-only).
     pub fn txn_state(&self) -> &TransactionState {
         self.state.txn_state()
