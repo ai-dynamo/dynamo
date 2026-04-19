@@ -36,12 +36,16 @@ inputs:
     description: 'Path inside the container to run pytest from. The image ships the dynamo source/tests here; kept separate from the GitHub Actions checkout at $GITHUB_WORKSPACE.'
     required: false
     default: '/workspace'
+  verify_gpu:
+    description: 'Whether to verify GPU visibility via torch before running tests'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
   steps:
     - name: Verify GPU visibility
-      if: contains(inputs.pytest_marks, 'gpu')
+      if: inputs.verify_gpu == 'true'
       shell: python
       run: |
         import sys

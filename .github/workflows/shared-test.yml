@@ -157,3 +157,4 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           framework: ${{ inputs.test_suite_name }}
+          verify_gpu: 'true'
