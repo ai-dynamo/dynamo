@@ -87,8 +87,8 @@ runs:
       if: inputs.buildkit_worker_addresses == ''
       shell: bash
       run: |
-        # If the builder already exists, these commands will just set the right configurations to use it 
-        # when fresh_builder is true, it needs to create a new builder per workflow, not per job. We should not remove the builder if it exist.  
+        # If the builder already exists, these commands will just set the right configurations to use it
+        # when fresh_builder is true, it needs to create a new builder per workflow, not per job. We should not remove the builder if it exist.
         echo "🔨 Creating K8s builder '${{ inputs.builder_name }}'."
         docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
         '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
