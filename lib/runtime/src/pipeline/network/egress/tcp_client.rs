@@ -665,40 +665,42 @@ impl TcpConnection {
         };
 
         // Bounded admission (channel_buffer hard limit). Permit is held for the
-        // call and released on drop on every exit path -- Prevents unbounded SegQueue growth.
+        // call and released on drop on every exit path -- prevents unbounded
+        // SegQueue growth.
         //
         // Fast path: try_acquire() is a synchronous atomic decrement; the
         // previous unconditional .acquire().await forced a Tokio scheduler
-        // round-trip even when a permit was free
+        // round-trip even when a permit was free.
         //
         // Slow path: on NoPermits, fall back to .acquire().await (preserves
-        // OOM bound and back-pressure) and re-check health after parking --
-        // the fast-path permit is granted ns after the pre-check above, so a
-        // second atomic load on that path would be redundant.
+        // OOM bound and back-pressure).
         let _permit = match self.admission.try_acquire() {
             Ok(p) => p,
-            Err(tokio::sync::TryAcquireError::NoPermits) => {
-                let permit = self
-                    .admission
-                    .acquire()
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
-                // Re-check health: the connection may have gone unhealthy while
-                // we were parked on the semaphore. Fail fast so the caller can
-                // retry on a fresh connection rather than pushing to a dead
-                // submit_queue.
-                if !self.healthy.load(Ordering::Relaxed) {
-                    anyhow::bail!("Connection unhealthy (tasks failed)");
-                }
-                if self.closed.load(Ordering::Acquire) {
-                    anyhow::bail!("Connection closed (writer exited)");
-                }
-                permit
-            }
+            Err(tokio::sync::TryAcquireError::NoPermits) => self
+                .admission
+                .acquire()
+                .await
+                .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?,
             Err(tokio::sync::TryAcquireError::Closed) => {
                 anyhow::bail!("Connection closed (admission gate shut)");
             }
         };
+
+        // Re-check health AFTER acquiring the permit, on both fast and slow
+        // paths. The upfront check at the top of send_request establishes
+        // `healthy == true && closed == false`, but the writer/reader
+        // shutdown path can land after that check and before `try_acquire()`
+        // observes `admission.close()` (closed teardown is: `healthy.store(false)`
+        // -> `closed.store(true)` -> `admission.close()`). Without this
+        // re-check, a request could acquire a valid permit on a dying
+        // connection, push onto a submit_queue the writer will never drain,
+        // and hang until the outer request timeout.
+        if !self.healthy.load(Ordering::Relaxed) {
+            anyhow::bail!("Connection unhealthy (tasks failed)");
+        }
+        if self.closed.load(Ordering::Acquire) {
+            anyhow::bail!("Connection closed (writer exited)");
+        }
 
         // encode() called here — after admission is granted — so the frame is
         // only allocated once we have capacity to process it.
