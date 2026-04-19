@@ -8,8 +8,8 @@ inputs:
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
-  framework:
-    description: 'Framework name for test metrics'
+  test_suite_name:
+    description: 'Test suite name for test metrics'
     required: false
     default: 'unknown'
   test_type:
@@ -28,10 +28,6 @@ inputs:
     description: 'Start MinIO service for LoRA tests (true/false)'
     required: false
     default: 'true'
-  enable_mypy:
-    description: 'Enable mypy type checking during test run (true/false)'
-    required: false
-    default: 'false'
   hf_token:
     required: false
   parallel_mode:
@@ -125,12 +121,7 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          MYPY_FLAG=""
-          if [[ "${{ inputs.enable_mypy }}" == "true" ]]; then
-            echo "🔍 Mypy type checking enabled"
-            MYPY_FLAG="--mypy"
-          fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -151,15 +142,21 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
+          --shm-size=200m \
           --network host \
+          --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+          sh -c "umask 0022 && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -189,9 +186,13 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # Define common docker flags for stability (Shared memory & limits)
-        # --ipc=host is critical for parallel pytest workers to communicate fast
-        DOCKER_OPTS="--ipc=host --ulimit memlock=-1 --ulimit stack=67108864"
+        # /dev/shm sizing: NIXL uses UCX which allocates shared memory segments in /dev/shm
+        # via shm_open(). Each NIXL agent with num_threads=8 creates 9 UCX workers, each needing
+        # ~4.8MB of shm. Disaggregated tests use up to 3 agents (encode+prefill+decode) = ~130MB.
+        # Docker's default is 64MB, which is insufficient and causes segfaults.
+        # Do NOT use --ipc=host here — it overrides --shm-size with the host's /dev/shm
+        # (64MB in K8s pods by default), silently ignoring the size we set.
+        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
@@ -200,12 +201,6 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          MYPY_FLAG=""
-          if [[ "${{ inputs.enable_mypy }}" == "true" ]]; then
-            echo "🔍 Mypy type checking enabled"
-            MYPY_FLAG="--mypy"
-          fi
-
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
           # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
@@ -234,7 +229,7 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -247,6 +242,10 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
@@ -254,7 +253,7 @@ runs:
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "${PYTEST_CMD}"
+          sh -c "umask 0022 && ${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -293,7 +292,7 @@ runs:
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
           # Rename XML file to unique name
-          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
@@ -313,9 +312,18 @@ runs:
         docker rm -f dynamo-minio-test 2>/dev/null || true
 
     - name: Upload Test Results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always()
+      with:
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore

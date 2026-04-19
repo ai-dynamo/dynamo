@@ -6,6 +6,7 @@ name: Post-Merge CI Pipeline
 on:
   push:
     branches:
+      - main
       - 'release/*.*.*'
 
 permissions:
@@ -16,25 +17,52 @@ jobs:
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
   # ============================================================================
+  # PLANNER PIPELINE
+  # ============================================================================
+  planner-pipeline:
+    name: planner
+    uses: ./.github/workflows/build-test-distribute-flavor.yml
+    with:
+      framework: dynamo
+      builder_flavor: general
+      target: planner
+      platform: 'linux/amd64,linux/arm64'
+      cpu_only: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-planner' || '' }}
+        ${{ github.ref_name == 'main' && format('main-planner-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and planner and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
+    name: vllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -42,22 +70,24 @@ jobs:
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
+    name: sglang
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -65,23 +95,73 @@ jobs:
   # TRTLLM PIPELINE
   # ============================================================================
   trtllm-pipeline:
+    name: trtllm
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # DEV PIPELINES
+  # ============================================================================
+  vllm-dev-pipeline:
+    name: vllm-dev
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: vllm
+      target: dev
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: true
+      copy_to_acr: true
+    secrets: inherit
+
+  sglang-dev-pipeline:
+    name: sglang-dev
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: sglang
+      target: dev
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["12.9", "13.0"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: true
+      copy_to_acr: true
+    secrets: inherit
+
+  trtllm-dev-pipeline:
+    name: trtllm-dev
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: trtllm
+      target: dev
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      push_image: true
+      run_compliance_scan: true
+      copy_to_acr: true
     secrets: inherit
 
   # ============================================================================
@@ -95,14 +175,15 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64"]'
+      platform: 'linux/amd64'
       cuda_versions: '["12.9"]'
       make_efa: true
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       cpu_only_test_timeout_minutes: 60
       run_single_gpu_tests: false
@@ -118,14 +199,15 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64"]'
+      platform: 'linux/amd64'
       cuda_versions: '["13.1"]'
       make_efa: true
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       cpu_only_test_timeout_minutes: 60
       run_single_gpu_tests: false
@@ -133,12 +215,246 @@ jobs:
       copy_to_acr: false
     secrets: inherit
 
+  # ============================================================================
+  # FRONTEND IMAGE BUILD
+  # ============================================================================
+  frontend-image:
+    name: Frontend Image
+    uses: ./.github/workflows/build-frontend-image.yaml
+    with:
+      skip_change_detection: true
+    secrets: inherit
+
+  # ============================================================================
+  # Operator
+  # ============================================================================
+
+  operator:
+    name: Operator
+    runs-on: prod-default-v2
+    outputs:
+      operator_default_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+      - name: Build and push operator
+        id: build
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+
+# ============================================================================
+# Snapshot Agent
+# ============================================================================
+
+  snapshot-agent:
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  # ============================================================================
+  # DEPLOYMENT JOBS
+  # Deploy operator and run end-to-end tests on Kubernetes cluster
+  # ============================================================================
+
+  deploy-operator:
+    needs: [operator]
+    runs-on: prod-default-small-v2
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+  deploy-test-vllm:
+    needs: [deploy-operator, vllm-pipeline]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: vllm
+      profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
+      image_suffix: vllm-runtime-cuda12
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-test-sglang:
+    needs: [deploy-operator, sglang-pipeline]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: sglang
+      profiles: '["agg", "agg_router"]'
+      image_suffix: sglang-runtime-cuda12
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-test-trtllm:
+    needs: [deploy-operator, trtllm-pipeline]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: trtllm
+      profiles: '["agg", "agg_router"]'
+      image_suffix: trtllm-runtime-cuda13
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-cleanup:
+    if: always()
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    runs-on: prod-default-small-v2
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Teardown vCluster
+      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  # ============================================================================
+  # GAIE DEPLOY TEST
+  # ============================================================================
+  deploy-test-gaie:
+    name: GAIE Deploy Test
+    runs-on: prod-default-small-v2
+    needs: [deploy-operator, frontend-image, vllm-pipeline]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, kgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_kgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
+
+  deploy-status-check:
+    runs-on: ubuntu-latest
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    if: always()
+    steps:
+      - name: "Check all deploy test jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+
+  # ============================================================================
+  # CLEANUP JOBS
+  # ============================================================================
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+        buildkit_worker_addresses: '' # k8s builder
+        skip_bootstrap: true
+    - name: Builder Cleanup in case of k8s builder
+      shell: bash
+      run: |
+        docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline ]
+    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:
@@ -154,7 +470,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"

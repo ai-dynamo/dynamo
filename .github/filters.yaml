@@ -1,9 +1,9 @@
 # CI Filter Patterns - See FILTERS.md for documentation
 #
 # Filters that trigger CI jobs:
-#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm), deploy tests
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   deploy   -> deploy-test-vllm-disagg-router
+#   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
@@ -53,6 +53,7 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
+  - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
@@ -67,12 +68,9 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
+  - 'container/Dockerfile.test'
 
 core:
-  # Exclude documentation files first, then include patterns override for specific paths
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
   - *ci
   - 'container/render.py'
   - 'container/Dockerfile.template'
@@ -96,56 +94,63 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
+  # Negation patterns MUST come after positive patterns — micromatch processes
+  # patterns left-to-right, so negations only filter matches accumulated by
+  # preceding patterns. Placing them first has no effect.
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
 
 operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
   - 'docs/kubernetes/api-reference.md'
+  - 'deploy/helm/charts/platform/**'
+  - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 deploy:
-  - '!**/*.md'
-  - '!**/*.rst'
+  - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
+  - 'tests/deploy/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 planner:
+  - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
   - 'components/src/dynamo/global_planner/**'
-  - 'tests/planner/**'
-  - 'tests/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
 vllm:
-  - '!**/*.md'
-  - '!**/*.rst'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
   - 'container/templates/vllm_*'
-
-sglang:
   - '!**/*.md'
   - '!**/*.rst'
+
+sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
-
-trtllm:
   - '!**/*.md'
   - '!**/*.rst'
+
+trtllm:
   - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
-
-frontend:
   - '!**/*.md'
   - '!**/*.rst'
+
+frontend:
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'
@@ -159,6 +164,8 @@ frontend:
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 rust:
   - '.github/workflows/pre-merge.yml'
