@@ -146,7 +146,7 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
             worker_service_name = "TRTLLMDecodeWorker"
         else:
             # Agg deployment uses TRTLLMWorker
-            worker_service_name = "TRTLLMWorker"
+            worker_service_name = "TRTLLMWorker"  # Intentional: aggregated TRTLLM deployment uses different name not yet in TrtllmComponentName defaults
     else:
         logger.warning(
             f"Unsupported backend: {scenario.backend}, using default checker"
