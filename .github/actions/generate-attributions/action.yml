@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Generate Attributions'
+description: 'Generate ATTRIBUTIONS-*.md from lock files and registry license APIs'
+
+inputs:
+  image:
+    description: 'Container image for pip freeze extraction (Python attributions)'
+    required: false
+    default: ''
+  ecosystem:
+    description: 'Ecosystem to generate (rust, python, go, all)'
+    required: false
+    default: 'all'
+  artifact_name:
+    description: 'Name for the uploaded artifact'
+    required: false
+    default: 'attributions'
+  retention_days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '90'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      with:
+        python-version: '3.12'
+
+    - name: Install dynamo-attributions
+      shell: bash
+      run: pip install ./container/compliance/generate-attributions-md/
+
+    - name: Restore license cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: ~/.dynamo_license_cache.json
+        key: license-cache-${{ hashFiles('Cargo.lock', 'deploy/operator/go.mod') }}
+        restore-keys: license-cache-
+
+    - name: Pull container image
+      if: inputs.image != ''
+      shell: bash
+      run: |
+        source ./.github/scripts/retry_docker.sh
+        retry_pull ${{ inputs.image }}
+
+    - name: Generate attributions
+      shell: bash
+      run: |
+        mkdir -p ./attributions-output
+        ARGS="--branch ${{ github.sha }} --ecosystem ${{ inputs.ecosystem }}"
+        ARGS+=" --output-dir ./attributions-output"
+        ARGS+=" --github-token ${{ github.token }}"
+        if [ -n "${{ inputs.image }}" ]; then
+          ARGS+=" --image ${{ inputs.image }}"
+        fi
+        dynamo-attributions ${ARGS}
+
+    - name: Upload attributions
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ./attributions-output/ATTRIBUTIONS-*.md
+        retention-days: ${{ inputs.retention_days }}
