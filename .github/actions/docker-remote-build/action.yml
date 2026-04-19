@@ -158,8 +158,6 @@ runs:
         # The runner pod has IRSA which provides AWS_WEB_IDENTITY_TOKEN_FILE and
         # AWS_ROLE_ARN. We pass the token file and role ARN to BuildKit so sccache
         # can authenticate via STS AssumeRoleWithWebIdentity -- no static keys needed.
-        # Disable tracing to prevent set -x from leaking credentials into logs.
-        set +x
         SECRET_ARGS=""
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
           TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
@@ -170,7 +168,6 @@ runs:
             echo "::warning::IRSA web identity token not available; sccache S3 cache will be disabled"
           fi
         fi
-        set -x
 
         docker buildx build \
           --progress=plain \
