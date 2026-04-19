@@ -318,13 +318,12 @@ jobs:
 
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build]
+    needs: [changed-files, trtllm-build]
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
       test_type: Test
       amd_runner: stg-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]' #, "13.0"]'
       platform: '["arm64"]' #'["amd64"]' #, "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
