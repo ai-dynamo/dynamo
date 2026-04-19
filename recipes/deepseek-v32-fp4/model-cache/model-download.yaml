@@ -32,12 +32,12 @@ spec:
               value: nvidia/DeepSeek-V3.2-NVFP4
             - name: HF_HOME
               value: /model-store
-            - name: HF_HUB_ENABLE_HF_TRANSFER
+            - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub hf_transfer
+              pip install --no-cache-dir huggingface_hub==1.11.0
               hf download $MODEL_NAME
           volumeMounts:
             - name: model-cache

@@ -5,7 +5,10 @@
 
 import pytest
 
-from dynamo.profiler.rapid import _DEFAULT_NAIVE_BACKEND
+try:
+    from dynamo.profiler.rapid import _DEFAULT_NAIVE_BACKEND
+except ImportError:
+    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,

@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "1.0.0"
+version = "1.1.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==1.0.0",
+    "ai-dynamo-runtime==1.1.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -62,8 +62,8 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.9",
-    "nixl[cu12]<=0.10.1",
+    "sglang[diffusion]==0.5.10.post1",
+    "nixl[cu12]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
 
@@ -181,6 +181,11 @@ filterwarnings = [
     "error",
     # CUDA deprecation warnings from tensorrt_llm
     "ignore:.*cuda*:DeprecationWarning",
+    # cuda.cudart/cuda.nvrtc deprecated in favor of cuda.bindings.* (cuda-python >=13)
+    # Triggered by flashinfer 0.6.7+ during import of comm/mnnvl.py
+    "ignore:The cuda\\..*module is deprecated:FutureWarning",
+    # SGLang GGUF quantization emits UserWarning on non-CUDA platforms (arm64 CPU-only CI)
+    "ignore:Only CUDA.*support GGUF quantization:UserWarning",
     # protobuf C extension warning
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
     # unclosed socket/event loop warnings

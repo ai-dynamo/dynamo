@@ -11,18 +11,18 @@ use uuid::Uuid;
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ScheduledWorkerCompletion, WorkerAdmission,
+    ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_decode_handoff, pop_ready_worker_completion,
-    push_decode_handoff, push_worker_completion,
+    pop_ready_worker_ready, push_decode_handoff, push_worker_completion, push_worker_ready,
 };
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
 use super::state::{DisaggPhase, DisaggRequestState};
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
@@ -60,7 +60,7 @@ pub(super) struct DisaggRuntimeStats {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct DisaggRuntimeStats;
 
-pub(super) struct DisaggRuntime {
+pub(in crate::replay) struct DisaggRuntime {
     now_ms: f64,
     next_prefill_worker_idx: usize,
     next_decode_worker_idx: usize,
@@ -75,11 +75,16 @@ pub(super) struct DisaggRuntime {
     events: BinaryHeap<SimulationEvent>,
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
+    /// Forward pass metrics accumulated between planner ticks, keyed by (stage, worker_idx).
+    prefill_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    decode_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Traffic statistics accumulated between planner ticks.
+    traffic: TrafficAccumulator,
 }
 
 impl DisaggRuntime {
     /// Create a disaggregated offline runtime seeded from an explicit request queue.
-    pub(super) fn new(
+    pub(in crate::replay) fn new(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -97,7 +102,7 @@ impl DisaggRuntime {
     }
 
     /// Create a disaggregated offline runtime whose admissions come from a workload driver.
-    pub(super) fn new_workload(
+    pub(in crate::replay) fn new_workload(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -147,7 +152,8 @@ impl DisaggRuntime {
             }
         };
 
-        let prefill_engine = EngineComponent::new(
+        let prefill_capture_kv = prefill_router.is_some();
+        let mut prefill_engine = EngineComponent::new(
             SimulationWorkerStage::Prefill,
             EnginePassMode::Hidden,
             (0..config.num_prefill_workers)
@@ -155,12 +161,13 @@ impl DisaggRuntime {
                     super::state::OfflineWorkerState::new(
                         worker_idx,
                         config.prefill_args.clone(),
-                        prefill_router.is_some(),
+                        prefill_capture_kv,
                     )
                 })
                 .collect(),
         );
-        let decode_engine = EngineComponent::new(
+        prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_kv);
+        let mut decode_engine = EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
             (0..config.num_decode_workers)
@@ -173,6 +180,7 @@ impl DisaggRuntime {
                 })
                 .collect(),
         );
+        decode_engine.set_scaling_args(config.decode_args.clone(), false);
 
         Ok(Self {
             now_ms: 0.0,
@@ -192,6 +200,9 @@ impl DisaggRuntime {
             stats: DisaggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: DisaggRuntimeStats,
+            prefill_fpm_buffer: Vec::new(),
+            decode_fpm_buffer: Vec::new(),
+            traffic: TrafficAccumulator::new(),
         })
     }
 
@@ -209,20 +220,28 @@ impl DisaggRuntime {
                 .map_or(0, OfflineReplayRouter::pending_count)
     }
 
-    /// Pick the next prefill worker in round-robin order.
+    /// Pick the next active prefill worker in round-robin order.
     fn next_prefill_worker(&mut self) -> usize {
-        let worker_idx = self.next_prefill_worker_idx;
-        self.next_prefill_worker_idx =
-            (self.next_prefill_worker_idx + 1) % self.prefill_engine.worker_count();
-        worker_idx
+        let active = self.prefill_engine.active_worker_ids();
+        debug_assert!(
+            !active.is_empty(),
+            "no active prefill workers for round-robin"
+        );
+        let idx = self.next_prefill_worker_idx % active.len();
+        self.next_prefill_worker_idx = idx + 1;
+        active[idx]
     }
 
-    /// Pick the next decode worker in round-robin order.
+    /// Pick the next active decode worker in round-robin order.
     fn next_decode_worker(&mut self) -> usize {
-        let worker_idx = self.next_decode_worker_idx;
-        self.next_decode_worker_idx =
-            (self.next_decode_worker_idx + 1) % self.decode_engine.worker_count();
-        worker_idx
+        let active = self.decode_engine.active_worker_ids();
+        debug_assert!(
+            !active.is_empty(),
+            "no active decode workers for round-robin"
+        );
+        let idx = self.next_decode_worker_idx % active.len();
+        self.next_decode_worker_idx = idx + 1;
+        active[idx]
     }
 
     /// Track the peak number of requests parked in each stage router.
@@ -355,7 +374,6 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
-
         let queued_request = request.clone();
         self.requests
             .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
@@ -382,6 +400,24 @@ impl DisaggRuntime {
             && self.admission.is_drained()
             && self.prefill_engine.is_drained()
             && self.decode_engine.is_drained()
+    }
+
+    /// Return true once the request workload is complete, even if `WorkerReady`
+    /// events remain in the queue.
+    fn is_workload_done(&self) -> bool {
+        self.cluster_in_flight() == 0
+            && self.admission.is_drained()
+            && self.prefill_engine.is_drained()
+            && self.decode_engine.is_drained()
+            && self.only_worker_ready_events_remain()
+    }
+
+    /// True if the event heap is empty or contains only `WorkerReady` events.
+    fn only_worker_ready_events_remain(&self) -> bool {
+        use super::events::SimulationEventKind;
+        self.events
+            .iter()
+            .all(|e| matches!(e.kind, SimulationEventKind::WorkerReady { .. }))
     }
 
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
@@ -479,6 +515,13 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
+        let state = self.state(signal.uuid)?;
+        let original = state.original_request()?;
+        let input_tokens = original.tokens.len();
+        let output_tokens = original.max_output_tokens;
+        let latencies = self.collector.request_latencies(signal.uuid);
+        self.traffic
+            .on_request(input_tokens, output_tokens, latencies);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -626,6 +669,7 @@ impl DisaggRuntime {
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.prefill_fpm_buffer.extend(effects.fpm_snapshots);
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
@@ -651,6 +695,7 @@ impl DisaggRuntime {
     }
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.decode_fpm_buffer.extend(effects.fpm_snapshots);
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             self.process_decode_pass(
@@ -665,10 +710,44 @@ impl DisaggRuntime {
         Ok(())
     }
 
+    /// Activate workers whose startup period has elapsed at the current timestamp.
+    fn apply_worker_ready_events(&mut self) -> Result<bool> {
+        let mut changed = false;
+        while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
+            match stage {
+                SimulationWorkerStage::Prefill => {
+                    if self.prefill_engine.mark_worker_ready(worker_id) {
+                        if let Some(router) = self.prefill_router.as_mut() {
+                            router.add_worker(worker_id)?;
+                            let effects = router.try_drain_pending(self.now_ms)?;
+                            self.dispatch_prefill_admissions(effects.admissions)?;
+                        }
+                        changed = true;
+                    }
+                }
+                SimulationWorkerStage::Decode => {
+                    if self.decode_engine.mark_worker_ready(worker_id) {
+                        if let Some(router) = self.decode_router.as_mut() {
+                            router.add_worker(worker_id)?;
+                            let effects = router.try_drain_pending(self.now_ms)?;
+                            self.dispatch_decode_admissions(effects.admissions)?;
+                        }
+                        changed = true;
+                    }
+                }
+                SimulationWorkerStage::Aggregated => {
+                    unreachable!("disagg replay should not receive aggregated worker ready events")
+                }
+            }
+        }
+        Ok(changed)
+    }
+
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> Result<()> {
         loop {
             let mut changed = self.apply_worker_completions()?;
+            changed |= self.apply_worker_ready_events()?;
             changed |= self.apply_decode_handoffs()?;
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_prefill_workers()?;
@@ -691,6 +770,156 @@ impl DisaggRuntime {
                 .map(|(uuid, state)| (*uuid, state.debug_snapshot()))
                 .collect();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Planner integration: step-based execution
+    // ------------------------------------------------------------------
+
+    /// Advance the simulation up to `until_ms` simulated time, then pause.
+    /// Returns `true` if the request workload is done — pending `WorkerReady`
+    /// events do not block completion since there is no work for those workers.
+    pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> Result<bool> {
+        self.drain_current_timestamp()?;
+
+        while !self.is_done() {
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline disagg replay reached a dead end with {} in-flight requests remaining",
+                    self.cluster_in_flight()
+                );
+            };
+
+            if next_timestamp_ms > until_ms {
+                break;
+            }
+
+            self.now_ms = next_timestamp_ms;
+            self.drain_current_timestamp()?;
+        }
+
+        Ok(self.is_workload_done())
+    }
+
+    /// Current simulated time in milliseconds.
+    pub(in crate::replay) fn now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    pub(in crate::replay) fn active_prefill_count(&self) -> usize {
+        self.prefill_engine.active_worker_ids().len()
+    }
+
+    pub(in crate::replay) fn active_decode_count(&self) -> usize {
+        self.decode_engine.active_worker_ids().len()
+    }
+
+    pub(in crate::replay) fn total_prefill_count(&self) -> usize {
+        self.prefill_engine.worker_count()
+    }
+
+    pub(in crate::replay) fn total_decode_count(&self) -> usize {
+        self.decode_engine.worker_count()
+    }
+
+    /// Drain accumulated prefill FPM snapshots since the last drain.
+    pub(in crate::replay) fn drain_prefill_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
+        std::mem::take(&mut self.prefill_fpm_buffer)
+    }
+
+    /// Drain accumulated decode FPM snapshots since the last drain.
+    pub(in crate::replay) fn drain_decode_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
+        std::mem::take(&mut self.decode_fpm_buffer)
+    }
+
+    /// Drain accumulated traffic stats since the last drain.
+    pub(in crate::replay) fn drain_traffic(&mut self) -> TrafficStats {
+        self.traffic.drain(self.now_ms)
+    }
+
+    /// Apply a scaling decision with separate prefill and decode targets.
+    ///
+    /// Scale-up: if `startup_time` is configured on the respective engine args,
+    /// new workers enter a startup phase and a `WorkerReady` event is scheduled.
+    /// They become active (and are registered with the router) only when that
+    /// event fires.  Without `startup_time`, workers are available immediately.
+    ///
+    /// Scale-down: the worker is removed from the router immediately so no
+    /// new requests land on it while it drains in-flight work.
+    pub(in crate::replay) fn apply_scaling(
+        &mut self,
+        target_prefill: usize,
+        target_decode: usize,
+    ) -> Result<()> {
+        // -- prefill --
+        let (added, newly_marked) = self.prefill_engine.apply_target_count(target_prefill);
+        let prefill_delay = self.prefill_engine.startup_time_ms();
+        for &id in &added {
+            match prefill_delay {
+                Some(delay) => {
+                    push_worker_ready(
+                        &mut self.events,
+                        &mut self.next_event_seq,
+                        self.now_ms + delay,
+                        SimulationWorkerStage::Prefill,
+                        id,
+                    );
+                }
+                None => {
+                    if let Some(router) = self.prefill_router.as_mut() {
+                        router.add_worker(id)?;
+                    }
+                }
+            }
+        }
+        let prefill_admissions = if let Some(router) = self.prefill_router.as_mut() {
+            for id in newly_marked {
+                router.remove_worker(id)?;
+            }
+            router.on_topology_changed(self.now_ms)?.admissions
+        } else {
+            Vec::new()
+        };
+
+        // -- decode --
+        let (added, newly_marked) = self.decode_engine.apply_target_count(target_decode);
+        let decode_delay = self.decode_engine.startup_time_ms();
+        for &id in &added {
+            match decode_delay {
+                Some(delay) => {
+                    push_worker_ready(
+                        &mut self.events,
+                        &mut self.next_event_seq,
+                        self.now_ms + delay,
+                        SimulationWorkerStage::Decode,
+                        id,
+                    );
+                }
+                None => {
+                    if let Some(router) = self.decode_router.as_mut() {
+                        router.add_worker(id)?;
+                    }
+                }
+            }
+        }
+        let decode_admissions = if let Some(router) = self.decode_router.as_mut() {
+            for id in newly_marked {
+                router.remove_worker(id)?;
+            }
+            router.on_topology_changed(self.now_ms)?.admissions
+        } else {
+            Vec::new()
+        };
+        self.record_router_pending();
+        self.dispatch_prefill_admissions(prefill_admissions)?;
+        self.dispatch_decode_admissions(decode_admissions)?;
+        Ok(())
+    }
+
+    /// Finalize the replay and return the simulation report directly.
+    pub(in crate::replay) fn finalize_report(self) -> crate::replay::TraceSimulationReport {
+        self.progress.finish();
+        self.collector.finish()
     }
 
     /// Run the staged offline replay until both prefill and decode pipelines are drained.
@@ -748,6 +977,8 @@ fn derive_decode_router_config(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::super::entrypoints::{
         run_concurrency_collect, run_concurrency_workload_collect, run_trace_collect,
         run_trace_workload_collect,
@@ -816,9 +1047,40 @@ mod tests {
         config
     }
 
+    fn scaling_test_args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(512)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .decode_speedup_ratio(1.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    fn scaling_test_disagg_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: scaling_test_args(WorkerType::Prefill),
+            decode_args: scaling_test_args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(1.25),
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn planner_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
             ..KvRouterConfig::default()
         }
     }
@@ -1109,6 +1371,34 @@ mod tests {
         );
         assert!(queued_idx < enqueued_idx);
         assert!(delayed_stats.handoff_ms[&uuid] >= 120.0);
+    }
+
+    #[test]
+    fn test_apply_scaling_drains_prefill_router_pending_immediately() {
+        let config = scaling_test_disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            Some(planner_router_config()),
+            None,
+            VecDeque::from([request(1, 64, 8, 0.0), request(2, 64, 8, 0.0)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        runtime.advance_to(0.0).unwrap();
+        assert_eq!(
+            runtime.state(Uuid::from_u128(2)).unwrap().phase,
+            DisaggPhase::QueuedPrefill
+        );
+
+        runtime.apply_scaling(2, 1).unwrap();
+
+        assert_eq!(
+            runtime.state(Uuid::from_u128(2)).unwrap().phase,
+            DisaggPhase::RunningPrefill
+        );
+        assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
     }
 
     #[test]

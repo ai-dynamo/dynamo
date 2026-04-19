@@ -29,6 +29,7 @@ async def fetch_embeddings_from_encoder(
     request: Dict[str, Any],
     encode_client: Any,
     encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
+    trace_context=None,
 ) -> Union[List[torch.Tensor], DisaggregatedParams]:
     """
     Fetch embeddings from remote encode worker.
@@ -38,6 +39,7 @@ async def fetch_embeddings_from_encoder(
         request: Request dict (used for creating modified requests for caching)
         encode_client: Client to call remote encode worker
         encoder_cache: Optional cache for embeddings
+        trace_context: Optional Dynamo context for OTel trace propagation
 
     Returns:
         - List[torch.Tensor]: When using cache (CPU tensors from cache)
@@ -56,13 +58,19 @@ async def fetch_embeddings_from_encoder(
             request,
             encoder_cache,
             lambda req: _remote_encode_full_epd(
-                req, encode_client, update_request_for_decode=False
+                req,
+                encode_client,
+                update_request_for_decode=False,
+                trace_context=trace_context,
             ),
         )
     else:
         # No cache: return DisaggregatedParams directly (no GPU→CPU extraction)
         return await _remote_encode_full_epd(
-            request, encode_client, update_request_for_decode=True
+            request,
+            encode_client,
+            update_request_for_decode=True,
+            trace_context=trace_context,
         )
 
 
@@ -70,6 +78,7 @@ async def _remote_encode_full_epd(
     request: Dict[str, Any],
     encode_client: Any,
     update_request_for_decode: bool = True,
+    trace_context=None,
 ) -> DisaggregatedParams:
     """
     Call encode worker for full EPD flow.
@@ -78,6 +87,7 @@ async def _remote_encode_full_epd(
         request: Request dict
         encode_client: Client to call remote encode worker
         update_request_for_decode: If True, store EPD metadata in request
+        trace_context: Optional Dynamo context for OTel trace propagation
 
     Returns:
         DisaggregatedParams with multimodal_embedding_handles
@@ -86,7 +96,7 @@ async def _remote_encode_full_epd(
         RuntimeError: If encode worker returns invalid response
     """
     encode_response = None
-    async for res in await encode_client.round_robin(request):
+    async for res in await encode_client.round_robin(request, context=trace_context):
         encode_response = res.data()
         break
 
