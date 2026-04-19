@@ -115,12 +115,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="llava-1.5-7b",
         topologies={
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.gpu_4],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=340,
+                gpu_marker="gpu_4",
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.gpu_4],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=300,
+                gpu_marker="gpu_4",
             ),
         },
         request_payloads=[make_image_payload(["green"])],
