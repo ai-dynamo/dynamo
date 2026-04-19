@@ -1,0 +1,251 @@
+---
+source: lib/llm/tests/responses_replay.rs
+expression: redacted_events(&text)
+---
+[
+  {
+    "event": "response.created",
+    "data": {
+      "type": "response.created",
+      "sequence_number": 0,
+      "response": {
+        "background": false,
+        "created_at": 1000000000,
+        "id": "[ID]",
+        "max_output_tokens": 128,
+        "metadata": {},
+        "model": "harness-model",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "name": "list_files",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "strict": true,
+            "description": "List files at a path."
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled"
+      }
+    }
+  },
+  {
+    "event": "response.in_progress",
+    "data": {
+      "type": "response.in_progress",
+      "sequence_number": 1,
+      "response": {
+        "background": false,
+        "created_at": 1000000000,
+        "id": "[ID]",
+        "max_output_tokens": 128,
+        "metadata": {},
+        "model": "harness-model",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "name": "list_files",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "strict": true,
+            "description": "List files at a path."
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled"
+      }
+    }
+  },
+  {
+    "event": "response.output_item.added",
+    "data": {
+      "type": "response.output_item.added",
+      "sequence_number": 2,
+      "output_index": 0,
+      "item": {
+        "type": "function_call",
+        "arguments": "",
+        "call_id": "call_codex_fn",
+        "name": "list_files",
+        "id": "[ID]",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 3,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "delta": ""
+    }
+  },
+  {
+    "event": "response.function_call_arguments.done",
+    "data": {
+      "type": "response.function_call_arguments.done",
+      "name": "list_files",
+      "sequence_number": 4,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "arguments": ""
+    }
+  },
+  {
+    "event": "response.output_item.done",
+    "data": {
+      "type": "response.output_item.done",
+      "sequence_number": 5,
+      "output_index": 0,
+      "item": {
+        "type": "function_call",
+        "arguments": "",
+        "call_id": "call_codex_fn",
+        "name": "list_files",
+        "id": "[ID]",
+        "status": "completed"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 6,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "delta": "{\"path\""
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 7,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "delta": ":\"/tmp\"}"
+    }
+  },
+  {
+    "event": "response.completed",
+    "data": {
+      "type": "response.completed",
+      "sequence_number": 8,
+      "response": {
+        "background": false,
+        "created_at": 1000000000,
+        "completed_at": 1000000000,
+        "id": "[ID]",
+        "max_output_tokens": 128,
+        "metadata": {},
+        "model": "harness-model",
+        "object": "response",
+        "output": [
+          {
+            "type": "function_call",
+            "arguments": "{\"path\":\"/tmp\"}",
+            "call_id": "call_codex_fn",
+            "name": "list_files",
+            "id": "[ID]",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "service_tier": "auto",
+        "status": "completed",
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "name": "list_files",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "strict": true,
+            "description": "List files at a path."
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 30,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 14,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 44
+        }
+      }
+    }
+  },
+  {
+    "event": "",
+    "data": "[DONE]"
+  }
+]

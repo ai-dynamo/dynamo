@@ -1,0 +1,8 @@
+// Stop-sequence termination. Backend returns finish_reason=stop with a
+// stop_reason annotation the Anthropic converter must surface as
+// stop_reason="stop_sequence" in message_delta.
+{"id":"chatcmpl-harness-stop","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-stop","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"line one"}}]}
+{"id":"chatcmpl-harness-stop","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"\n###END"}}]}
+{"id":"chatcmpl-harness-stop","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"chatcmpl-harness-stop","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18}}

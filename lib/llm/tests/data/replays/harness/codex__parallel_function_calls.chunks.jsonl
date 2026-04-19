@@ -1,0 +1,7 @@
+// Two parallel function_calls — tests output_item ordering and index
+// stability across emitted Responses events.
+{"id":"chatcmpl-harness-codex-parallel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-codex-parallel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_p0","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/a\"}"}}]}}]}
+{"id":"chatcmpl-harness-codex-parallel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_p1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/b\"}"}}]}}]}
+{"id":"chatcmpl-harness-codex-parallel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"chatcmpl-harness-codex-parallel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":40,"completion_tokens":22,"total_tokens":62}}

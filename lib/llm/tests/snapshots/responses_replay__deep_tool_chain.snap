@@ -1,0 +1,439 @@
+---
+source: lib/llm/tests/responses_replay.rs
+expression: redacted_events(&text)
+---
+[
+  {
+    "event": "response.created",
+    "data": {
+      "type": "response.created",
+      "sequence_number": 0,
+      "response": {
+        "background": false,
+        "created_at": 1000000000,
+        "id": "[ID]",
+        "max_output_tokens": 256,
+        "metadata": {},
+        "model": "harness-model",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "name": "ls",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          },
+          {
+            "type": "function",
+            "name": "grep",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "pattern": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          },
+          {
+            "type": "function",
+            "name": "git_diff",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled"
+      }
+    }
+  },
+  {
+    "event": "response.in_progress",
+    "data": {
+      "type": "response.in_progress",
+      "sequence_number": 1,
+      "response": {
+        "background": false,
+        "created_at": 1000000000,
+        "id": "[ID]",
+        "max_output_tokens": 256,
+        "metadata": {},
+        "model": "harness-model",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "name": "ls",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          },
+          {
+            "type": "function",
+            "name": "grep",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "pattern": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          },
+          {
+            "type": "function",
+            "name": "git_diff",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled"
+      }
+    }
+  },
+  {
+    "event": "response.output_item.added",
+    "data": {
+      "type": "response.output_item.added",
+      "sequence_number": 2,
+      "output_index": 0,
+      "item": {
+        "type": "function_call",
+        "arguments": "",
+        "call_id": "call_deep0",
+        "name": "ls",
+        "id": "[ID]",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 3,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "delta": ""
+    }
+  },
+  {
+    "event": "response.function_call_arguments.done",
+    "data": {
+      "type": "response.function_call_arguments.done",
+      "name": "ls",
+      "sequence_number": 4,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "arguments": ""
+    }
+  },
+  {
+    "event": "response.output_item.done",
+    "data": {
+      "type": "response.output_item.done",
+      "sequence_number": 5,
+      "output_index": 0,
+      "item": {
+        "type": "function_call",
+        "arguments": "",
+        "call_id": "call_deep0",
+        "name": "ls",
+        "id": "[ID]",
+        "status": "completed"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 6,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "delta": "{\"path\":\"/src\"}"
+    }
+  },
+  {
+    "event": "response.output_item.added",
+    "data": {
+      "type": "response.output_item.added",
+      "sequence_number": 7,
+      "output_index": 1,
+      "item": {
+        "type": "function_call",
+        "arguments": "",
+        "call_id": "call_deep1",
+        "name": "grep",
+        "id": "[ID]",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 8,
+      "item_id": "[ID]",
+      "output_index": 1,
+      "delta": "{\"pat"
+    }
+  },
+  {
+    "event": "response.function_call_arguments.done",
+    "data": {
+      "type": "response.function_call_arguments.done",
+      "name": "grep",
+      "sequence_number": 9,
+      "item_id": "[ID]",
+      "output_index": 1,
+      "arguments": "{\"pat"
+    }
+  },
+  {
+    "event": "response.output_item.done",
+    "data": {
+      "type": "response.output_item.done",
+      "sequence_number": 10,
+      "output_index": 1,
+      "item": {
+        "type": "function_call",
+        "arguments": "{\"pat",
+        "call_id": "call_deep1",
+        "name": "grep",
+        "id": "[ID]",
+        "status": "completed"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 11,
+      "item_id": "[ID]",
+      "output_index": 1,
+      "delta": "tern\":\"TODO\"}"
+    }
+  },
+  {
+    "event": "response.output_item.added",
+    "data": {
+      "type": "response.output_item.added",
+      "sequence_number": 12,
+      "output_index": 2,
+      "item": {
+        "type": "function_call",
+        "arguments": "",
+        "call_id": "call_deep2",
+        "name": "git_diff",
+        "id": "[ID]",
+        "status": "in_progress"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 13,
+      "item_id": "[ID]",
+      "output_index": 2,
+      "delta": "{\"branch\":\"main\"}"
+    }
+  },
+  {
+    "event": "response.function_call_arguments.done",
+    "data": {
+      "type": "response.function_call_arguments.done",
+      "name": "git_diff",
+      "sequence_number": 14,
+      "item_id": "[ID]",
+      "output_index": 2,
+      "arguments": "{\"branch\":\"main\"}"
+    }
+  },
+  {
+    "event": "response.output_item.done",
+    "data": {
+      "type": "response.output_item.done",
+      "sequence_number": 15,
+      "output_index": 2,
+      "item": {
+        "type": "function_call",
+        "arguments": "{\"branch\":\"main\"}",
+        "call_id": "call_deep2",
+        "name": "git_diff",
+        "id": "[ID]",
+        "status": "completed"
+      }
+    }
+  },
+  {
+    "event": "response.completed",
+    "data": {
+      "type": "response.completed",
+      "sequence_number": 16,
+      "response": {
+        "background": false,
+        "created_at": 1000000000,
+        "completed_at": 1000000000,
+        "id": "[ID]",
+        "max_output_tokens": 256,
+        "metadata": {},
+        "model": "harness-model",
+        "object": "response",
+        "output": [
+          {
+            "type": "function_call",
+            "arguments": "{\"path\":\"/src\"}",
+            "call_id": "call_deep0",
+            "name": "ls",
+            "id": "[ID]",
+            "status": "completed"
+          },
+          {
+            "type": "function_call",
+            "arguments": "{\"pattern\":\"TODO\"}",
+            "call_id": "call_deep1",
+            "name": "grep",
+            "id": "[ID]",
+            "status": "completed"
+          },
+          {
+            "type": "function_call",
+            "arguments": "{\"branch\":\"main\"}",
+            "call_id": "call_deep2",
+            "name": "git_diff",
+            "id": "[ID]",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "service_tier": "auto",
+        "status": "completed",
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "function",
+            "name": "ls",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          },
+          {
+            "type": "function",
+            "name": "grep",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "pattern": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          },
+          {
+            "type": "function",
+            "name": "git_diff",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": true
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 55,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 40,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 95
+        }
+      }
+    }
+  },
+  {
+    "event": "",
+    "data": "[DONE]"
+  }
+]

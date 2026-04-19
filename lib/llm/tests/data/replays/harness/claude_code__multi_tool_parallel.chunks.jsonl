@@ -1,0 +1,7 @@
+// Two parallel tool_calls in a single assistant turn. The converter must
+// produce two content_block_start events with the correct indices.
+{"id":"chatcmpl-harness-multi","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-multi","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_first","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]}}]}
+{"id":"chatcmpl-harness-multi","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_second","type":"function","function":{"name":"get_time","arguments":"{\"tz\":\"UTC\"}"}}]}}]}
+{"id":"chatcmpl-harness-multi","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"chatcmpl-harness-multi","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":22,"total_tokens":72}}

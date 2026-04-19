@@ -1,0 +1,11 @@
+// Deep tool-chain: three sequential tool_calls in a single assistant turn
+// with long streamed arguments. Exercises the Responses converter's
+// ability to re-synchronise output_item indices over many frames.
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_deep0","type":"function","function":{"name":"ls","arguments":""}}]}}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"/src\"}"}}]}}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_deep1","type":"function","function":{"name":"grep","arguments":"{\"pat"}}]}}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"tern\":\"TODO\"}"}}]}}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call_deep2","type":"function","function":{"name":"git_diff","arguments":"{\"branch\":\"main\"}"}}]}}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"chatcmpl-harness-codex-deep","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":55,"completion_tokens":40,"total_tokens":95}}

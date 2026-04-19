@@ -1,0 +1,8 @@
+// Follow-up turn — request carries a prior tool_result block; response
+// is a short synthesised answer. The replay is just the second-turn
+// assistant output.
+{"id":"chatcmpl-harness-multiturn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-multiturn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"Paris is 14"}}]}
+{"id":"chatcmpl-harness-multiturn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"\u00b0C and clear."}}]}
+{"id":"chatcmpl-harness-multiturn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"chatcmpl-harness-multiturn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":85,"completion_tokens":6,"total_tokens":91}}

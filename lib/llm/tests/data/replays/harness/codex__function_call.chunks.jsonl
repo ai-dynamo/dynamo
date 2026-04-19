@@ -1,0 +1,8 @@
+// Single function_call — the Responses converter must emit
+// response.function_call_arguments.delta frames.
+{"id":"chatcmpl-harness-codex-fn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-codex-fn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_codex_fn","type":"function","function":{"name":"list_files","arguments":""}}]}}]}
+{"id":"chatcmpl-harness-codex-fn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\""}}]}}]}
+{"id":"chatcmpl-harness-codex-fn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"/tmp\"}"}}]}}]}
+{"id":"chatcmpl-harness-codex-fn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"chatcmpl-harness-codex-fn","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":30,"completion_tokens":14,"total_tokens":44}}
