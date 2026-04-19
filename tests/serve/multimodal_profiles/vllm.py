@@ -103,18 +103,26 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=300,
                 profiled_vram_gib=12.0,
             ),
-            "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=340,
-                single_gpu=True,
-            ),
-            "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=300,
-                single_gpu=True,
-            ),
         },
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
+        gated=True,
+    ),
+    # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
+    # We may use less GPUs by squeezing the model onto 2 GPUs.
+    MultimodalModelProfile(
+        name="llava-hf/llava-1.5-7b-hf",
+        short_name="llava-1.5-7b",
+        topologies={
+            "e_pd": TopologyConfig(
+                marks=[pytest.mark.pre_merge, pytest.mark.gpu_4],
+                timeout_s=340,
+            ),
+            "epd": TopologyConfig(
+                marks=[pytest.mark.pre_merge, pytest.mark.gpu_4],
+                timeout_s=300,
+            ),
+        },
+        request_payloads=[make_image_payload(["green"])],
     ),
 ]
