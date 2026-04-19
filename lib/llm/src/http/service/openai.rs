@@ -1160,6 +1160,10 @@ async fn chat_completions(
     let streaming = request.inner.stream.unwrap_or(false);
 
     // Apply template values first to resolve the model before creating metrics guards
+    // Default max_completion_tokens to avoid backend-specific low defaults (e.g. TRT-LLM's 32).
+    // The Responses API already has this fallback; adding parity for Chat Completions.
+    const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 4096;
+
     if let Some(template) = template {
         if request.inner.model.is_empty() {
             request.inner.model = template.model.clone();
@@ -1170,6 +1174,14 @@ async fn chat_completions(
         if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
+    }
+
+    // When no template is configured and the client omitted both max_completion_tokens
+    // and the deprecated max_tokens, apply a sensible default so backends like TRT-LLM
+    // don't silently cap output at their internal default (32 tokens).
+    #[allow(deprecated)]
+    if request.inner.max_completion_tokens.is_none() && request.inner.max_tokens.is_none() {
+        request.inner.max_completion_tokens = Some(DEFAULT_MAX_COMPLETION_TOKENS);
     }
 
     // Capture the resolved model after template application for metrics and engine lookup
