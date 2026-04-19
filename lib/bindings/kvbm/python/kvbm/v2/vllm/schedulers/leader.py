@@ -275,13 +275,18 @@ class SchedulerConnectorLeader:
             all_token_ids = [int(token) for token in request.all_token_ids]
 
         # vLLM carries connector-specific transfer params as a
-        # dict[str, Any] | None on the Request. Serialize to JSON here so the
-        # Rust side receives a well-defined payload. json.dumps will raise
-        # TypeError on unserializable values — we deliberately let that
-        # propagate so the misconfiguration is loud.
-        kv_transfer_params = getattr(request, "kv_transfer_params", None)
+        # dict[str, Any] | None on the Request. Access the attribute
+        # directly so a future vLLM rename surfaces as AttributeError
+        # rather than silently masking the regression. Serialize with
+        # allow_nan=False so NaN / Infinity raise ValueError on this
+        # side instead of producing a payload serde_json will reject
+        # with a less informative error; TypeError on unserializable
+        # values likewise propagates unchanged.
+        kv_transfer_params = request.kv_transfer_params
         kv_transfer_params_json = (
-            json.dumps(kv_transfer_params) if kv_transfer_params is not None else None
+            json.dumps(kv_transfer_params, allow_nan=False)
+            if kv_transfer_params is not None
+            else None
         )
 
         kv_request = KvbmRequest(

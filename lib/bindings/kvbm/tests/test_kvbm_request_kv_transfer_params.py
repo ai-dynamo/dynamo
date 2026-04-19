@@ -127,9 +127,11 @@ class TestAdversarialJson:
 class TestAdversarialPython:
     """
     The Python side of the contract is that callers serialize with
-    ``json.dumps`` before handing the string to the shim. These tests pin
-    that the loud failure mode (TypeError from json.dumps) happens in
-    Python as expected for values that are not JSON-serializable.
+    ``json.dumps(..., allow_nan=False)`` before handing the string to the
+    shim. These tests pin the two loud failure modes: TypeError for
+    values that are not JSON-serializable at all, and ValueError for
+    non-finite floats under strict mode (which serde_json on the Rust
+    side also rejects).
     """
 
     @pytest.mark.parametrize(
@@ -142,7 +144,20 @@ class TestAdversarialPython:
     )
     def test_json_dumps_raises_on_unserializable(self, unserializable):
         with pytest.raises(TypeError):
-            json.dumps(unserializable)
+            json.dumps(unserializable, allow_nan=False)
+
+    @pytest.mark.parametrize(
+        "non_finite",
+        [
+            {"bad": float("nan")},
+            {"bad": float("inf")},
+            {"bad": float("-inf")},
+            {"nested": [1.0, float("nan"), 2.0]},
+        ],
+    )
+    def test_json_dumps_rejects_non_finite_floats_in_strict_mode(self, non_finite):
+        with pytest.raises(ValueError):
+            json.dumps(non_finite, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------
