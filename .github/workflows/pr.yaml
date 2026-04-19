@@ -578,6 +578,7 @@ jobs:
     runs-on: prod-default-small-v2
     if: always()
     needs:
+      - changed-files 
       - sglang-build
     steps:
       - name: Checkout repository
