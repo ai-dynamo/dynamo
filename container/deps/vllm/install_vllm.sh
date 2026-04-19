@@ -287,13 +287,13 @@ fi
 # Override at build time:  --build-arg PRIME_RL_REF=v0.5.1.dev101
 # --no-deps: prime-rl's full dep tree includes trainer + wandb; Dynamo only
 #            needs the inference-side plugin and worker-extension classes.
-# --ignore-requires-python: prime-rl pins 3.12; harmless for the inference
-#            modules which are 3.11-compatible (Dynamo containers use 3.12
-#            anyway so this is a no-op there).
+# Python version: prime-rl pins requires-python = "~=3.12.0"; Dynamo containers
+#            are Python 3.12, so no version override is needed. For 3.11 local
+#            dev venvs use the regular pip (not uv) with --ignore-requires-python.
 # ---------------------------------------------------------------------------
 PRIME_RL_REF="${PRIME_RL_REF:-v0.5.1.dev101}"
 echo "\n=== Installing prime-rl vLLM plugin (ref=${PRIME_RL_REF}) ==="
-uv pip install --no-deps --ignore-requires-python \
+uv pip install --no-deps \
     "prime-rl @ git+https://github.com/PrimeIntellect-ai/prime-rl@${PRIME_RL_REF}"
 
 # Sanity-check: confirm vllm.general_plugins entry-point is registered.
