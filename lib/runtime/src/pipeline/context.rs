@@ -387,7 +387,14 @@ impl AsyncEngineContext for Controller {
             child.stop_generating();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        // Do not regress from Killed to Stopped — Killed is terminal
+        self.tx.send_if_modified(|state| {
+            if *state == State::Killed {
+                return false;
+            }
+            *state = State::Stopped;
+            true
+        });
     }
 
     fn stop(&self) {
@@ -403,7 +410,14 @@ impl AsyncEngineContext for Controller {
             child.stop();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        // Do not regress from Killed to Stopped — Killed is terminal
+        self.tx.send_if_modified(|state| {
+            if *state == State::Killed {
+                return false;
+            }
+            *state = State::Stopped;
+            true
+        });
     }
 
     fn kill(&self) {
@@ -513,5 +527,51 @@ mod tests {
         let ctx: Context<Final> = ctx.into_context();
 
         assert_eq!(ctx.current.message, "Processed length: 5");
+    }
+
+    #[test]
+    fn test_kill_is_terminal() {
+        // Once a controller is killed, stop_generating/stop must not
+        // regress its state back to Stopped.
+        let controller = Controller::default();
+
+        controller.kill();
+        assert!(controller.is_killed());
+
+        // This should not regress from Killed to Stopped
+        controller.stop_generating();
+        assert!(
+            controller.is_killed(),
+            "stop_generating() after kill() should not regress state from Killed to Stopped"
+        );
+
+        // Same for stop()
+        controller.stop();
+        assert!(
+            controller.is_killed(),
+            "stop() after kill() should not regress state from Killed to Stopped"
+        );
+    }
+
+    #[test]
+    fn test_kill_child_not_regressed_by_parent_stop() {
+        // If a child is killed independently, a parent's stop_generating()
+        // must not regress the child back to Stopped.
+        let parent = Controller::default();
+        let child = Arc::new(Controller::default());
+
+        parent.link_child(child.clone());
+
+        // Child is killed independently
+        child.kill();
+        assert!(child.is_killed());
+
+        // Parent stops — should not regress the killed child
+        parent.stop_generating();
+        assert!(parent.is_stopped());
+        assert!(
+            child.is_killed(),
+            "parent stop_generating() should not regress a killed child back to Stopped"
+        );
     }
 }
