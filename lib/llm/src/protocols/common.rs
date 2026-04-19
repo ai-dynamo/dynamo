@@ -22,6 +22,94 @@ use super::TokenIdType;
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
+// The byte-length and JSON-depth caps below bound pathological guided-decoding
+// inputs that can otherwise drive unbounded recursion / runaway parsing in the
+// downstream guided decoding backend (notably `xgrammar`, the default for
+// vLLM, SGLang, and TRT-LLM workers). All three workers consume
+// `sampling_options.guided_decoding` after `GuidedDecodingOptions::validate()`
+// runs on the OpenAI ingest path, so this single validator is the choke point
+// for every worker. Do not bypass for guided-decoding inputs.
+//
+// Note: `structural_tag` is not a field on this Rust struct (only Python's
+// trtllm handler reads it from a dict, and it is always `None` over HTTP),
+// so it is unreachable from the public OpenAI surface today.
+//
+// Defaults are deliberately generous; they exist to bound pathological inputs,
+// not to gate normal traffic. Revisit only if production telemetry shows false
+// positives.
+
+/// Maximum byte length of a `guided_grammar` EBNF string.
+const MAX_GRAMMAR_BYTE_LENGTH: usize = 64 * 1024; // 64 KiB
+
+/// Maximum byte length of a `guided_regex` pattern.
+const MAX_REGEX_BYTE_LENGTH: usize = 32 * 1024; // 32 KiB
+
+/// Maximum byte length of a `guided_whitespace_pattern` regex.
+const MAX_WHITESPACE_PATTERN_BYTE_LENGTH: usize = 1024; // 1 KiB
+
+/// Maximum serialized byte length of a `guided_json` schema.
+const MAX_JSON_SCHEMA_BYTE_LENGTH: usize = 256 * 1024; // 256 KiB
+
+/// Maximum JSON nesting depth of a `guided_json` schema.
+/// Matches common JSON-schema validator defaults (e.g. ajv's default of 64).
+const MAX_JSON_SCHEMA_NESTING_DEPTH: usize = 64;
+
+/// `std::io::Write` adapter that counts bytes and short-circuits once `limit`
+/// is exceeded. Returning `Err` from `write` causes `serde_json::to_writer` to
+/// stop walking the value, so a pathological multi-MB schema costs O(limit)
+/// rather than O(input) to reject.
+struct CountingWriter {
+    count: usize,
+    limit: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.count = self.count.saturating_add(buf.len());
+        if self.count > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "guided_json byte length limit exceeded",
+            ));
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Returns true if `v` contains an object/array nested deeper than `max_depth`.
+///
+/// Iterative early-return walker so worst-case cost is O(visited_until_breach)
+/// rather than O(nodes); a wide-flat schema bails out at the first over-depth
+/// child instead of fully traversing the structure.
+fn json_exceeds_nesting_depth(v: &serde_json::Value, max_depth: usize) -> bool {
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(v, 1)];
+    while let Some((cur, d)) = stack.pop() {
+        match cur {
+            serde_json::Value::Object(m) => {
+                if d > max_depth {
+                    return true;
+                }
+                for (_, child) in m {
+                    stack.push((child, d + 1));
+                }
+            }
+            serde_json::Value::Array(a) => {
+                if d > max_depth {
+                    return true;
+                }
+                for child in a {
+                    stack.push((child, d + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub mod llm_backend;
 pub mod postprocessor;
 pub mod preprocessor;
@@ -370,7 +458,11 @@ pub struct GuidedDecodingOptions {
 }
 
 impl GuidedDecodingOptions {
-    /// Construct without validation
+    /// Construct without validation. Bypasses the byte/depth caps enforced by
+    /// [`Self::validate`]; only safe for upstream-validated data (e.g.
+    /// `migration.rs` re-wrapping a previously validated request). Public
+    /// callers building from external input should use [`Self::validated`] or
+    /// [`Self::from_optional`].
     pub fn new(
         json: Option<serde_json::Value>,
         regex: Option<String>,
@@ -441,12 +533,18 @@ impl GuidedDecodingOptions {
 
         if count > 1 {
             return Err(anyhow::anyhow!(
-                "Only one of json, regex, choice, or grammar can be set, but multiple are specified: {:?}",
-                self
+                "Only one of json, regex, choice, or grammar can be set, but multiple are specified"
             ));
         }
 
         if let Some(ref grammar) = self.grammar {
+            if grammar.len() > MAX_GRAMMAR_BYTE_LENGTH {
+                return Err(anyhow::anyhow!(
+                    "guided_grammar exceeds maximum byte length of {} (got {})",
+                    MAX_GRAMMAR_BYTE_LENGTH,
+                    grammar.len()
+                ));
+            }
             // NOTE: This intentionally scans raw bytes without tracking quoted
             // regions. Delimiters inside quoted terminals (e.g. "(") are counted
             // but balanced quotes contribute net-zero depth, and the 500 limit is
@@ -473,6 +571,63 @@ impl GuidedDecodingOptions {
                     "guided_grammar exceeds maximum nesting depth of {} (got {})",
                     MAX_GRAMMAR_NESTING_DEPTH,
                     max
+                ));
+            }
+        }
+
+        if let Some(ref regex) = self.regex
+            && regex.len() > MAX_REGEX_BYTE_LENGTH
+        {
+            return Err(anyhow::anyhow!(
+                "guided_regex exceeds maximum byte length of {} (got {})",
+                MAX_REGEX_BYTE_LENGTH,
+                regex.len()
+            ));
+        }
+
+        if let Some(ref ws) = self.whitespace_pattern
+            && ws.len() > MAX_WHITESPACE_PATTERN_BYTE_LENGTH
+        {
+            return Err(anyhow::anyhow!(
+                "guided_whitespace_pattern exceeds maximum byte length of {} (got {})",
+                MAX_WHITESPACE_PATTERN_BYTE_LENGTH,
+                ws.len()
+            ));
+        }
+
+        if let Some(ref json) = self.json {
+            let mut counter = CountingWriter {
+                count: 0,
+                limit: MAX_JSON_SCHEMA_BYTE_LENGTH,
+            };
+            // CountingWriter returns Err once the byte cap is exceeded, which
+            // short-circuits serde_json::to_writer for pathological payloads.
+            // Any other error from to_writer would be a Serialize impl panic,
+            // which serde_json::Value cannot trigger.
+            if let Err(e) = serde_json::to_writer(&mut counter, json) {
+                if counter.count > MAX_JSON_SCHEMA_BYTE_LENGTH {
+                    return Err(anyhow::anyhow!(
+                        "guided_json schema exceeds maximum byte length of {} (got at least {})",
+                        MAX_JSON_SCHEMA_BYTE_LENGTH,
+                        counter.count
+                    ));
+                }
+                return Err(anyhow::anyhow!(
+                    "failed to measure guided_json schema length: {}",
+                    e
+                ));
+            }
+            if counter.count > MAX_JSON_SCHEMA_BYTE_LENGTH {
+                return Err(anyhow::anyhow!(
+                    "guided_json schema exceeds maximum byte length of {} (got {})",
+                    MAX_JSON_SCHEMA_BYTE_LENGTH,
+                    counter.count
+                ));
+            }
+            if json_exceeds_nesting_depth(json, MAX_JSON_SCHEMA_NESTING_DEPTH) {
+                return Err(anyhow::anyhow!(
+                    "guided_json schema exceeds maximum nesting depth of {}",
+                    MAX_JSON_SCHEMA_NESTING_DEPTH
                 ));
             }
         }
@@ -891,6 +1046,98 @@ mod tests {
     fn test_guided_grammar_acceptable_nesting_ok() {
         let grammar = "(".repeat(500) + "a" + &")".repeat(500);
         let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_guided_grammar_byte_length_rejected() {
+        let grammar = "a".repeat(MAX_GRAMMAR_BYTE_LENGTH + 1);
+        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("byte length"));
+    }
+
+    #[test]
+    fn test_guided_grammar_byte_length_at_limit_accepted() {
+        let grammar = "a".repeat(MAX_GRAMMAR_BYTE_LENGTH);
+        let result = GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_guided_regex_byte_length_rejected() {
+        let regex = "a".repeat(MAX_REGEX_BYTE_LENGTH + 1);
+        let result = GuidedDecodingOptions::validated(None, Some(regex), None, None, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("byte length"));
+    }
+
+    #[test]
+    fn test_guided_regex_byte_length_at_limit_accepted() {
+        let regex = "a".repeat(MAX_REGEX_BYTE_LENGTH);
+        let result = GuidedDecodingOptions::validated(None, Some(regex), None, None, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_guided_whitespace_pattern_byte_length_rejected() {
+        let ws = " ".repeat(MAX_WHITESPACE_PATTERN_BYTE_LENGTH + 1);
+        let result = GuidedDecodingOptions::validated(None, None, None, None, None, Some(ws));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("byte length"));
+    }
+
+    #[test]
+    fn test_guided_whitespace_pattern_byte_length_at_limit_accepted() {
+        let ws = " ".repeat(MAX_WHITESPACE_PATTERN_BYTE_LENGTH);
+        let result = GuidedDecodingOptions::validated(None, None, None, None, None, Some(ws));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_guided_json_byte_length_rejected() {
+        // A JSON string of (LIMIT+1) `a`s serializes to LIMIT+3 bytes (two
+        // surrounding quotes), which trips the byte-length cap before any
+        // depth check.
+        let big_string = "a".repeat(MAX_JSON_SCHEMA_BYTE_LENGTH + 1);
+        let json = serde_json::Value::String(big_string);
+        let result = GuidedDecodingOptions::validated(Some(json), None, None, None, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("byte length"));
+    }
+
+    #[test]
+    fn test_guided_json_byte_length_at_limit_accepted() {
+        // (LIMIT-2) `a`s plus the two surrounding JSON-string quotes serialize
+        // to exactly MAX_JSON_SCHEMA_BYTE_LENGTH bytes — at the limit, accepted.
+        let s = "a".repeat(MAX_JSON_SCHEMA_BYTE_LENGTH - 2);
+        let json = serde_json::Value::String(s);
+        let result = GuidedDecodingOptions::validated(Some(json), None, None, None, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_guided_json_nesting_depth_rejected() {
+        // Build a chain of `MAX_JSON_SCHEMA_NESTING_DEPTH + 1` nested objects,
+        // each `{"a": ...}`. The serialized form stays well under the byte cap.
+        let mut value = serde_json::json!({});
+        for _ in 0..(MAX_JSON_SCHEMA_NESTING_DEPTH + 1) {
+            value = serde_json::json!({ "a": value });
+        }
+        let result = GuidedDecodingOptions::validated(Some(value), None, None, None, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nesting depth"));
+    }
+
+    #[test]
+    fn test_guided_json_nesting_depth_at_limit_accepted() {
+        // Exactly MAX_JSON_SCHEMA_NESTING_DEPTH container levels around a
+        // scalar leaf — at the limit, accepted (depth counts containers only).
+        let mut value = serde_json::json!("leaf");
+        for _ in 0..MAX_JSON_SCHEMA_NESTING_DEPTH {
+            value = serde_json::json!({ "a": value });
+        }
+        let result = GuidedDecodingOptions::validated(Some(value), None, None, None, None, None);
         assert!(result.is_ok());
     }
 }
