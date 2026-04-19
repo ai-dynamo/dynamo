@@ -90,17 +90,17 @@ jobs:
       image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:d5c0140bf2d5bd8cd57417ad2a4e3862ec7c56f0-sglang-runtime-cuda12-test
     permissions:
       contents: read
-    # services:
-    #   minio:
-    #     image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
-    #     env:
-    #       MINIO_ROOT_USER: minioadmin
-    #       MINIO_ROOT_PASSWORD: minioadmin
-    #       MINIO_VOLUMES: /data
-    #       MINIO_CONSOLE_ADDRESS: ':9001'
-    #     ports:
-    #       - 9000:9000
-          # - 9001:9001
+    services:
+      minio:
+        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /data
+          MINIO_CONSOLE_ADDRESS: ':9001'
+        ports:
+          - 9000:9000
+          - 9001:9001
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
