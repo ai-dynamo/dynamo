@@ -22,6 +22,7 @@ inputs:
     required: false
     default: 'false'
   hf_token:
+    description: 'Hugging Face access token passed through as HF_TOKEN for model downloads.'
     required: false
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
@@ -55,7 +56,6 @@ runs:
       shell: bash
       env:
         PYTEST_XML_FILE: pytest_test_report.xml
-        HF_HOME: /runner/_work/_temp
         HF_TOKEN: ${{ inputs.hf_token }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
@@ -70,6 +70,16 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
+        # Point caches at a writable in-container path. The host-runner path
+        # /runner/_work/_temp is not writable by the container uid, which made
+        # HF downloads and flashinfer's /.cache init fail with EACCES.
+        CACHE_ROOT="/tmp/dynamo-test-cache"
+        mkdir -p "${CACHE_ROOT}/hf" "${CACHE_ROOT}/xdg"
+        export HF_HOME="${CACHE_ROOT}/hf"
+        export XDG_CACHE_HOME="${CACHE_ROOT}/xdg"
+        echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
+        echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
+
         CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
         if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
           echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
@@ -83,7 +93,9 @@ runs:
         else
           echo "🚀 Running pytest in normal mode"
 
-          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+          # nvidia-smi isn't installed in the test image, so probe the device
+          # files the NVIDIA container runtime mounts in when --gpus is set.
+          if [[ -e /dev/nvidiactl ]] || compgen -G "/dev/nvidia[0-9]*" > /dev/null; then
             echo "✓ GPU detected"
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
