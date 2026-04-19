@@ -273,6 +273,7 @@ markers = [
     "deploy: marks tests as deployment tests",
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
+    "mla: marks tests for Multi-Latent Attention (MLA) model validation",
     # Built-in markers
     "skip: skip this test",
     "skipif: skip if condition is true",
