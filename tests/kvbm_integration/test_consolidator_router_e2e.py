@@ -43,6 +43,8 @@ if HAS_TRTLLM:
 # Test markers
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.vllm,
+    pytest.mark.trtllm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
