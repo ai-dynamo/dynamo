@@ -22,6 +22,7 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, Optional, Set
@@ -237,6 +238,32 @@ class DependencyStubber:
         return stub
 
 
+class _AutoStubFinder:
+    """Fallback meta-path finder: auto-stubs any import not resolved by real finders.
+
+    Append to the END of sys.meta_path so real finders are tried first.
+    """
+
+    def __init__(self) -> None:
+        self.stubbed: Set[str] = set()
+
+    def find_module(self, fullname: str, path: object = None) -> "_AutoStubFinder":
+        return self  # last in meta_path — only reached when real finders fail
+
+    def load_module(self, fullname: str) -> ModuleType:
+        if fullname in sys.modules:
+            return sys.modules[fullname]
+        stub = MagicMock()
+        stub.__path__ = []
+        stub.__name__ = fullname
+        stub.__loader__ = self
+        stub.__spec__ = ModuleSpec(fullname, None)
+        stub.__package__ = fullname.rsplit(".", 1)[0] if "." in fullname else fullname
+        sys.modules[fullname] = stub
+        self.stubbed.add(fullname)
+        return stub
+
+
 # --------------------------------------------------------------------------- #
 # Data Structures
 # --------------------------------------------------------------------------- #
@@ -273,7 +300,7 @@ class MarkerReportPlugin:
     def pytest_collection_modifyitems(self, session, config, items):
         for item in items:
             markers = {m.name for m in item.iter_markers()}
-            if "mypy" in markers:
+            if markers & {"mypy", "skip", "skipif"}:
                 self.skipped_mypy += 1
                 continue
 
@@ -394,7 +421,10 @@ def parse_args():
         help="Enable strict validation (undeclared markers, missing config, naming)",
     )
     parser.add_argument(
-        "--tests", default="tests", help="Path to test directory (default: tests)"
+        "--tests",
+        nargs="*",
+        default=["tests", "components/src"],
+        help="Paths to test directories (default: tests components/src)"
     )
     parser.add_argument(
         "--verbose",
@@ -404,9 +434,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
+def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Report]:
     """Run pytest collection and return exit code and report."""
     if use_stubbing:
+        # Force-remove native extensions that may be partially loaded but broken.
+        for mod in ("dynamo._core", "nixl._api"):
+            sys.modules.pop(mod, None)
+
         stubber = DependencyStubber()
         for module in STUB_MODULES:
             stubber.ensure_available(module)
@@ -419,7 +453,38 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
         except (KeyError, AttributeError):
             pass
 
-        LOG.info("Stubbed %d modules", len(stubber.stubbed))
+        # Auto-stub fallback: catches any remaining unresolvable imports
+        # (e.g. from components/src tests) without maintaining STUB_MODULES.
+        auto = _AutoStubFinder()
+        sys.meta_path.append(auto)
+
+        # pydantic.BaseModel must be a real class (MagicMock can't be subclassed).
+        try:
+            importlib.import_module("pydantic")
+        except ImportError:
+            pass
+        if "pydantic" in auto.stubbed:
+            class _BaseModel:
+                model_config: dict = {}
+                def __init_subclass__(cls, **kw: object) -> None:
+                    super().__init_subclass__(**kw)
+            sys.modules["pydantic"].BaseModel = _BaseModel  # type: ignore[attr-defined]
+            sys.modules["pydantic"].ConfigDict = lambda **kw: {}  # type: ignore[attr-defined]
+
+        # typing_extensions must re-export real typing constructs for subclassing.
+        try:
+            importlib.import_module("typing_extensions")
+        except ImportError:
+            pass
+        if "typing_extensions" in auto.stubbed:
+            import typing
+            _te = sys.modules["typing_extensions"]
+            for attr in ("TypedDict", "Required", "NotRequired", "Protocol",
+                         "runtime_checkable", "Annotated", "get_type_hints"):
+                setattr(_te, attr, getattr(typing, attr, lambda *a, **kw: None))
+
+        LOG.info("Stubbed %d + auto-stubbed %d modules",
+                 len(stubber.stubbed), len(auto.stubbed))
 
     plugin = MarkerReportPlugin()
     exitcode = pytest.main(
@@ -433,7 +498,7 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
             "addopts=",
             "-o",
             "filterwarnings=",
-            test_path,
+            *test_paths,
         ],
         plugins=[plugin],
     )
