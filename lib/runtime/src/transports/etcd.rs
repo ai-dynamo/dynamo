@@ -83,7 +83,10 @@ impl Client {
                     })?;
 
                 let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), 10, token)
+                    // TTL=60s: gives ~10 reconnect attempts (max_backoff=5s) before expiry.
+                    // 10s was too short — a transient CoreDNS overload (~8-30s) during
+                    // simultaneous scale-up of many replicas exhausted the deadline in 1-2 tries.
+                    create_lease(connector.clone(), 60, token)
                         .await
                         .with_context(|| {
                             format!(
