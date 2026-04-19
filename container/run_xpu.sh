@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""This script is to create docker container for xpu device"""
+
+set -e
+
+RUN_PREFIX=
+
+# Frameworks
+#
+# Each framework has a corresponding base image.  Additional
+# dependencies are specified in the /container/deps folder and
+# installed within framework specific sections of the Dockerfile.
+
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+
+DEFAULT_FRAMEWORK=VLLM
+
+SOURCE_DIR=$(dirname "$(readlink -f "$0")")
+
+IMAGE=
+HF_HOME=${HF_HOME:-}
+DEFAULT_HF_HOME=${SOURCE_DIR}/.cache/huggingface
+PRIVILEGED=TRUE
+VOLUME_MOUNTS=
+PORT_MAPPINGS=
+MOUNT_WORKSPACE=
+ENVIRONMENT_VARIABLES=
+REMAINING_ARGS=
+INTERACTIVE=
+WORKDIR=/workspace
+NETWORK=host
+USER=
+GROUP_ADD_STRING=
+
+get_options() {
+    while :; do
+        case $1 in
+        -h | -\? | --help)
+            show_help
+            exit
+            ;;
+        --framework)
+            if [ "$2" ]; then
+                FRAMEWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --image)
+            if [ "$2" ]; then
+                IMAGE=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --target)
+            if [ "$2" ]; then
+                TARGET=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --name)
+            if [ "$2" ]; then
+                NAME=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --hf-cache|--hf-home)
+            if [ "$2" ]; then
+                HF_HOME=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --entrypoint)
+            if [ "$2" ]; then
+                ENTRYPOINT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --workdir)
+            if [ "$2" ]; then
+                WORKDIR="$2"
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --privileged)
+            if [ "$2" ]; then
+                PRIVILEGED=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --rm)
+            if [ "$2" ]; then
+                RM=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        -v)
+            if [ "$2" ]; then
+                VOLUME_MOUNTS+=" -v $2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        -p|--port)
+            if [ "$2" ]; then
+                PORT_MAPPINGS+=" -p $2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        -e)
+            if [ "$2" ]; then
+                ENVIRONMENT_VARIABLES+=" -e $2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        -it)
+            INTERACTIVE=" -it "
+            ;;
+        --mount-workspace)
+            MOUNT_WORKSPACE=TRUE
+            ;;
+        --network)
+            if [ "$2" ]; then
+                NETWORK=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --user)
+            if [ "$2" ]; then
+                USER=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --dry-run)
+            RUN_PREFIX="echo"
+            echo ""
+            echo "=============================="
+            echo "DRY RUN: COMMANDS PRINTED ONLY"
+            echo "=============================="
+            echo ""
+            ;;
+        --)
+            shift
+            break
+            ;;
+         -?*)
+            error 'ERROR: Unknown option: ' "$1"
+            ;;
+         ?*)
+            error 'ERROR: Unknown option: ' "$1"
+            ;;
+        *)
+            break
+            ;;
+        esac
+
+        shift
+    done
+
+    if [ -z "$FRAMEWORK" ]; then
+        FRAMEWORK=$DEFAULT_FRAMEWORK
+    fi
+
+    if [ -n "$FRAMEWORK" ]; then
+        FRAMEWORK=${FRAMEWORK^^}
+        if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
+            error 'ERROR: Unknown framework: ' "$FRAMEWORK"
+        fi
+    fi
+
+    if [ -z "$IMAGE" ]; then
+        IMAGE="dynamo:latest-${FRAMEWORK,,}"
+        if [ -n "${TARGET}" ]; then
+            IMAGE="${IMAGE}-${TARGET}"
+        fi
+    fi
+
+    if [[ ${NAME^^} == "" ]]; then
+        NAME_STRING=""
+    else
+        NAME_STRING="--name ${NAME}"
+    fi
+
+    if [[ ${ENTRYPOINT^^} == "" ]]; then
+        ENTRYPOINT_STRING=""
+    else
+        ENTRYPOINT_STRING="--entrypoint ${ENTRYPOINT}"
+    fi
+
+    if [ -n "$MOUNT_WORKSPACE" ]; then
+        VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
+        VOLUME_MOUNTS+=" -v /tmp:/tmp "
+        VOLUME_MOUNTS+=" -v /mnt:/mnt "
+
+        if [ -z "$HF_HOME" ]; then
+            HF_HOME=$DEFAULT_HF_HOME
+        fi
+
+        ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
+    fi
+
+    if [[ ${HF_HOME^^} == "NONE" ]]; then
+        HF_HOME=
+    fi
+
+    if [ -n "$HF_HOME" ]; then
+        mkdir -p "$HF_HOME"
+        if [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
+            HF_HOME_TARGET="/root/.cache/huggingface"
+        else
+            HF_HOME_TARGET="/home/dynamo/.cache/huggingface"
+        fi
+        VOLUME_MOUNTS+=" -v $HF_HOME:$HF_HOME_TARGET"
+    fi
+
+    if [ -z "${PRIVILEGED}" ]; then
+        PRIVILEGED="TRUE"
+    fi
+
+    if [ -z "${RM}" ]; then
+        RM="TRUE"
+    fi
+
+    if [[ ${PRIVILEGED^^} == "FALSE" ]]; then
+        PRIVILEGED_STRING=""
+    else
+        PRIVILEGED_STRING="--privileged"
+    fi
+
+    if [[ ${RM^^} == "FALSE" ]]; then
+        RM_STRING=""
+    else
+        RM_STRING=" --rm "
+    fi
+
+    if [[ ${USER} == "" ]]; then
+        USER_STRING=""
+    else
+        USER_STRING="--user ${USER}"
+    fi
+
+    # XPU specific: Add DRI device group for GPU access
+    if [ -e /dev/dri/renderD128 ]; then
+        DRI_GROUP=$(stat -c '%g' /dev/dri/renderD128)
+        GROUP_ADD_STRING="--group-add ${DRI_GROUP}"
+    else
+        GROUP_ADD_STRING=""
+        echo "Warning: /dev/dri/renderD128 not found. XPU access may not work properly."
+    fi
+
+    # If we override the user, Docker drops supplementary groups from the image.
+    # Add root group (GID 0) back so group-writable directories owned by root remain writable,
+    # avoiding expensive `chown -R ...` fixes on large mounted workspaces.
+    if [[ -n "${USER}" ]]; then
+        # Extract just the UID part (before any colon)
+        USER_UID="${USER%%:*}"
+        if [[ "${USER_UID}" != "root" && "${USER_UID}" != "0" ]]; then
+            if [[ -n "${GROUP_ADD_STRING}" ]]; then
+                GROUP_ADD_STRING="${GROUP_ADD_STRING} --group-add 0"
+            else
+                GROUP_ADD_STRING="--group-add 0"
+            fi
+        fi
+    fi
+
+    REMAINING_ARGS=("$@")
+}
+
+show_help() {
+    echo "usage: run_xpu.sh - Run Dynamo containers with Intel XPU support"
+    echo "  [--image image]"
+    echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
+    echo "  [--name name for launched container, default NONE]"
+    echo "  [--privileged whether to launch in privileged mode, default TRUE for XPU]"
+    echo "  [--dry-run print docker commands without running]"
+    echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
+    echo "  [--network network mode for container, default is 'host']"
+    echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"
+    echo "           Examples: --network bridge (isolated), --network none (no network - WARNING: breaks most functionality)"
+    echo "                    --network container:redis (share network with 'redis' container)"
+    echo "  [--user <name|uid>[:<group|gid>] specify user to run container as]"
+    echo "           Format: username or numeric UID, optionally with group/GID (e.g., 'root', '0', '1000:0')"
+    echo "  [-v add volume mount]"
+    echo "  [-p|--port add port mapping (host_port:container_port)]"
+    echo "  [-e add environment variable]"
+    echo "  [--mount-workspace set up for local development]"
+    echo "  [-- stop processing and pass remaining args as command to docker run]"
+    echo "  [--workdir set the working directory inside the container]"
+    echo "  [--entrypoint override container entrypoint]"
+    echo "  [-h, --help show this help]"
+    echo ""
+    echo "Note: This script is optimized for Intel XPU devices."
+    echo "      It automatically adds DRI device group access and runs in privileged mode."
+    exit 0
+}
+
+missing_requirement() {
+    error "ERROR: $1 requires an argument."
+}
+
+error() {
+    printf '%s %s\n' "$1" "$2" >&2
+    exit 1
+}
+
+get_options "$@"
+
+# RUN the image
+if [ -z "$RUN_PREFIX" ]; then
+    set -x
+fi
+
+${RUN_PREFIX} docker run \
+    ${INTERACTIVE} \
+    ${RM_STRING} \
+    ${PRIVILEGED_STRING} \
+    ${GROUP_ADD_STRING} \
+    --network "$NETWORK" \
+    --shm-size=10G \
+    --ulimit memlock=-1 \
+    --ulimit stack=67108864 \
+    --ulimit nofile=65536:65536 \
+    ${ENVIRONMENT_VARIABLES} \
+    ${VOLUME_MOUNTS} \
+    ${PORT_MAPPINGS} \
+    -w "$WORKDIR" \
+    --cap-add CAP_SYS_PTRACE \
+    --ipc host \
+    ${USER_STRING} \
+    ${NAME_STRING} \
+    ${ENTRYPOINT_STRING} \
+    ${IMAGE} \
+    "${REMAINING_ARGS[@]}"
+
+{ set +x; } 2>/dev/null
