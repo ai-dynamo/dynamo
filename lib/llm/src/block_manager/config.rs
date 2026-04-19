@@ -106,7 +106,7 @@ pub struct KvManagerLayoutConfig<S: Storage + NixlRegisterableStorage> {
 
     /// Storage for the blocks
     /// If provided, the blocks will be allocated from the provided storage
-    /// Otherwise, the blocks will be allocated from
+    /// Otherwise, the blocks will be allocated from the provided allocator or logical strategy
     #[builder(default)]
     pub storage: Option<Vec<S>>,
 
