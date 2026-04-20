@@ -96,6 +96,12 @@ Start the frontend, then start a worker for your chosen backend.
 python3 -m dynamo.frontend --discovery-backend file
 ```
 
+**Learn more**
+
+- `--discovery-backend` → [Discovery Plane](../design-docs/discovery-plane.md)
+- `--kv-events-config` → [KV Cache Routing](../components/router/router-concepts.md#kv-cache-routing)
+- The frontend process itself → [Frontend Guide](../components/frontend/README.md) and [Architecture](../design-docs/architecture.md)
+
 In another terminal (or same terminal if using background mode), start a worker:
 
 **SGLang**
