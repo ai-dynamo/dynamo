@@ -155,3 +155,8 @@ curl localhost:8000/v1/chat/completions \
 | [`nvext.timing`](../components/frontend/nvext.md#response-extensions) | Per-phase timing telemetry in OpenAI responses. |
 | [Kubernetes Quickstart](../kubernetes/README.md) | Go from single-node to a Dynamo Graph deployment. |
 | [Troubleshooting](../troubleshooting.md) | Common failures and their fixes. *(added by PR E)* |
+
+## From the blog
+
+- [Full-Stack Optimizations for Agentic Inference](/dynamo/dev/blog/full-stack-optimizations-for-agentic-inference/)
+- [Flash Indexer: Inter-Galactic KV Routing](/dynamo/dev/blog/flash-indexer-inter-galactic-kv-routing/)
