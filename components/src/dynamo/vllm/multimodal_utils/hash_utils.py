@@ -3,7 +3,7 @@
 
 import logging
 import struct
-from typing import Any, Sequence
+from typing import Sequence, Union
 
 import blake3
 import numpy as np
@@ -11,6 +11,8 @@ import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+ImageInput = Union[Image.Image, np.ndarray]
 
 # Preimage layout (12 bytes, fixed-length) || pixel bytes.
 #   offset  bytes  field
@@ -41,7 +43,7 @@ def _header(height: int, width: int) -> bytes:
     )
 
 
-def _image_preimage_parts(img: Any) -> tuple[bytes, bytes]:
+def _image_preimage_parts(img: ImageInput) -> tuple[bytes, bytes]:
     """Return `(header_bytes, pixel_bytes)` for a canonicalized image.
 
     The returned pair is safe to feed into an incremental blake3 hasher. Two
@@ -81,7 +83,7 @@ def _image_preimage_parts(img: Any) -> tuple[bytes, bytes]:
     )
 
 
-def compute_mm_uuids_from_images(images: Sequence[Any]) -> list[str]:
+def compute_mm_uuids_from_images(images: Sequence[ImageInput]) -> list[str]:
     """Compute blake3 hex UUIDs for image inputs.
 
     Each preimage is a fixed-length header (version, mode, dtype, channels,
