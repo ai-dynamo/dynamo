@@ -204,12 +204,6 @@ class VllmProcessor:
                     "[mm-routing] mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
                 )
             else:
-                nvtx_label = (
-                    "mm_frontend:shm_sender_prepare"
-                    if self.use_shm_transfer
-                    else "mm_frontend:nixl_sender_prepare"
-                )
-                nvtx_color = "cyan" if self.use_shm_transfer else "magenta"
                 try:
                     if self._sender is None:
                         self._sender = (
@@ -217,10 +211,11 @@ class VllmProcessor:
                             if self.use_shm_transfer
                             else MmKwargsNixlSender()
                         )
-                    with _nvtx.annotate(nvtx_label, color=nvtx_color):
-                        extra_update, cleanup_items = await self._sender.prepare(
-                            vllm_preproc.mm_features, modality="image"
-                        )
+                    # NVTX annotation is owned by MmKwargsSender.prepare via
+                    # the subclass's _nvtx_label/_nvtx_color class attrs.
+                    extra_update, cleanup_items = await self._sender.prepare(
+                        vllm_preproc.mm_features, modality="image"
+                    )
                     if extra_update is not None:
                         dynamo_preproc["extra_args"].update(extra_update)
                         nixl_transferred = True

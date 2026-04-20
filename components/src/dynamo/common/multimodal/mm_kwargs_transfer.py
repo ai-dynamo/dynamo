@@ -82,9 +82,18 @@ class MmKwargsSender(ABC):
             dynamo_preproc["extra_args"].update(extra_args)
         # ... after streaming:
         await sender.cleanup(cleanup_items)
+
+    The base class owns the per-request NVTX annotation via class-level
+    ``_nvtx_label`` / ``_nvtx_color`` attributes that subclasses override.
+    ``prepare`` is a concrete template method that wraps ``_prepare`` with
+    ``_nvtx.annotate`` so the callsite in ``vllm_processor`` doesn't need
+    to know which transport is in use.
     """
 
-    @abstractmethod
+    # Subclasses override these to tag their own NVTX range.
+    _nvtx_label: str = "mm_frontend:sender_prepare"
+    _nvtx_color: str = "cyan"
+
     async def prepare(
         self,
         mm_features: list[Any],
@@ -99,6 +108,16 @@ class MmKwargsSender(ABC):
             cleanup_items: opaque list passed back to cleanup() after the
                 response stream completes.
         """
+        with _nvtx.annotate(self._nvtx_label, color=self._nvtx_color):
+            return await self._prepare(mm_features, modality)
+
+    @abstractmethod
+    async def _prepare(
+        self,
+        mm_features: list[Any],
+        modality: str = "image",
+    ) -> tuple[dict[str, Any] | None, list[Any]]:
+        """Subclass hook: do the actual serialize/register work."""
 
     @abstractmethod
     async def cleanup(self, items: list[Any]) -> None:
@@ -116,6 +135,9 @@ class MmKwargsNixlSender(MmKwargsSender):
         await sender.cleanup(cleanup_items)  # wait for backend to finish reading
     """
 
+    _nvtx_label = "mm_frontend:nixl_sender_prepare"
+    _nvtx_color = "magenta"
+
     def __init__(self) -> None:
         # Lazy import to avoid hard dependency when NIXL is not available.
         try:
@@ -128,7 +150,7 @@ class MmKwargsNixlSender(MmKwargsSender):
             self._available = False
             logger.warning("nixl_connect not available; MmKwargsNixlSender disabled")
 
-    async def prepare(
+    async def _prepare(
         self,
         mm_features: list[Any],  # list[MultiModalFeatureSpec]
         modality: str = "image",
@@ -155,7 +177,6 @@ class MmKwargsNixlSender(MmKwargsSender):
         completions: list[Awaitable[None]] = []
         mm_hashes: list[str] = []
 
-        rng = _nvtx.start_range("mm_nixl:sender_prepare", color="magenta")
         for i, feat in enumerate(mm_features):
             if feat.mm_hash:
                 mm_hashes.append(feat.mm_hash)
@@ -190,7 +211,6 @@ class MmKwargsNixlSender(MmKwargsSender):
             tensor_specs.append(spec)
             completions.append(readable_op.wait_for_completion())
 
-        _nvtx.end_range(rng)
         if not tensor_specs:
             return None, []
 
@@ -388,7 +408,10 @@ class MmKwargsShmSender(MmKwargsSender):
         await sender.cleanup(cleanup_items)
     """
 
-    async def prepare(
+    _nvtx_label = "mm_frontend:shm_sender_prepare"
+    _nvtx_color = "cyan"
+
+    async def _prepare(
         self,
         mm_features: list[Any],
         modality: str = "image",
@@ -402,7 +425,6 @@ class MmKwargsShmSender(MmKwargsSender):
         if not mm_features:
             return None, []
 
-        rng = _nvtx.start_range("mm_shm:sender_prepare", color="cyan")
         items: list[dict[str, Any]] = []
         handles: list[shm.SharedMemory] = []
         mm_hashes: list[str] = []
@@ -428,7 +450,6 @@ class MmKwargsShmSender(MmKwargsSender):
                 name,
             )
 
-        _nvtx.end_range(rng)
         if not items:
             return None, []
 
