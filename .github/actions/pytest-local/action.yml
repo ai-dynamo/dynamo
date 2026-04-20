@@ -73,15 +73,11 @@ runs:
         available = torch.cuda.is_available()
         count = torch.cuda.device_count() if available else 0
         name = torch.cuda.get_device_name(0) if available else "None"
+        print(f"Python version: {sys.version}")
         print(f"Is CUDA available? {available}")
         print(f"GPU count: {count}")
         print(f"GPU Name: {name}")
         if not available:
-            # # DEBUG ONLY — remove before merging to main. Sleeps 10 minutes
-            # # so the container can be exec'd into to inspect GPU state.
-            # import time
-            # print("Sleeping 10 minutes for debugging; remove before merging.", flush=True)
-            # time.sleep(600)
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
 
     - name: Run pytest
