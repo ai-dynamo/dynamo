@@ -47,4 +47,4 @@ This is the symptom, not the cause — the cause is that the container image you
 - Check the minimum driver for the tag you pulled in the [Container / driver matrix](./README.md#container--driver-matrix).
 - Either upgrade the host driver, or pull a lower-CUDA variant (e.g. `vllm-runtime:1.0.1` on driver `575+` instead of `vllm-runtime:1.0.1-cuda13` on driver `580+`).
 
-> The driver-mismatch error message itself is being improved — tracked as an engineering follow-up (VDR §1.3 item 7 — driver-validation error text).
+> The driver-mismatch error message itself is being improved — tracked as an engineering follow-up.

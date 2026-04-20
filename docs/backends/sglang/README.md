@@ -133,7 +133,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 > **Performance caveat:** Qwen3-0.6B is small enough that the disaggregated pathway is dominated by transport overhead and will often look slower than aggregated. Use it for plumbing validation, not benchmarks. Switch to Qwen3-32B-FP8 or larger for realistic disagg numbers.
 
-> **Known race:** `examples/backends/sglang/launch/disagg.sh` can start the frontend before prefill and decode workers are fully ready, causing the first few requests to 503. Re-run after ~10 seconds. Tracked as an engineering follow-up (VDR §1.3 item 10 — `disagg.sh` race condition).
+> **Known race:** `examples/backends/sglang/launch/disagg.sh` can start the frontend before prefill and decode workers are fully ready, causing the first few requests to 503. Re-run after ~10 seconds. Tracked as an engineering follow-up.
 
 ### Kubernetes Deployment
 
