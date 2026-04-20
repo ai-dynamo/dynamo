@@ -41,7 +41,7 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
+    MmRoutingInfo, MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -262,9 +262,17 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        self.gather_multi_modal_data(request, &mut builder, formatted_prompt)
+        self.gather_multi_modal_data(request, &mut builder, formatted_prompt.clone())
             .await
             .with_context(|| "Failed to gather multimodal data")?;
+
+        // Populate mm_routing_info for approximate MM-aware KV routing.
+        // Controlled by DYN_ROUTER_MM_APPROX=1. Requires both images AND a
+        // tokenized prompt. Backend-agnostic: just URL-hash-based routing.
+        if Self::mm_approx_routing_enabled() {
+            self.gather_mm_approx_routing_info(request, &mut builder, formatted_prompt.as_deref())
+                .with_context(|| "Failed to gather MM approx routing info")?;
+        }
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["preprocess"])
@@ -507,6 +515,172 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
+        Ok(())
+    }
+
+    /// Read `DYN_ROUTER_MM_APPROX` (default off) to decide whether to emit
+    /// MM-aware routing metadata. Checked per-request so flipping the env var
+    /// is hot-reloadable from a test harness.
+    fn mm_approx_routing_enabled() -> bool {
+        matches!(
+            std::env::var("DYN_ROUTER_MM_APPROX").as_deref(),
+            Ok("1") | Ok("true") | Ok("True") | Ok("TRUE")
+        )
+    }
+
+    /// Read the KV block size that we lay `block_mm_infos` out for.
+    /// Must match the router's block size so the synthetic event hashes
+    /// line up with what the router queries. Default 16.
+    fn mm_approx_block_size() -> usize {
+        std::env::var("DYN_ROUTER_MM_APPROX_BLOCK_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(16)
+    }
+
+    /// Hash a single image reference to a stable u64. Data URIs are hashed
+    /// as content; http(s) URLs are hashed after stripping common
+    /// cache-buster query parameters so the same image with different
+    /// signed-URL query strings still clusters.
+    fn hash_image_url(url: &str) -> u64 {
+        if url.starts_with("data:") {
+            xxhash_rust::xxh3::xxh3_64(url.as_bytes())
+        } else {
+            Self::hash_normalized_url(url)
+        }
+    }
+
+    fn hash_normalized_url(url: &str) -> u64 {
+        // Strip well-known cache-buster keys: v, t, cache, _, ts, sig, signature
+        const BUSTERS: [&str; 7] = ["v", "t", "cache", "_", "ts", "sig", "signature"];
+        let normalized = match url.split_once('?') {
+            Some((base, query)) => {
+                let kept: Vec<&str> = query
+                    .split('&')
+                    .filter(|part| {
+                        let key = part.split_once('=').map(|(k, _)| k).unwrap_or(part);
+                        !BUSTERS.contains(&key)
+                    })
+                    .collect();
+                if kept.is_empty() {
+                    Cow::Borrowed(base)
+                } else {
+                    Cow::Owned(format!("{}?{}", base, kept.join("&")))
+                }
+            }
+            None => Cow::Borrowed(url),
+        };
+        xxhash_rust::xxh3::xxh3_64(normalized.as_bytes())
+    }
+
+    /// Extract image URLs from the request in message order.
+    fn extract_image_urls_in_order<R: OAIChatLikeRequest>(request: &R) -> Vec<String> {
+        let mut urls = Vec::new();
+        let Some(messages) = request.typed_messages() else {
+            return urls;
+        };
+        for message in messages.iter() {
+            let content_parts = match message {
+                ChatCompletionRequestMessage::User(u) => match &u.content {
+                    ChatCompletionRequestUserMessageContent::Array(parts) => parts,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            for content_part in content_parts.iter() {
+                if let ChatCompletionRequestUserMessageContentPart::ImageUrl(p) = content_part {
+                    urls.push(p.image_url.url.as_str().to_string());
+                }
+            }
+        }
+        urls
+    }
+
+    /// Build `MmRoutingInfo` for approximate MM-aware KV routing.
+    ///
+    /// Skips the HF image processor entirely: image URLs are hashed and each
+    /// hash is pinned to a distinct block (images spread evenly across the
+    /// token range). Same-set-same-order requests produce identical block
+    /// hashes; swapped-order or different-image requests diverge.
+    ///
+    /// This is approximate-routing-only: the resulting hashes do not
+    /// correspond to backend KV blocks. They serve as a routing-affinity
+    /// signal so repeat multimodal requests cluster on the same worker.
+    pub fn gather_mm_approx_routing_info<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<&str>,
+    ) -> Result<()> {
+        let urls = Self::extract_image_urls_in_order(request);
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let Some(prompt) = formatted_prompt else {
+            tracing::debug!(
+                "[mm-approx] no formatted_prompt; skipping MM approx routing info"
+            );
+            return Ok(());
+        };
+
+        let encoding = self
+            .tokenizer
+            .encode(prompt)
+            .with_context(|| "MM approx routing: failed to tokenize formatted prompt")?;
+        let routing_token_ids: Vec<u32> = encoding.token_ids().to_vec();
+
+        let block_size = Self::mm_approx_block_size();
+        if block_size == 0 || routing_token_ids.is_empty() {
+            return Ok(());
+        }
+        // Use integer division: partial trailing blocks aren't hashed by the
+        // router (see compute_block_hash_for_seq), so we only need enough
+        // full blocks to cover the images. Guarantee at least one block
+        // when images are present.
+        let num_full_blocks = (routing_token_ids.len() / block_size).max(1);
+
+        // Spread images across the *full* blocks. We pin image i to block
+        // `(i * num_full_blocks) / n_images` so two images can't collide
+        // on the same block unless there are more images than blocks (in
+        // which case extras pile onto the last block).
+        let n_images = urls.len();
+        let mut mm_objects = Vec::with_capacity(n_images);
+        for (i, url) in urls.iter().enumerate() {
+            let mm_hash = Self::hash_image_url(url);
+            let block_idx = if num_full_blocks == 0 {
+                0
+            } else {
+                (i * num_full_blocks / n_images).min(num_full_blocks - 1)
+            };
+            // Represent each image as a single-token offset so
+            // RequestExtraInfo::to_block_level maps it to exactly one block.
+            let token_offset = block_idx * block_size;
+            mm_objects.push(dynamo_kv_router::protocols::RequestMmObjectInfo {
+                mm_hash,
+                offsets: vec![(token_offset, token_offset + 1)],
+            });
+        }
+        let total_tokens = num_full_blocks * block_size;
+        let request_info = dynamo_kv_router::protocols::RequestExtraInfo { mm_objects };
+        let block_mm_infos = request_info.to_block_level(block_size, total_tokens);
+
+        // Trim routing_token_ids to full blocks so the router's block-hash
+        // computation and ours agree on block count.
+        let mut routing_token_ids = routing_token_ids;
+        routing_token_ids.truncate(total_tokens);
+
+        tracing::debug!(
+            n_images,
+            block_size,
+            num_full_blocks,
+            total_tokens = routing_token_ids.len(),
+            "[mm-approx] built MmRoutingInfo"
+        );
+
+        builder.mm_routing_info(Some(MmRoutingInfo {
+            routing_token_ids,
+            block_mm_infos,
+        }));
         Ok(())
     }
 
