@@ -203,7 +203,7 @@ class KubernetesConnector(PlannerConnector):
                 model_name = decode_model_name
             elif decode_model_name is None:
                 model_name = prefill_model_name
-            elif prefill_model_name != decode_model_name:
+            elif prefill_model_name.lower() != decode_model_name.lower():
                 raise DeploymentModelNameMismatchError(
                     prefill_model_name, decode_model_name
                 )
