@@ -6,6 +6,8 @@ title: Deployment Guide
 
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
+> See also: example K8s deploys under [`examples/backends/`](../../examples/backends/) and production recipes under [`recipes/`](../../recipes/README.md).
+
 ## Important Terminology
 
 **Kubernetes Namespace**: The K8s namespace where your DynamoGraphDeployment resource is created.
