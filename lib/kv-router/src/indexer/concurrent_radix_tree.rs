@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::active_set::reconcile_active_workers;
+use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -83,6 +84,22 @@ impl Block {
     }
 }
 
+impl CleanableNode for Block {
+    type ChildKey = LocalBlockHash;
+
+    fn has_any_workers(&self) -> bool {
+        !self.workers.is_empty()
+    }
+
+    fn children(&self) -> &FxHashMap<LocalBlockHash, SharedBlock> {
+        &self.children
+    }
+
+    fn remove_child(&mut self, key: &LocalBlockHash) {
+        self.children.remove(key);
+    }
+}
+
 /// Thread-safe radix tree for concurrent KV cache lookups.
 ///
 /// Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
@@ -109,6 +126,7 @@ pub struct ConcurrentRadixTree {
     root: SharedBlock,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
+    cleanup: CleanupState,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -147,6 +165,7 @@ impl ConcurrentRadixTree {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            cleanup: CleanupState::new(),
         }
     }
 
@@ -643,6 +662,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
+                }
                 WorkerTask::DumpEvents(_sender) => {
                     // Handled directly via dump_events() on the shared tree.
                     // Should not be reached, but respond with empty to avoid blocking.
@@ -660,6 +682,20 @@ impl SyncIndexer for ConcurrentRadixTree {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn try_schedule_cleanup(&self) -> bool {
+        self.cleanup.try_schedule()
+    }
+
+    fn cancel_scheduled_cleanup(&self) {
+        self.cleanup.cancel();
+    }
+
+    fn run_cleanup_task(&self) {
+        let mut cleanup_guard = CleanupGuard::new(&self.cleanup);
+        cleanup::sweep_stale_children(&self.root);
+        cleanup_guard.mark_completed();
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
