@@ -1407,6 +1407,44 @@ impl
         let transformed_stream =
             self.postprocessor_parsing_stream(stream, &request, prompt_injected_reasoning)?;
 
+        let tokenizer = self.tokenizer.clone();
+        let transformed_stream =
+            transformed_stream.scan(0u32, move |accumulated_reasoning_tokens, response| {
+                let result = response.map_data(|mut data| {
+                    for choice in &data.choices {
+                        if let Some(ref reasoning_content) = choice.delta.reasoning_content {
+                            if let Ok(encoding) = tokenizer.encode(reasoning_content) {
+                                *accumulated_reasoning_tokens += encoding.token_ids().len() as u32;
+                            }
+                        }
+                    }
+
+                    if let Some(ref mut usage) = data.usage {
+                        if *accumulated_reasoning_tokens > 0 {
+                            if let Some(ref mut completion_tokens_details) =
+                                usage.completion_tokens_details
+                            {
+                                completion_tokens_details.reasoning_tokens = Some(
+                                    completion_tokens_details.reasoning_tokens.unwrap_or(0)
+                                        + *accumulated_reasoning_tokens,
+                                );
+                            } else {
+                                usage.completion_tokens_details =
+                                    Some(dynamo_async_openai::types::CompletionTokensDetails {
+                                        reasoning_tokens: Some(*accumulated_reasoning_tokens),
+                                        accepted_prediction_tokens: None,
+                                        audio_tokens: None,
+                                        rejected_prediction_tokens: None,
+                                    });
+                            }
+                            *accumulated_reasoning_tokens = 0;
+                        }
+                    }
+                    Ok(data)
+                });
+                std::future::ready(Some(result))
+            });
+
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
         // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
