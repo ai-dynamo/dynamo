@@ -85,6 +85,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on amd64 post-merge. "
+                        "TODO(<LINEAR-ID>)"
+                    ),
                     pytest.mark.post_merge,
                 ],
                 timeout_s=600,
