@@ -475,6 +475,7 @@ fn make_tokenize_chat_completion_request(
         chat_template_args: Some(request.merged_chat_template_kwargs()),
         media_io_kwargs: request.media_io_kwargs.clone(),
         return_tokens_as_token_ids: None,
+        required_prefix_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -3114,6 +3115,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -3147,6 +3149,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -3364,6 +3367,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3395,6 +3399,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3425,6 +3430,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3455,6 +3461,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3487,6 +3494,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3517,6 +3525,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3563,6 +3572,25 @@ mod tests {
             assert!(msg.contains("documents"));
             assert!(msg.contains("chat_template"));
         }
+    }
+
+    #[test]
+    fn test_chat_completions_required_prefix_token_ids_accepted() {
+        let json = r#"{
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "test-model",
+            "required_prefix_token_ids": [1, 2, 3]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.required_prefix_token_ids, Some(vec![1, 2, 3]));
+        assert!(!request
+            .unsupported_fields
+            .contains_key("required_prefix_token_ids"));
+
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -77,6 +77,104 @@ use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
 pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
+
+fn replace_prefix_tokens(
+    model_prefix_token_ids: &[u32],
+    template_prefix_token_ids: &[u32],
+    template_token_ids: &[u32],
+    eos_token_ids: &[u32],
+) -> Result<Vec<u32>> {
+    if model_prefix_token_ids.is_empty() {
+        return Ok(template_token_ids.to_vec());
+    }
+
+    anyhow::ensure!(
+        !eos_token_ids.is_empty(),
+        "Your tokenizer must have at least one EOS token ID!"
+    );
+
+    let mut model_cut_end = model_prefix_token_ids.len();
+    if model_prefix_token_ids
+        .last()
+        .is_some_and(|token| eos_token_ids.contains(token))
+    {
+        model_cut_end -= 1;
+    }
+
+    if template_token_ids.len() <= template_prefix_token_ids.len() {
+        return Ok(template_token_ids.to_vec());
+    }
+
+    let template_cut_start = (0..template_prefix_token_ids.len())
+        .rev()
+        .find(|&pos| eos_token_ids.contains(&template_token_ids[pos]))
+        .with_context(|| {
+            format!(
+                "No EOS token ID found in the chat-templated messages. \
+template_prefix_len={}, template_len={}",
+                template_prefix_token_ids.len(),
+                template_token_ids.len()
+            )
+        })?;
+
+    Ok([
+        &model_prefix_token_ids[..model_cut_end],
+        &template_token_ids[template_cut_start..],
+    ]
+    .concat())
+}
+
+struct PrefixReuseChatRequest<'a> {
+    base: &'a NvCreateChatCompletionRequest,
+    messages: Vec<ChatCompletionRequestMessage>,
+}
+
+impl OAIChatLikeRequest for PrefixReuseChatRequest<'_> {
+    fn model(&self) -> String {
+        self.base.inner.model.clone()
+    }
+
+    fn messages(&self) -> minijinja::value::Value {
+        let messages_json = serde_json::to_value(&self.messages).unwrap();
+        minijinja::value::Value::from_serialize(&messages_json)
+    }
+
+    fn typed_messages(&self) -> Option<&[ChatCompletionRequestMessage]> {
+        Some(self.messages.as_slice())
+    }
+
+    fn tools(&self) -> Option<minijinja::value::Value> {
+        <NvCreateChatCompletionRequest as OAIChatLikeRequest>::tools(self.base)
+    }
+
+    fn tool_choice(&self) -> Option<minijinja::value::Value> {
+        <NvCreateChatCompletionRequest as OAIChatLikeRequest>::tool_choice(self.base)
+    }
+
+    fn response_format(&self) -> Option<minijinja::value::Value> {
+        <NvCreateChatCompletionRequest as OAIChatLikeRequest>::response_format(self.base)
+    }
+
+    fn should_add_generation_prompt(&self) -> bool {
+        false
+    }
+
+    fn chat_template_args(&self) -> Option<&HashMap<String, serde_json::Value>> {
+        self.base.chat_template_args.as_ref()
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        Some(TextInput::Single(String::new()))
+    }
+
+    fn media_io_kwargs(&self) -> Option<&media::MediaDecoder> {
+        self.base.media_io_kwargs.as_ref()
+    }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.base.inner.mm_processor_kwargs.as_ref()
+    }
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
@@ -383,6 +481,50 @@ impl OpenAIPreprocessor {
         } else {
             Ok(None)
         }
+    }
+
+    fn messages_to_last_assistant(
+        request: &NvCreateChatCompletionRequest,
+    ) -> Vec<ChatCompletionRequestMessage> {
+        let messages = &request.inner.messages;
+        let last_assistant_idx = messages.iter().rposition(|message| {
+            matches!(message, ChatCompletionRequestMessage::Assistant(_))
+        });
+
+        match last_assistant_idx {
+            Some(idx) => messages[..=idx].to_vec(),
+            None => messages.clone(),
+        }
+    }
+
+    fn maybe_apply_required_prefix_token_ids(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        token_ids: &[u32],
+    ) -> Result<Option<Vec<u32>>> {
+        let Some(required_prefix_token_ids) = request.required_prefix_token_ids.as_ref() else {
+            return Ok(None);
+        };
+
+        let prefix_request = PrefixReuseChatRequest {
+            base: request,
+            messages: Self::messages_to_last_assistant(request),
+        };
+        let template_prefix_prompt = self
+            .formatter
+            .render(&prefix_request)
+            .with_context(|| "Failed to apply prompt template for prefix reuse")?;
+        let template_prefix_token_ids = self
+            .encode_with_timing(&template_prefix_prompt, None)?
+            .token_ids()
+            .to_vec();
+
+        Ok(Some(replace_prefix_tokens(
+            required_prefix_token_ids,
+            &template_prefix_token_ids,
+            token_ids,
+            self.model_info.eos_token_ids().as_slice(),
+        )?))
     }
 
     /// Replace inline `data:` URLs with empty strings in message content parts.
@@ -1367,6 +1509,9 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request(&request, tracker.as_deref())
             .await?;
+        if let Some(token_ids) = self.maybe_apply_required_prefix_token_ids(&request, &common_request.token_ids)? {
+            common_request.token_ids = token_ids;
+        }
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
@@ -1653,6 +1798,7 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_is_reasoning_disabled_by_request() {
@@ -1806,5 +1952,39 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[test]
+    fn test_replace_prefix_tokens_preserves_model_prefix_up_to_eos() {
+        let result = replace_prefix_tokens(
+            &[11, 12, 13, 40, 41, 220, 17, 2],
+            &[11, 12, 13, 40, 41, 1001, 2],
+            &[11, 12, 13, 40, 41, 1001, 2, 21, 22, 40, 41],
+            &[2],
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![11, 12, 13, 40, 41, 220, 17, 2, 21, 22, 40, 41]);
+    }
+
+    #[test]
+    fn test_messages_to_last_assistant_includes_last_assistant_only() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"}
+            ]
+        }))
+        .unwrap();
+
+        let messages = OpenAIPreprocessor::messages_to_last_assistant(&request);
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            messages.last(),
+            Some(ChatCompletionRequestMessage::Assistant(_))
+        ));
     }
 }

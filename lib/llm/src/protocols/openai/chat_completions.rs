@@ -65,6 +65,11 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 
+    /// Optional exact prior assistant token prefix to preserve across
+    /// multi-turn chat-template re-rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_prefix_token_ids: Option<Vec<u32>>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -435,5 +440,24 @@ mod tests {
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
         }
+    }
+
+    #[test]
+    fn test_required_prefix_token_ids_is_supported() {
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "required_prefix_token_ids": [1, 2, 3]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.required_prefix_token_ids, Some(vec![1, 2, 3]));
+        assert!(!request
+            .unsupported_fields
+            .contains_key("required_prefix_token_ids"));
     }
 }

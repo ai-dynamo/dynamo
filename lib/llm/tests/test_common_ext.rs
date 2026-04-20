@@ -71,6 +71,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
+        required_prefix_token_ids: None,
     };
 
     let sampling = request.extract_sampling_options().unwrap();
@@ -302,6 +303,7 @@ fn test_serialization_preserves_structure() {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
+        required_prefix_token_ids: None,
     };
 
     let json = serde_json::to_value(&request).unwrap();
@@ -355,6 +357,7 @@ fn test_sampling_parameters_extraction() {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
+        required_prefix_token_ids: None,
     };
 
     let sampling_options = request.extract_sampling_options().unwrap();
