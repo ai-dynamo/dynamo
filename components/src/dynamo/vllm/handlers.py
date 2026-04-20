@@ -1691,6 +1691,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             kv_params = None
             embedding_params = None
+            expanded_prompt_token_ids = None
+
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         has_mm_data = (
