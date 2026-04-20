@@ -391,6 +391,9 @@ def predownload_models(pytestconfig, _models_dir_env):
 
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
     this fixture simply yields without downloading.
+
+    _models_dir_env is declared as a dependency to ensure HF env vars are
+    configured before any download attempt, even though its yielded value is unused.
     """
     if pytestconfig.getoption("--models-dir"):
         yield
@@ -418,6 +421,9 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
 
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
     this fixture simply yields without downloading.
+
+    _models_dir_env is declared as a dependency to ensure HF env vars are
+    configured before any download attempt, even though its yielded value is unused.
     """
     if pytestconfig.getoption("--models-dir"):
         yield

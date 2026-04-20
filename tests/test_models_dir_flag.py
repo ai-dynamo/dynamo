@@ -13,6 +13,8 @@ import tests.hf_cache as hf_cache
 from tests.hf_cache import (
     _MODELS_DIR_ENV_KEYS,
     _apply_models_dir_env,
+    _disable_offline_with_mistral_patch,
+    _enable_offline_with_mistral_patch,
     _restore_models_dir_env,
 )
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
@@ -61,7 +63,6 @@ def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
     orig = _apply_models_dir_env(str(tmp_path))
     _restore_models_dir_env(orig)
     for k in _MODELS_DIR_ENV_KEYS:
@@ -90,6 +91,8 @@ def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
     missing = tmp_path / "no_such_dir"
     # Run from the project root so conftest.py is discovered and --models-dir
     # is registered before pytest_configure fires.
+    # Note: the child pytest process collects from this file itself — keep
+    # module-level imports here side-effect-free to avoid spurious child failures.
     project_root = Path(__file__).parents[1]
     result = subprocess.run(
         [
@@ -139,7 +142,29 @@ def test_pythonpath_restored_after_apply_restore(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", original)
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
     orig = _apply_models_dir_env(str(tmp_path))
     _restore_models_dir_env(orig)
     assert os.environ["PYTHONPATH"] == original
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_enable_disable_enable_cycle(monkeypatch):
+    """_enable/_disable is safe to call in sequence; PYTHONPATH and HF_HUB_OFFLINE are correct after each call."""
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
+
+    _enable_offline_with_mistral_patch()
+    assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    pythonpath_after_enable = os.environ.get("PYTHONPATH")
+
+    _disable_offline_with_mistral_patch()
+    assert "HF_HUB_OFFLINE" not in os.environ
+    assert os.environ.get("PYTHONPATH") is None
+
+    _enable_offline_with_mistral_patch()
+    assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    assert os.environ.get("PYTHONPATH") == pythonpath_after_enable
+
+    _disable_offline_with_mistral_patch()

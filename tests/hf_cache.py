@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
+import textwrap
 from pathlib import Path
 
 _mistral_patch_applied: bool = False
@@ -22,6 +23,12 @@ def _enable_offline_with_mistral_patch():
     not in-process monkey-patches, we inject the fix via a sitecustomize.py on
     PYTHONPATH so every subprocess auto-applies it at startup.
 
+    _mistral_patch_applied guards the class-level patch and PYTHONPATH injection
+    so they run at most once per enable/disable cycle. _disable_offline_with_mistral_patch
+    resets the flag so a subsequent enable call re-injects PYTHONPATH; the class-level
+    re-application on that second call is harmless — it adds one extra try/except layer
+    that behaves identically to the first.
+
     Upstream bug: https://github.com/huggingface/transformers/issues/44843
 
     TODO: Remove this workaround once transformers ships a fix and TRT-LLM (or
@@ -30,7 +37,7 @@ def _enable_offline_with_mistral_patch():
     global _mistral_patch_applied
     os.environ["HF_HUB_OFFLINE"] = "1"
     if _mistral_patch_applied:
-        return  # class patch and sitecustomize already applied
+        return  # class patch and sitecustomize already applied for this cycle
 
     # Apply the patch in this process
     try:
@@ -56,25 +63,23 @@ def _enable_offline_with_mistral_patch():
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
     os.makedirs(patch_dir, exist_ok=True)
     with open(os.path.join(patch_dir, "sitecustomize.py"), "w") as f:
-        f.write(
-            "import os\n"
-            "if os.environ.get('HF_HUB_OFFLINE') == '1':\n"
-            "    try:\n"
-            "        from transformers.tokenization_utils_base import"
-            " PreTrainedTokenizerBase as _T\n"
-            "        from huggingface_hub.errors import"
-            " OfflineModeIsEnabled as _E\n"
-            "        _orig = _T._patch_mistral_regex\n"
-            "        @classmethod\n"
-            "        def _safe(cls, tokenizer, *a, **kw):\n"
-            "            try:\n"
-            "                return _orig.__func__(cls, tokenizer, *a, **kw)\n"
-            "            except _E:\n"
-            "                return tokenizer\n"
-            "        _T._patch_mistral_regex = _safe\n"
-            "    except (ImportError, AttributeError):\n"
-            "        pass\n"
-        )
+        f.write(textwrap.dedent("""\
+            import os
+            if os.environ.get('HF_HUB_OFFLINE') == '1':
+                try:
+                    from transformers.tokenization_utils_base import PreTrainedTokenizerBase as _T
+                    from huggingface_hub.errors import OfflineModeIsEnabled as _E
+                    _orig = _T._patch_mistral_regex
+                    @classmethod
+                    def _safe(cls, tokenizer, *a, **kw):
+                        try:
+                            return _orig.__func__(cls, tokenizer, *a, **kw)
+                        except _E:
+                            return tokenizer
+                    _T._patch_mistral_regex = _safe
+                except (ImportError, AttributeError):
+                    pass
+        """))
     pythonpath = os.environ.get("PYTHONPATH", "")
     os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
     logging.info(
@@ -86,6 +91,7 @@ def _enable_offline_with_mistral_patch():
 
 def _disable_offline_with_mistral_patch():
     """Undo _enable_offline_with_mistral_patch."""
+    global _mistral_patch_applied
     os.environ.pop("HF_HUB_OFFLINE", None)
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
@@ -95,6 +101,7 @@ def _disable_offline_with_mistral_patch():
         os.environ["PYTHONPATH"] = result
     else:
         os.environ.pop("PYTHONPATH", None)
+    _mistral_patch_applied = False
 
 
 # Keys managed by _apply_models_dir_env / _restore_models_dir_env.
@@ -122,7 +129,7 @@ def _apply_models_dir_env(models_dir: str) -> dict:
     else:
         logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
         os.environ["HF_HUB_CACHE"] = models_dir
-    os.environ["HF_HUB_OFFLINE"] = "1"  # set directly; Mistral patch below is for sitecustomize only
+    os.environ["HF_HUB_OFFLINE"] = "1"  # set before _enable so orig snapshot reflects pre-existing state
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # activates sitecustomize for Mistral tokenizer workaround
