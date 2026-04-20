@@ -4,7 +4,7 @@
 # Tested with dynamo 1.0 (vLLM 0.16.0).
 #
 # Dynamo 0.9.1 compatibility notes:
-#   - Change image tags from :1.0.0 to :0.9.1
+#   - Change image tags from :1.0.1 to :0.9.1
 #   - Add `--connector none` to args (required in 0.9.1, rejected in 1.0)
 #   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
 #     (nemotron_nano reasoning parser is broken in 0.9.1)
