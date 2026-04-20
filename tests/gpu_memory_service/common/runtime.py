@@ -9,11 +9,9 @@ import json
 import logging
 import os
 import sys
-import time
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 
-import pynvml
 import requests
 
 from tests.gpu_memory_service.common.gms import GMSServer
@@ -24,32 +22,6 @@ from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
-
-
-def get_gpu_memory_used(device: int = 0) -> int:
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        return pynvml.nvmlDeviceGetMemoryInfo(handle).used
-    finally:
-        pynvml.nvmlShutdown()
-
-
-def wait_for_memory_drop(
-    baseline_bytes: int,
-    *,
-    timeout_s: float = 30.0,
-    poll_interval_s: float = 0.5,
-) -> int:
-    """Poll until GPU memory drops below *baseline_bytes*, then return current usage."""
-    deadline = time.monotonic() + timeout_s
-    current = get_gpu_memory_used()
-    while time.monotonic() < deadline:
-        if current < baseline_bytes:
-            return current
-        time.sleep(poll_interval_s)
-        current = get_gpu_memory_used()
-    return current
 
 
 class GMSProcessManager:
@@ -314,7 +286,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "--max-num-seqs",
             "1",
             "--gpu-memory-utilization",
-            "0.9",
+            "0.8",
             "--kv-events-config",
             kv_events_cfg,
         ]
@@ -360,7 +332,7 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
         read_only_weights: bool = False,
         override_engine_args: str | None = None,
     ):
-        reserved_ports = allocate_ports(1)
+        reserved_ports = allocate_ports(1, DefaultPort.SYSTEM1.value)
         self._override_engine_args = override_engine_args
         try:
             super().__init__(
@@ -461,7 +433,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "--enable-memory-saver",
             "--disable-cuda-graph",
             "--mem-fraction-static",
-            "0.9",
+            "0.8",
             "--port",
             str(self.serve_port),
         ]

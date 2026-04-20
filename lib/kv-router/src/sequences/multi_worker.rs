@@ -19,6 +19,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(test, feature = "bench"))]
+use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
@@ -94,8 +96,6 @@ pub enum SequenceError {
 pub struct SequenceRequest {
     pub request_id: RequestId,
     pub token_sequence: Option<Vec<SequenceHash>>,
-    pub isl: usize,
-    pub overlap: u32,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
     pub prefill_load_hint: Option<PrefillLoadHint>,
@@ -181,6 +181,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(
             self.prompt_registry.is_block_index_empty(),
             "expected reverse block index to be empty after drain",
+        );
+
+        let trie_lookup_live_hashes: Vec<_> = {
+            let table = self.workers.read();
+            table
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    let live_hashes = lookup_live_hashes(&slot.trie_lookup);
+                    (!live_hashes.is_empty()).then_some((slot.worker, live_hashes))
+                })
+                .collect()
+        };
+        assert!(
+            trie_lookup_live_hashes.is_empty(),
+            "expected all worker trie lookups to reference only dead nodes after drain, found {:?}",
+            trie_lookup_live_hashes,
         );
     }
 
@@ -280,8 +297,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     match &event.data {
                         ActiveSequenceEventData::AddRequest {
                             token_sequence,
-                            isl,
-                            overlap,
                             track_prefill_tokens,
                             expected_output_tokens,
                             prefill_load_hint,
@@ -300,8 +315,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     let outcome = seq.add_request_with_prefill_tracking(
                                         event.request_id.clone(),
                                         token_sequence.clone(),
-                                        *isl,
-                                        *overlap,
                                         *expected_output_tokens,
                                         *track_prefill_tokens,
                                         *prefill_load_hint,
@@ -434,8 +447,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
                 token_sequence: req.token_sequence.clone(),
-                isl: req.isl,
-                overlap: req.overlap,
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
@@ -727,8 +738,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let SequenceRequest {
             request_id,
             token_sequence,
-            isl,
-            overlap,
             track_prefill_tokens,
             expected_output_tokens,
             prefill_load_hint,
@@ -758,8 +767,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let outcome = seq.add_request_with_prefill_tracking(
                 request_id,
                 token_sequence,
-                isl,
-                overlap,
                 expected_output_tokens,
                 track_prefill_tokens,
                 prefill_load_hint,
@@ -938,6 +945,7 @@ mod tests {
 
     use rustc_hash::FxHashMap;
 
+    use super::super::prefill_tracker::added_prefill_tokens;
     use super::*;
     use crate::protocols::{
         ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, OverlapScores,
@@ -994,7 +1002,7 @@ mod tests {
                 token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
             let overlap = *overlaps.scores.get(&slot.worker).unwrap_or(&0);
             let added_tokens = if track_prefill_tokens {
-                seq.new_tokens(isl, overlap)
+                added_prefill_tokens(sequences.block_size, isl, overlap)
             } else {
                 0
             };
@@ -1014,6 +1022,13 @@ mod tests {
             },
         );
         compute_seq_hash_for_block(&block_hashes)
+    }
+
+    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: None,
+        })
     }
 
     struct VecSubscriber {
@@ -1039,8 +1054,6 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1069,11 +1082,9 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-a".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: tracking_hint(12),
                     worker: worker_a,
                     lora_name: None,
                 },
@@ -1092,11 +1103,9 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-b".to_string(),
                     token_sequence: Some(vec![1, 2, 4]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: tracking_hint(12),
                     worker: worker_b,
                     lora_name: None,
                 },
@@ -1149,8 +1158,6 @@ mod tests {
                 SequenceRequest {
                     request_id: "base".to_string(),
                     token_sequence: Some(base_prompt.clone()),
-                    isl: 8,
-                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1165,8 +1172,6 @@ mod tests {
                 SequenceRequest {
                     request_id: "lora".to_string(),
                     token_sequence: Some(lora_prompt),
-                    isl: 8,
-                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1213,11 +1218,9 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
                 },
@@ -1243,11 +1246,9 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
                 },
@@ -1262,11 +1263,9 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-2".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
                 },
@@ -1313,11 +1312,9 @@ mod tests {
                     worker,
                     data: ActiveSequenceEventData::AddRequest {
                         token_sequence: Some(vec![1, 2, 3]),
-                        isl: 12,
-                        overlap: 0,
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
-                        prefill_load_hint: None,
+                        prefill_load_hint: tracking_hint(12),
                     },
                     router_id: 99,
                     lora_name: None,
@@ -1359,11 +1356,9 @@ mod tests {
                 worker,
                 data: ActiveSequenceEventData::AddRequest {
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: tracking_hint(12),
                 },
                 router_id: 99,
                 lora_name: None,
@@ -1395,8 +1390,6 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1429,8 +1422,6 @@ mod tests {
                 SequenceRequest {
                     request_id: request_id.clone(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1481,8 +1472,6 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
-                    isl: 100,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: Some(PrefillLoadHint {

@@ -116,6 +116,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
         self._diag_throughput_reason: Optional[str] = None
+        self._diag_load_reason_prefill: Optional[str] = None
+        self._diag_load_reason_decode: Optional[str] = None
+        self._diag_throughput_reason_prefill: Optional[str] = None
+        self._diag_throughput_reason_decode: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -170,6 +174,24 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         if tick_input.worker_counts is not None:
             self._update_inventory(tick_input.worker_counts)
 
+        # Run throughput scaling first so any updated lower bound is visible
+        # to the load scaling pass on a combined tick.  Otherwise load scaling
+        # reads the stale bound, potentially deciding to scale below the new
+        # floor set in this same tick.
+        #
+        # We always advance _next_throughput_s on a throughput tick, even if
+        # no traffic was available, so the planner keeps the throughput
+        # cadence stable rather than re-firing back-to-back ticks whenever
+        # traffic is temporarily absent.
+        throughput_decision = None
+        if tick.run_throughput_scaling:
+            if tick_input.traffic is not None:
+                self._observe_traffic(tick_input.traffic)
+                throughput_decision = self._advance_throughput(tick_input.traffic)
+            self._next_throughput_s = (
+                tick_input.now_s + self._config.throughput_adjustment_interval
+            )
+
         if tick.run_load_scaling:
             if tick_input.fpm_observations is not None:
                 if not self._is_easy:
@@ -179,16 +201,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                     effects.scale_to = load_decision
             self._next_load_s = tick_input.now_s + self._config.load_adjustment_interval
 
-        if tick.run_throughput_scaling:
-            if tick_input.traffic is not None:
-                self._observe_traffic(tick_input.traffic)
-                throughput_decision = self._advance_throughput(tick_input.traffic)
-                if throughput_decision is not None:
-                    if effects.scale_to is None:
-                        effects.scale_to = throughput_decision
-            self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
-            )
+        # Load scaling has precedence when it produced a decision; otherwise
+        # fall back to the throughput-scaling decision.
+        if effects.scale_to is None and throughput_decision is not None:
+            effects.scale_to = throughput_decision
 
         effects.diagnostics = self._build_diagnostics()
         effects.next_tick = self._next_scheduled_tick()
@@ -204,6 +220,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
         self._diag_throughput_reason = None
+        self._diag_load_reason_prefill = None
+        self._diag_load_reason_decode = None
+        self._diag_throughput_reason_prefill = None
+        self._diag_throughput_reason_decode = None
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -214,8 +234,14 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             predicted_osl=self._diag_predicted_osl,
             engine_rps_prefill=self._diag_engine_rps_prefill,
             engine_rps_decode=self._diag_engine_rps_decode,
+            throughput_lower_bound_prefill=self._throughput_lower_bound_p,
+            throughput_lower_bound_decode=self._throughput_lower_bound_d,
             load_decision_reason=self._diag_load_reason,
             throughput_decision_reason=self._diag_throughput_reason,
+            load_decision_reason_prefill=self._diag_load_reason_prefill,
+            load_decision_reason_decode=self._diag_load_reason_decode,
+            throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
+            throughput_decision_reason_decode=self._diag_throughput_reason_decode,
         )
 
     # ------------------------------------------------------------------
