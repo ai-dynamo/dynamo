@@ -9,9 +9,9 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use kvbm_connector::TensorDescriptor;
 use kvbm_connector::connector::leader::scheduler::KvConnectorMetadata;
 use kvbm_connector::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
-use kvbm_connector::TensorDescriptor;
 
 use crate::to_pyerr;
 use crate::v2::torch::Tensor;
