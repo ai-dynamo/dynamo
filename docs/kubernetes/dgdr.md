@@ -349,6 +349,11 @@ kubectl get pods -n ${NAMESPACE} | grep frontend
 kubectl logs <frontend-pod-name> -n ${NAMESPACE}
 ```
 
+## Known issues
+
+- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an engineering follow-up (VDR §1.3 item 5 — DGDR `pareto_analysis.py` NaN output). Workaround: re-run with a narrower sweep; narrow sweeps bypass the NaN path in practice.
+- **PCIe profiler data not yet available.** See callout above the SKU table.
+
 ## Next Steps
 
 - **Tune for production SLAs**: Add `sla` (TTFT, ITL) and `workload` (ISL, OSL) targets to
