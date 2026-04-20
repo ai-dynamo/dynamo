@@ -47,6 +47,14 @@ class frontend_perf:
 
     # Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     STAGE_DURATION_SECONDS = "stage_duration_seconds"
+    # Per-stage inflight request gauge (labels: stage, phase)
+    # Tracks how many requests are currently in each pipeline stage.
+    # Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    STAGE_REQUESTS = "stage_requests"
+    # Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    STAGE_PREPROCESS = "preprocess"
+    STAGE_ROUTE = "route"
+    STAGE_DISPATCH = "dispatch"
     # Tokenization time in preprocessor
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
@@ -73,6 +81,9 @@ class frontend_service:
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
     # Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     INFLIGHT_REQUESTS = "inflight_requests"
+    # Number of requests currently being handled by the frontend, from HTTP handler
+    # entry to response completion. Clearer name for what inflight_requests measures.
+    ACTIVE_REQUESTS = "active_requests"
     # Number of disconnected clients (gauge that can go up and down)
     DISCONNECTED_CLIENTS = "disconnected_clients"
     # Duration of LLM requests
