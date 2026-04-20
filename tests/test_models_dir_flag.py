@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from tests.conftest import (
     _apply_models_dir_env,
     _restore_models_dir_env,
 )
+from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
 
 @pytest.mark.pre_merge
@@ -26,6 +29,9 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
+        cache = os.environ.get("TRANSFORMERS_CACHE")
+        assert cache is not None and cache != str(tmp_path)
+        assert Path(cache).is_dir() and os.access(cache, os.W_OK)
     finally:
         _restore_models_dir_env(orig, tmp_cache)
 
@@ -82,7 +88,9 @@ def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_apply_sets_writable_transformers_cache(tmp_path):
+def test_apply_sets_writable_transformers_cache(tmp_path, monkeypatch):
+    for k in _MODELS_DIR_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
     orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
     try:
         cache = os.environ.get("TRANSFORMERS_CACHE")
@@ -92,3 +100,33 @@ def test_apply_sets_writable_transformers_cache(tmp_path):
         assert os.access(cache, os.W_OK)
     finally:
         _restore_models_dir_env(orig, tmp_cache)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--models-dir=/nonexistent_path_xyz_dynamo_8362",
+            "--collect-only",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+    )
+    assert result.returncode == 2
+    assert "does not exist" in result.stderr + result.stdout
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("DYNAMO_MODELS_DIR", str(tmp_path))
+    service = MinioService(MinioLoraConfig())
+    with pytest.raises(pytest.skip.Exception, match="read-only cache mode"):
+        service.download_lora()

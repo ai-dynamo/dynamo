@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import boto3
+import pytest
 import requests
 from botocore.client import Config
 from botocore.exceptions import ClientError
@@ -237,8 +238,6 @@ class MinioService:
         Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
         """
         if os.environ.get("DYNAMO_MODELS_DIR"):
-            import pytest
-
             pytest.skip(
                 "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
                 "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."

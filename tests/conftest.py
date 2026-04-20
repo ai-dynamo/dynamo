@@ -528,7 +528,7 @@ def predownload_models(pytestconfig, _models_dir_env):
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
     this fixture simply yields without downloading.
     """
-    if pytestconfig.getoption("--models-dir"):
+    if os.environ.get("DYNAMO_MODELS_DIR"):
         yield
         return
 
@@ -556,7 +556,7 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
     this fixture simply yields without downloading.
     """
-    if pytestconfig.getoption("--models-dir"):
+    if os.environ.get("DYNAMO_MODELS_DIR"):
         yield
         return
 
