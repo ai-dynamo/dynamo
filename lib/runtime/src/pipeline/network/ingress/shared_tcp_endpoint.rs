@@ -500,8 +500,11 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Send to worker pool with backpressure - BEFORE sending ACK
-            match work_tx.send(work_item).await {
+            // Attempt to enqueue work without blocking the TCP read loop.
+            // try_send() is non-blocking: it either succeeds immediately or
+            // returns Full/Closed.  This prevents the read loop from stalling
+            // when the worker pool queue is saturated
+            match work_tx.try_send(work_item) {
                 Ok(_) => {
                     // Send acknowledgment ONLY after successful queuing
                     let ack_response = TcpResponseMessage::empty();
@@ -521,30 +524,40 @@ impl SharedTcpServer {
                         "Request queued and acknowledged"
                     );
                 }
-                Err(e) => {
-                    tracing::warn!(
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Queue is full: send the overload sentinel immediately instead
+                    // of stalling the read loop.  The client detects this sentinel
+                    // and returns ErrorType::Overload so the migration layer can
+                    // retry on a different worker.
+                    tracing::debug!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        error = %e,
-                        "Failed to queue work to worker pool, sending error response"
+                        "Worker queue full — rejecting request immediately (overload)"
                     );
-
-                    // Send error response to client instead of ACK
+                    let overload_response = TcpResponseMessage::new(Bytes::from_static(
+                        crate::pipeline::network::codec::OVERLOAD_SENTINEL,
+                    ));
+                    if let Ok(encoded) = overload_response.encode() {
+                        let _ = response_tx.send(encoded);
+                    }
+                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                    handler.notify.notify_one();
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        endpoint = handler.endpoint_name.as_str(),
+                        instance_id = handler.instance_id,
+                        "Worker pool channel closed, shutting down read loop"
+                    );
+                    // Send a generic error to the client
                     let error_response =
-                        TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
+                        TcpResponseMessage::new(Bytes::from_static(b"Worker pool channel closed"));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
-
-                    // Clean up inflight counter
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
-
-                    // If channel is closed, break the loop
-                    if matches!(e, tokio::sync::mpsc::error::SendError(_)) {
-                        tracing::error!("Worker pool channel closed, shutting down read loop");
-                        break;
-                    }
+                    break;
                 }
             }
         }

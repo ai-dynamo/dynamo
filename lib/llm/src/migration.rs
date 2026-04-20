@@ -25,6 +25,9 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
         ErrorType::ConnectionTimeout,
+        // Worker queue was full — the worker explicitly rejected the request.
+        // Retrying on a different worker is the correct response.
+        ErrorType::Overload,
         ErrorType::Backend(BackendError::EngineShutdown),
     ];
     const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];

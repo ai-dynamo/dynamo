@@ -57,6 +57,12 @@ pub enum ErrorType {
     Cancelled,
     /// The system does not have enough resources to handle the request.
     ResourceExhausted,
+    /// The worker's request queue is full and the request was rejected immediately.
+    ///
+    /// This is explicit backpressure: the worker cannot accept more work right now.
+    /// Unlike `ResourceExhausted` (which is permanent), `Overload` is transient —
+    /// retrying on a different worker is the correct response.
+    Overload,
     /// Error originating from a backend engine.
     Backend(BackendError),
 }
@@ -72,6 +78,7 @@ impl fmt::Display for ErrorType {
             ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
+            ErrorType::Overload => write!(f, "Overload"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }
@@ -469,6 +476,7 @@ mod tests {
         );
         assert_eq!(ErrorType::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
+        assert_eq!(ErrorType::Overload.to_string(), "Overload");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
             "BackendUnknown"

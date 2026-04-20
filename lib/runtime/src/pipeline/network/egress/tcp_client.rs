@@ -1414,6 +1414,22 @@ impl RequestPlaneClient for TcpRequestClient {
 
         match result {
             Ok(Ok(response)) => {
+                // Detect overload sentinel: the worker queue was full and the
+                // worker sent this magic prefix instead of an empty ACK.
+                // Return ErrorType::Overload so the migration layer can retry
+                // on a different worker immediately, without hitting a timeout.
+                if response.starts_with(crate::pipeline::network::codec::OVERLOAD_SENTINEL) {
+                    self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    TCP_ERRORS_TOTAL.inc();
+                    tracing::debug!("TCP overload rejection from {}: worker queue full", addr);
+                    return Err(anyhow::anyhow!(
+                        crate::error::DynamoError::builder()
+                            .error_type(crate::error::ErrorType::Overload)
+                            .message(format!("Worker {addr} queue full — request rejected"))
+                            .build()
+                    ));
+                }
+
                 self.stats
                     .responses_received
                     .fetch_add(1, Ordering::Relaxed);

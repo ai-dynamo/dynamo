@@ -20,6 +20,17 @@ pub mod zero_copy_decoder;
 pub use two_part::{TwoPartCodec, TwoPartMessage, TwoPartMessageType};
 pub use zero_copy_decoder::{TcpRequestMessageZeroCopy, ZeroCopyTcpDecoder};
 
+/// Magic sentinel prefix sent in lieu of a normal empty ACK when the worker's
+/// request queue is full.  The client detects this prefix and returns an
+/// `ErrorType::Overload` error immediately rather than waiting for the outer
+/// 5-second ACK timeout.
+///
+/// Chosen constraints:
+/// - First byte `0x7f` (ASCII DEL) is never the first byte of a valid empty ACK
+///   (`\x00\x00\x00\x00` for a zero-length response payload).
+/// - The full string is long enough to be unmistakable and short enough to be cheap.
+pub const OVERLOAD_SENTINEL: &[u8] = b"\x7fDYNAMO-OVERLOAD";
+
 /// TCP request plane protocol message with endpoint routing and trace headers
 ///
 /// Wire format:
