@@ -28,9 +28,9 @@ fn select_onboard_block_ids(
     num_external_tokens: usize,
     block_size: usize,
 ) -> Vec<BlockId> {
+    let num_computed_blocks = num_computed_tokens / block_size;
     let num_external_blocks = num_external_tokens / block_size;
-    let onboard_start_block_idx = block_ids.len().saturating_sub(num_external_blocks);
-    block_ids[onboard_start_block_idx..].to_vec()
+    block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec()
 }
 
 impl ConnectorLeader {
@@ -56,10 +56,8 @@ impl ConnectorLeader {
             .expect("session should exist")
             .num_computed_tokens;
 
-        let num_computed_blocks = num_computed_tokens / self.block_size();
-        let num_external_blocks = num_external_tokens / self.block_size();
         let g1_block_ids =
-            block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec();
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, self.block_size());
 
         // Record the block_ids - this assigns them to the token_block sequence hashes
         slot.apply_new_blocks(block_ids);
@@ -115,8 +113,12 @@ impl ConnectorLeader {
         let (staging_fut, onboard_blocks_ids) = {
             let mut slot = shared_slot.lock();
 
+            let num_computed_tokens = match slot.onboarding_state() {
+                Some(state) => state.num_computed_tokens,
+                None => 0,
+            };
             let onboard_blocks_ids =
-                select_onboard_block_ids(&block_ids, 0, num_external_tokens, self.block_size());
+                select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, self.block_size());
 
             // record the block_ids
             // this will assign the block_ids to the token_block sequence hashes
