@@ -2053,17 +2053,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            embedding_params = None
             async for res in gen:
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                # Build embedding params if not already built
-                if embedding_params is None:
-                    embedding_params = self._build_embedding_params(
-                        multi_modal_data or {}, res.prompt_token_ids
-                    )
+                # For prefill worker, only one res will be generated,
+                # so we can always build embedding params here without conditionals
+                embedding_params = self._build_embedding_params(
+                    multi_modal_data or {}, res.prompt_token_ids
+                )
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
@@ -2121,5 +2120,4 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # original prompt and sufficient metadata to reconstruct mm embedding
             # as request input.
             return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
-        # return empty dict as a hint that no embedding params are needed
-        return {}
+        return None
