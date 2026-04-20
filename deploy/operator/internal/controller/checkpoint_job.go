@@ -6,17 +6,18 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -81,10 +82,10 @@ func buildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	mainContainer, err := snapshotprotocol.ResolveCheckpointWorkerContainer(&podTemplate.Spec)
-	if err != nil {
-		return nil, err
+	if len(podTemplate.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
+	mainContainer := &podTemplate.Spec.Containers[0]
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,
@@ -105,12 +106,17 @@ func buildCheckpointJob(
 	}
 	mainContainer.LivenessProbe = nil
 	mainContainer.StartupProbe = nil
+
+	// The snapshot agent sends SIGUSR1 to PID 1 of the main container after
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 
-	var gmsSidecars []corev1.Container
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		storage, err := checkpoint.ResolveGMSCheckpointStorage(
+		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
+		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
+		}
+		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
 			ctx,
 			reader,
 			ckpt.Namespace,
@@ -120,12 +126,13 @@ func buildCheckpointJob(
 		if err != nil {
 			return nil, err
 		}
-		gmsSidecars, err = checkpoint.BuildGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage)
-		if err != nil {
+		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
 			return nil, err
 		}
+		// Re-acquire pointer: append in EnsureGMSCheckpointJobSidecars may
+		// have reallocated the Containers slice.
+		mainContainer = &podTemplate.Spec.Containers[0]
 	}
-	podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, gmsSidecars...)
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
@@ -133,10 +140,29 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	wrapLaunchJob := false
-	if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
-		wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
+	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs (TP*PP > 1).
+	// Use checkpoint identity (not container limits) because DRA may have
+	// already removed nvidia.com/gpu from the template.
+	tp := ckpt.Spec.Identity.TensorParallelSize
+	pp := ckpt.Spec.Identity.PipelineParallelSize
+	if tp == 0 {
+		tp = 1
 	}
+	if pp == 0 {
+		pp = 1
+	}
+	wrapLaunchJob := tp*pp > 1
+
+	// For single-GPU jobs (no cuda-checkpoint wrapper), unwrap /bin/sh -c so
+	// the actual process is PID 1 and receives SIGUSR1 from the snapshot agent.
+	if !wrapLaunchJob && len(mainContainer.Command) >= 2 &&
+		mainContainer.Command[len(mainContainer.Command)-1] == "-c" &&
+		len(mainContainer.Args) == 1 {
+		parts := strings.Fields(mainContainer.Args[0])
+		mainContainer.Command = parts[:1]
+		mainContainer.Args = parts[1:]
+	}
+
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{

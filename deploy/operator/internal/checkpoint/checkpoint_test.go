@@ -23,7 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -183,50 +183,6 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 
 // --- InjectCheckpointIntoPodSpec tests ---
 
-func TestEnsurePodInfoVolumeMergesExistingDownwardAPIItems(t *testing.T) {
-	podSpec := &corev1.PodSpec{
-		Volumes: []corev1.Volume{{
-			Name: consts.PodInfoVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				DownwardAPI: &corev1.DownwardAPIVolumeSource{
-					Items: []corev1.DownwardAPIVolumeFile{
-						{
-							Path:     "pod_name",
-							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
-						},
-						{
-							Path:     "custom",
-							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels['custom']"},
-						},
-					},
-				},
-			},
-		}},
-	}
-
-	EnsurePodInfoVolume(podSpec)
-
-	require.Len(t, podSpec.Volumes, 1)
-	require.NotNil(t, podSpec.Volumes[0].DownwardAPI)
-
-	fields := map[string]string{}
-	for _, item := range podSpec.Volumes[0].DownwardAPI.Items {
-		if item.FieldRef != nil {
-			fields[item.Path] = item.FieldRef.FieldPath
-		}
-	}
-
-	assert.Equal(t, consts.PodInfoFieldPodName, fields["pod_name"])
-	assert.Equal(t, consts.PodInfoFieldPodUID, fields["pod_uid"])
-	assert.Equal(t, consts.PodInfoFieldPodNamespace, fields["pod_namespace"])
-	assert.Equal(t, "metadata.labels['custom']", fields["custom"])
-	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
-	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
-	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
-	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
-	assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
-}
-
 func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
 		podSpec := testPodSpec()
@@ -263,65 +219,21 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
-	t.Run("ready checkpoint augments existing podinfo volume", func(t *testing.T) {
-		podSpec := testPodSpec()
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: consts.PodInfoVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				DownwardAPI: &corev1.DownwardAPIVolumeSource{
-					Items: []corev1.DownwardAPIVolumeFile{
-						{Path: "pod_name", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodName}},
-						{Path: "pod_uid", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodUID}},
-						{Path: "pod_namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodNamespace}},
-					},
-				},
-			},
-		})
-		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
-		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-
-		var podInfoVolume *corev1.Volume
-		for i := range podSpec.Volumes {
-			if podSpec.Volumes[i].Name == consts.PodInfoVolumeName {
-				podInfoVolume = &podSpec.Volumes[i]
-				break
-			}
-		}
-		require.NotNil(t, podInfoVolume)
-		require.NotNil(t, podInfoVolume.DownwardAPI)
-
-		fields := map[string]string{}
-		for _, item := range podInfoVolume.DownwardAPI.Items {
-			if item.FieldRef != nil {
-				fields[item.Path] = item.FieldRef.FieldPath
-			}
-		}
-		assert.Equal(t, consts.PodInfoFieldPodName, fields["pod_name"])
-		assert.Equal(t, consts.PodInfoFieldPodUID, fields["pod_uid"])
-		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields["pod_namespace"])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
-		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
-	})
-
 	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
+				{Name: "main", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
-				{Name: consts.MainContainerName, Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 			},
 		}
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[0].Command)
-		assert.Equal(t, []string{"run"}, podSpec.Containers[0].Args)
-		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[1].Command)
-		assert.Nil(t, podSpec.Containers[1].Args)
+		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
+		assert.Nil(t, podSpec.Containers[0].Args)
+		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
+		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
 	})
 
 	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
@@ -331,22 +243,24 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		gmsServer := findContainer(podSpec, gmsruntime.ServerContainerName)
+		gmsServer := findContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := findContainer(podSpec, GMSLoaderContainer)
 		require.NotNil(t, loader)
 
-		// Restore: gms-server should be a regular container, not an init container
-		assert.Empty(t, podSpec.InitContainers, "restore pods should not have gms-server as init container")
-		assert.Nil(t, gmsServer.RestartPolicy, "restore gms-server should not have RestartPolicy")
+		// Restore: server and loader are init sidecars (restartPolicy=Always)
+		assert.NotNil(t, gmsServer.RestartPolicy, "restore gms-server should have RestartPolicy")
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
 		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
+		assert.NotNil(t, loader.RestartPolicy, "restore gms-loader should have RestartPolicy")
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *loader.RestartPolicy)
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
 			mounts[mount.Name] = mount.MountPath
 		}
 		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
-		assert.Equal(t, gmsruntime.SharedMountPath, mounts[gmsruntime.SharedVolumeName])
+		assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName])
 
 		env := map[string]string{}
 		for _, item := range loader.Env {
@@ -366,8 +280,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			errMsg  string
 		}{
 			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
-			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container found"},
-			{"main container missing", &corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "img", Command: []string{"python3"}}}}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "main container not found"},
+			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container named"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {

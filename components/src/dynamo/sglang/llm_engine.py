@@ -79,6 +79,12 @@ class SglangLLMEngine(LLMEngine):
         if max_total_tokens and page_size:
             total_kv_blocks = (max_total_tokens + page_size - 1) // page_size
 
+        # Prefer explicit max_prefill_tokens; fall back to max_total_num_tokens
+        # from the scheduler so the planner always has a prefill load signal.
+        max_num_batched_tokens = (
+            getattr(self.server_args, "max_prefill_tokens", None) or max_total_tokens
+        )
+
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
@@ -86,9 +92,7 @@ class SglangLLMEngine(LLMEngine):
             kv_cache_block_size=page_size,
             total_kv_blocks=total_kv_blocks,
             max_num_seqs=getattr(self.server_args, "max_running_requests", None),
-            max_num_batched_tokens=getattr(
-                self.server_args, "max_prefill_tokens", None
-            ),
+            max_num_batched_tokens=max_num_batched_tokens,
         )
 
     async def generate(

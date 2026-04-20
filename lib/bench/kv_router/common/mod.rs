@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use tokio::task::JoinHandle;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 /// Shared CLI arguments for trace-based benchmarks.
@@ -95,6 +96,23 @@ pub struct CommonArgs {
     /// Ignored - passed by cargo bench harness.
     #[arg(long, hide = true, global = true)]
     pub bench: bool,
+
+    /// Opt in to runtime warn/error logs from the mocker and sequence tracker.
+    #[clap(long)]
+    pub sequence_logs: bool,
+}
+
+pub fn init_sequence_logging(enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(
+            "error,dynamo_kv_router::sequences=warn,dynamo_mocker=warn",
+        ))
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 /// A single request deserialized from the mooncake trace JSONL.

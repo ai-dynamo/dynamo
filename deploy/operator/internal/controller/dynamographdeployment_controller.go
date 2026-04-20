@@ -54,6 +54,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -664,10 +665,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
 	if r.RuntimeConfig.DRAEnabled {
 		for serviceName, component := range dynamoDeployment.Spec.Services {
-			svcComponent := component
-			claimTemplateName := dynamo.GMSResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+			gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
+			claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
 			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-				return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, svcComponent)
+				return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
 			})
 			if err != nil {
 				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
@@ -1419,10 +1420,14 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, err
 	}
 
-	// Create a copy of the component spec without checkpoint config
-	// The checkpoint job is CREATING the checkpoint, not restoring from one
+	// Create a copy of the component spec stripped of features that buildCheckpointJob
+	// or the checkpoint controller handle independently. GenerateBasePodSpec would
+	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
+	// frontend sidecar) that conflict with the checkpoint path's own setup.
 	componentForJob := component.DeepCopy()
 	componentForJob.Checkpoint = nil
+	componentForJob.GPUMemoryService = nil
+	componentForJob.FrontendSidecar = nil
 
 	// Ensure DYN_NAMESPACE is set for checkpoint job using the same logic as regular pods
 	// This is required for service discovery and distributed coordination

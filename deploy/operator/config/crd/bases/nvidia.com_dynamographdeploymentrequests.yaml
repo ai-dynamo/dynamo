@@ -579,26 +579,52 @@ spec:
                       allOf:
                         - enum:
                             - gb200_sxm
+                            - b200_sxm
                             - h200_sxm
                             - h100_sxm
-                            - b200_sxm
+                            - h100_pcie
                             - a100_sxm
+                            - a100_pcie
                             - l40s
+                            - l40
+                            - l4
+                            - v100_sxm
+                            - v100_pcie
+                            - t4
+                            - mi200
+                            - mi300
                         - enum:
                             - gb200_sxm
+                            - b200_sxm
                             - h200_sxm
                             - h100_sxm
-                            - b200_sxm
+                            - h100_pcie
                             - a100_sxm
+                            - a100_pcie
                             - l40s
+                            - l40
+                            - l4
+                            - v100_sxm
+                            - v100_pcie
+                            - t4
+                            - mi200
+                            - mi300
                       description: |-
                         GPUSKU is the AIC hardware system identifier for the GPU.
                         When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
+                      type: string
+                    interconnect:
+                      description: |-
+                        Interconnect describes the GPU interconnect type within a node.
+                        Examples: "pcie", "nvlink", "infiniband".
                       type: string
                     numGpusPerNode:
                       description: NumGPUsPerNode is the number of GPUs per node.
                       format: int32
                       type: integer
+                    rdma:
+                      description: RDMA indicates whether RDMA is available on the cluster.
+                      type: boolean
                     totalGpus:
                       description: TotalGPUs is the total number of GPUs available in the cluster.
                       format: int32

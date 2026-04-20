@@ -29,7 +29,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
@@ -1424,7 +1424,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			return nil
 		}
 
-		gmsServer := find(gmsruntime.ServerContainerName)
+		gmsServer := find(gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := find(checkpoint.GMSLoaderContainer)
 		require.NotNil(t, loader)
@@ -1439,9 +1439,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
 			t.Fatalf("expected weights server to run python module, got %#v", got)
 		}
-		// Restore: gms-server should be a regular container, not an init container
-		if gmsServer.RestartPolicy != nil {
-			t.Fatalf("expected restore gms-server to have no RestartPolicy (regular container), got %#v", gmsServer.RestartPolicy)
+		// Restore: gms-server and loader are init sidecars (restartPolicy=Always)
+		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			t.Fatalf("expected restore gms-server to have RestartPolicy=Always, got %#v", gmsServer.RestartPolicy)
 		}
 		if gmsServer.StartupProbe != nil {
 			t.Fatalf("expected restore gms-server to have no StartupProbe")
@@ -1487,8 +1487,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
+		// User's extra sidecar should remain in Containers, unchanged.
+		// GMS loader is now an init sidecar, so the user's container stays
+		// at Containers[0] and main at Containers[1].
 		if got := podTemplateSpec.Spec.Containers[0]; got.Name != "gms-loader" || len(got.Command) != 1 || got.Command[0] != "python3" {
-			t.Fatalf("expected sidecar container to remain unchanged, got %#v", got)
+			t.Fatalf("expected user sidecar container to remain unchanged, got %#v", got)
 		}
 		if got := podTemplateSpec.Spec.Containers[1]; got.Name != commonconsts.MainContainerName || len(got.Command) != 2 || got.Command[0] != "sleep" || got.Command[1] != "infinity" {
 			t.Fatalf("expected main container to be rewritten for restore, got %#v", got)
