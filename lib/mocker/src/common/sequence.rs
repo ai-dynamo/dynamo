@@ -4,7 +4,7 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{TokenBlockSequence, Tokens};
+use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
@@ -132,6 +132,20 @@ impl ActiveSequence {
         let hash_start = prev_blocks.min(self.block_hashes.len());
         let hash_end = target_blocks.min(self.block_hashes.len());
         let hashes = self.block_hashes[hash_start..hash_end].to_vec();
+        // When prefix caching is disabled, emit randomised PLHs so two requests
+        // with identical prompts don't accidentally share blocks via kvbm-logical's
+        // PLH-keyed `match_blocks`. Mirrors `create_sequence_cache`'s random
+        // fallback for the `UniqueBlock::FullBlock` hashes.
+        let plhs: Vec<PositionalLineageHash> = if self.enable_prefix_caching {
+            self.tokens.blocks()[hash_start..hash_end]
+                .iter()
+                .map(|b| b.positional_lineage_hash())
+                .collect()
+        } else {
+            (hash_start..hash_end)
+                .map(|pos| PositionalLineageHash::new(random::<u64>(), None, pos as u64))
+                .collect()
+        };
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
             Some(
@@ -149,7 +163,17 @@ impl ActiveSequence {
         } else {
             None
         };
-        Some(MoveBlock::Use(blocks, hashes, token_ids, parent))
+        Some(MoveBlock::Use(blocks, hashes, plhs, token_ids, parent))
+    }
+
+    /// Positional lineage hashes for all fully-tokenised blocks in the sequence.
+    /// Mirrors `block_hashes()` but returns the PLH identity used by kvbm-logical.
+    pub fn positional_lineage_hashes(&self) -> Vec<PositionalLineageHash> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.positional_lineage_hash())
+            .collect()
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
@@ -209,6 +233,15 @@ impl ActiveSequence {
                 random::<u64>()
             };
             let last_block_hash = last_complete.block_hash();
+            // Same randomization story as `last_seq_hash`: with prefix caching off,
+            // two identical prompts must not share blocks, so the PLH we promote
+            // with must also be unique — otherwise `process_promote`'s
+            // `match_blocks(&[plh])` lookup would reuse another request's block.
+            let last_plh = if self.enable_prefix_caching {
+                last_complete.positional_lineage_hash()
+            } else {
+                PositionalLineageHash::new(random::<u64>(), None, self.block_hashes.len() as u64)
+            };
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())
             } else {
@@ -230,13 +263,20 @@ impl ActiveSequence {
                 last_seq_hash,
                 second_to_last_hash,
                 last_block_hash,
+                last_plh,
                 promote_token_ids,
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], None, None));
+        signals.push(MoveBlock::Use(
+            vec![new_partial_block],
+            vec![],
+            vec![],
+            None,
+            None,
+        ));
         Some(signals)
     }
 
