@@ -31,6 +31,7 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+      run_tag_prefix: ${{ steps.export-builder-name.outputs.run_tag_prefix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -44,6 +45,7 @@ jobs:
         id: export-builder-name
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+          echo "run_tag_prefix=r-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
     runs-on: ubuntu-latest
@@ -155,6 +157,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
+      extra_tags: ${{ needs.changed-files.outputs.run_tag_prefix }}
     secrets: inherit
 
   vllm-dev-build:
@@ -184,6 +187,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
+      extra_tags: ${{ needs.changed-files.outputs.run_tag_prefix }}
     secrets: inherit
 
   sglang-dev-build:
@@ -213,6 +217,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
+      extra_tags: ${{ needs.changed-files.outputs.run_tag_prefix }}
     secrets: inherit
 
   trtllm-dev-build:
@@ -242,6 +247,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
+      extra_tags: ${{ needs.changed-files.outputs.run_tag_prefix }}
     secrets: inherit
 
   # ============================================================================

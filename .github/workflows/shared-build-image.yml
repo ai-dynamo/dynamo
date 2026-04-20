@@ -33,7 +33,7 @@ on:
         type: number
         default: 60
       extra_tags:
-        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
+        description: 'Tag prefixes (newline-separated); {framework}-{target}[-cuda{N}] suffix is auto-appended to each'
         required: false
         type: string
         default: ''
@@ -152,6 +152,7 @@ jobs:
           IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+          echo "tag_builder=${TAG_BUILDER}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
       - name: Calculate Builder Flavor
@@ -176,13 +177,14 @@ jobs:
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
+          TAG_BUILDER: ${{ steps.calculate-target-tag.outputs.tag_builder }}
         run: |
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
           if [ -n "$EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}"$'\n'
+                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-${TAG_BUILDER}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
           fi
