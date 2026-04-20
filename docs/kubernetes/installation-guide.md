@@ -298,16 +298,11 @@ kubectl get pods -n ${NAMESPACE}
 
 ## Troubleshooting
 
-**"VALIDATION ERROR: Cannot install cluster-wide Dynamo operator"**
+**Cluster-scoped and namespace-scoped operator coexistence**
 
-```
-VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
-Found existing namespace-restricted Dynamo operators in namespaces: ...
-```
+> **Cluster-scoped and namespace-scoped Dynamo operator installations coexist.** A cluster-scoped operator reconciles Dynamo resources across all namespaces *except* those already owned by a namespace-scoped operator. If both are installed, namespace-scoped installations take precedence within their namespace. This was reconfirmed during VDR testing (2026-04).
 
-Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
-
-Solution: Migrate the existing namespace-restricted operators to cluster-wide mode. Namespace-restricted mode is deprecated and should no longer be used.
+Note that namespace-restricted mode is deprecated and should no longer be used for new installations. Migrate existing namespace-restricted operators to cluster-wide mode.
 
 **CRDs already exist**
 
