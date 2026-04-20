@@ -342,6 +342,11 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
         } else if !delta.text.is_empty() {
             // Text-only response (backward compatible)
             Some(ChatCompletionMessageContent::Text(delta.text))
+        } else if delta.reasoning_content.is_some() {
+            // Reasoning-only response: keep `content` as an empty string so
+            // `skip_serializing_if` doesn't drop the key alongside
+            // `reasoning_content` (DGH-651).
+            Some(ChatCompletionMessageContent::Text(String::new()))
         } else {
             None
         };
@@ -1184,5 +1189,39 @@ mod tests {
             choice.message.tool_calls.as_ref().unwrap()[0].r#type,
             dynamo_protocols::types::FunctionType::Function
         );
+    }
+
+    #[test]
+    fn test_reasoning_only_delta_serializes_content_key() {
+        // DGH-651: when a DeltaChoice has reasoning_content but no text or
+        // content parts, the converted ChatChoice must still carry a
+        // non-None `content` field so serde doesn't drop the key via
+        // skip_serializing_if.
+        let delta = DeltaChoice {
+            index: 0,
+            text: String::new(),
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            stop_reason: None,
+            logprobs: None,
+            tool_calls: None,
+            reasoning_content: Some("Analyzing the question.".to_string()),
+            content_parts: vec![],
+        };
+
+        let choice: dynamo_protocols::types::ChatChoice = delta.into();
+
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(String::new()))
+        );
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Analyzing the question.")
+        );
+
+        let json = serde_json::to_value(&choice.message).unwrap();
+        assert!(json.get("content").is_some(), "content key must be serialized");
+        assert!(json.get("reasoning_content").is_some());
     }
 }
