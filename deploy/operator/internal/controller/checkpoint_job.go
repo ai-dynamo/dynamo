@@ -90,25 +90,11 @@ func buildCheckpointJob(
 		mainContainer.Env,
 	)
 	dynamo.AddStandardEnvVars(mainContainer, config)
-	mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-		Name:  consts.EnvReadyForCheckpointFile,
-		Value: config.Checkpoint.ReadyForCheckpointFilePath,
-	})
-	mainContainer.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
-			},
-		},
-		InitialDelaySeconds: 15,
-		PeriodSeconds:       2,
-	}
-	mainContainer.LivenessProbe = nil
-	mainContainer.StartupProbe = nil
 
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
-	snapshotprotocol.EnsureControlVolume(&podTemplate.Spec, mainContainer)
+	// NewCheckpointJob handles control volume + readiness probe from the
+	// snapshot contract.
 
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
