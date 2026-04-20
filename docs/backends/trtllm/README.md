@@ -33,6 +33,10 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 | **DP Rank Routing**| ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |
 
+## Prerequisites
+
+- **`yq`** for in-place YAML edits. Install with `wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq` or `pip install yq` (the latter is a different tool with the same name but similar syntax). If neither is available, a `sed` fallback is shown inline where `yq` is used.
+
 ## Quick Start
 
 **Step 1 (host terminal):** Start infrastructure services:
@@ -79,6 +83,21 @@ curl localhost:8000/v1/chat/completions \
 ### Kubernetes Deployment
 
 You can deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
+
+## Deploy
+
+`yq` substitutes the container image tag in the deployment YAML before you `kubectl apply` it. The `sed` fallback is shown inline for environments without `yq`:
+
+```bash
+# yq
+yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.1", ":<your-tag>")' deploy.yaml
+# sed fallback
+sed -i.bak 's|:1\.0\.1|:<your-tag>|g' deploy.yaml
+```
+
+> Image substitution: see top of Deploy section.
+
+For full Kubernetes deployment instructions, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
 
 ## Next Steps
 
