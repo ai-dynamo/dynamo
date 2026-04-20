@@ -1,5 +1,9 @@
 # vLLM Kubernetes Deployment Configurations
 
+> See also: the authoritative guide for this backend at [`docs/backends/vllm/`](../../../../docs/backends/vllm/README.md).
+>
+> See also: [`docs/kubernetes/README.md`](../../../../docs/kubernetes/README.md) for operator install + backend selection, and [`recipes/`](../../../../recipes/README.md) for production-ready deploys.
+
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying vLLM inference graphs using the **DynamoGraphDeployment** resource.
 
 ## Available Deployment Patterns
