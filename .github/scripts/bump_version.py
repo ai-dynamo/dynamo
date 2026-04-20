@@ -55,6 +55,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator
 
+from packaging.version import InvalidVersion
+from packaging.version import Version as _PkgVersion
+
 # Per-file opt-out: any file containing this marker is skipped entirely.
 # Use it in test fixtures / historical artifacts that must stay on an old version.
 IGNORE_MARKER = "bump-version: ignore"
@@ -65,9 +68,9 @@ IGNORE_MARKER = "bump-version: ignore"
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=False)
 class Version:
-    """A Dynamo release version.
+    """Thin wrapper around packaging.version.Version with Dynamo-specific formatters.
 
     Knows its three canonical string forms:
       - :meth:`python`:  ``0.9.0`` / ``0.9.0.post1`` (PEP 440, for Python/images/git)
@@ -75,71 +78,69 @@ class Version:
       - :meth:`dashed`:  ``0-9-0`` / ``0-9-0-post1`` (for URL slugs)
     """
 
-    major: int
-    minor: int
-    patch: int
-    post: int | None = None
+    _pkg: _PkgVersion
 
-    _PARSE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[.-]post(\d+))?$")
+    # Strict surface form: digits-only X.Y.Z with optional .postN or -postN.
+    # Rejects things packaging.version.Version would otherwise accept like
+    # leading "v" prefix, epochs, or 4-segment release tuples.
+    _PARSE_RE = re.compile(r"^\d+\.\d+\.\d+(?:[.-]post\d+)?$")
 
     @classmethod
     def parse(cls, s: str) -> Version:
-        m = cls._PARSE_RE.match(s)
-        if not m:
+        if not cls._PARSE_RE.match(s):
             raise argparse.ArgumentTypeError(
                 f"Not a valid version: {s!r}. Expected X.Y.Z or X.Y.Z.postN."
             )
-        maj, min_, pat, post = m.groups()
-        return cls(
-            int(maj), int(min_), int(pat), int(post) if post is not None else None
-        )
+        try:
+            v = _PkgVersion(s)
+        except InvalidVersion as e:
+            raise argparse.ArgumentTypeError(
+                f"Not a valid version: {s!r}. Expected X.Y.Z or X.Y.Z.postN."
+            ) from e
+        return cls(v)
+
+    @property
+    def major(self) -> int:
+        return self._pkg.release[0]
+
+    @property
+    def minor(self) -> int:
+        return self._pkg.release[1]
+
+    @property
+    def patch(self) -> int:
+        return self._pkg.release[2]
+
+    @property
+    def post(self) -> int | None:
+        return self._pkg.post
+
+    @property
+    def is_post(self) -> bool:
+        return self._pkg.post is not None
 
     def python(self) -> str:
         base = f"{self.major}.{self.minor}.{self.patch}"
-        return f"{base}.post{self.post}" if self.post is not None else base
+        return f"{base}.post{self.post}" if self.is_post else base
 
     def semver(self) -> str:
         base = f"{self.major}.{self.minor}.{self.patch}"
-        return f"{base}-post{self.post}" if self.post is not None else base
+        return f"{base}-post{self.post}" if self.is_post else base
 
     def dashed(self) -> str:
         return self.python().replace(".", "-")
 
-    @property
-    def is_post(self) -> bool:
-        return self.post is not None
-
-    def _sort_key(self) -> tuple[int, int, int, int]:
-        # PEP 440: a base release sorts before any of its post-releases, so
-        # treat ``post=None`` as ``-1`` (less than any real post number). The
-        # default dataclass ordering would compare ``None`` to ``int`` and
-        # raise ``TypeError`` at runtime.
-        return (
-            self.major,
-            self.minor,
-            self.patch,
-            self.post if self.post is not None else -1,
-        )
-
     def __lt__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._sort_key() < other._sort_key()
+        return isinstance(other, Version) and self._pkg < other._pkg
 
     def __le__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._sort_key() <= other._sort_key()
+        return isinstance(other, Version) and self._pkg <= other._pkg
 
     def __gt__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._sort_key() > other._sort_key()
+        return isinstance(other, Version) and self._pkg > other._pkg
 
     def __ge__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self._sort_key() >= other._sort_key()
+        return isinstance(other, Version) and self._pkg >= other._pkg
 
     def __str__(self) -> str:
         return self.python()
