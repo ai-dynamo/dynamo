@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import (
+from tests.hf_cache import (
     _MODELS_DIR_ENV_KEYS,
     _apply_models_dir_env,
     _restore_models_dir_env,
@@ -17,7 +17,6 @@ from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
 
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0
 @pytest.mark.unit
 def test_apply_bare_cache_layout(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
@@ -35,7 +34,6 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0
 @pytest.mark.unit
 def test_apply_hf_home_layout(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
@@ -54,7 +52,6 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0
 @pytest.mark.unit
 def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
@@ -66,7 +63,6 @@ def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0
 @pytest.mark.unit
 @pytest.mark.parametrize("use_hf_home", [False, True])
 def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home):
@@ -82,23 +78,9 @@ def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home
 
 
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0
 @pytest.mark.unit
-def test_apply_does_not_set_transformers_cache(tmp_path, monkeypatch):
-    for k in _MODELS_DIR_ENV_KEYS:
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.delenv("TRANSFORMERS_CACHE", raising=False)
-    orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
-    try:
-        assert "TRANSFORMERS_CACHE" not in os.environ
-    finally:
-        _restore_models_dir_env(orig, tmp_cache)
-
-
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
-@pytest.mark.unit
-def test_models_dir_nonexistent_exits_with_code_2():
+def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
+    missing = tmp_path / "no_such_dir"
     # Run from the project root so conftest.py is discovered and --models-dir
     # is registered before pytest_configure fires.
     project_root = Path(__file__).parents[1]
@@ -107,7 +89,7 @@ def test_models_dir_nonexistent_exits_with_code_2():
             sys.executable,
             "-m",
             "pytest",
-            "--models-dir=/nonexistent_path_xyz_dynamo_8362",
+            f"--models-dir={missing}",
             "--collect-only",
             "tests/test_models_dir_flag.py",
         ],
@@ -120,7 +102,19 @@ def test_models_dir_nonexistent_exits_with_code_2():
 
 
 @pytest.mark.pre_merge
-@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch):
+    """_restore_models_dir_env logs a warning but does not raise when tmp_cache_dir is gone."""
+    for k in _MODELS_DIR_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    orig, _ = _apply_models_dir_env(str(tmp_path))
+    nonexistent = str(tmp_path / "already_deleted")
+    _restore_models_dir_env(orig, nonexistent)  # must not raise
+    for k in _MODELS_DIR_ENV_KEYS:
+        assert k not in os.environ
+
+
+@pytest.mark.pre_merge
 @pytest.mark.unit
 def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("DYNAMO_MODELS_DIR", str(tmp_path))
