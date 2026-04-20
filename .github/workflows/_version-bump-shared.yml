@@ -1,0 +1,236 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reusable workflow: version bump, commit, push, and open PR.
+# Called by:
+#   - release.yml (Phase 1: release branch prep)
+#   - release-version-bump.yml (Phase 2: port to main after release publish)
+
+name: _version-bump-shared
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Target version (e.g. 1.0.0 or 0.9.0.post1)'
+        required: true
+        type: string
+      ref:
+        description: 'Checkout target (release/* branch or main)'
+        required: true
+        type: string
+      pr_base:
+        description: 'PR base branch'
+        required: true
+        type: string
+      pr_branch:
+        description: 'Head branch name (no remote prefix)'
+        required: true
+        type: string
+      pr_title:
+        description: 'PR title'
+        required: true
+        type: string
+      pr_body:
+        description: 'PR body (newline-safe; passed via env)'
+        required: true
+        type: string
+      vllm_version:
+        description: 'vLLM backend version'
+        required: false
+        type: string
+        default: ''
+      sglang_version:
+        description: 'SGLang backend version'
+        required: false
+        type: string
+        default: ''
+      trtllm_version:
+        description: 'TensorRT-LLM backend version'
+        required: false
+        type: string
+        default: ''
+      nixl_version:
+        description: 'NIXL backend version'
+        required: false
+        type: string
+        default: ''
+      release_date:
+        description: 'Release date (e.g. Apr 20, 2026)'
+        required: false
+        type: string
+        default: ''
+      skip_core:
+        description: 'Skip core version file updates'
+        required: false
+        type: boolean
+        default: false
+      skip_containers:
+        description: 'Skip container image tag updates'
+        required: false
+        type: boolean
+        default: false
+      skip_helm:
+        description: 'Skip Helm chart version updates'
+        required: false
+        type: boolean
+        default: false
+      skip_docs:
+        description: 'Skip docs reference updates'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      github_token:
+        description: 'GitHub token for PR creation'
+        required: true
+
+env:
+  YQ_VERSION: '4.52.2'
+  CONTROLLER_GEN_VERSION: 'v0.16.5'
+  HELM_DOCS_VERSION: '1.14.2'
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+
+      # FIX 15: explicit pinned toolchain instead of relying on rustup-on-runner.
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b  # 1.83.0 release
+        with:
+          toolchain: stable
+
+      - name: Install pinned tools (yq, controller-gen, helm-docs)
+        run: |
+          set -euo pipefail
+          sudo wget -qO /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}
+          curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xzf - helm-docs
+          sudo mv helm-docs /usr/local/bin/
+
+      - name: Install bump_version.py runtime deps
+        run: pip install --quiet 'packaging>=24.0'
+
+      - name: Create version-bump branch
+        env:
+          BRANCH: ${{ inputs.pr_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+      # FIX 7 + FIX 16: explicit `if` blocks (no `[ … ] && X || true`),
+      #                 bash array for FLAGS to survive special chars.
+      - name: Run version bump
+        env:
+          VERSION: ${{ inputs.version }}
+          VLLM: ${{ inputs.vllm_version }}
+          SGLANG: ${{ inputs.sglang_version }}
+          TRTLLM: ${{ inputs.trtllm_version }}
+          NIXL: ${{ inputs.nixl_version }}
+          RELEASE_DATE: ${{ inputs.release_date }}
+          SKIP_CORE: ${{ inputs.skip_core }}
+          SKIP_CONTAINERS: ${{ inputs.skip_containers }}
+          SKIP_HELM: ${{ inputs.skip_helm }}
+          SKIP_DOCS: ${{ inputs.skip_docs }}
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          if [ "$SKIP_CORE" = "true" ]; then FLAGS+=(--skip-core); fi
+          if [ "$SKIP_CONTAINERS" = "true" ]; then FLAGS+=(--skip-containers); fi
+          if [ "$SKIP_HELM" = "true" ]; then FLAGS+=(--skip-helm); fi
+          if [ "$SKIP_DOCS" = "true" ]; then FLAGS+=(--skip-docs); fi
+          echo "Skip flags: ${FLAGS[*]:-(none — all scopes enabled)}"
+
+          ARGS=(--new-version "$VERSION")
+          if [ -n "$VLLM" ]; then ARGS+=(--vllm-version "$VLLM"); fi
+          if [ -n "$SGLANG" ]; then ARGS+=(--sglang-version "$SGLANG"); fi
+          if [ -n "$TRTLLM" ]; then ARGS+=(--trtllm-version "$TRTLLM"); fi
+          if [ -n "$NIXL" ]; then ARGS+=(--nixl-version "$NIXL"); fi
+          if [ -n "$RELEASE_DATE" ]; then ARGS+=(--release-date "$RELEASE_DATE"); fi
+          ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
+          ARGS+=("${FLAGS[@]}")
+
+          python3 .github/scripts/bump_version.py "${ARGS[@]}"
+
+      - name: Regenerate Cargo.lock
+        if: ${{ !inputs.skip_core }}
+        run: cargo update --workspace
+
+      - name: Regenerate CRDs
+        if: ${{ !inputs.skip_core }}
+        working-directory: deploy/operator
+        run: |
+          set -euo pipefail
+          make generate
+          make manifests
+
+      - name: Regenerate Helm docs
+        if: ${{ !inputs.skip_helm }}
+        working-directory: deploy/helm/charts/platform
+        run: helm-docs
+
+      # FIX 8: GITHUB_OUTPUT instead of GITHUB_ENV — keeps no_changes step-scoped.
+      - name: Commit
+        id: commit
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::No changes produced — nothing to commit."
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -s -m "chore: bump version to ${VERSION}"
+
+      - name: Push
+        if: steps.commit.outputs.no_changes != 'true'
+        env:
+          BRANCH: ${{ inputs.pr_branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git push origin --delete "$BRANCH"
+          fi
+          git push -u origin "$BRANCH"
+
+      # FIX 9: PR body template via env var, not Actions expression interpolation.
+      - name: Open PR
+        if: steps.commit.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          BASE: ${{ inputs.pr_base }}
+          BRANCH: ${{ inputs.pr_branch }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_BODY: ${{ inputs.pr_body }}
+        run: |
+          set -euo pipefail
+          gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "$PR_TITLE" --body "$PR_BODY" \
+            --label release --label chore

@@ -50,7 +50,7 @@ on:
         default: true
 
 # Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
-# This is enforced in the prepare-release job via branch validation
+# This is enforced in the prepare-release / parse-release-bump jobs via branch validation
 
 permissions:
   contents: write
@@ -61,25 +61,27 @@ env:
 jobs:
   # ============================================================================
   # VERSION BUMP (Phase 1): Bump all version references on the release branch.
-  # Only runs on workflow_dispatch with action=version-bump.
-  # Opens a PR to the release/* branch instead of pushing directly, so the
-  # mechanical changes get a human review before they land.
+  # Delegates to _version-bump-shared.yml. A tiny parse job extracts the
+  # release branch's version + backend metadata and composes the PR body.
   # ============================================================================
-  version-bump:
-    name: Version Bump (Release Branch Prep)
+  parse-release-bump:
+    name: Parse release-branch metadata
     if: inputs.action == 'version-bump'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: automated-release
-    permissions:
-      contents: write
-      pull-requests: write
     env:
       YQ_VERSION: '4.52.2'
-      CONTROLLER_GEN_VERSION: 'v0.16.5'
-      HELM_DOCS_VERSION: '1.14.2'
+    outputs:
+      version:        ${{ steps.ctx.outputs.version }}
+      pr_branch:      ${{ steps.ctx.outputs.pr_branch }}
+      pr_title:       ${{ steps.body.outputs.pr_title }}
+      pr_body:        ${{ steps.body.outputs.pr_body }}
+      vllm_version:   ${{ steps.metadata.outputs.vllm_version }}
+      sglang_version: ${{ steps.metadata.outputs.sglang_version }}
+      trtllm_version: ${{ steps.metadata.outputs.trtllm_version }}
+      nixl_version:   ${{ steps.metadata.outputs.nixl_version }}
+      release_date:   ${{ steps.metadata.outputs.release_date }}
     steps:
-      - name: Validate branch
+      - name: Validate branch and derive version
         id: ctx
         run: |
           set -euo pipefail
@@ -89,40 +91,23 @@ jobs:
             exit 1
           fi
           VERSION="${BRANCH_NAME#release/}"
-          # Slug for git branch names: drop '.' in .postN → -post (PR branches can't have dots in sloppy places).
           SLUG="${VERSION//./-}"
+          PR_BRANCH="chore/bump-version-${SLUG}-on-${BRANCH_NAME##*/}"
           {
             echo "version=$VERSION"
-            echo "branch=$BRANCH_NAME"
-            echo "slug=$SLUG"
+            echo "pr_branch=$PR_BRANCH"
           } >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION, Branch: $BRANCH_NAME"
+          echo "Version: $VERSION, PR branch: $PR_BRANCH"
 
       - name: Checkout release branch
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        with:
-          python-version: '3.12'
-
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
-        with:
-          go-version-file: deploy/operator/go.mod
-
-      - name: Install tools (yq, controller-gen, helm-docs; all pinned)
+      - name: Install yq
         run: |
           set -euo pipefail
           sudo wget -qO /usr/local/bin/yq \
             "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
           sudo chmod +x /usr/local/bin/yq
-          go install sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}
-          curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
-            | tar -xzf - helm-docs
-          sudo mv helm-docs /usr/local/bin/
 
       - name: Extract backend metadata from context.yaml
         id: metadata
@@ -145,148 +130,72 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Backend: vLLM=$VLLM_VER SGLang=$SGLANG_VER TRT-LLM=$TRTLLM_VER NIXL=$NIXL_VER  Released=$RELEASE_DATE"
 
-      - name: Create version-bump branch
-        id: branch
+      - name: Compose PR title and body
+        id: body
         env:
-          SLUG: ${{ steps.ctx.outputs.slug }}
-          BASE: ${{ steps.ctx.outputs.branch }}
-        run: |
-          set -euo pipefail
-          BRANCH="chore/bump-version-${SLUG}-on-${BASE##*/}"
-          git checkout -b "$BRANCH"
-          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
-
-      - name: Build skip flags
-        id: flags
-        env:
-          UPDATE_CORE: ${{ inputs.update_core }}
+          VERSION:           ${{ steps.ctx.outputs.version }}
+          BASE:              ${{ github.ref_name }}
+          VLLM:              ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG:            ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM:            ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL:              ${{ steps.metadata.outputs.nixl_version }}
+          UPDATE_CORE:       ${{ inputs.update_core }}
           UPDATE_CONTAINERS: ${{ inputs.update_containers }}
-          UPDATE_HELM: ${{ inputs.update_helm }}
-          UPDATE_DOCS: ${{ inputs.update_docs }}
+          UPDATE_HELM:       ${{ inputs.update_helm }}
+          UPDATE_DOCS:       ${{ inputs.update_docs }}
         run: |
           set -euo pipefail
-          SKIP_FLAGS=""
-          [ "$UPDATE_CORE" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-core" || true
-          [ "$UPDATE_CONTAINERS" = "false" ] && SKIP_FLAGS="$SKIP_FLAGS --skip-containers" || true
-          [ "$UPDATE_HELM" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-helm" || true
-          [ "$UPDATE_DOCS" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-docs" || true
-          echo "skip_flags=$SKIP_FLAGS" >> "$GITHUB_OUTPUT"
-          echo "Skip flags: ${SKIP_FLAGS:-none (full update)}"
+          SCOPE_FLAGS=""
+          if [ "$UPDATE_CORE"       = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-core"; fi
+          if [ "$UPDATE_CONTAINERS" = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-containers"; fi
+          if [ "$UPDATE_HELM"       = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-helm"; fi
+          if [ "$UPDATE_DOCS"       = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-docs"; fi
+          {
+            echo "pr_title=chore: bump version references to ${VERSION}"
+            echo "pr_body<<EOF_BODY"
+            echo "## Summary"
+            echo ""
+            echo "Automated Phase 1 version bump for release \`v${VERSION}\`."
+            echo "Targets the release branch \`${BASE}\` -- merge here kicks off the RC publish flow."
+            echo ""
+            echo "**Backend versions** (from \`container/context.yaml\`):"
+            echo "- vLLM: \`${VLLM}\`"
+            echo "- SGLang: \`${SGLANG}\`"
+            echo "- TRT-LLM: \`${TRTLLM}\`"
+            echo "- NIXL: \`${NIXL}\`"
+            echo ""
+            echo "**Scope flags:** \`${SCOPE_FLAGS:-all scopes}\`"
+            echo ""
+            echo "See the workflow run summary for the per-file / per-rule change table."
+            echo "EOF_BODY"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Run version bump script
-        env:
-          VERSION: ${{ steps.ctx.outputs.version }}
-          VLLM: ${{ steps.metadata.outputs.vllm_version }}
-          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
-          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
-          NIXL: ${{ steps.metadata.outputs.nixl_version }}
-          RELEASE_DATE: ${{ steps.metadata.outputs.release_date }}
-          FLAGS: ${{ steps.flags.outputs.skip_flags }}
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/bump_version.py \
-            --new-version "$VERSION" \
-            --vllm-version "$VLLM" \
-            --sglang-version "$SGLANG" \
-            --trtllm-version "$TRTLLM" \
-            --nixl-version "$NIXL" \
-            --release-date "$RELEASE_DATE" \
-            --summary-file "$GITHUB_STEP_SUMMARY" \
-            $FLAGS
-
-      - name: Set up Rust
-        if: inputs.update_core != false
-        run: rustup show active-toolchain
-
-      - name: Regenerate Cargo.lock
-        if: inputs.update_core != false
-        run: cargo update --workspace
-
-      - name: Regenerate CRDs
-        # CRDs are generated from Go types under deploy/operator/, so they belong
-        # to the core/operator scope, not container image tags. Gate on
-        # update_core to keep the manifests in sync with operator code changes
-        # even when --skip-containers is set. Mirrors the gating in
-        # release-version-bump.yml.
-        if: inputs.update_core != false
-        working-directory: deploy/operator
-        run: |
-          set -euo pipefail
-          make generate
-          make manifests
-
-      - name: Regenerate Helm docs
-        if: inputs.update_helm != false
-        working-directory: deploy/helm/charts/platform
-        run: helm-docs
-
-      - name: Commit
-        id: commit
-        env:
-          VERSION: ${{ steps.ctx.outputs.version }}
-          FLAGS: ${{ steps.flags.outputs.skip_flags }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "::notice::No changes produced — nothing to commit."
-            echo "no_changes=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          printf -v MSG '%s\n' \
-            "Automated release branch prep for v${VERSION}." \
-            "" \
-            "Scope flags: ${FLAGS:-all scopes}"
-          git commit -s -m "chore: bump version references to ${VERSION}" -m "$MSG"
-
-      - name: Push branch
-        if: steps.commit.outputs.no_changes != 'true'
-        env:
-          BRANCH: ${{ steps.branch.outputs.name }}
-        run: |
-          set -euo pipefail
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            git push origin --delete "$BRANCH"
-          fi
-          git push -u origin "$BRANCH"
-
-      - name: Open PR into release branch
-        if: steps.commit.outputs.no_changes != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.ctx.outputs.version }}
-          BASE: ${{ steps.ctx.outputs.branch }}
-          BRANCH: ${{ steps.branch.outputs.name }}
-          FLAGS: ${{ steps.flags.outputs.skip_flags }}
-          VLLM: ${{ steps.metadata.outputs.vllm_version }}
-          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
-          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
-          NIXL: ${{ steps.metadata.outputs.nixl_version }}
-        run: |
-          set -euo pipefail
-          printf -v BODY '%s\n' \
-            "## Summary" \
-            "" \
-            "Automated Phase 1 version bump for release \`v${VERSION}\`." \
-            "Targets the release branch \`${BASE}\` — merge here kicks off the RC publish flow." \
-            "" \
-            "**Backend versions** (from \`container/context.yaml\`):" \
-            "- vLLM: \`${VLLM}\`" \
-            "- SGLang: \`${SGLANG}\`" \
-            "- TRT-LLM: \`${TRTLLM}\`" \
-            "- NIXL: \`${NIXL}\`" \
-            "" \
-            "**Scope flags:** \`${FLAGS:-all scopes}\`" \
-            "" \
-            "See the workflow run summary for the per-file / per-rule change table."
-          gh pr create \
-            --base "$BASE" \
-            --head "$BRANCH" \
-            --title "chore: bump version references to ${VERSION}" \
-            --body "$BODY" \
-            --label release --label chore
+  version-bump:
+    name: Version Bump (Release Branch Prep)
+    if: inputs.action == 'version-bump'
+    needs: [parse-release-bump]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/_version-bump-shared.yml
+    with:
+      version:         ${{ needs.parse-release-bump.outputs.version }}
+      ref:             ${{ github.ref }}
+      pr_base:         ${{ github.ref_name }}
+      pr_branch:       ${{ needs.parse-release-bump.outputs.pr_branch }}
+      pr_title:        ${{ needs.parse-release-bump.outputs.pr_title }}
+      pr_body:         ${{ needs.parse-release-bump.outputs.pr_body }}
+      vllm_version:    ${{ needs.parse-release-bump.outputs.vllm_version }}
+      sglang_version:  ${{ needs.parse-release-bump.outputs.sglang_version }}
+      trtllm_version:  ${{ needs.parse-release-bump.outputs.trtllm_version }}
+      nixl_version:    ${{ needs.parse-release-bump.outputs.nixl_version }}
+      release_date:    ${{ needs.parse-release-bump.outputs.release_date }}
+      skip_core:       ${{ !inputs.update_core }}
+      skip_containers: ${{ !inputs.update_containers }}
+      skip_helm:       ${{ !inputs.update_helm }}
+      skip_docs:       ${{ !inputs.update_docs }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================================
   # GATE: Version Extraction
@@ -307,12 +216,20 @@ jobs:
           COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
           BRANCH_NAME: ${{ github.ref_name }}
           NIGHTLY: ${{ github.event.inputs.nightly }}
+          ACTION: ${{ inputs.action }}
         run: |
           set -euo pipefail
 
-          if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Error: commit_sha must be a full 40-character hex SHA (got: '${COMMIT_SHA}')"
-            exit 1
+          # FIX 10: commit_sha is only required for release-publish. When the
+          # workflow is dispatched with action=version-bump the parse-release-bump
+          # job handles validation; this gate should not reject an empty SHA.
+          if [ "$ACTION" = "release-publish" ]; then
+            if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Error: commit_sha must be a full 40-character hex SHA for action=release-publish (got: '${COMMIT_SHA}')"
+              exit 1
+            fi
+          else
+            echo "Skipping commit_sha validation (action=${ACTION})."
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
@@ -680,4 +597,3 @@ jobs:
             echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
           fi
-
