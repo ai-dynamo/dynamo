@@ -1706,10 +1706,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
+						// ObservedGeneration is tracked because CheckPCSGReady uses it as
+						// a readiness gate ("spec not yet processed" while
+						// ObservedGeneration < Generation). A PCSG spec edit that does
+						// not change Spec.Replicas (e.g. template/topology edits) would
+						// otherwise not wake the DGD when Grove catches up.
 						return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
 							oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
 							oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
-							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas
+							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
+							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -1779,4 +1785,17 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx
 			Namespace: pcsg.Namespace,
 		},
 	}}
+}
+
+// ptrInt64Equal returns true when two *int64 values are equivalent, treating
+// nil and a pointer to the same value as equal. Used to compare optional
+// status fields like ObservedGeneration without tripping on pointer identity.
+func ptrInt64Equal(a, b *int64) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
