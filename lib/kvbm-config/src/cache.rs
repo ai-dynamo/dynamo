@@ -59,6 +59,7 @@ pub struct HostCacheConfig {
 }
 
 impl HostCacheConfig {
+    // TODO(KVBM-383): update this logic
     /// Compute the number of blocks based on configuration and block size.
     ///
     /// Selection rules:
