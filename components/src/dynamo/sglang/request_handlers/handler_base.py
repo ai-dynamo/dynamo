@@ -138,6 +138,17 @@ class RLMixin:
 
     Requires the host class to have ``self.engine`` with a
     ``tokenizer_manager`` attribute.
+
+    In addition to the generic ``call_tokenizer_manager`` passthrough, this
+    mixin provides:
+
+    - ``generate_raw``: SGLang-native ``/generate`` passthrough that returns
+      full ``meta_info`` (logprobs, weight_version, routed_experts, etc.).
+    - Explicit control-plane routes: ``pause_generation``,
+      ``continue_generation``, ``flush_cache``, ``post_process_weights``,
+      ``abort_request``.
+
+    These are registered as ``/engine/*`` routes when ``--enable-rl`` is set.
     """
 
     engine: sgl.Engine  # provided by BaseWorkerHandler
@@ -221,6 +232,145 @@ class RLMixin:
         result = await method(*args, **kwargs)
         return self._normalize_result(result)
 
+    # ------------------------------------------------------------------
+    # Raw /generate passthrough
+    # ------------------------------------------------------------------
+
+    async def generate_raw(self, body: dict) -> dict:
+        """SGLang-native ``/generate`` passthrough for RL training.
+
+        Accepts the same request format as SGLang's ``/generate`` endpoint
+        (``input_ids``, ``sampling_params``, ``return_logprob``, etc.) and
+        returns the full response including all ``meta_info`` fields
+        (``output_token_logprobs``, ``weight_version``, ``routed_experts``,
+        ``finish_reason``, ``cached_tokens``, ``prompt_tokens``, …).
+
+        .. note::
+
+            The request is forced to ``stream=False`` because engine routes
+            are request/response (not streaming).
+        """
+        from sglang.srt.managers.io_struct import GenerateReqInput
+
+        body = dict(body)  # avoid mutating the caller's dict
+        body["stream"] = False
+
+        req = GenerateReqInput(**body)
+        if hasattr(req, "post_init"):
+            req.post_init()
+
+        tm = self.engine.tokenizer_manager
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+
+        ret = tm.generate_request(req, request=None)
+
+        # generate_request may return a coroutine or an async generator
+        # depending on the SGLang version.
+        import inspect
+
+        if inspect.isasyncgen(ret):
+            # Async generator: consume all chunks (non-streaming collects
+            # the full response as the last yielded item).
+            last = None
+            async for chunk in ret:
+                last = chunk
+            ret = last
+        else:
+            ret = await ret
+
+        # generate_request may return a list for batched requests
+        if isinstance(ret, list):
+            return {"responses": [self._sanitize_generate_response(r) for r in ret]}
+        return self._sanitize_generate_response(ret)
+
+    @staticmethod
+    def _sanitize_generate_response(response: Any) -> dict:
+        """Ensure a single ``generate_request`` response is JSON-safe.
+
+        Specifically converts ``meta_info.routed_experts`` from a
+        ``torch.Tensor`` to a base64-encoded string (same encoding SGLang
+        uses in its HTTP responses).
+        """
+        if not isinstance(response, dict):
+            return response
+
+        meta_info = response.get("meta_info")
+        if isinstance(meta_info, dict):
+            routed_experts = meta_info.get("routed_experts")
+            if routed_experts is not None and hasattr(routed_experts, "numpy"):
+                import pybase64
+
+                meta_info["routed_experts"] = pybase64.b64encode(
+                    routed_experts.numpy().tobytes()
+                ).decode("utf-8")
+
+        return response
+
+    # ------------------------------------------------------------------
+    # Control-plane routes
+    # ------------------------------------------------------------------
+
+    async def pause_generation(self, body: dict) -> dict:
+        """Pause generation on the engine (drain in-flight requests).
+
+        Body may contain ``mode`` (default ``"retract"``).
+        """
+        from sglang.srt.managers.io_struct import PauseGenerationReqInput
+
+        req = PauseGenerationReqInput(**body)
+        tm = self.engine.tokenizer_manager
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+        result = await tm.pause_generation(req)
+        return self._normalize_result(result)
+
+    async def continue_generation(self, body: dict) -> dict:
+        """Resume generation after a pause."""
+        from sglang.srt.managers.io_struct import ContinueGenerationReqInput
+
+        req = ContinueGenerationReqInput(**body)
+        tm = self.engine.tokenizer_manager
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+        result = await tm.continue_generation(req)
+        return self._normalize_result(result)
+
+    async def flush_cache(self, body: dict) -> dict:
+        """Flush the KV cache."""
+        tm = self.engine.tokenizer_manager
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+        result = await tm.flush_cache()
+        return self._normalize_result(result)
+
+    async def post_process_weights(self, body: dict) -> dict:
+        """Post-process weights after a weight update (e.g. re-quantize).
+
+        Delegates to ``call_tokenizer_manager`` so that the
+        ``PostProcessWeightsReqInput`` io_struct is constructed automatically.
+        """
+        return await self.call_tokenizer_manager(
+            {
+                "method": "post_process_weights",
+                "args": [{"io_struct.PostProcessWeightsReqInput": body}],
+                "kwargs": {"request": None},
+            }
+        )
+
+    async def abort_request(self, body: dict) -> dict:
+        """Abort in-flight generation requests.
+
+        Body may contain ``abort_all`` (default ``True``).
+        """
+        abort_all = body.get("abort_all", True)
+        self.engine.tokenizer_manager.abort_request(abort_all=abort_all)
+        return {"status": "ok", "message": "Requests aborted"}
+
+    # ------------------------------------------------------------------
+    # Route registration
+    # ------------------------------------------------------------------
+
     def register_rl_engine_routes(self, runtime) -> None:
         """Register RL-specific engine routes.
 
@@ -230,6 +380,16 @@ class RLMixin:
         runtime.register_engine_route(
             "call_tokenizer_manager", self.call_tokenizer_manager
         )
+        runtime.register_engine_route("generate_raw", self.generate_raw)
+        runtime.register_engine_route("pause_generation", self.pause_generation)
+        runtime.register_engine_route(
+            "continue_generation", self.continue_generation
+        )
+        runtime.register_engine_route("flush_cache", self.flush_cache)
+        runtime.register_engine_route(
+            "post_process_weights", self.post_process_weights
+        )
+        runtime.register_engine_route("abort_request", self.abort_request)
 
 
 class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):

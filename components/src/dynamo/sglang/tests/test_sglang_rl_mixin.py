@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for RLMixin generic tokenizer_manager passthrough."""
+"""Unit tests for RLMixin RL training support.
+
+Covers the generic tokenizer_manager passthrough as well as the explicit
+RL engine routes (generate_raw, pause/continue/flush/post_process/abort).
+"""
 
 import dataclasses
 import sys
@@ -312,4 +316,292 @@ class TestCallTokenizerManager:
             "success": True,
             "message": "updated",
             "num_paused_requests": 3,
+        }
+
+
+# ---------------------------------------------------------------------------
+# generate_raw
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateRaw:
+    def setup_method(self):
+        self.handler = _make_handler()
+
+    @pytest.mark.asyncio
+    async def test_basic_generate(self, _stub_sglang_io_struct):
+        """generate_raw calls generate_request and returns the response."""
+        mock_generate_req_cls = MagicMock()
+        mock_req = MagicMock()
+        mock_generate_req_cls.return_value = mock_req
+        _stub_sglang_io_struct.GenerateReqInput = mock_generate_req_cls
+
+        expected_response = {
+            "text": "Hello world",
+            "meta_info": {
+                "id": "req-123",
+                "output_token_logprobs": [[-0.5, 101], [-0.3, 102]],
+                "weight_version": "v1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "cached_tokens": 0,
+            },
+        }
+        self.handler.engine.tokenizer_manager.generate_request = AsyncMock(
+            return_value=expected_response
+        )
+
+        result = await self.handler.generate_raw(
+            {
+                "input_ids": [1, 2, 3, 4, 5],
+                "sampling_params": {"temperature": 0.7, "max_new_tokens": 256},
+                "return_logprob": True,
+            }
+        )
+
+        # Verify stream was forced to False
+        call_kwargs = mock_generate_req_cls.call_args
+        assert call_kwargs[1]["stream"] is False or call_kwargs[0] == ()
+
+        # Verify the full response is returned
+        assert result["text"] == "Hello world"
+        assert result["meta_info"]["output_token_logprobs"] == [
+            [-0.5, 101],
+            [-0.3, 102],
+        ]
+        assert result["meta_info"]["weight_version"] == "v1"
+        assert result["meta_info"]["finish_reason"] == {"type": "stop"}
+
+    @pytest.mark.asyncio
+    async def test_generate_batched_response(self, _stub_sglang_io_struct):
+        """generate_raw wraps list responses in a 'responses' key."""
+        mock_generate_req_cls = MagicMock()
+        _stub_sglang_io_struct.GenerateReqInput = mock_generate_req_cls
+
+        batched = [
+            {"text": "a", "meta_info": {"id": "1"}},
+            {"text": "b", "meta_info": {"id": "2"}},
+        ]
+        self.handler.engine.tokenizer_manager.generate_request = AsyncMock(
+            return_value=batched
+        )
+
+        result = await self.handler.generate_raw({"input_ids": [1]})
+
+        assert "responses" in result
+        assert len(result["responses"]) == 2
+        assert result["responses"][0]["text"] == "a"
+        assert result["responses"][1]["text"] == "b"
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_generate_response
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeGenerateResponse:
+    def test_plain_dict_unchanged(self):
+        resp = {"text": "hi", "meta_info": {"weight_version": "v1"}}
+        assert BaseWorkerHandler._sanitize_generate_response(resp) is resp
+
+    def test_routed_experts_tensor_converted(self):
+        """Tensor-like routed_experts is base64-encoded."""
+        import numpy as np
+
+        class FakeTensor:
+            def numpy(self):
+                return np.array([1, 2, 3], dtype=np.int32)
+
+        resp = {"text": "hi", "meta_info": {"routed_experts": FakeTensor()}}
+        result = BaseWorkerHandler._sanitize_generate_response(resp)
+        # Should be a base64 string now
+        assert isinstance(result["meta_info"]["routed_experts"], str)
+
+    def test_no_meta_info(self):
+        resp = {"text": "hi"}
+        assert BaseWorkerHandler._sanitize_generate_response(resp) == {"text": "hi"}
+
+    def test_non_dict_passthrough(self):
+        assert BaseWorkerHandler._sanitize_generate_response("string") == "string"
+
+
+# ---------------------------------------------------------------------------
+# pause_generation
+# ---------------------------------------------------------------------------
+
+
+class TestPauseGeneration:
+    def setup_method(self):
+        self.handler = _make_handler()
+
+    @pytest.mark.asyncio
+    async def test_pause_default(self, _stub_sglang_io_struct):
+        """pause_generation constructs req and calls tokenizer_manager."""
+        mock_cls = MagicMock()
+        mock_req = MagicMock()
+        mock_cls.return_value = mock_req
+        _stub_sglang_io_struct.PauseGenerationReqInput = mock_cls
+
+        self.handler.engine.tokenizer_manager.pause_generation = AsyncMock(
+            return_value=None
+        )
+
+        result = await self.handler.pause_generation({})
+
+        mock_cls.assert_called_once_with()
+        self.handler.engine.tokenizer_manager.pause_generation.assert_awaited_once_with(
+            mock_req
+        )
+        assert result == {"status": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_pause_with_mode(self, _stub_sglang_io_struct):
+        """pause_generation passes body kwargs to the request input."""
+        mock_cls = MagicMock()
+        _stub_sglang_io_struct.PauseGenerationReqInput = mock_cls
+        self.handler.engine.tokenizer_manager.pause_generation = AsyncMock(
+            return_value=None
+        )
+
+        await self.handler.pause_generation({"mode": "retract"})
+
+        mock_cls.assert_called_once_with(mode="retract")
+
+
+# ---------------------------------------------------------------------------
+# continue_generation
+# ---------------------------------------------------------------------------
+
+
+class TestContinueGeneration:
+    def setup_method(self):
+        self.handler = _make_handler()
+
+    @pytest.mark.asyncio
+    async def test_continue(self, _stub_sglang_io_struct):
+        mock_cls = MagicMock()
+        _stub_sglang_io_struct.ContinueGenerationReqInput = mock_cls
+        self.handler.engine.tokenizer_manager.continue_generation = AsyncMock(
+            return_value=None
+        )
+
+        result = await self.handler.continue_generation({})
+
+        mock_cls.assert_called_once_with()
+        assert result == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# flush_cache
+# ---------------------------------------------------------------------------
+
+
+class TestFlushCache:
+    def setup_method(self):
+        self.handler = _make_handler()
+
+    @pytest.mark.asyncio
+    async def test_flush(self):
+        self.handler.engine.tokenizer_manager.flush_cache = AsyncMock(
+            return_value=None
+        )
+
+        result = await self.handler.flush_cache({})
+
+        self.handler.engine.tokenizer_manager.flush_cache.assert_awaited_once()
+        assert result == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# post_process_weights
+# ---------------------------------------------------------------------------
+
+
+class TestPostProcessWeights:
+    def setup_method(self):
+        self.handler = _make_handler()
+
+    @pytest.mark.asyncio
+    async def test_post_process(self, _stub_sglang_io_struct):
+        """post_process_weights delegates to call_tokenizer_manager."""
+        mock_cls = MagicMock()
+        constructed = MagicMock()
+        mock_cls.return_value = constructed
+        mock_module = MagicMock()
+        mock_module.PostProcessWeightsReqInput = mock_cls
+
+        self.handler.engine.tokenizer_manager.post_process_weights = AsyncMock(
+            return_value=(True, "done")
+        )
+
+        with patch("importlib.import_module", return_value=mock_module):
+            result = await self.handler.post_process_weights(
+                {
+                    "post_process_quantization": True,
+                    "restore_weights_before_load": False,
+                }
+            )
+
+        mock_cls.assert_called_once_with(
+            post_process_quantization=True, restore_weights_before_load=False
+        )
+        assert result == {"success": True, "message": "done"}
+
+
+# ---------------------------------------------------------------------------
+# abort_request
+# ---------------------------------------------------------------------------
+
+
+class TestAbortRequest:
+    def setup_method(self):
+        self.handler = _make_handler()
+
+    @pytest.mark.asyncio
+    async def test_abort_all(self):
+        self.handler.engine.tokenizer_manager.abort_request = MagicMock()
+
+        result = await self.handler.abort_request({})
+
+        self.handler.engine.tokenizer_manager.abort_request.assert_called_once_with(
+            abort_all=True
+        )
+        assert result == {"status": "ok", "message": "Requests aborted"}
+
+    @pytest.mark.asyncio
+    async def test_abort_specific(self):
+        self.handler.engine.tokenizer_manager.abort_request = MagicMock()
+
+        result = await self.handler.abort_request({"abort_all": False})
+
+        self.handler.engine.tokenizer_manager.abort_request.assert_called_once_with(
+            abort_all=False
+        )
+        assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# register_rl_engine_routes
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterRLEngineRoutes:
+    def test_all_routes_registered(self):
+        handler = _make_handler()
+        runtime = MagicMock()
+
+        handler.register_rl_engine_routes(runtime)
+
+        registered = {
+            call.args[0] for call in runtime.register_engine_route.call_args_list
+        }
+        assert registered == {
+            "call_tokenizer_manager",
+            "generate_raw",
+            "pause_generation",
+            "continue_generation",
+            "flush_cache",
+            "post_process_weights",
+            "abort_request",
         }
