@@ -38,11 +38,13 @@ def bv():
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     sys.modules["bump_version"] = mod
+    loaded = False
     try:
         spec.loader.exec_module(mod)
-    except Exception:
-        sys.modules.pop("bump_version", None)
-        raise
+        loaded = True
+    finally:
+        if not loaded:
+            sys.modules.pop("bump_version", None)
     return mod
 
 
@@ -234,7 +236,9 @@ class TestIteration:
         assert changes == []
 
     def test_binary_files_skipped(self, bv, tmp_path):
-        (tmp_path / "blob.bin").write_bytes(
+        # Extensionless name so the test isolates _is_binary from EXCLUDE_GLOBS
+        # (which would skip *.bin via the binary-extension list anyway).
+        (tmp_path / "blob").write_bytes(
             b"\x00\x01\x02nvcr.io/nvidia/ai-dynamo/x:0.9.0"
         )
         changes = bv.apply_rules(
@@ -274,10 +278,16 @@ def _make_fake_repo(root: Path, version: str) -> None:
         "  repository: nvcr.io/nvidia/ai-dynamo/snapshot-agent\n"
         f"  tag: {version}\n",
     )
+    # Spec file: container image tag, git ref, pip pin, and env var. Lives in
+    # a path that _is_spec_file() recognises (Dockerfile.* prefix), so the
+    # broad CONTAINERS rules fire here. (Markdown prose is intentionally out
+    # of scope after the _is_spec_file filter — see Patch 5.)
     _write(
-        root / "docs" / "example.md",
-        f"Pull `nvcr.io/nvidia/ai-dynamo/vllm-runtime:{version}` to get started.\n"
-        f"Or: `git checkout release/{version}` then `pip install ai-dynamo=={version}`.\n",
+        root / "container" / "Dockerfile.example",
+        f"FROM nvcr.io/nvidia/ai-dynamo/vllm-runtime:{version}\n"
+        f"RUN git checkout release/{version} \\\n"
+        f" && pip install ai-dynamo=={version}\n"
+        f"ENV DYNAMO_VERSION={version}\n",
     )
     _write(
         root / "deploy" / "operator" / "samples" / "dgd.yaml",
@@ -325,13 +335,14 @@ def test_full_bump_writes_every_scope(bv, tmp_path):
         encoding="utf-8"
     )
     assert "tag: 1.0.0" in snap
-    md = (tmp_path / "docs/example.md").read_text(encoding="utf-8")
-    assert "vllm-runtime:1.0.0" in md
-    assert "release/1.0.0" in md
-    assert "ai-dynamo==1.0.0" in md
+    dockerfile = (tmp_path / "container/Dockerfile.example").read_text(encoding="utf-8")
+    assert "vllm-runtime:1.0.0" in dockerfile
+    assert "release/1.0.0" in dockerfile
+    assert "ai-dynamo==1.0.0" in dockerfile
+    assert "DYNAMO_VERSION=1.0.0" in dockerfile
     dgd = (tmp_path / "deploy/operator/samples/dgd.yaml").read_text(encoding="utf-8")
     assert 'dynamoVersion: "1.0.0"' in dgd
-    assert "0.9.0" not in (chart + snap + md + dgd)
+    assert "0.9.0" not in (chart + snap + dockerfile + dgd)
 
 
 def test_post_release_uses_semver_in_helm_python_elsewhere(bv, tmp_path):
@@ -353,8 +364,8 @@ def test_post_release_uses_semver_in_helm_python_elsewhere(bv, tmp_path):
     assert "version: 0.9.0-post1" in chart
     assert 'appVersion: "0.9.0-post1"' in chart
     # Image tag: dotted post
-    md = (tmp_path / "docs/example.md").read_text(encoding="utf-8")
-    assert "vllm-runtime:0.9.0.post1" in md
+    dockerfile = (tmp_path / "container/Dockerfile.example").read_text(encoding="utf-8")
+    assert "vllm-runtime:0.9.0.post1" in dockerfile
 
 
 def test_skip_flags_combine(bv, tmp_path):
@@ -383,8 +394,8 @@ def test_skip_flags_combine(bv, tmp_path):
     assert "version: 0.9.0" in (
         tmp_path / "deploy/helm/charts/platform/Chart.yaml"
     ).read_text(encoding="utf-8")
-    # containers (outside pyproject.toml) were bumped
-    assert "vllm-runtime:1.0.0" in (tmp_path / "docs/example.md").read_text(
+    # containers (outside pyproject.toml) were bumped in spec files
+    assert "vllm-runtime:1.0.0" in (tmp_path / "container/Dockerfile.example").read_text(
         encoding="utf-8"
     )
 
@@ -428,22 +439,23 @@ def test_check_autodetects_from_pyproject(bv, tmp_path):
 
 
 def test_check_mode_detects_stale_docs(bv, tmp_path):
-    """--check must catch staleness in the DOCS specialised functions too.
+    """--check must catch staleness in DOCS rules (now in the unified RULES table).
 
-    The support-matrix / release-artifacts / feature-matrix files carry the
-    bump-version: ignore marker, so apply_rules() skips them entirely. Without
-    a separate dry-run pass through the DOCS helpers, --check would miss a
-    stale "Updated for Dynamo vX.Y.Z" tag (and the support-matrix /
-    release-artifacts equivalents) — regression guard for that blind spot.
+    After Axis B, the support-matrix / release-artifacts / feature-matrix
+    files no longer carry IGNORE_MARKER -- the bespoke specialised helpers
+    are gone, replaced by narrowly-targeted rules that only match the exact
+    version-bearing tokens (header tag, "At a Glance" line, etc) and leave
+    historical table rows untouched. So apply_rules(active_scopes={DOCS})
+    sees these files, and --check can detect a stale "*Updated for Dynamo
+    vX.Y.Z*" tag through the same dry-run pass.
     """
     _make_fake_repo(tmp_path, "1.0.0")
     # Plant a stale DOCS-only reference: feature-matrix tag still on the old
-    # version. apply_rules() can't see it (the file is ignore-marked), but the
-    # update_feature_matrix() helper can.
+    # version. The narrow `feature_matrix_tag` rule must catch this.
     fm = tmp_path / "docs" / "reference" / "feature-matrix.md"
     fm.parent.mkdir(parents=True, exist_ok=True)
     fm.write_text(
-        "<!-- bump-version: ignore -->\n*Updated for Dynamo v0.9.0*\n",
+        "*Updated for Dynamo v0.9.0*\n\nSome historical content with v0.5.0 mentions.\n",
         encoding="utf-8",
     )
     # Sanity check: with --skip-docs the stale tag is invisible to --check.
@@ -517,43 +529,82 @@ def test_no_change_when_old_equals_new(bv, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _bump_docs(bv, repo, new_version: str, **ctx_overrides):
+    """Apply DOCS rules + table insertions in one pass — the contract used by
+    --bump and --check for docs after the Axis B refactor.
+
+    Returns the combined Change list so tests can assert which rules fired.
+    """
+    ctx = {
+        "release_date": "Feb 15, 2026",
+        "vllm": "0.19.0",
+        "sglang": "0.5.7",
+        "trtllm": "1.3.0",
+        "nixl": "0.10.1",
+        **ctx_overrides,
+    }
+    v = bv.Version.parse(new_version)
+    return (
+        bv.apply_rules(repo, v, active_scopes={bv.Scope.DOCS}, ctx=ctx, dry_run=False)
+        + bv.insert_table_rows(repo, v, ctx, dry_run=False)
+    )
+
+
 class TestReleaseArtifacts:
-    """The GitHub-Releases table insertion must fail loud if the doc structure changes."""
+    """release-artifacts.md edits go through DOCS rules + insert_table_rows.
+
+    The bespoke update_release_artifacts() helper is gone — a missing table
+    insertion point now raises from insert_table_rows().
+    """
 
     def test_unknown_table_raises(self, bv, tmp_path):
-        # docs/reference/release-artifacts.md without the expected header
         p = tmp_path / "docs" / "reference" / "release-artifacts.md"
         _write(p, "## Current Release: Dynamo v0.9.0\n\nNo table here.\n")
-        with pytest.raises(RuntimeError, match="GitHub Releases table"):
-            bv.update_release_artifacts(
-                tmp_path,
-                bv.Version.parse("1.0.0"),
-                "Feb 15, 2026",
-                bv.BackendVersions(),
-                dry_run=False,
-            )
+        with pytest.raises(RuntimeError, match="release_artifacts_table_row"):
+            _bump_docs(bv, tmp_path, "1.0.0")
 
     def test_table_row_inserted(self, bv, tmp_path):
         doc = (
             "## Current Release: Dynamo v0.9.0\n\n"
             "**GitHub Release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0)\n\n"
+            "**Docs:** [v0.9.0](https://docs.dynamo.nvidia.com/dynamo)\n\n"
             "### GitHub Releases\n\n"
-            "| Version | Date | Release | Docs |\n"
-            "|---------|------|---------|------|\n"
-            "| `v0.9.0` | Dec 01, 2025 | [Release](x) | [Docs](y) |\n"
+            "| Version | Release Date | GitHub | Docs | Notes |\n"
+            "|---------|------|---------|------|------|\n"
+            "| `v0.9.0` | Dec 01, 2025 | [Release](x) | [Docs](y) | |\n"
         )
         p = tmp_path / "docs" / "reference" / "release-artifacts.md"
         _write(p, doc)
-        bv.update_release_artifacts(
-            tmp_path,
-            bv.Version.parse("1.0.0"),
-            "Feb 15, 2026",
-            bv.BackendVersions(),
-            dry_run=False,
-        )
+        _bump_docs(bv, tmp_path, "1.0.0")
         out = p.read_text(encoding="utf-8")
-        assert "| `v1.0.0` | Feb 15, 2026 " in out
+        # Header rule rewrote the "Current Release" line.
         assert "## Current Release: Dynamo v1.0.0" in out
+        # GitHub-link and Docs-link rules rewrote the per-release links.
+        assert "[v1.0.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0)" in out
+        assert "[v1.0.0](https://docs.dynamo.nvidia.com/dynamo)" in out
+        # Table-insertion appended the new row with all 5 columns.
+        assert "| `v1.0.0` | Feb 15, 2026 " in out
+        assert "[Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0)" in out
+        # Historical row is left intact (no broad rewrite).
+        assert "| `v0.9.0` | Dec 01, 2025 " in out
+
+    def test_idempotent(self, bv, tmp_path):
+        """Running the docs update twice must not insert the row twice."""
+        doc = (
+            "## Current Release: Dynamo v0.9.0\n\n"
+            "**GitHub Release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0)\n\n"
+            "**Docs:** [v0.9.0](https://docs.dynamo.nvidia.com/dynamo)\n\n"
+            "### GitHub Releases\n\n"
+            "| Version | Release Date | GitHub | Docs | Notes |\n"
+            "|---------|------|---------|------|------|\n"
+            "| `v0.9.0` | Dec 01, 2025 | [Release](x) | [Docs](y) | |\n"
+        )
+        p = tmp_path / "docs" / "reference" / "release-artifacts.md"
+        _write(p, doc)
+        _bump_docs(bv, tmp_path, "1.0.0")
+        first = p.read_text(encoding="utf-8")
+        _bump_docs(bv, tmp_path, "1.0.0")
+        assert p.read_text(encoding="utf-8") == first
 
 
 class TestSupportMatrix:
@@ -564,26 +615,31 @@ class TestSupportMatrix:
             "| Version | SGLang | TRT-LLM | vLLM | NIXL |\n"
             "|---------|--------|---------|------|------|\n"
             "| **main (ToT)** | `latest` | `latest` | `latest` | `latest` |\n"
+            "| **v0.9.0** | `0.5.0` | `1.0.0` | `0.18.0` | `0.10.0` |\n"
         )
         p = tmp_path / "docs" / "reference" / "support-matrix.md"
         _write(p, doc)
-        bv.update_support_matrix(
-            tmp_path,
-            bv.Version.parse("1.0.0"),
-            bv.BackendVersions(
-                vllm="0.19.0", sglang="0.5.7", trtllm="1.3.0", nixl="0.10.1"
-            ),
-            dry_run=False,
-        )
+        _bump_docs(bv, tmp_path, "1.0.0")
         out = p.read_text(encoding="utf-8")
-        assert "[v1.0.0]" in out
+        assert "[v1.0.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0)" in out
         assert "SGLang `0.5.7`" in out
+        assert "TensorRT-LLM `1.3.0`" in out
+        # New backend row inserted right after main(ToT) row.
         assert "| **v1.0.0** | `0.5.7` | `1.3.0` | `0.19.0` | `0.10.1` |" in out
+        # Historical row preserved.
+        assert "| **v0.9.0** | `0.5.0` | `1.0.0` | `0.18.0` | `0.10.0` |" in out
 
 
 class TestFeatureMatrix:
     def test_updated_for_tag(self, bv, tmp_path):
         p = tmp_path / "docs" / "reference" / "feature-matrix.md"
-        _write(p, "*Updated for Dynamo v0.9.0*\n\nsome content\n")
-        bv.update_feature_matrix(tmp_path, bv.Version.parse("1.0.0"), dry_run=False)
-        assert "*Updated for Dynamo v1.0.0*" in p.read_text(encoding="utf-8")
+        _write(
+            p,
+            "*Updated for Dynamo v0.9.0*\n\n"
+            "Some content that mentions historical version v0.5.0 in prose.\n",
+        )
+        _bump_docs(bv, tmp_path, "1.0.0")
+        out = p.read_text(encoding="utf-8")
+        assert "*Updated for Dynamo v1.0.0*" in out
+        # Historical version mention in prose must NOT be rewritten.
+        assert "historical version v0.5.0" in out

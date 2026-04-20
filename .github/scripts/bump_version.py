@@ -46,11 +46,11 @@ Version format conventions:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator
@@ -179,6 +179,15 @@ def _endswith(*suffixes: str) -> Callable[[Path], bool]:
     return lambda p: any(p.as_posix().endswith(s) for s in suffixes)
 
 
+_SPEC_EXTENSIONS = {".yaml", ".yml", ".toml", ".sh", ".env"}
+_SPEC_NAMES = {"Dockerfile"}
+
+
+def _is_spec_file(p: Path) -> bool:
+    """Filter for broad CONTAINERS rules: only fire on spec files, not prose Markdown."""
+    return p.suffix in _SPEC_EXTENSIONS or p.name in _SPEC_NAMES or p.name.startswith("Dockerfile.")
+
+
 @dataclass(frozen=True)
 class Rule:
     """A single version-reference update rule.
@@ -193,12 +202,19 @@ class Rule:
     pattern: re.Pattern[str]
     replacement: str
     file_filter: Callable[[Path], bool] = _always
+    requires: tuple[str, ...] = ()  # ctx keys this rule needs
 
-    def apply(self, content: str, version: Version) -> str:
-        repl = (
-            self.replacement.replace("{python}", version.python())
-            .replace("{semver}", version.semver())
-            .replace("{dashed}", version.dashed())
+    def apply(self, content: str, version: Version, ctx: dict[str, str] | None = None) -> str:
+        # Invariant: version.python() / .semver() / .dashed() return PEP-440 /
+        # dashed numeric strings only — no re.sub replacement metacharacters
+        # (\g<...>, \1, etc.) can appear in them. Same applies to ctx values
+        # (backend versions are validated upstream as `<digits>.<digits>...`).
+        ctx = ctx or {}
+        if any(k not in ctx for k in self.requires):
+            return content  # missing context → rule no-ops (matches today's all_set guard)
+        repl = self.replacement.format_map(
+            {"python": version.python(), "semver": version.semver(),
+             "dashed": version.dashed(), **ctx}
         )
         return self.pattern.sub(repl, content)
 
@@ -271,6 +287,7 @@ RULES: tuple[Rule, ...] = (
         Scope.CONTAINERS,
         re.compile(rf"((?:nvcr\.io/nvidia/)?ai-dynamo/[a-z][a-z0-9-]*):{_VER}"),
         r"\g<1>:{python}",
+        _is_spec_file,
     ),
     Rule(
         "image_tag_short_dynamo",
@@ -281,6 +298,7 @@ RULES: tuple[Rule, ...] = (
             rf"|epp-image|snapshot-agent):{_VER}"
         ),
         r"\g<1>:{python}",
+        _is_spec_file,
     ),
     # Wheel filenames and pip install specs in docs/Dockerfiles/shell.
     # pyproject.toml pins are owned by the CORE rule (pyproject_ai_dynamo_pin);
@@ -290,7 +308,7 @@ RULES: tuple[Rule, ...] = (
         Scope.CONTAINERS,
         re.compile(rf"(ai[_-]dynamo(?:[_-]runtime)?(?:\[[^\]]*\])?)(==|-){_VER}"),
         r"\g<1>\g<2>{python}",
-        lambda p: p.name != "pyproject.toml",
+        lambda p: p.name != "pyproject.toml" and _is_spec_file(p),
     ),
     # Operator sample YAML dynamoVersion: "X.Y.Z"
     Rule(
@@ -298,6 +316,7 @@ RULES: tuple[Rule, ...] = (
         Scope.CONTAINERS,
         re.compile(rf'(dynamoVersion:\s*"){_VER}(")'),
         r"\g<1>{python}\g<2>",
+        _is_spec_file,
     ),
     # git checkout release/X.Y.Z
     Rule(
@@ -305,6 +324,7 @@ RULES: tuple[Rule, ...] = (
         Scope.CONTAINERS,
         re.compile(rf"(git checkout release/){_VER}"),
         r"\g<1>{python}",
+        _is_spec_file,
     ),
     # pip git URLs: git+https://...@release/X.Y.Z
     Rule(
@@ -312,6 +332,7 @@ RULES: tuple[Rule, ...] = (
         Scope.CONTAINERS,
         re.compile(rf"(@release/){_VER}"),
         r"\g<1>{python}",
+        _is_spec_file,
     ),
     # DYNAMO_VERSION=X.Y.Z env-var assignment
     Rule(
@@ -319,6 +340,64 @@ RULES: tuple[Rule, ...] = (
         Scope.CONTAINERS,
         re.compile(rf"(DYNAMO_VERSION=){_VER}"),
         r"\g<1>{python}",
+        _is_spec_file,
+    ),
+    # -- Docs: feature-matrix.md ---------------------------------------------
+    Rule(
+        "feature_matrix_tag",
+        Scope.DOCS,
+        re.compile(rf"\*Updated for Dynamo v{_VER}\*"),
+        "*Updated for Dynamo v{python}*",
+        _endswith("docs/reference/feature-matrix.md"),
+    ),
+    # -- Docs: release-artifacts.md ------------------------------------------
+    Rule(
+        "release_artifacts_header",
+        Scope.DOCS,
+        re.compile(rf"(## Current Release: Dynamo v){_VER}"),
+        r"\g<1>{python}",
+        _endswith("docs/reference/release-artifacts.md"),
+    ),
+    Rule(
+        "release_artifacts_github_link",
+        Scope.DOCS,
+        re.compile(
+            rf"(\*\*GitHub Release:\*\* \[v){_VER}"
+            rf"(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v){_VER}(\))"
+        ),
+        r"\g<1>{python}\g<2>{python}\g<3>",
+        _endswith("docs/reference/release-artifacts.md"),
+    ),
+    Rule(
+        # FIX 1: canonical Docs URL is https://docs.dynamo.nvidia.com/dynamo
+        "release_artifacts_docs_link",
+        Scope.DOCS,
+        re.compile(
+            rf"(\*\*Docs:\*\* \[v){_VER}"
+            rf"(\]\(https://docs\.dynamo\.nvidia\.com/dynamo\))"
+        ),
+        r"\g<1>{python}\g<2>",
+        _endswith("docs/reference/release-artifacts.md"),
+    ),
+    # -- Docs: support-matrix.md ---------------------------------------------
+    Rule(
+        "support_matrix_in_progress",
+        Scope.DOCS,
+        re.compile(rf"(\*\*v{_VER}\*\*)\s*\*\(in progress\)\*"),
+        r"\g<1>",
+        _endswith("docs/reference/support-matrix.md"),
+    ),
+    Rule(
+        "support_matrix_at_a_glance",
+        Scope.DOCS,
+        re.compile(
+            rf"(\*\*Latest stable release:\*\* \[v){_VER}"
+            rf"(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v){_VER}(\)) --.*"
+        ),
+        r"\g<1>{python}\g<2>{python}\g<3> -- "
+        r"SGLang `{sglang}` | TensorRT-LLM `{trtllm}` | vLLM `{vllm}` | NIXL `{nixl}`",
+        _endswith("docs/reference/support-matrix.md"),
+        requires=("vllm", "sglang", "trtllm", "nixl"),
     ),
 )
 
@@ -371,11 +450,9 @@ def _is_binary(path: Path) -> bool:
 
 
 def _excluded(rel: Path) -> bool:
+    rel_posix = rel.as_posix()
     for pat in EXCLUDE_GLOBS:
-        if rel.match(pat):
-            return True
-        # Also accept "**/foo" → match "foo" anywhere in path.
-        if pat.startswith("**/") and rel.match(pat[3:]):
+        if fnmatch.fnmatchcase(rel_posix, pat):
             return True
     return False
 
@@ -427,6 +504,7 @@ def apply_rules(
     repo: Path,
     version: Version,
     active_scopes: set[Scope],
+    ctx: dict[str, str] | None = None,
     dry_run: bool = False,
 ) -> list[Change]:
     """Walk the repo, apply every matching rule, collect :class:`Change` records.
@@ -434,6 +512,7 @@ def apply_rules(
     When ``dry_run`` is True, files are not written — used by both ``--dry-run``
     and ``--check`` modes.
     """
+    ctx = ctx or {}
     changes: list[Change] = []
     for abs_path, rel_path, content in iter_repo_files(repo):
         new_content = content
@@ -443,7 +522,7 @@ def apply_rules(
                 continue
             if not rule.file_filter(rel_path):
                 continue
-            updated = rule.apply(new_content, version)
+            updated = rule.apply(new_content, version, ctx)
             if updated != new_content:
                 hit_by_scope.setdefault(rule.scope, []).append(rule.name)
                 new_content = updated
@@ -456,204 +535,85 @@ def apply_rules(
 
 
 # ---------------------------------------------------------------------------
-# Backend metadata (consumed by DOCS specialised functions)
+# Table insertions (DOCS structured edits)
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class BackendVersions:
-    vllm: str | None = None
-    sglang: str | None = None
-    trtllm: str | None = None
-    nixl: str | None = None
+@dataclass(frozen=True)
+class TableInsertSpec:
+    """Spec for inserting a new row into a Markdown table."""
 
-    def all_set(self) -> bool:
-        return all([self.vllm, self.sglang, self.trtllm, self.nixl])
-
-    def any_set(self) -> bool:
-        return any([self.vllm, self.sglang, self.trtllm, self.nixl])
+    name: str
+    file: str  # repo-relative
+    table_header_re: re.Pattern[str]  # captures full header+separator
+    row_marker_template: str  # str.format with python/dashed/etc
+    new_row_template: str  # same
+    requires: tuple[str, ...] = ()
 
 
-# ---------------------------------------------------------------------------
-# DOCS specialised updates (table-row insertion / section-scoped edits)
-# ---------------------------------------------------------------------------
+TABLE_INSERTIONS: tuple[TableInsertSpec, ...] = (
+    TableInsertSpec(
+        name="release_artifacts_table_row",
+        file="docs/reference/release-artifacts.md",
+        table_header_re=re.compile(
+            r"(### GitHub Releases\n\n\| Version \|.*\n\|[-| ]+\n)"
+        ),
+        row_marker_template="| `v{python}`",
+        # FIX 1c: 5 columns to match | Version | Release Date | GitHub | Docs | Notes |
+        new_row_template=(
+            "| `v{python}` | {release_date} "
+            "| [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v{python}) "
+            "| [Docs](https://docs.dynamo.nvidia.com/dynamo) | |"
+        ),
+        requires=("release_date",),
+    ),
+    TableInsertSpec(
+        name="support_matrix_backend_row",
+        file="docs/reference/support-matrix.md",
+        table_header_re=re.compile(
+            r"(\| \*\*main \(ToT\)\*\* \|[^\n]+\n)"  # insert AFTER ToT row
+        ),
+        row_marker_template="| **v{python}**",
+        new_row_template=(
+            "| **v{python}** | `{sglang}` | `{trtllm}` | `{vllm}` | `{nixl}` |"
+        ),
+        requires=("vllm", "sglang", "trtllm", "nixl"),
+    ),
+)
 
 
-def update_feature_matrix(repo: Path, version: Version, dry_run: bool) -> list[Change]:
-    path = repo / "docs/reference/feature-matrix.md"
-    if not path.exists():
-        return []
-    content = path.read_text(encoding="utf-8")
-    updated = re.sub(
-        r"\*Updated for Dynamo v[\d.]+(?:\.post\d+)?\*",
-        f"*Updated for Dynamo v{version.python()}*",
-        content,
-    )
-    if updated == content:
-        return []
-    if not dry_run:
-        path.write_text(updated, encoding="utf-8")
-    return [
-        Change(
-            Path("docs/reference/feature-matrix.md"),
-            Scope.DOCS,
-            ["feature_matrix_tag"],
-        )
-    ]
-
-
-def update_support_matrix(
-    repo: Path,
-    version: Version,
-    backends: BackendVersions,
-    dry_run: bool,
+def insert_table_rows(
+    repo: Path, version: Version, ctx: dict[str, str], dry_run: bool
 ) -> list[Change]:
-    path = repo / "docs/reference/support-matrix.md"
-    if not path.exists():
-        return []
-    content = path.read_text(encoding="utf-8")
-    original = content
-    rules_hit: list[str] = []
-
-    # Remove "*(in progress)*" from the version row being released.
-    before = content
-    content = re.sub(
-        rf"(\*\*v{re.escape(version.python())}\*\*)\s*\*\(in progress\)\*",
-        r"\g<1>",
-        content,
-    )
-    if content != before:
-        rules_hit.append("support_matrix_in_progress")
-
-    if backends.all_set():
-        before = content
-        content = re.sub(
-            r"(\*\*Latest stable release:\*\* \[v)[\d.]+\S*"
-            r"(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v)[\d.]+\S*"
-            r"(\) --).*",
-            (
-                rf"\g<1>{version.python()}\g<2>{version.python()}\g<3>"
-                rf" SGLang `{backends.sglang}` |"
-                rf" TensorRT-LLM `{backends.trtllm}` |"
-                rf" vLLM `{backends.vllm}` |"
-                rf" NIXL `{backends.nixl}`"
-            ),
-            content,
-        )
-        if content != before:
-            rules_hit.append("support_matrix_at_a_glance")
-
-        row_marker = f"| **v{version.python()}**"
-        if row_marker not in content:
-            new_row = (
-                f"| **v{version.python()}** "
-                f"| `{backends.sglang}` "
-                f"| `{backends.trtllm}` "
-                f"| `{backends.vllm}` "
-                f"| `{backends.nixl}` |"
-            )
-            before = content
-            content = re.sub(
-                r"(\| \*\*main \(ToT\)\*\* \|[^\n]+\n)",
-                rf"\g<1>{new_row}\n",
-                content,
-            )
-            if content != before:
-                rules_hit.append("support_matrix_backend_row")
-
-    if content == original:
-        return []
-    if not dry_run:
-        path.write_text(content, encoding="utf-8")
-    return [Change(Path("docs/reference/support-matrix.md"), Scope.DOCS, rules_hit)]
-
-
-def update_release_artifacts(
-    repo: Path,
-    version: Version,
-    release_date: str | None,
-    backends: BackendVersions,
-    dry_run: bool,
-) -> list[Change]:
-    path = repo / "docs/reference/release-artifacts.md"
-    if not path.exists():
-        return []
-    content = path.read_text(encoding="utf-8")
-    original = content
-    rules_hit: list[str] = []
-
-    # Header
-    before = content
-    content = re.sub(
-        r"(## Current Release: Dynamo v)[\d.]+\S*",
-        rf"\g<1>{version.python()}",
-        content,
-    )
-    if content != before:
-        rules_hit.append("release_artifacts_header")
-
-    # GitHub Release link
-    content = re.sub(
-        r"(\*\*GitHub Release:\*\* \[v)[\d.]+\S*"
-        r"(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v)[\d.]+\S*(\))",
-        rf"\g<1>{version.python()}\g<2>{version.python()}\g<3>",
-        content,
-    )
-
-    # Docs link
-    content = re.sub(
-        r"(\*\*Docs:\*\* \[v)[\d.]+\S*"
-        r"(\]\(https://docs\.nvidia\.com/dynamo/v-)[\d-]+\S*(/?\))",
-        rf"\g<1>{version.python()}\g<2>{version.dashed()}\g<3>",
-        content,
-    )
-
-    # New row in the GitHub Releases table
-    row_marker = f"| `v{version.python()}`"
-    if row_marker not in content:
-        date_str = release_date or datetime.now().strftime("%b %d, %Y")
-        new_row = (
-            f"| `v{version.python()}` | {date_str} "
-            f"| [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v{version.python()}) "
-            f"| [Docs](https://docs.nvidia.com/dynamo/v-{version.dashed()}/) |"
-        )
-        table_pattern = r"(### GitHub Releases\n\n\| Version \|.*\n\|[-| ]+\n)"
-        if re.search(table_pattern, content):
-            content = re.sub(table_pattern, rf"\g<1>{new_row}\n", content)
-            rules_hit.append("release_artifacts_table_row")
-        else:
-            # Fail loud: the doc structure changed and we'd silently skip the row.
+    """Insert new rows into DOCS tables as specified by TABLE_INSERTIONS."""
+    out: list[Change] = []
+    fmt_ctx = {
+        "python": version.python(),
+        "semver": version.semver(),
+        "dashed": version.dashed(),
+        **ctx,
+    }
+    for spec in TABLE_INSERTIONS:
+        path = repo / spec.file
+        if not path.exists():
+            continue
+        if any(k not in ctx for k in spec.requires):
+            continue
+        content = path.read_text(encoding="utf-8")
+        marker = spec.row_marker_template.format_map(fmt_ctx)
+        if marker in content:
+            continue
+        if not spec.table_header_re.search(content):
             raise RuntimeError(
-                "release-artifacts.md: could not find the GitHub Releases table "
-                "header. The doc structure changed — update this script."
+                f"{spec.file}: insertion point for {spec.name!r} not found. "
+                "The doc structure changed — update TABLE_INSERTIONS."
             )
-
-    # Backend versions inside the Current Release section only.
-    backend_labels = {"vllm": "vLLM", "sglang": "SGLang", "trtllm": "TRT-LLM"}
-    cr_start = content.find("## Current Release")
-    if cr_start >= 0 and backends.any_set():
-        next_h2 = content.find("\n## ", cr_start + 1)
-        if next_h2 < 0:
-            next_h2 = len(content)
-        section = content[cr_start:next_h2]
-        before = section
-        for key, label in backend_labels.items():
-            val = getattr(backends, key)
-            if val:
-                section = re.sub(
-                    rf"({re.escape(label)} `)v[^`]+(`)",
-                    rf"\g<1>v{val}\g<2>",
-                    section,
-                )
-        if section != before:
-            content = content[:cr_start] + section + content[next_h2:]
-            rules_hit.append("release_artifacts_backend_versions")
-
-    if content == original:
-        return []
-    if not dry_run:
-        path.write_text(content, encoding="utf-8")
-    return [Change(Path("docs/reference/release-artifacts.md"), Scope.DOCS, rules_hit)]
+        new_row = spec.new_row_template.format_map(fmt_ctx)
+        new_content = spec.table_header_re.sub(rf"\g<1>{new_row}\n", content, count=1)
+        if not dry_run:
+            path.write_text(new_content, encoding="utf-8")
+        out.append(Change(Path(spec.file), Scope.DOCS, [spec.name]))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -663,13 +623,21 @@ def update_release_artifacts(
 
 def detect_current_version(repo: Path) -> Version:
     pyproject = repo / "pyproject.toml"
+    if not pyproject.exists():
+        raise SystemExit(
+            f"ERROR: {pyproject} not found. "
+            "Pass --old-version (for bump) or --expected-version (for --check) explicitly."
+        )
     m = re.search(
         r'^version\s*=\s*"([^"]+)"',
         pyproject.read_text(encoding="utf-8"),
         re.MULTILINE,
     )
     if not m:
-        raise SystemExit("ERROR: could not detect current version from pyproject.toml")
+        raise SystemExit(
+            f"ERROR: could not detect current version from {pyproject}. "
+            "Pass --old-version (for bump) or --expected-version (for --check) explicitly."
+        )
     return Version.parse(m.group(1))
 
 
@@ -804,47 +772,34 @@ def _format_summary(
     return "\n".join(lines) + "\n"
 
 
+def _ctx_from_args(args: argparse.Namespace) -> dict[str, str]:
+    """Build ctx dict from CLI args for rules that require backend versions."""
+    ctx: dict[str, str] = {}
+    if args.vllm_version:
+        ctx["vllm"] = args.vllm_version
+    if args.sglang_version:
+        ctx["sglang"] = args.sglang_version
+    if args.trtllm_version:
+        ctx["trtllm"] = args.trtllm_version
+    if args.nixl_version:
+        ctx["nixl"] = args.nixl_version
+    if args.release_date:
+        ctx["release_date"] = args.release_date
+    return ctx
+
+
 def _run_check(args: argparse.Namespace, repo: Path) -> int:
     expected = args.expected_version or detect_current_version(repo)
-    _log(
-        args, "info", f"Checking for stale version references (expected: {expected})..."
-    )
+    _log(args, "info", f"Checking for stale version references (expected: {expected})...")
     active = _active_scopes(args)
-    # Rerun the engine with the expected version — anything that would change is stale.
-    stale = apply_rules(repo, expected, active, dry_run=True)
-    # The DOCS specialised functions own table-row insertion and section-scoped
-    # edits in support-matrix.md / release-artifacts.md / feature-matrix.md.
-    # Those files now carry the bump-version: ignore marker, so apply_rules() no
-    # longer touches them; without this dry-run pass --check would have a blind
-    # spot for stale "Current Release" headers, "Latest stable release" lines,
-    # missing release-row entries, and stale "Updated for vX.Y.Z" tags.
-    # Backend versions / release date are usually not passed to --check; the
-    # all_set/any_set guards inside the DOCS helpers keep the
-    # backend-dependent rewrites no-ops in that case, while still catching the
-    # version-only staleness signals.
-    if Scope.DOCS in active:
-        backends = BackendVersions(
-            vllm=args.vllm_version,
-            sglang=args.sglang_version,
-            trtllm=args.trtllm_version,
-            nixl=args.nixl_version,
-        )
-        stale.extend(update_feature_matrix(repo, expected, dry_run=True))
-        stale.extend(update_support_matrix(repo, expected, backends, dry_run=True))
-        stale.extend(
-            update_release_artifacts(
-                repo, expected, args.release_date, backends, dry_run=True
-            )
-        )
+    ctx = _ctx_from_args(args)
+    stale = apply_rules(repo, expected, active, ctx, dry_run=True)
+    stale.extend(insert_table_rows(repo, expected, ctx, dry_run=True))
     if not stale:
         _log(args, "summary", "All version references are up to date.")
         return 0
     for ch in stale:
-        _log(
-            args,
-            "info",
-            f"STALE: {ch.path.as_posix()} ({ch.scope.value}: {', '.join(ch.rules)})",
-        )
+        _log(args, "info", f"STALE: {ch.path.as_posix()} ({ch.scope.value}: {', '.join(ch.rules)})")
     _log(args, "summary", f"Found {len(stale)} stale version reference(s).")
     return 1
 
@@ -877,25 +832,13 @@ def _run_bump(args: argparse.Namespace, repo: Path) -> int:
             f"  Post-release formats: python={new_ver.python()} semver={new_ver.semver()}",
         )
 
-    backends = BackendVersions(
-        vllm=args.vllm_version,
-        sglang=args.sglang_version,
-        trtllm=args.trtllm_version,
-        nixl=args.nixl_version,
-    )
+    ctx = _ctx_from_args(args)
 
     changes: list[Change] = []
-    # Rule-based scopes (core, containers, helm, + any text-pattern DOCS rules)
-    changes.extend(apply_rules(repo, new_ver, active, dry_run=args.dry_run))
-    # Specialised DOCS functions (table-row insertion / sectioned edits)
-    if Scope.DOCS in active:
-        changes.extend(update_feature_matrix(repo, new_ver, args.dry_run))
-        changes.extend(update_support_matrix(repo, new_ver, backends, args.dry_run))
-        changes.extend(
-            update_release_artifacts(
-                repo, new_ver, args.release_date, backends, args.dry_run
-            )
-        )
+    # Rule-based scopes (core, containers, helm, docs)
+    changes.extend(apply_rules(repo, new_ver, active, ctx, dry_run=args.dry_run))
+    # Table insertions (docs structured edits)
+    changes.extend(insert_table_rows(repo, new_ver, ctx, dry_run=args.dry_run))
 
     _log(
         args,
