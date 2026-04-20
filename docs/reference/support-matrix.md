@@ -33,8 +33,8 @@ The following table shows the backend framework versions included with each Dyna
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
-| **v1.1.0-dev.3** *(experimental, in progress)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
-| **v1.1.0-dev.2** *(experimental)* | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.3** *(experimental, partial)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.2** *(experimental, partial)* | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
 | **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
 | **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
@@ -52,9 +52,12 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 | **v0.6.0** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 
+For **v1.1.0-dev.2** and **v1.1.0-dev.3**, the cells above match `container/context.yaml` on the corresponding release branch (pins used to build images). Those dev lines are **partial releases**: not every backend has a published Dynamo runtime container for that tag. See [Pre-Release Artifacts](release-artifacts.md#pre-release-artifacts) for what actually shipped.
+
 ### Version Labels
 
 - **main (ToT)** reflects the current development branch.
+- Releases marked *(experimental, partial)* are pre-releases: the table shows branch build pins, which may include backends with no NGC image for that dev tag yet.
 - Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
 ### Version Compatibility
