@@ -107,7 +107,7 @@ For detailed installation instructions, see the [Local Quick Start](https://gith
 ```bash
 # Install Dynamo with a specific backend (Recommended)
 uv pip install "ai-dynamo[vllm]==1.0.1"
-uv pip install "ai-dynamo[sglang]==1.0.1"
+uv pip install --prerelease=allow "ai-dynamo[sglang]==1.0.1"
 # TensorRT-LLM requires the NVIDIA PyPI index and pip
 pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]==1.0.1"
 
