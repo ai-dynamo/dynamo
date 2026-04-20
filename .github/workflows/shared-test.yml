@@ -104,7 +104,7 @@ jobs:
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
-          MINIO_VOLUMES: /data
+          MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
         ports:
           - 9000:9000

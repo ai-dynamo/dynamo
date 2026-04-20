@@ -44,7 +44,8 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: verify minio 
+    - name: verify minio
+      if: inputs.verify_gpu == 'true' # only gpu tests require minio
       shell: bash
       run: |
         # Wait for MinIO to be ready
@@ -76,11 +77,11 @@ runs:
         print(f"GPU count: {count}")
         print(f"GPU Name: {name}")
         if not available:
-            # DEBUG ONLY — remove before merging to main. Sleeps 10 minutes
-            # so the container can be exec'd into to inspect GPU state.
-            import time
-            print("Sleeping 10 minutes for debugging; remove before merging.", flush=True)
-            time.sleep(600)
+            # # DEBUG ONLY — remove before merging to main. Sleeps 10 minutes
+            # # so the container can be exec'd into to inspect GPU state.
+            # import time
+            # print("Sleeping 10 minutes for debugging; remove before merging.", flush=True)
+            # time.sleep(600)
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
 
     - name: Run pytest
