@@ -1685,6 +1685,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = prefill_result.get("disaggregated_params", {}).get(
                 "embedding_params"
             )
+            expanded_prompt_token_ids = prefill_result.get(
+                "disaggregated_params", {}
+            ).get("expanded_prompt_token_ids")
         else:
             kv_params = None
             embedding_params = None
@@ -1723,6 +1726,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.error("Request %s: %s", request_id, msg)
                     yield {"status": "error", "message": msg}
                     return
+            else:
+                # Non-qwen model, assume the multi_modal_data has been consumed
+                # in prefill, so we can use the expanded prompt token ids
+                # without multimodal data
+                if expanded_prompt_token_ids is not None:
+                    request["token_ids"] = expanded_prompt_token_ids
+                    has_mm_data = False
             # TODO(DIS-1661): video/audio re-downloaded on decode.
             # TODO(DIS-1664): mixed image+video in disagg decode is not
             # supported — synthetic image data would be overwritten.
@@ -2049,10 +2059,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                # [gluo FIXME] adhoc injection of expanded prompt for decode worker
+                # for models that are handled differently from Qwen (i.e. llava)
+                expanded_prompt_token_ids = None
+                if multi_modal_data and not is_qwen_vl_model(self.config.model):
+                    expanded_prompt_token_ids = res.prompt_token_ids
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params, embedding_params
+                        res.kv_transfer_params,
+                        embedding_params,
+                        expanded_prompt_token_ids,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -2073,12 +2090,18 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 yield output
 
-    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+    def _build_disaggregated_params(
+        self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None
+    ):
         disaggregated_params = {}
         if kv_transfer_params is not None:
             disaggregated_params["kv_transfer_params"] = kv_transfer_params
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
+        if expanded_prompt_token_ids is not None:
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 
