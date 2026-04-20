@@ -7,22 +7,27 @@
 //! Supports role-specific configuration for leader and worker components.
 
 mod cache;
+mod debug;
 mod discovery;
 mod events;
 mod messenger;
+mod metrics;
 mod nixl;
 mod object;
 mod offload;
 mod onboard;
 mod rayon;
 mod tokio;
+mod v1_compat;
 
 pub use cache::{CacheConfig, DiskCacheConfig, HostCacheConfig, ParallelismMode};
+pub use debug::DebugConfig;
 pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
 pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
 pub use messenger::{MessengerBackendConfig, MessengerConfig};
+pub use metrics::MetricsConfig;
 pub use nixl::NixlConfig;
 pub use object::{NixlObjectConfig, ObjectClientConfig, ObjectConfig, S3ObjectConfig};
 pub use offload::{
@@ -31,6 +36,7 @@ pub use offload::{
 pub use onboard::{OnboardConfig, OnboardMode};
 pub use rayon::RayonConfig;
 pub use tokio::TokioConfig;
+pub use v1_compat::V1EnvCompat;
 
 use figment::{
     Figment, Metadata, Profile, Provider,
@@ -99,6 +105,16 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub events: EventsConfig,
+
+    /// Metrics and cache statistics configuration.
+    #[validate(nested)]
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+
+    /// Debug configuration (recording, etc.).
+    #[validate(nested)]
+    #[serde(default)]
+    pub debug: DebugConfig,
 }
 
 impl KvbmConfig {
@@ -106,16 +122,23 @@ impl KvbmConfig {
     ///
     /// Configuration sources in priority order (lowest to highest):
     /// 1. Code defaults
-    /// 2. System config file at /opt/dynamo/etc/kvbm.toml
-    /// 3. TOML file from KVBM_CONFIG_PATH environment variable
-    /// 4. Environment variables (KVBM_* prefixed)
+    /// 2. V1 `DYN_KVBM_*` environment variables (compat layer)
+    /// 3. System config file at /opt/dynamo/etc/kvbm.toml
+    /// 4. TOML file from KVBM_CONFIG_PATH environment variable
+    /// 5. V2 environment variables (KVBM_* prefixed)
+    /// 6. JSON overrides from Python (via `from_figment_with_json`)
     pub fn figment() -> Figment {
         let config_path = std::env::var("KVBM_CONFIG_PATH").unwrap_or_default();
 
         Figment::new()
+            // 1. Code defaults (lowest priority)
             .merge(Serialized::defaults(KvbmConfig::default()))
+            // 2. V1 DYN_KVBM_* env vars (compat layer)
+            .merge(V1EnvCompat)
+            // 3-4. TOML files
             .merge(Toml::file("/opt/dynamo/etc/kvbm.toml"))
             .merge(Toml::file(&config_path))
+            // 5. V2 KVBM_* env vars (override v1 and files)
             // Tokio config: KVBM_TOKIO_WORKER_THREADS, KVBM_TOKIO_MAX_BLOCKING_THREADS
             .merge(
                 Env::prefixed("KVBM_TOKIO_")
@@ -135,6 +158,11 @@ impl KvbmConfig {
             .merge(
                 Env::prefixed("KVBM_MESSENGER_DISCOVERY_")
                     .map(|k| format!("messenger.discovery.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Messenger init timeout: KVBM_MESSENGER_INIT_TIMEOUT_SECS
+            .merge(
+                Env::prefixed("KVBM_MESSENGER_INIT_TIMEOUT_SECS")
+                    .map(|_| "messenger.init_timeout_secs".into()),
             )
             // NixL config: KVBM_NIXL_BACKENDS (comma-separated list)
             .merge(
@@ -163,6 +191,27 @@ impl KvbmConfig {
                 Env::prefixed("KVBM_EVENTS_BATCHING_")
                     .map(|k| format!("events.batching.{}", k.as_str().to_lowercase()).into()),
             )
+            // Metrics config: KVBM_METRICS_ENABLED, KVBM_METRICS_PORT, etc.
+            .merge(
+                Env::prefixed("KVBM_METRICS_")
+                    .map(|k| format!("metrics.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Debug config: KVBM_DEBUG_RECORDING
+            .merge(
+                Env::prefixed("KVBM_DEBUG_")
+                    .map(|k| format!("debug.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Offload config: KVBM_OFFLOAD_G1_TO_G2_*, KVBM_OFFLOAD_G2_TO_G3_*
+            .merge(
+                Env::prefixed("KVBM_OFFLOAD_G1_TO_G2_")
+                    .map(|k| format!("offload.g1_to_g2.{}", k.as_str().to_lowercase()).into()),
+            )
+            .merge(
+                Env::prefixed("KVBM_OFFLOAD_G2_TO_G3_")
+                    .map(|k| format!("offload.g2_to_g3.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Onboard config: KVBM_ONBOARD_MODE
+            .merge(Env::prefixed("KVBM_ONBOARD_MODE").map(|_| "onboard.mode".into()))
     }
 
     /// Load configuration from default figment (env and files).

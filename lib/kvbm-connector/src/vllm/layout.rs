@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use kvbm_physical::layout::{BlockDimension, LayoutConfig};
 use dynamo_memory::TensorDescriptor;
+use kvbm_physical::layout::{BlockDimension, LayoutConfig};
 
 /// Determine the KV cache layout configuration and block dimension from tensor shapes.
 ///

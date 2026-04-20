@@ -27,15 +27,16 @@ mod s3_tests {
     use anyhow::Result;
     use rstest::rstest;
 
-    use kvbm_engine::distributed::object::LayoutConfigExt;
-    use kvbm_engine::distributed::object::s3::{S3Config, S3ObjectBlockClient};
+    use crate::{BlockId, SequenceHash};
+    use dynamo_tokens::TokenBlockSequence;
+    use kvbm_engine::object::LayoutConfigExt;
+    use kvbm_engine::object::s3::{S3Config, S3ObjectBlockClient};
+    use kvbm_engine::testing::physical::{LayoutKind, standard_config};
+    use kvbm_logical::KvbmSequenceHashProvider;
     use kvbm_physical::layout::{BlockDimension, PhysicalLayout};
     use kvbm_physical::transfer::{
         BlockChecksum, FillPattern, NixlAgent, compute_block_checksums, fill_blocks,
     };
-    use kvbm_engine::testing::physical::{LayoutKind, standard_config};
-    use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
-    use dynamo_tokens::TokenBlockSequence;
 
     /// Generate unique test bucket name to avoid collisions.
     fn test_bucket_name() -> String {
@@ -84,7 +85,8 @@ mod s3_tests {
         let tokens: Vec<u32> = (0..total_tokens as u32)
             .map(|t| t.wrapping_add(seed as u32 * 1000))
             .collect();
-        let seq = TokenBlockSequence::from_slice(&tokens, tokens_per_block as u32, Some(seed as u64));
+        let seq =
+            TokenBlockSequence::from_slice(&tokens, tokens_per_block as u32, Some(seed as u64));
         seq.blocks()
             .iter()
             .take(count)
@@ -184,8 +186,11 @@ mod s3_tests {
         }
 
         /// Check if blocks exist in S3.
-        pub async fn has_blocks(&self, keys: &[SequenceHash]) -> Vec<(SequenceHash, Option<usize>)> {
-            use kvbm_engine::distributed::object::ObjectBlockOps;
+        pub async fn has_blocks(
+            &self,
+            keys: &[SequenceHash],
+        ) -> Vec<(SequenceHash, Option<usize>)> {
+            use kvbm_engine::object::ObjectBlockOps;
             self.inner.has_blocks(keys.to_vec()).await
         }
 
@@ -242,7 +247,8 @@ mod s3_tests {
                 }
 
                 if list_result.is_truncated() == Some(true) {
-                    continuation_token = list_result.next_continuation_token().map(|s| s.to_string());
+                    continuation_token =
+                        list_result.next_continuation_token().map(|s| s.to_string());
                 } else {
                     break;
                 }
@@ -448,7 +454,8 @@ mod s3_tests {
         let src_block_ids: Vec<BlockId> = vec![0, 1, 2];
         let hashes = generate_test_hashes(src_block_ids.len(), 200);
 
-        let src_checksums = fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
+        let src_checksums =
+            fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
         println!(
             "✓ Filled {} source blocks with sequential pattern",
             src_block_ids.len()
@@ -517,7 +524,8 @@ mod s3_tests {
         let src_block_ids: Vec<BlockId> = vec![0, 1];
         let hashes = generate_test_hashes(src_block_ids.len(), 300);
 
-        let src_checksums = fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
+        let src_checksums =
+            fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
 
         // Put FC blocks to S3
         let put_results = test_client
@@ -853,7 +861,8 @@ mod s3_tests {
         let src_block_ids: Vec<BlockId> = (0..4).collect();
         let hashes = generate_test_hashes(4, 720);
 
-        let src_checksums = fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
+        let src_checksums =
+            fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
         let _ = test_client
             .put_blocks(&hashes, &src_layout, &src_block_ids)
             .await;

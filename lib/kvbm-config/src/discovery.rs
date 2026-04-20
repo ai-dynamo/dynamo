@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Discovery configuration for Nova peer discovery.
+//! Discovery configuration for Velo peer discovery.
 //!
 //! Supports three discovery backends:
 //! - **Etcd**: Centralized discovery using etcd key-value store

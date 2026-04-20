@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! There are four action that the [`ConnectorWorker`] is allowed to perform:
@@ -527,33 +527,24 @@ impl ConnectorWorkerInterface for ConnectorWorker {
                 "Starting intra-pass layer-wise onboard from G2 to G1"
             );
 
-            #[cfg(feature = "nccl")]
-            {
-                // Get the DirectWorker
-                let worker = self
-                    .worker()
-                    .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))?;
+            let worker = self
+                .worker()
+                .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))?;
 
-                // Get pre-allocated layer events
-                let layer_events = self.state.onboard_layer_events()?;
+            let layer_events = self.state.onboard_layer_events()?;
 
-                // Execute layer-wise onboard (requires nccl feature for layerwise CUDA event tracking)
-                worker.execute_local_layerwise_onboard(
-                    &load.g2_src_block_ids,
-                    &load.g1_dst_block_ids,
-                    layer_events,
-                )?;
+            // Pure-CUDA per-layer H2D onboard: uses a dedicated H2D stream and
+            // records a CudaEvent per layer so that wait_for_layer_load can
+            // inject a cuStreamWaitEvent on the torch compute stream before
+            // each layer's forward pass reads its KV slots. No NCCL involved.
+            worker.execute_local_layerwise_onboard(
+                &load.g2_src_block_ids,
+                &load.g1_dst_block_ids,
+                layer_events,
+            )?;
 
-                // Set flag so wait_for_layer_load knows to sync
-                self.intra_pass_onboard_active
-                    .store(true, Ordering::Relaxed);
-            }
-
-            #[cfg(not(feature = "nccl"))]
-            {
-                let _ = load;
-                tracing::warn!("Intra-pass layerwise onboard requires nccl feature — skipping");
-            }
+            self.intra_pass_onboard_active
+                .store(true, Ordering::Relaxed);
 
             tracing::debug!("Intra-pass onboard initiated - events recorded on transfer stream");
         }

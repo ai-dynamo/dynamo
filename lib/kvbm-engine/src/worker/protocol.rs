@@ -153,7 +153,7 @@ pub enum RemoteDescriptor {
 
 /// Configuration sent from leader to workers for G2/G3/G4 layout creation.
 ///
-/// This message is sent via Nova RPC during Phase 3 coordination.
+/// This message is sent via Velo RPC during Phase 3 coordination.
 /// Workers use this to create additional cache tiers beyond G1 (GPU KV).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaderLayoutConfig {

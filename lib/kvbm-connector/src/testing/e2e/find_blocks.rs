@@ -8,14 +8,14 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::testing::connector::{ConnectorTestConfig, TestConnectorCluster};
     use kvbm_engine::leader::{
         FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
     };
-    use kvbm_physical::transfer::FillPattern;
-    use crate::testing::connector::{ConnectorTestConfig, TestConnectorCluster};
     use kvbm_engine::testing::distributed::create_instance_leader_pair;
     use kvbm_engine::testing::managers::populate_manager_with_blocks;
     use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+    use kvbm_physical::transfer::FillPattern;
     use std::time::Duration;
     use tokio::time::timeout;
 

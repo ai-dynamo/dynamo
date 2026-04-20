@@ -115,6 +115,31 @@ pub struct TierOffloadConfig {
     #[serde(default)]
     #[validate(nested)]
     pub presence_lfu: PresenceLfuFilterConfig,
+
+    /// Minimum priority threshold for prefix-contiguous offload filtering.
+    ///
+    /// Offloading stops at the first block below this threshold.
+    /// 0 means no priority filtering (default).
+    ///
+    /// V1 compat: `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY`
+    #[serde(default)]
+    pub min_priority: i32,
+
+    /// Maximum number of concurrent transfers for this tier transition.
+    ///
+    /// If None, the engine uses its own default (typically 4).
+    ///
+    /// V1 compat: `DYN_KVBM_MAX_CONCURRENT_TRANSFERS`
+    #[serde(default)]
+    pub max_concurrent_transfers: Option<usize>,
+
+    /// Maximum batch size for transfers.
+    ///
+    /// If None, the engine uses its own default (typically 16).
+    ///
+    /// V1 compat: `DYN_KVBM_MAX_TRANSFER_BATCH_SIZE` or `DYN_KVBM_TRANSFER_BATCH_SIZE`
+    #[serde(default)]
+    pub max_batch_size: Option<usize>,
 }
 
 /// Top-level offload configuration.

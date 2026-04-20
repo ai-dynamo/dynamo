@@ -46,7 +46,7 @@ impl VeloWorkerService {
         &self.worker
     }
 
-    /// Register all worker handlers with Nova
+    /// Register all worker handlers with Velo
     fn register_handlers(&self) -> Result<()> {
         self.register_local_transfer_handler()?;
         self.register_remote_onboard_handler()?;

@@ -888,6 +888,12 @@ mod tests {
         values: Vec<f64>,
     }
 
+    // `Jail::expect_with` takes `FnOnce(&mut Jail) -> Result<T, figment::Error>`
+    // (fixed by figment's API). `figment::Error` is ≥208 bytes so the
+    // `result_large_err` lint fires on every closure in this test and there
+    // is nothing to fix at the call site — the error type is not ours to
+    // choose. Allow is scoped to this one test fn.
+    #[allow(clippy::result_large_err)]
     #[test]
     fn test_client_options_builder() {
         Jail::expect_with(|_jail| {

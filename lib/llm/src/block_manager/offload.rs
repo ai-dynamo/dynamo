@@ -2008,6 +2008,8 @@ mod tests {
         // Helper functions for improved disk testing
 
         /// Build pools with mixed layout types for testing compatibility
+        // TODO(block-manager-team): factor return tuple into a `type` alias. Tracked in Linear.
+        #[allow(clippy::type_complexity)]
         fn build_pools_mixed_layouts(
             num_blocks: usize,
             host_config: Option<(usize, LayoutType)>,

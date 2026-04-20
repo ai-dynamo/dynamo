@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Scheduler output types shared between scheduler and connector.
 
-use kvbm_common::BlockId;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
+use kvbm_common::BlockId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

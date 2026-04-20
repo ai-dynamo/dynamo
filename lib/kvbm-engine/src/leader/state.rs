@@ -39,7 +39,7 @@ pub struct LeaderState {
     /// This leader's instance ID
     instance_id: InstanceId,
 
-    /// Nova runtime for RPC
+    /// Velo runtime for RPC
     messenger: Arc<Messenger>,
 
     /// Workers under this leader (rank-ordered)
@@ -54,7 +54,7 @@ impl LeaderState {
     ///
     /// # Arguments
     /// * `instance_id` - This leader's unique identifier
-    /// * `nova` - Nova runtime for RPC communication
+    /// * `velo` - Velo runtime for RPC communication
     pub fn new(instance_id: InstanceId, messenger: Arc<Messenger>) -> Self {
         Self {
             instance_id,
@@ -69,8 +69,8 @@ impl LeaderState {
         self.instance_id
     }
 
-    /// Get the Nova runtime.
-    pub fn nova(&self) -> &Arc<Messenger> {
+    /// Get the Velo runtime.
+    pub fn velo(&self) -> &Arc<Messenger> {
         &self.messenger
     }
 

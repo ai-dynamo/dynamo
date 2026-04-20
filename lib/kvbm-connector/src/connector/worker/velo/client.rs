@@ -4,13 +4,13 @@
 //! Client for calling Velo services registered on ConnectorWorker.
 
 use anyhow::Result;
-use velo::Messenger;
 use std::sync::Arc;
+use velo::Messenger;
 
-use kvbm_physical::layout::LayoutConfig;
 use kvbm_common::BlockId;
 use kvbm_engine::InstanceId;
 use kvbm_engine::worker::{LeaderLayoutConfig, WorkerLayoutResponse};
+use kvbm_physical::layout::LayoutConfig;
 
 use super::*;
 
