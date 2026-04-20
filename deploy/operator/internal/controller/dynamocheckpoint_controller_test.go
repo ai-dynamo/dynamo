@@ -169,6 +169,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 	assert.Equal(t, "/tmp/ready-for-checkpoint", envMap[consts.EnvReadyForCheckpointFile])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, envMap[snapshotprotocol.SnapshotControlDirEnv])
 	assert.Equal(t, "manual-checkpoint", envMap[consts.DynamoNamespaceEnvVar])
 	assert.Equal(t, consts.ComponentTypeWorker, envMap[consts.DynamoComponentEnvVar])
 	assert.Equal(t, "worker-1234", envMap[consts.DynamoNamespaceWorkerSuffixEnvVar])
@@ -212,6 +213,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 	assert.False(t, volNames[snapshotprotocol.CheckpointVolumeName])
 	assert.True(t, volNames[consts.PodInfoVolumeName])
+	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
 	mountPaths := make(map[string]string)
 	for _, m := range main.VolumeMounts {
@@ -221,6 +223,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.False(t, hasCheckpointMount)
 	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mountPaths[snapshotprotocol.SnapshotControlVolumeName])
 
 	foundSharedMemoryVolume := false
 	for _, v := range podSpec.Volumes {
@@ -374,7 +377,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	}
 	assert.True(t, volNames[gms.SharedVolumeName])
 	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
-	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
+	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
 	mainMounts := map[string]string{}
 	for _, m := range main.VolumeMounts {
