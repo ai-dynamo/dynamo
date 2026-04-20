@@ -8,6 +8,8 @@ title: vLLM
 
 Dynamo vLLM integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with vLLM's native engine arguments. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
+> See also: runnable examples under [`examples/backends/vllm/launch/`](../../../examples/backends/vllm/launch/) and production recipes under [`recipes/`](../../../recipes/README.md).
+
 ## Installation
 
 ### Install Latest Release

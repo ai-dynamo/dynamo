@@ -12,6 +12,8 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with SGLang's native engine arguments. It supports LLM inference, embedding models, multimodal vision models, and diffusion-based generation (LLM, image, video).
 
+> See also: runnable examples under [`examples/backends/sglang/launch/`](../../../examples/backends/sglang/launch/) and production recipes under [`recipes/`](../../../recipes/README.md).
+
 ## Installation
 
 ### Install Latest Release

@@ -12,6 +12,8 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, multi-node deployments, and request cancellation. It supports LLM inference, multimodal models, video diffusion, and advanced features like speculative decoding and attention data parallelism.
 
+> See also: runnable examples under [`examples/backends/trtllm/launch/`](../../../examples/backends/trtllm/launch/) and production recipes under [`recipes/`](../../../recipes/README.md).
+
 ## Feature Support Matrix
 
 ### Core Dynamo Features
