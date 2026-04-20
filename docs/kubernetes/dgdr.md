@@ -128,6 +128,30 @@ For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 >
 > **Note:** Namespace-scoped mode is deprecated. Use cluster-wide mode for new deployments.
 
+## Supported GPU SKUs
+
+DGDR's webhook accepts exactly these values in `spec.hardware.gpuSku`. Anything else is rejected at admission. Values are sourced from the CRD enum at [`deploy/operator/api/v1beta1/dynamographdeploymentrequest_types.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/api/v1beta1/dynamographdeploymentrequest_types.go) lines 183–202.
+
+| Family | CRD value | Form factor | Profiler support |
+|---|---|---|---|
+| GB200 | `gb200_sxm` | SXM | TBD (profiler team) |
+| B200 | `b200_sxm` | SXM | TBD |
+| H200 | `h200_sxm` | SXM | TBD |
+| H100 | `h100_sxm` | SXM | TBD |
+| H100 | `h100_pcie` | PCIe | Not yet supported |
+| A100 | `a100_sxm` | SXM | TBD |
+| A100 | `a100_pcie` | PCIe | Not yet supported |
+| L40S | `l40s` | single | TBD |
+| L40 | `l40` | single | Not yet supported |
+| L4 | `l4` | single | Not yet supported |
+| V100 | `v100_sxm` | SXM | Not yet supported |
+| V100 | `v100_pcie` | PCIe | Not yet supported |
+| T4 | `t4` | single | Not yet supported |
+| AMD MI200 | `mi200` | single | Not yet supported |
+| AMD MI300 | `mi300` | single | Not yet supported |
+
+> **PCIe variants not yet supported by profiler.** DGDR's CRD admits PCIe SKUs (`h100_pcie`, `a100_pcie`, `v100_pcie`) but the profiler does not currently ship training data for them. You can submit a DGDR with a PCIe value; the operator will accept it but profiler-assisted sizing will fall back to defaults. Tracking: VDR §1.3 engineering follow-up for PCIe profiler support.
+
 ## Step 3: Monitor Profiling Progress
 
 Profiling is the automated step where Dynamo sweeps across candidate configurations (parallelism, batching, scheduling strategies) to find the one that best meets your SLA and hardware — so you don't have to tune it manually.
