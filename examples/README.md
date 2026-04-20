@@ -54,6 +54,66 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 - **[Hello World](/examples/custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
 
+## By Use Case
+
+Indexed by what you want to *do*, not which backend you want to use. Each entry links to a runnable script or YAML and to the doc that explains it.
+
+### Serving shapes
+
+**Aggregated single-node**
+
+- [vLLM `launch/agg.sh`](backends/vllm/launch/agg.sh) — one process, all GPUs. Smallest-footprint starting point. → [vLLM backend guide](../docs/backends/vllm/README.md)
+- [TRT-LLM `launch/agg.sh`](backends/trtllm/launch/agg.sh) — aggregated TRT-LLM engine. → [TRT-LLM backend guide](../docs/backends/trtllm/README.md)
+- [SGLang `launch/agg.sh`](backends/sglang/launch/agg.sh) → [SGLang backend guide](../docs/backends/sglang/README.md)
+
+**Multi-node tensor parallelism**
+
+- [vLLM `launch/multi_node_tp.sh`](backends/vllm/launch/multi_node_tp.sh) → [vLLM TP walkthrough](../docs/backends/vllm/README.md)
+- SGLang multi-node → [SGLang examples](../docs/backends/sglang/sglang-examples.md)
+
+**Disaggregated prefill / decode**
+
+- [vLLM `launch/disagg.sh`](backends/vllm/launch/disagg.sh) → architecture: [Disaggregated Serving](../docs/features/disaggregated-serving/README.md)
+- [SGLang `launch/disagg.sh`](backends/sglang/launch/disagg.sh) — note the known startup race, see [Troubleshooting](../docs/troubleshooting.md#disaggsh-503-on-first-requests).
+- [TRT-LLM `launch/disagg.sh`](backends/trtllm/launch/disagg.sh)
+
+### Advanced features
+
+**GAIE (Gateway API Inference Extension)**
+
+- [vLLM GAIE deploy YAMLs](backends/vllm/deploy/gaie/) → [`recipes/llama-3-70b/`](../recipes/llama-3-70b/) for production-ready equivalents.
+
+**LoRA**
+
+- [vLLM LoRA deploy YAMLs](backends/vllm/deploy/lora/) — multi-adapter hot-loading via the frontend.
+
+**Multimodal**
+
+- [`custom_backend/hello_world/`](custom_backend/hello_world/) — minimal custom-backend shape.
+- Multimodal streaming on vLLM: see [Troubleshooting](../docs/troubleshooting.md#multimodal-streaming-fails-on-vllm) for current limitation.
+
+**Tracing and telemetry**
+
+- See [`docs/observability/README.md`](../docs/observability/README.md) for the required env-vars checklist. Example manifests under `backends/<backend>/deploy/` already include the right annotations.
+
+**Fault tolerance**
+
+- [`tests/fault_tolerance/`](../tests/fault_tolerance/) — templated vLLM deploys used for chaos testing.
+
+### Cloud-specific deploys
+
+- [GKE](deployments/GKE/)
+- [ECS](deployments/ECS/)
+
+### Diffusion (image/video)
+
+- [diffusers/](diffusers/) — Dynamo frontend + diffusion backends.
+
+## What lives where
+
+- **`examples/`** — learning material, scripts, single-backend deploys. Usable as a starting point; not production-hardened.
+- **`recipes/`** — production-ready K8s deploys per-model, per-backend, pinned to a release tag.
+
 ## Getting Started
 
 1. **Choose your deployment pattern**: Start with the [Quickstart](/docs/getting-started/quickstart.md) for a simple local deployment, or explore [Disaggregated Serving](/docs/features/disaggregated-serving/README.md) for advanced architectures.
