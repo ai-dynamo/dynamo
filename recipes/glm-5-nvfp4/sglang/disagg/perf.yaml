@@ -53,7 +53,7 @@ spec:
         - |
           set -eu
           apt-get update -qq && apt-get install -y -qq curl jq && apt-get clean
-          pip install -q aiperf transformers tokenizers
+          pip install -q aiperf==0.6.0 transformers==4.57.3 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
           while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do

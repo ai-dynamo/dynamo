@@ -166,6 +166,9 @@ impl SyncIndexer for PositionalIndexer {
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
                 }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
+                }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_events(&worker_blocks);
                     if let Err(e) = sender.send(Ok(events)) {
