@@ -330,10 +330,7 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        // THEN set health status to Ready (after handler is registered and ready)
-        system_health
-            .lock()
-            .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
+        system_health.lock().set_endpoint_registered(&endpoint_name);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
@@ -717,6 +714,7 @@ mod tests {
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             crate::HealthStatus::Ready,
             vec![],
+            false, // health_check_enabled
             "/health".to_string(),
             "/live".to_string(),
         )));
