@@ -146,7 +146,7 @@ DGDR's webhook accepts exactly these values in `spec.hardware.gpuSku`. Anything 
 | AMD MI200 | `mi200` | single | Not yet supported |
 | AMD MI300 | `mi300` | single | Not yet supported |
 
-> **PCIe variants not yet supported by profiler.** DGDR's CRD admits PCIe SKUs (`h100_pcie`, `a100_pcie`, `v100_pcie`) but the profiler does not currently ship training data for them. You can submit a DGDR with a PCIe value; the operator will accept it but profiler-assisted sizing will fall back to defaults. Tracking: VDR §1.3 engineering follow-up for PCIe profiler support.
+> **PCIe variants not yet supported by profiler.** DGDR's CRD admits PCIe SKUs (`h100_pcie`, `a100_pcie`, `v100_pcie`) but the profiler does not currently ship training data for them. You can submit a DGDR with a PCIe value; the operator will accept it but profiler-assisted sizing will fall back to defaults. Profiler support for PCIe SKUs is tracked as an engineering follow-up.
 
 ## Step 3: Monitor Profiling Progress
 
@@ -347,7 +347,7 @@ kubectl logs <frontend-pod-name> -n ${NAMESPACE}
 
 ## Known issues
 
-- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an engineering follow-up (VDR §1.3 item 5 — DGDR `pareto_analysis.py` NaN output). Workaround: re-run with a narrower sweep; narrow sweeps bypass the NaN path in practice.
+- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an engineering follow-up. Workaround: re-run with a narrower sweep; narrow sweeps bypass the NaN path in practice.
 - **PCIe profiler data not yet available.** See callout above the SKU table.
 
 ## Next Steps
