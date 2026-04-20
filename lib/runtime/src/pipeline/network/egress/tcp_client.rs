@@ -232,17 +232,12 @@ struct TcpConnection {
     /// This closes the race where a request can enqueue after the final drain pass
     /// and then wait until the outer request timeout.
     closed: Arc<AtomicBool>,
-    /// Number of in-flight requests (for capacity heuristic)
+    /// In-flight count, advisory only — feeds `available_capacity()` for
+    /// round-robin selection. Backpressure is enforced end-to-end by the
+    /// server-side mpsc queue (`OVERLOAD_SENTINEL` on Full).
     inflight: Arc<AtomicU64>,
-    /// Max inflight for capacity heuristic (matches channel_buffer)
+    /// Advisory cap for `available_capacity()` heuristic.
     channel_buffer: usize,
-    /// Bounded admission semaphore (permits == channel_buffer).
-    /// Callers must acquire a permit before pushing to submit_queue,
-    /// enforcing channel_buffer as a hard limit and preventing unbounded
-    /// SegQueue growth and heap OOM under sustained overload.
-    /// Permit is held for the lifetime of the call and released on drop
-    /// (success, error via `?`, or timeout/cancel future drop).
-    admission: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
@@ -265,7 +260,6 @@ impl TcpConnection {
         let healthy = Arc::new(AtomicBool::new(true));
         let closed = Arc::new(AtomicBool::new(false));
         let inflight = Arc::new(AtomicU64::new(0));
-        let admission = Arc::new(tokio::sync::Semaphore::new(channel_buffer));
 
         // Spawn writer task (batches into BytesMut, single write_all per drain)
         let writer_handle = {
@@ -274,7 +268,6 @@ impl TcpConnection {
             let notify = writer_notify.clone();
             let healthy = healthy.clone();
             let closed = closed.clone();
-            let admission = admission.clone();
             tokio::spawn(async move {
                 if let Err(e) = Self::writer_task(
                     write_half,
@@ -291,9 +284,6 @@ impl TcpConnection {
                     // drain_pending; these are idempotent backstops.
                     healthy.store(false, Ordering::Relaxed);
                     closed.store(true, Ordering::Release);
-                    // Unblock any callers currently waiting to acquire a permit
-                    // so they fail fast via the post-acquire health re-check.
-                    admission.close();
                 }
             })
         };
@@ -303,15 +293,12 @@ impl TcpConnection {
             let response_q = response_queue.clone();
             let healthy = healthy.clone();
             let writer_notify = writer_notify.clone();
-            let admission = admission.clone();
             tokio::spawn(async move {
                 if let Err(e) =
                     Self::reader_task(read_half, response_q, healthy.clone(), writer_notify).await
                 {
                     tracing::debug!("Reader task failed for {}: {}", addr, e);
                     healthy.store(false, Ordering::Relaxed);
-                    // Unblock any callers currently waiting to acquire a permit.
-                    admission.close();
                 }
             })
         };
@@ -327,7 +314,6 @@ impl TcpConnection {
             closed,
             inflight,
             channel_buffer,
-            admission,
             #[cfg(test)]
             post_enqueue_barrier: None,
         })
@@ -664,46 +650,8 @@ impl TcpConnection {
             None
         };
 
-        // Bounded admission (channel_buffer hard limit). Permit is held for the
-        // call and released on drop on every exit path -- prevents unbounded
-        // SegQueue growth.
-        //
-        // Fast path: try_acquire() is a synchronous atomic decrement; the
-        // previous unconditional .acquire().await forced a Tokio scheduler
-        // round-trip even when a permit was free.
-        //
-        // Slow path: on NoPermits, fall back to .acquire().await (preserves
-        // OOM bound and back-pressure).
-        let _permit = match self.admission.try_acquire() {
-            Ok(p) => p,
-            Err(tokio::sync::TryAcquireError::NoPermits) => self
-                .admission
-                .acquire()
-                .await
-                .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?,
-            Err(tokio::sync::TryAcquireError::Closed) => {
-                anyhow::bail!("Connection closed (admission gate shut)");
-            }
-        };
-
-        // Re-check health AFTER acquiring the permit, on both fast and slow
-        // paths. The upfront check at the top of send_request establishes
-        // `healthy == true && closed == false`, but the writer/reader
-        // shutdown path can land after that check and before `try_acquire()`
-        // observes `admission.close()` (closed teardown is: `healthy.store(false)`
-        // -> `closed.store(true)` -> `admission.close()`). Without this
-        // re-check, a request could acquire a valid permit on a dying
-        // connection, push onto a submit_queue the writer will never drain,
-        // and hang until the outer request timeout.
-        if !self.healthy.load(Ordering::Relaxed) {
-            anyhow::bail!("Connection unhealthy (tasks failed)");
-        }
-        if self.closed.load(Ordering::Acquire) {
-            anyhow::bail!("Connection closed (writer exited)");
-        }
-
-        // encode() called here — after admission is granted — so the frame is
-        // only allocated once we have capacity to process it.
+        // Backpressure is enforced end-to-end by the server mpsc queue
+        // (`OVERLOAD_SENTINEL` on Full). No client-side admission gate.
         let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
         let encoded_data = request_msg.encode()?;
 
@@ -747,7 +695,6 @@ impl TcpConnection {
 
         // Await response. On timeout the enclosing future is dropped here:
         // `_inflight_guard` drops → fetch_sub(Release) runs automatically.
-        // `_permit` drops     → semaphore slot is released automatically.
         let result = response_rx
             .await
             .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
@@ -1237,10 +1184,8 @@ impl TcpConnectionPool {
                 let snap = host.snapshot.load();
                 for conn in snap.iter() {
                     conn.healthy.store(false, Ordering::Relaxed);
-                    // Unblock callers waiting on the admission semaphore so
-                    // they fail fast via the post-acquire health re-check,
-                    // rather than waiting for drain_pending to free permits.
-                    conn.admission.close();
+                    // Wake the writer so it observes `healthy == false` and
+                    // drains pending callers via the terminal path.
                     conn.writer_notify.notify_one();
                     conn.reader_handle.abort();
                 }
