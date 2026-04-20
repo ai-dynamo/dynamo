@@ -1992,7 +1992,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
 
-        # Build prompt from request
+        # Build prompt from request. `prompt` is either a pre-rendered
+        # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
+        # `_build_prompt_from_request`. Declare as Any so mypy accepts both
+        # branches without spelling out the full union.
+        prompt: Any
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
             if pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
