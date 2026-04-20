@@ -79,7 +79,9 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          # Planner/profiler runtime deps (kubernetes_asyncio, pmdarima, prophet, aiconfigurator, ...)
+          # live in the dynamo-planner image, not the backend runtime image (DYN-2540).
+          image: my-registry/dynamo-planner:my-tag
           ports:
             - name: metrics
               containerPort: 9085

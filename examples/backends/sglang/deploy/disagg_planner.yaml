@@ -62,7 +62,9 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          # Planner/profiler runtime deps (kubernetes_asyncio, pmdarima, prophet, aiconfigurator, ...)
+          # live in the dynamo-planner image, not the backend runtime image (DYN-2540).
+          image: my-registry/dynamo-planner:my-tag
           command:
           - python3
           - -m

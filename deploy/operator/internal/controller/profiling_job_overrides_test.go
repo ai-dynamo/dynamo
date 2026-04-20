@@ -81,6 +81,53 @@ func baseJob() *batchv1.Job {
 	}
 }
 
+func TestDerivePlannerImage(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "frontend image with tag",
+			in:   "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3",
+			want: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
+		},
+		{
+			name: "backend runtime image with tag (DYN-2733/2746 user input)",
+			in:   "nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.1.0rc0",
+			want: "nvcr.io/nvstaging/ai-dynamo/dynamo-planner:1.1.0rc0",
+		},
+		{
+			name: "image with digest only",
+			in:   "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
+			want: "nvcr.io/nvidia/ai-dynamo/dynamo-planner@sha256:deadbeef",
+		},
+		{
+			name: "image with tag and digest",
+			in:   "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
+			want: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+		},
+		{
+			name: "image without registry path",
+			in:   "test-profiler:latest",
+			want: "dynamo-planner:latest",
+		},
+		{
+			name: "image without tag",
+			in:   "nvcr.io/nvidia/ai-dynamo/dynamo-frontend",
+			want: "nvcr.io/nvidia/ai-dynamo/dynamo-planner",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := derivePlannerImage(tc.in); got != tc.want {
+				t.Errorf("derivePlannerImage(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyProfilingJobOverrides_NilOverrides(t *testing.T) {
 	job := baseJob()
 	original := job.Spec.BackoffLimit
