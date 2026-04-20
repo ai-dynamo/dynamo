@@ -37,6 +37,18 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 
 - **`yq`** for in-place YAML edits. Install with `wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq` or `pip install yq` (the latter is a different tool with the same name but similar syntax). If neither is available, a `sed` fallback is shown inline where `yq` is used.
 
+## Container / driver matrix
+
+| Container tag | Backend version | CUDA | Min NVIDIA driver |
+|---|---|---|---|
+| `tensorrtllm-runtime:1.0.1` | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | `580+` |
+| `vllm-runtime:1.0.1` | vLLM `v0.16.0` | `v12.9` | `575+` |
+| `vllm-runtime:1.0.1-cuda13` | vLLM `v0.16.0` | `v13.0` | `580+` |
+| `sglang-runtime:1.0.1` | SGLang `v0.5.9` | `v12.9` | `575+` |
+| `sglang-runtime:1.0.1-cuda13` | SGLang `v0.5.9` | `v13.0` | `580+` |
+
+Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-matrix.md#cuda-and-driver-requirements) and [`docs/reference/release-artifacts.md`](../../reference/release-artifacts.md). If those differ from the values above, the source-of-truth files win.
+
 ## Quick Start
 
 **Step 1 (host terminal):** Start infrastructure services:
