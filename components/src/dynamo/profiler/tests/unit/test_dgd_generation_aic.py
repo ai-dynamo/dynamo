@@ -330,4 +330,6 @@ class TestEnableVllmBenchmarkMode:
         ]
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]
-        assert _benchmark_mode(cfg["spec"]["services"]["VllmPrefillWorker"]) == "prefill"
+        assert (
+            _benchmark_mode(cfg["spec"]["services"]["VllmPrefillWorker"]) == "prefill"
+        )
