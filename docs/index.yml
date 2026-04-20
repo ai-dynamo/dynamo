@@ -190,6 +190,8 @@ navigation:
             path: backends/sglang/sglang-examples.md
           - page: Disaggregation
             path: backends/sglang/sglang-disaggregation.md
+          - page: SGLang Multi-Node TP
+            path: backends/sglang/sglang-multinode.md
           - page: Diffusion
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
