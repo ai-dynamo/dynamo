@@ -119,7 +119,7 @@ For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 >   ...
 >   hardware:
 >     numGpusPerNode: 1
->     gpuSku: "H100-SXM5-80GB"
+>     gpuSku: "h100_sxm"
 >     vramMb: 81920
 > ```
 >
