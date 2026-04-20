@@ -93,6 +93,7 @@ async def test_load_video_rejects_http_by_default():
 async def test_load_video_blocks_redirect_to_private_ip():
     """A 302 to a blocked IP must be rejected per-hop, not only the initial URL."""
     loader = VideoLoader(url_policy=UrlValidationPolicy())
+    loader._create_vllm_video_io = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
 
     redirect = MagicMock(spec=httpx.Response)
     redirect.status_code = 302
