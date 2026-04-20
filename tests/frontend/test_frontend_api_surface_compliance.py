@@ -48,6 +48,46 @@ OPENRESPONSES_DIR = "/opt/openresponses"
 
 COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 
+# Env keys forwarded into codex/claude subprocesses. These agents run with tool
+# permissions (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`),
+# and even against a local model they may emit telemetry; inheriting the whole
+# CI environment would expose `GITHUB_TOKEN`, AWS creds, registry credentials,
+# etc. Keep to a minimal allowlist covering only what the runtime needs:
+# PATH to resolve the binaries, locale/TLS/proxy for HTTPS, HOME so Node/bun
+# finds per-user caches, and NVIDIA/CUDA vars so any GPU-touching side effects
+# see the same device the test was given.
+_SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "LD_LIBRARY_PATH",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
+        "NVIDIA_DRIVER_CAPABILITIES",
+    }
+)
+
+
+def _agent_subprocess_env(extra_env: dict[str, str]) -> dict[str, str]:
+    """Build a minimal env for codex/claude subprocesses: allowlist from
+    `os.environ` merged with explicit test-scoped vars."""
+    base = {k: v for k in _SUBPROCESS_ENV_ALLOWLIST if (v := os.environ.get(k)) is not None}
+    base.update(extra_env)
+    return base
+
 
 @pytest.mark.sglang
 @pytest.mark.e2e
@@ -311,7 +351,7 @@ def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
         "CODEX_HOME": str(codex_home),
         "LOCAL_API_KEY": "sk-none",
     }
-    env = {**os.environ, **extra_env}
+    env = _agent_subprocess_env(extra_env)
 
     cmd = [
         "codex",
@@ -382,7 +422,7 @@ def _run_claude_exec_smoke(
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
     }
-    env = {**os.environ, **extra_env}
+    env = _agent_subprocess_env(extra_env)
 
     cmd = [
         "claude",

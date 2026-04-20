@@ -331,12 +331,14 @@ jobs:
     # HTTP surface, not sglang specifically. Fire on any filter that can move
     # that surface:
     #   core     -> lib/**, tests/**, container/** (wire-shape fix lands here)
-    #   frontend -> components/src/dynamo/frontend/**
     #   sglang   -> backend vehicle — backend changes can shift real traffic
     # sglang-build stays in `needs` because the test spins up sglang as the
     # traffic source; no sglang runtime image means the test can't run, so
     # the natural skip cascade via `needs` is the behaviour we want.
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.sglang == 'true'
+    # Note: `frontend` (components/src/dynamo/frontend/**) isn't gated here
+    # because sglang-build doesn't run on frontend-only changes — if it did,
+    # the needs chain would skip and target_tag_plain would be missing.
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: frontend-api-surface-compliance
