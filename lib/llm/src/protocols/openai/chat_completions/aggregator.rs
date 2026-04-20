@@ -342,11 +342,6 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
         } else if !delta.text.is_empty() {
             // Text-only response (backward compatible)
             Some(ChatCompletionMessageContent::Text(delta.text))
-        } else if delta.reasoning_content.is_some() {
-            // Reasoning-only response: keep `content` as an empty string so
-            // `skip_serializing_if` doesn't drop the key alongside
-            // `reasoning_content` (DGH-651).
-            Some(ChatCompletionMessageContent::Text(String::new()))
         } else {
             None
         };
@@ -1192,11 +1187,12 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_only_delta_serializes_content_key() {
-        // DGH-651: when a DeltaChoice has reasoning_content but no text or
-        // content parts, the converted ChatChoice must still carry a
-        // non-None `content` field so serde doesn't drop the key via
-        // skip_serializing_if.
+    fn test_reasoning_only_response_serializes_content_key_as_null() {
+        // DGH-651: when a response carries reasoning_content but no text or
+        // content parts, the `content` key must still be present in the
+        // serialized JSON (as `null`) so clients can rely on it alongside
+        // `reasoning_content`. Fixed by removing skip_serializing_if from
+        // ChatCompletionResponseMessage.content.
         let delta = DeltaChoice {
             index: 0,
             text: String::new(),
@@ -1211,17 +1207,18 @@ mod tests {
 
         let choice: dynamo_protocols::types::ChatChoice = delta.into();
 
-        assert_eq!(
-            choice.message.content,
-            Some(ChatCompletionMessageContent::Text(String::new()))
-        );
+        assert!(choice.message.content.is_none());
         assert_eq!(
             choice.message.reasoning_content.as_deref(),
             Some("Analyzing the question.")
         );
 
         let json = serde_json::to_value(&choice.message).unwrap();
-        assert!(json.get("content").is_some(), "content key must be serialized");
+        assert_eq!(
+            json.get("content"),
+            Some(&serde_json::Value::Null),
+            "content key must be serialized as null when absent"
+        );
         assert!(json.get("reasoning_content").is_some());
     }
 }
