@@ -66,4 +66,4 @@ Dynamo's frontend is launched once, typically co-located with rank 0. Workers on
 ## See also
 
 - [vLLM multi-node TP](../vllm/README.md) (parallel structure).
-- [Backend selection matrix](../../kubernetes/README.md).
+- [Kubernetes Deployment Guide](../../kubernetes/README.md#2-choose-your-backend) — backend selection and deployment reference.
