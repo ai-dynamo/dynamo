@@ -63,7 +63,9 @@ def _enable_offline_with_mistral_patch():
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
     os.makedirs(patch_dir, exist_ok=True)
     with open(os.path.join(patch_dir, "sitecustomize.py"), "w") as f:
-        f.write(textwrap.dedent("""\
+        f.write(
+            textwrap.dedent(
+                """\
             import os
             if os.environ.get('HF_HUB_OFFLINE') == '1':
                 try:
@@ -79,7 +81,9 @@ def _enable_offline_with_mistral_patch():
                     _T._patch_mistral_regex = _safe
                 except (ImportError, AttributeError):
                     pass
-        """))
+        """
+            )
+        )
     pythonpath = os.environ.get("PYTHONPATH", "")
     os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
     logging.info(
@@ -129,7 +133,9 @@ def _apply_models_dir_env(models_dir: str) -> dict:
     else:
         logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
         os.environ["HF_HUB_CACHE"] = models_dir
-    os.environ["HF_HUB_OFFLINE"] = "1"  # set before _enable so orig snapshot reflects pre-existing state
+    os.environ[
+        "HF_HUB_OFFLINE"
+    ] = "1"  # set before _enable so orig snapshot reflects pre-existing state
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # activates sitecustomize for Mistral tokenizer workaround

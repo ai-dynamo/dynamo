@@ -12,6 +12,12 @@ from typing import Generator, Optional
 import pytest
 from filelock import FileLock
 
+from tests.hf_cache import (
+    _apply_models_dir_env,
+    _disable_offline_with_mistral_patch,
+    _enable_offline_with_mistral_patch,
+    _restore_models_dir_env,
+)
 from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -22,13 +28,6 @@ from tests.utils.port_utils import (
     deallocate_ports,
 )
 from tests.utils.test_output import resolve_test_output_path
-
-from tests.hf_cache import (
-    _apply_models_dir_env,
-    _disable_offline_with_mistral_patch,
-    _enable_offline_with_mistral_patch,
-    _restore_models_dir_env,
-)
 
 _logger = logging.getLogger(__name__)
 

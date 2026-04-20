@@ -22,6 +22,7 @@ from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_apply_bare_cache_layout(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
@@ -40,6 +41,7 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_apply_hf_home_layout(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
@@ -59,6 +61,7 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
@@ -72,6 +75,7 @@ def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 @pytest.mark.parametrize("use_hf_home", [False, True])
 def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home):
     if use_hf_home:
@@ -87,6 +91,7 @@ def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
     missing = tmp_path / "no_such_dir"
     # Run from the project root so conftest.py is discovered and --models-dir
@@ -113,6 +118,7 @@ def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch, caplog):
     """_restore_models_dir_env logs a warning but does not raise when tmp_cache_dir is gone."""
     for k in _MODELS_DIR_ENV_KEYS:
@@ -128,6 +134,7 @@ def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch, caplog):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("DYNAMO_MODELS_DIR", str(tmp_path))
     service = MinioService(MinioLoraConfig())
@@ -137,6 +144,7 @@ def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_pythonpath_restored_after_apply_restore(tmp_path, monkeypatch):
     original = "some:existing:path"
     monkeypatch.setenv("PYTHONPATH", original)
@@ -149,6 +157,7 @@ def test_pythonpath_restored_after_apply_restore(tmp_path, monkeypatch):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
+@pytest.mark.gpu_0
 def test_enable_disable_enable_cycle(monkeypatch):
     """_enable/_disable is safe to call in sequence; PYTHONPATH and HF_HUB_OFFLINE are correct after each call."""
     monkeypatch.delenv("PYTHONPATH", raising=False)
