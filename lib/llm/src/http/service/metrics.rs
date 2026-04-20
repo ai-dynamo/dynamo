@@ -1609,17 +1609,24 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let msgs = annotated
-                .comment
-                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-            return Err(axum::Error::new(msgs.join(" -- ")));
+            let error_message = if let Some(ref dynamo_err) = annotated.error
+                && !dynamo_err.message().is_empty()
+            {
+                dynamo_err.message().to_string()
+            } else if let Some(ref comments) = annotated.comment {
+                comments.join(" -- ")
+            } else {
+                "unspecified error".to_string()
+            };
+            return Err(axum::Error::new(error_message));
         }
         event = event.event(msg);
     }
 
     if let Some(comments) = annotated.comment {
         for comment in comments {
-            event = event.comment(comment);
+            // Axum's Event::comment() panics on \n / \r
+            event = event.comment(comment.replace('\n', " ").replace('\r', ""));
         }
     }
 

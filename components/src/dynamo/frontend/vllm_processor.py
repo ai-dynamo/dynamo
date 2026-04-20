@@ -43,7 +43,7 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
-from .utils import extract_mm_urls, random_uuid
+from .utils import extract_mm_urls, make_backend_error, make_internal_error, random_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -535,13 +535,34 @@ class VllmProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    logger.error("No outputs from engine for request %s", request_id)
-                    yield {
-                        "error": {
-                            "message": f"Invalid engine response for request {request_id}",
-                            "type": "internal_error",
+                    if (
+                        isinstance(engine_response, dict)
+                        and engine_response.get("status") == "error"
+                    ):
+                        backend_msg = engine_response.get(
+                            "message", "unknown backend error"
+                        )
+                        logger.error(
+                            "Backend error for request %s: %s", request_id, backend_msg
+                        )
+                        yield {
+                            "error": {
+                                "message": backend_msg,
+                                "type": "backend_error",
+                            }
                         }
-                    }
+                    else:
+                        logger.error(
+                            "No outputs from engine for request %s: %s",
+                            request_id,
+                            engine_response,
+                        )
+                        yield {
+                            "error": {
+                                "message": f"Invalid engine response for request {request_id}",
+                                "type": "internal_error",
+                            }
+                        }
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -583,6 +604,9 @@ class VllmProcessor:
 
                     yield dynamo_out
             _nvtx.end_range(rng_stream)
+        except Exception as e:
+            logger.exception("Error generating response for request %s", request_id)
+            yield make_internal_error(request_id, str(e))
         finally:
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
