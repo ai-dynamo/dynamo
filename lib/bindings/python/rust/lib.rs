@@ -1073,6 +1073,46 @@ impl Client {
         })
     }
 
+    /// Send a request using device-aware weighted routing.
+    /// Preferentially routes to GPU (CUDA) workers; CPU workers receive overflow
+    /// only when GPU workers are sufficiently loaded (controlled by DYN_ENCODER_CUDA_TO_CPU_RATIO).
+    /// With the default ratio of 8, all requests go to GPU workers unless they are
+    /// handling 8x more load than CPU workers.
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    fn device_aware_weighted<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+        annotated: Option<bool>,
+        context: Option<context::Context>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
+        let annotated = annotated.unwrap_or(false);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let client = self.router.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream = match context {
+                Some(context) => {
+                    let span = get_span_for_context(&context, "device_aware_weighted");
+                    client
+                        .device_aware_weighted(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
+                }
+                _ => client
+                    .device_aware_weighted(request_ctx)
+                    .await
+                    .map_err(to_pyerr)?,
+            };
+            tokio::spawn(process_stream(stream, tx));
+            Ok(AsyncResponseStream::new(rx, annotated))
+        })
+    }
+
     /// Directly send a request to a specific endpoint.
     #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn direct<'p>(
