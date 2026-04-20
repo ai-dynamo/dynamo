@@ -74,7 +74,7 @@ pub struct LoadThresholdConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_prefill_tokens_threshold: Option<u64>,
 
-    /// Fraction of max_num_batched_tokens (0.0-1.5+).
+    /// Fraction of max_num_batched_tokens.
     /// Worker is busy when `active_prefill_tokens > frac * max_num_batched_tokens`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_prefill_tokens_threshold_frac: Option<f64>,
@@ -236,6 +236,14 @@ impl WorkerLoadState {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
     ) -> bool {
+        // Short-circuit if all thresholds are unset (i.e. no busy check can fire)
+        if active_decode_blocks_threshold.is_none()
+            && active_prefill_tokens_threshold.is_none()
+            && active_prefill_tokens_threshold_frac.is_none()
+        {
+            return false;
+        }
+
         // Get all dp_ranks we know about
         let all_dp_ranks: std::collections::HashSet<_> = self
             .active_decode_blocks
@@ -261,7 +269,7 @@ impl WorkerLoadState {
                     return true; // This dp_rank is busy due to absolute token threshold
                 }
 
-                // Check 2: prefill tokens threshold (fraction of max_num_batched_tokens
+                // Check 2: prefill tokens threshold (fraction of max_num_batched_tokens)
                 if let Some(frac) = active_prefill_tokens_threshold_frac {
                     let max_batched = self
                         .max_num_batched_tokens
@@ -277,11 +285,12 @@ impl WorkerLoadState {
 
             // Check 3: decode busy latch (OR-ed from kv_used_blocks and active_decode_blocks)
             if let Some(decode_threshold) = active_decode_blocks_threshold {
-                if let Some(latch) = self.decode_busy_latches.get(&dp_rank) {
-                    if latch.latched_busy {
-                        return true;
-                    }
-                } else if self.current_decode_busy(dp_rank, decode_threshold) {
+                let is_busy = self
+                    .decode_busy_latches
+                    .get(&dp_rank)
+                    .map(|latch| latch.latched_busy)
+                    .unwrap_or_else(|| self.current_decode_busy(dp_rank, decode_threshold));
+                if is_busy {
                     return true;
                 }
             }

@@ -322,17 +322,13 @@ where
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    // PushRouter's busy_threshold is only inspected via `.is_some()` to gate
-    // the 503 rejection path — the inner f64 is never compared to anything.
-    let threshold_value = worker_monitor.as_ref().map(|_| 1.0);
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
-        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
             router_client,
             router_mode,
-            threshold_value,
             monitor_arc,
         )
         .await?;
