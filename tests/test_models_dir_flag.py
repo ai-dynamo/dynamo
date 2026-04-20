@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import tests.hf_cache as hf_cache
 from tests.hf_cache import (
     _MODELS_DIR_ENV_KEYS,
     _apply_models_dir_env,
@@ -21,7 +23,8 @@ from tests.serve.lora_utils import MinioLoraConfig, MinioService
 def test_apply_bare_cache_layout(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
-    orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    orig = _apply_models_dir_env(str(tmp_path))
     try:
         assert os.environ["HF_HUB_CACHE"] == str(tmp_path)
         assert "HF_HOME" not in os.environ
@@ -30,7 +33,7 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
         assert "TRANSFORMERS_CACHE" not in os.environ
     finally:
-        _restore_models_dir_env(orig, tmp_cache)
+        _restore_models_dir_env(orig)
 
 
 @pytest.mark.pre_merge
@@ -38,8 +41,9 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
 def test_apply_hf_home_layout(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     (tmp_path / "hub").mkdir()
-    orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
+    orig = _apply_models_dir_env(str(tmp_path))
     try:
         assert os.environ["HF_HOME"] == str(tmp_path)
         assert "HF_HUB_CACHE" not in os.environ
@@ -48,7 +52,7 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
         assert "TRANSFORMERS_CACHE" not in os.environ
     finally:
-        _restore_models_dir_env(orig, tmp_cache)
+        _restore_models_dir_env(orig)
 
 
 @pytest.mark.pre_merge
@@ -56,10 +60,13 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
 def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
-    orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
-    _restore_models_dir_env(orig, tmp_cache)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
+    orig = _apply_models_dir_env(str(tmp_path))
+    _restore_models_dir_env(orig)
     for k in _MODELS_DIR_ENV_KEYS:
         assert k not in os.environ
+    assert "PYTHONPATH" not in os.environ
 
 
 @pytest.mark.pre_merge
@@ -71,8 +78,8 @@ def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home
     sentinel = {k: f"preexisting_{k}" for k in _MODELS_DIR_ENV_KEYS}
     for k, v in sentinel.items():
         monkeypatch.setenv(k, v)
-    orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
-    _restore_models_dir_env(orig, tmp_cache)
+    orig = _apply_models_dir_env(str(tmp_path))
+    _restore_models_dir_env(orig)
     for k, v in sentinel.items():
         assert os.environ[k] == v
 
@@ -103,15 +110,17 @@ def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
-def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch):
+def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch, caplog):
     """_restore_models_dir_env logs a warning but does not raise when tmp_cache_dir is gone."""
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
-    orig, _ = _apply_models_dir_env(str(tmp_path))
+    orig = _apply_models_dir_env(str(tmp_path))
     nonexistent = str(tmp_path / "already_deleted")
-    _restore_models_dir_env(orig, nonexistent)  # must not raise
+    with caplog.at_level(logging.WARNING):
+        _restore_models_dir_env(orig, nonexistent)  # must not raise
     for k in _MODELS_DIR_ENV_KEYS:
         assert k not in os.environ
+    assert any("already_deleted" in m or "failed" in m.lower() for m in caplog.messages)
 
 
 @pytest.mark.pre_merge
@@ -121,3 +130,16 @@ def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
     service = MinioService(MinioLoraConfig())
     with pytest.raises(pytest.skip.Exception, match="read-only cache mode"):
         service.download_lora()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+def test_pythonpath_restored_after_apply_restore(tmp_path, monkeypatch):
+    original = "some:existing:path"
+    monkeypatch.setenv("PYTHONPATH", original)
+    for k in _MODELS_DIR_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
+    orig = _apply_models_dir_env(str(tmp_path))
+    _restore_models_dir_env(orig)
+    assert os.environ["PYTHONPATH"] == original

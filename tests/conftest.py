@@ -23,6 +23,13 @@ from tests.utils.port_utils import (
 )
 from tests.utils.test_output import resolve_test_output_path
 
+from tests.hf_cache import (
+    _apply_models_dir_env,
+    _disable_offline_with_mistral_patch,
+    _enable_offline_with_mistral_patch,
+    _restore_models_dir_env,
+)
+
 _logger = logging.getLogger(__name__)
 
 
@@ -353,14 +360,6 @@ def download_models(model_list=None, ignore_weights=False):
         )
 
 
-from tests.hf_cache import (
-    _MODELS_DIR_ENV_KEYS,
-    _apply_models_dir_env,
-    _disable_offline_with_mistral_patch,
-    _enable_offline_with_mistral_patch,
-    _restore_models_dir_env,
-)
-
 _download_lock_path = os.path.join(tempfile.gettempdir(), "pytest_model_download.lock")
 
 
@@ -376,11 +375,11 @@ def _models_dir_env(pytestconfig):
     if not models_dir:
         yield
         return
-    orig, tmp_cache_dir = _apply_models_dir_env(models_dir)
+    orig = _apply_models_dir_env(models_dir)
     try:
         yield
     finally:
-        _restore_models_dir_env(orig, tmp_cache_dir)
+        _restore_models_dir_env(orig)
 
 
 @pytest.fixture(scope="session")
@@ -393,6 +392,9 @@ def predownload_models(pytestconfig, _models_dir_env):
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
     this fixture simply yields without downloading.
     """
+    if pytestconfig.getoption("--models-dir"):
+        yield
+        return
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
@@ -417,6 +419,9 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
     this fixture simply yields without downloading.
     """
+    if pytestconfig.getoption("--models-dir"):
+        yield
+        return
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:

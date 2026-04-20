@@ -7,6 +7,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+_mistral_patch_applied: bool = False
+
 
 def _enable_offline_with_mistral_patch():
     """Set HF_HUB_OFFLINE=1 and work around a transformers 4.57.3 regression.
@@ -25,7 +27,10 @@ def _enable_offline_with_mistral_patch():
     TODO: Remove this workaround once transformers ships a fix and TRT-LLM (or
     any other dependency) upgrades to that fixed version.
     """
+    global _mistral_patch_applied
     os.environ["HF_HUB_OFFLINE"] = "1"
+    if _mistral_patch_applied:
+        return  # class patch and sitecustomize already applied
 
     # Apply the patch in this process
     try:
@@ -76,6 +81,7 @@ def _enable_offline_with_mistral_patch():
         "Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround "
         "(see https://github.com/huggingface/transformers/issues/44843)"
     )
+    _mistral_patch_applied = True
 
 
 def _disable_offline_with_mistral_patch():
@@ -84,9 +90,11 @@ def _disable_offline_with_mistral_patch():
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
     pythonpath = os.environ.get("PYTHONPATH", "")
-    os.environ["PYTHONPATH"] = pythonpath.replace(f"{patch_dir}:", "").replace(
-        patch_dir, ""
-    )
+    result = pythonpath.replace(f"{patch_dir}:", "").replace(patch_dir, "")
+    if result:
+        os.environ["PYTHONPATH"] = result
+    else:
+        os.environ.pop("PYTHONPATH", None)
 
 
 # Keys managed by _apply_models_dir_env / _restore_models_dir_env.
@@ -101,12 +109,8 @@ _MODELS_DIR_ENV_KEYS = (
 )
 
 
-def _apply_models_dir_env(models_dir: str) -> tuple[dict, None]:
-    """Set HF env vars for read-only cache mode.
-
-    Returns (orig_values, None). The None second element is kept for API
-    compatibility with _restore_models_dir_env.
-    """
+def _apply_models_dir_env(models_dir: str) -> dict:
+    """Set HF env vars for read-only cache mode. Returns original env values."""
     orig = {k: os.environ.get(k) for k in _MODELS_DIR_ENV_KEYS}
     if (Path(models_dir) / "hub").is_dir():
         logging.warning(
@@ -122,7 +126,7 @@ def _apply_models_dir_env(models_dir: str) -> tuple[dict, None]:
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # activates sitecustomize for Mistral tokenizer workaround
-    return orig, None
+    return orig
 
 
 def _restore_models_dir_env(orig: dict, tmp_cache_dir: str | None = None) -> None:
