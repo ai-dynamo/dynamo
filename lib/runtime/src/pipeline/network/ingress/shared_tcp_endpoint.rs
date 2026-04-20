@@ -7,6 +7,10 @@
 //! by adding endpoint routing to the TCP wire protocol.
 
 use crate::SystemHealth;
+use crate::metrics::work_handler_pool::{
+    WORK_HANDLER_PERMIT_WAIT_SECONDS, WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY,
+    WORK_HANDLER_QUEUE_CAPACITY, WORK_HANDLER_QUEUE_DEPTH, WORK_HANDLER_QUEUE_FULL_TOTAL,
+};
 use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
@@ -15,6 +19,7 @@ use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -103,6 +108,16 @@ impl SharedTcpServer {
             work_queue_size
         );
 
+        // Publish static capacities so dashboards can compute saturation ratios.
+        // These gauges are process-global and harmless to re-set if multiple TCP
+        // servers are spun up in the same process (tests).
+        WORK_HANDLER_POOL_CAPACITY.set(crate::metrics::prometheus_names::clamp_u64_to_i64(
+            worker_pool_size as u64,
+        ));
+        WORK_HANDLER_QUEUE_CAPACITY.set(crate::metrics::prometheus_names::clamp_u64_to_i64(
+            work_queue_size as u64,
+        ));
+
         // Create bounded channel for work items
         let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
 
@@ -152,20 +167,30 @@ impl SharedTcpServer {
                             break;
                         };
 
-                        // Acquire permit before spawning (bounds concurrency)
+                        // Acquire permit before spawning (bounds concurrency). Time the wait so
+                        // pool starvation (permit exhaustion) shows up as rising p99 in
+                        // `dynamo_work_handler_permit_wait_seconds`.
+                        let permit_wait_start = Instant::now();
                         let permit = match semaphore.clone().acquire_owned().await {
                             Ok(p) => p,
                             Err(_) => {
                                 tracing::trace!("TCP worker dispatcher: semaphore closed");
+                                // Drain queue-depth accounting for the item we just popped but
+                                // won't process.
+                                WORK_HANDLER_QUEUE_DEPTH.dec();
                                 break;
                             }
                         };
+                        WORK_HANDLER_PERMIT_WAIT_SECONDS
+                            .observe(permit_wait_start.elapsed().as_secs_f64());
 
                         // Spawn task with owned permit (dropped when task completes)
                         tokio::spawn(async move {
                             Self::handle_work_item(work_item).await;
                             drop(permit);
+                            WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
                         });
+                        WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
                     }
                 }
             }
@@ -181,6 +206,11 @@ impl SharedTcpServer {
 
     /// Handle a single work item
     async fn handle_work_item(work_item: WorkItem) {
+        // The item is now leaving the "waiting" state (channel queue + permit acquire)
+        // and entering the "running" state (pool_active_tasks was incremented by the
+        // dispatcher before spawning).
+        WORK_HANDLER_QUEUE_DEPTH.dec();
+
         tracing::trace!(
             instance_id = work_item.instance_id,
             "TCP worker processing request"
@@ -500,7 +530,11 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Send to worker pool with backpressure - BEFORE sending ACK
+            // Send to worker pool with backpressure - BEFORE sending ACK.
+            // Increment the queue-depth gauge BEFORE send so a concurrent dispatcher
+            // pickup on another thread cannot observe depth < 0. On send failure we
+            // decrement below.
+            WORK_HANDLER_QUEUE_DEPTH.inc();
             match work_tx.send(work_item).await {
                 Ok(_) => {
                     // Send acknowledgment ONLY after successful queuing
@@ -522,6 +556,8 @@ impl SharedTcpServer {
                     );
                 }
                 Err(e) => {
+                    WORK_HANDLER_QUEUE_DEPTH.dec();
+                    WORK_HANDLER_QUEUE_FULL_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
@@ -921,9 +957,12 @@ mod tests {
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
 
-        // Send more work items than pool size
+        // Send more work items than pool size. Mirror the production read_loop's
+        // queue-depth accounting so `handle_work_item`'s decrement has a matching
+        // increment and the global gauge stays consistent for other tests.
         for i in 0..total_requests {
             inflight.fetch_add(1, Ordering::SeqCst);
+            WORK_HANDLER_QUEUE_DEPTH.inc();
             let work_item = WorkItem {
                 service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
                 payload: Bytes::from(format!("request {}", i)),
@@ -974,6 +1013,83 @@ mod tests {
         );
 
         // Cleanup
+        cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_metrics_are_observed() {
+        crate::logging::init();
+
+        // Monotonic histogram counters: safe to assert even with parallel tests
+        // moving the gauges.
+        let permit_observations_before = WORK_HANDLER_PERMIT_WAIT_SECONDS.get_sample_count();
+
+        let pool_size = 2;
+        let total_requests = 4;
+        let (work_tx, work_rx) = tokio::sync::mpsc::channel::<WorkItem>(total_requests);
+        let cancellation_token = CancellationToken::new();
+        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+
+        let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(25)));
+        let inflight = Arc::new(AtomicU64::new(0));
+        let notify = Arc::new(Notify::new());
+
+        for i in 0..total_requests {
+            inflight.fetch_add(1, Ordering::SeqCst);
+            // Mirror the production read_loop's inc so handle_work_item's dec has a pair.
+            WORK_HANDLER_QUEUE_DEPTH.inc();
+            let work_item = WorkItem {
+                service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
+                payload: Bytes::from(format!("request {}", i)),
+                headers: std::collections::HashMap::new(),
+                inflight: inflight.clone(),
+                notify: notify.clone(),
+                instance_id: 1,
+                namespace: "test".to_string(),
+                component_name: "test".to_string(),
+                endpoint_name: "test".to_string(),
+            };
+            work_tx.send(work_item).await.expect("send should succeed");
+        }
+
+        // Wait for all work to drain
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while inflight.load(Ordering::SeqCst) > 0 {
+                notify.notified().await;
+            }
+        })
+        .await
+        .expect("all requests should complete");
+
+        // permit_wait histogram is monotonic and records one sample per dispatched
+        // work item — reliable across parallel test threads.
+        assert!(
+            WORK_HANDLER_PERMIT_WAIT_SECONDS.get_sample_count()
+                >= permit_observations_before + total_requests as u64,
+            "permit_wait histogram should record at least one sample per dispatched work item"
+        );
+
+        cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_capacities_published_on_server_init() {
+        crate::logging::init();
+
+        // SharedTcpServer::new publishes static capacities. Any test that instantiates
+        // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
+        let cancellation_token = CancellationToken::new();
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+
+        assert!(
+            WORK_HANDLER_POOL_CAPACITY.get() > 0,
+            "pool_capacity should be set to DEFAULT_WORKER_POOL_SIZE"
+        );
+        assert!(
+            WORK_HANDLER_QUEUE_CAPACITY.get() > 0,
+            "queue_capacity should be set to DEFAULT_WORK_QUEUE_SIZE"
+        );
         cancellation_token.cancel();
     }
 }
