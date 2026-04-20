@@ -783,9 +783,14 @@ mod tests {
     }
 
     async fn make_test_router(
-        selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+        selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
+        + Send
+        + Sync
+        + 'static,
         shared_cache: Option<Box<dyn SharedKvCache>>,
-    ) -> KvRouter<impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static> {
+    ) -> KvRouter<
+        impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    > {
         let component = make_test_component("shared-cache-router").await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await.unwrap();

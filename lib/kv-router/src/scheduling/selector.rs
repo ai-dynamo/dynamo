@@ -135,8 +135,7 @@ impl DefaultWorkerSelector {
         let (adjusted_prefill_token, shared_beyond) =
             if let Some(ref shared_hits) = request.shared_cache_hits {
                 let beyond = shared_hits.hits_beyond(overlap_blocks);
-                let reduction =
-                    shared_cache_multiplier * (beyond as f64) * (block_size as f64);
+                let reduction = shared_cache_multiplier * (beyond as f64) * (block_size as f64);
                 let adjusted = (prefill_token as f64 - reduction).max(0.0) as usize;
                 (adjusted, beyond)
             } else {
@@ -242,8 +241,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(self.kv_router_config.router_temperature);
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            self.worker_score(request, worker, block_size, overlap_weight, shared_cache_multiplier, "Formula")
-                .logit
+            self.worker_score(
+                request,
+                worker,
+                block_size,
+                overlap_weight,
+                shared_cache_multiplier,
+                "Formula",
+            )
+            .logit
         };
 
         let worker_iter = workers
