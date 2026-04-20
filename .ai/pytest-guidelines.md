@@ -36,6 +36,34 @@ export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)"
 python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --durations=0 tests/
 ```
 
+### Running against a pre-populated local model cache
+
+If you have models already downloaded into a read-only directory (e.g. a shared
+NFS mount or a bind-mounted volume), pass `--models-dir` to skip all network
+downloads and avoid any writes to the cache:
+
+```bash
+python3 -m pytest --models-dir=/path/to/hf_cache -xvv tests/serve/test_vllm.py
+```
+
+The expected layout is a **bare `HF_HUB_CACHE` directory** — the same directory
+that `HF_HUB_CACHE` normally points at (contains `models--org--name/` subdirs).
+If your path has a `hub/` subdirectory (i.e. an `HF_HOME`-style layout), that is
+detected automatically and `HF_HOME` is set instead.
+
+What `--models-dir` does:
+- Sets `HF_HUB_CACHE` (or `HF_HOME`) to the supplied path.
+- Enables `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` — no network calls.
+- Short-circuits `predownload_models` and `predownload_tokenizers` — no writes to
+  the cache directory.
+- Sets `DYNAMO_MODELS_DIR` — code that would perform network downloads (e.g. LoRA
+  adapters in `download_lora()`) will `pytest.skip()` instead of failing.
+
+**LoRA tests are incompatible with `--models-dir`** because they download adapters
+from HuggingFace Hub at test time. Tests that call `download_lora()` will be
+skipped automatically with a clear message when the flag is active. To run LoRA
+tests locally, omit `--models-dir` and ensure `HF_TOKEN` is set.
+
 - `python3 -m pytest` ensures the venv's pytest runs with the correct `sys.path`.
   The system `pytest` at `/usr/local/bin/pytest` is **outside** the venv and cannot
   see venv-installed packages (like `dynamo`).

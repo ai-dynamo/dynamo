@@ -233,6 +233,14 @@ class MinioService:
 
     def download_lora(self) -> str:
         """Download LoRA from Hugging Face Hub, returns temp directory path."""
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            import pytest
+
+            pytest.skip(
+                "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
+                "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
+            )
+
         self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
         self._logger.info(
             f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"

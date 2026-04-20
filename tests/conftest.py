@@ -76,6 +76,23 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Show which tests would run vs skip based on --max-vram-gib, then exit.",
     )
+    # -------------------------------------------------------------------------
+    # Model cache options
+    # -------------------------------------------------------------------------
+    parser.addoption(
+        "--models-dir",
+        type=str,
+        default=None,
+        help="Path to a pre-populated HuggingFace cache (read-only safe). "
+        "When set, skips the predownload fixtures and runs tests in "
+        "HF_HUB_OFFLINE mode against this cache. "
+        "Expects a bare HF_HUB_CACHE layout (i.e. the directory that "
+        "HF_HUB_CACHE normally points at). "
+        "Sets DYNAMO_MODELS_DIR in the environment — code that performs "
+        "network downloads (e.g. LoRA adapters) will pytest.skip() "
+        "when this flag is active. "
+        "Without this flag, behavior is identical to before.",
+    )
 
 
 def pytest_runtest_setup(item):
@@ -127,7 +144,14 @@ logging.basicConfig(
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Detect GPUs for --max-vram-gib planning and parallel execution."""
+    """Configure session: validate --models-dir and detect GPUs for --max-vram-gib."""
+    models_dir = config.getoption("--models-dir", default=None)
+    if models_dir and not Path(models_dir).is_dir():
+        pytest.exit(
+            f"--models-dir: directory does not exist: {models_dir}",
+            returncode=4,
+        )
+
     vram_limit = config.getoption("max_vram_gib", default=None)
     if vram_limit is None:
         return
@@ -416,14 +440,70 @@ def _disable_offline_with_mistral_patch():
 
 _download_lock_path = os.path.join(tempfile.gettempdir(), "pytest_model_download.lock")
 
+_MODELS_DIR_ENV_KEYS = (
+    "HF_HUB_CACHE",
+    "HF_HOME",
+    "HF_HUB_OFFLINE",
+    "TRANSFORMERS_OFFLINE",
+    "TRANSFORMERS_CACHE",
+    "DYNAMO_MODELS_DIR",
+)
+
+
+def _apply_models_dir_env(models_dir: str) -> dict:
+    """Set HF env vars for read-only cache mode. Returns orig values for teardown."""
+    orig = {k: os.environ.get(k) for k in _MODELS_DIR_ENV_KEYS}
+    if (Path(models_dir) / "hub").is_dir():
+        os.environ["HF_HOME"] = models_dir
+    else:
+        os.environ["HF_HUB_CACHE"] = models_dir
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_CACHE"] = tempfile.mkdtemp(prefix="dynamo_hf_conv_")
+    os.environ["DYNAMO_MODELS_DIR"] = models_dir
+    _enable_offline_with_mistral_patch()  # sets HF_HUB_OFFLINE=1
+    return orig
+
+
+def _restore_models_dir_env(orig: dict) -> None:
+    """Undo _apply_models_dir_env. Call after fixture yield."""
+    _disable_offline_with_mistral_patch()  # pops HF_HUB_OFFLINE + cleans sitecustomize
+    for k, v in orig.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
 
 @pytest.fixture(scope="session")
-def predownload_models(pytestconfig):
+def _models_dir_env(pytestconfig):
+    """Set up HF env vars for --models-dir mode. No-op when flag is absent.
+
+    Session-scoped so env setup/teardown happens exactly once regardless of
+    how many fixtures depend on this.
+    """
+    models_dir = pytestconfig.getoption("--models-dir")
+    if not models_dir:
+        yield
+        return
+    orig = _apply_models_dir_env(models_dir)
+    yield
+    _restore_models_dir_env(orig)
+
+
+@pytest.fixture(scope="session")
+def predownload_models(pytestconfig, _models_dir_env):
     """Fixture wrapper around download_models for models used in collected tests.
 
     Uses a file lock so that under xdist, only one worker downloads at a time
     and the rest reuse the HuggingFace cache.
+
+    When --models-dir is passed, _models_dir_env has already set up HF env vars;
+    this fixture simply yields without downloading.
     """
+    if pytestconfig.getoption("--models-dir"):
+        yield
+        return
+
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
@@ -440,11 +520,18 @@ def predownload_models(pytestconfig):
 
 
 @pytest.fixture(scope="session")
-def predownload_tokenizers(pytestconfig):
+def predownload_tokenizers(pytestconfig, _models_dir_env):
     """Fixture wrapper around download_models for tokenizers used in collected tests.
 
     Uses a file lock so that under xdist, only one worker downloads at a time.
+
+    When --models-dir is passed, _models_dir_env has already set up HF env vars;
+    this fixture simply yields without downloading.
     """
+    if pytestconfig.getoption("--models-dir"):
+        yield
+        return
+
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
