@@ -21,7 +21,10 @@ import gc
 import logging
 import os
 
+logger = logging.getLogger(__name__)
+
 _ENV_VAR = "DYN_WORKER_DISABLE_GC"
+
 
 def configure_gc(worker_role: str) -> None:
     """Apply the GC setting selected by ``DYN_WORKER_DISABLE_GC``.
@@ -36,9 +39,9 @@ def configure_gc(worker_role: str) -> None:
     if env_value == "1":
         gc.collect()
         gc.disable()
-        logging.info("GC disabled for %s handler (%s=1)", worker_role, _ENV_VAR)
+        logger.info("GC disabled for %s handler (%s=1)", worker_role, _ENV_VAR)
         return
-    logging.warning(
+    logger.warning(
         "Unrecognized %s=%r (expected 0 or 1); leaving GC unchanged",
         _ENV_VAR,
         env_value,

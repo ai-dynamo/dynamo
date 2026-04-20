@@ -77,7 +77,7 @@ during a load burst.
 
 When disabled, the handler logs at startup:
 
-```
+```text
 GC disabled for decode handler (DYN_WORKER_DISABLE_GC=1)
 ```
 
