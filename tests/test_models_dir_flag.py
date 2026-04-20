@@ -16,7 +16,9 @@ from tests.conftest import (
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_apply_bare_cache_layout(tmp_path):
+def test_apply_bare_cache_layout(tmp_path, monkeypatch):
+    for k in _MODELS_DIR_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
     orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
     try:
         assert os.environ["HF_HUB_CACHE"] == str(tmp_path)
@@ -31,7 +33,9 @@ def test_apply_bare_cache_layout(tmp_path):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_apply_hf_home_layout(tmp_path):
+def test_apply_hf_home_layout(tmp_path, monkeypatch):
+    for k in _MODELS_DIR_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
     (tmp_path / "hub").mkdir()
     orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
     try:
@@ -62,7 +66,10 @@ def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_restore_preserves_preexisting_values(tmp_path, monkeypatch):
+@pytest.mark.parametrize("use_hf_home", [False, True])
+def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home):
+    if use_hf_home:
+        (tmp_path / "hub").mkdir()
     sentinel = {k: f"preexisting_{k}" for k in _MODELS_DIR_ENV_KEYS}
     for k, v in sentinel.items():
         monkeypatch.setenv(k, v)
