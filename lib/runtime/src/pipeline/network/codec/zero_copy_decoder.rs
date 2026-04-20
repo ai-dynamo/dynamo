@@ -9,27 +9,32 @@
 //! 3. Splitting off exact message sizes (zero-copy via Bytes::split_to)
 //! 4. Returning Arc-counted Bytes that can be cloned cheaply
 
+use crate::pipeline::network::get_tcp_max_message_size;
 use bytes::{Buf, Bytes, BytesMut};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// Maximum message size (32MB default, configurable via env)
-const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB
 const INITIAL_BUFFER_SIZE: usize = 262144; // 256KB
+const SHRINK_SIZE_DEFAULT: usize = 4 * 1024 * 1024; // 4MB
 
-fn get_max_message_size() -> usize {
-    std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
+fn get_shrink_message_size() -> usize {
+    // Clamp the shrink threshold to the configured max message size so the
+    // threshold never exceeds the largest allocation this decoder will allow.
+    std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(MAX_MESSAGE_SIZE)
+        .unwrap_or(SHRINK_SIZE_DEFAULT)
+        .min(get_tcp_max_message_size())
 }
 
 /// Zero-copy streaming decoder that reuses buffers
 ///
 /// This decoder maintains an internal buffer and only allocates when necessary.
 /// Messages are returned as Arc-counted Bytes slices, making cloning extremely cheap.
+/// The reusable buffer resets back to INITIAL_BUFFER_SIZE only when unread data
+/// is empty and capacity exceeds DYN_TCP_SHRINK_MESSAGE_SIZE.
 pub struct ZeroCopyTcpDecoder {
-    /// Reusable read buffer - grows as needed but never shrinks
+    /// Reusable read buffer - grows as needed, shrinks when empty and oversized
     read_buffer: BytesMut,
     /// Maximum allowed message size
     max_message_size: usize,
@@ -45,7 +50,7 @@ impl ZeroCopyTcpDecoder {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             read_buffer: BytesMut::with_capacity(capacity),
-            max_message_size: get_max_message_size(),
+            max_message_size: get_tcp_max_message_size(),
         }
     }
 
@@ -166,6 +171,12 @@ impl ZeroCopyTcpDecoder {
         // Split off exactly what we need - ZERO COPY!
         // split_to() just advances the internal pointer, doesn't allocate or copy
         let message_bytes = self.read_buffer.split_to(total_len).freeze();
+
+        // Shrink buffer if it grew too large and is now empty
+        if self.read_buffer.is_empty() && self.read_buffer.capacity() > get_shrink_message_size() {
+            // b10: michaelfeil to try contribute this upstream.
+            self.read_buffer = BytesMut::with_capacity(INITIAL_BUFFER_SIZE);
+        }
 
         // Return zero-copy message wrapper
         Ok(TcpRequestMessageZeroCopy::new(message_bytes))
@@ -499,5 +510,47 @@ mod tests {
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.headers().len(), 1);
         assert_eq!(msg.headers().get("x-test-header").unwrap(), "test-value");
+    }
+
+    #[tokio::test]
+    async fn test_zero_copy_decoder_buffer_shrinking() {
+        // Test that buffer shrinks back after reading a large message
+        let endpoint = "test/endpoint";
+        let small_payload = b"small";
+        let large_payload = vec![0x42u8; 10 * 1024 * 1024]; // 10MB
+
+        fn make_message(endpoint: &str, payload: &[u8]) -> Vec<u8> {
+            let mut message = Vec::new();
+            message.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
+            message.extend_from_slice(endpoint.as_bytes());
+            message.extend_from_slice(&(0u16).to_be_bytes()); // empty headers
+            message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            message.extend_from_slice(payload);
+            message
+        }
+
+        let mut decoder = ZeroCopyTcpDecoder::new();
+        assert!(decoder.buffer_capacity() <= INITIAL_BUFFER_SIZE);
+
+        // Read large message - buffer grows during read, then shrinks after split_to()
+        let large_message = make_message(endpoint, &large_payload);
+        let mut reader = &large_message[..];
+        decoder.read_message(&mut reader).await.unwrap();
+        // After reading, buffer is empty and should have shrunk back
+        assert!(
+            decoder.buffer_capacity() <= INITIAL_BUFFER_SIZE,
+            "buffer should shrink after large message, got capacity {}",
+            decoder.buffer_capacity()
+        );
+        assert!(
+            decoder.buffered_len() == 0,
+            "buffer should be empty after read"
+        );
+
+        // Read small message - should work fine with shrunk buffer
+        let small_message = make_message(endpoint, small_payload);
+        let mut reader = &small_message[..];
+        let msg = decoder.read_message(&mut reader).await.unwrap();
+        assert_eq!(msg.payload().as_ref(), small_payload);
     }
 }
