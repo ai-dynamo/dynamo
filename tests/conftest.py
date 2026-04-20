@@ -526,7 +526,9 @@ def predownload_models(pytestconfig, _models_dir_env):
     and the rest reuse the HuggingFace cache.
 
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
-    this fixture simply yields without downloading.
+    this fixture simply yields without downloading. Also short-circuits when
+    DYNAMO_MODELS_DIR is set directly in the environment (without --models-dir),
+    but in that case HF offline env vars are not configured by this fixture.
     """
     if os.environ.get("DYNAMO_MODELS_DIR"):
         yield
@@ -554,7 +556,9 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
     Uses a file lock so that under xdist, only one worker downloads at a time.
 
     When --models-dir is passed, _models_dir_env has already set up HF env vars;
-    this fixture simply yields without downloading.
+    this fixture simply yields without downloading. Also short-circuits when
+    DYNAMO_MODELS_DIR is set directly in the environment (without --models-dir),
+    but in that case HF offline env vars are not configured by this fixture.
     """
     if os.environ.get("DYNAMO_MODELS_DIR"):
         yield

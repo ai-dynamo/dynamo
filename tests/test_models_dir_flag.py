@@ -105,7 +105,10 @@ def test_apply_sets_writable_transformers_cache(tmp_path, monkeypatch):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
+def test_models_dir_nonexistent_exits_with_code_2():
+    # Run from the project root so conftest.py is discovered and --models-dir
+    # is registered before pytest_configure fires.
+    project_root = Path(__file__).parents[1]
     result = subprocess.run(
         [
             sys.executable,
@@ -116,7 +119,7 @@ def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
         ],
         capture_output=True,
         text=True,
-        cwd=str(tmp_path),
+        cwd=str(project_root),
     )
     assert result.returncode == 2
     assert "does not exist" in result.stderr + result.stdout
