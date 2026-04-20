@@ -21,10 +21,14 @@ import pytest_asyncio
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 _BASE_ARGV = [
-    "--model-path", MODEL_ID,
-    "--free-gpu-memory-fraction", "0.3",
-    "--max-seq-len", "1024",
-    "--max-batch-size", "4",
+    "--model-path",
+    MODEL_ID,
+    "--free-gpu-memory-fraction",
+    "0.3",
+    "--max-seq-len",
+    "1024",
+    "--max-batch-size",
+    "4",
 ]
 
 pytestmark = [
@@ -85,11 +89,14 @@ async def test_generate_streams_chunks_with_coherent_final_usage(started_engine)
 
     chunks = []
     async for chunk in engine.generate(
-        cast(dict, {
-            "token_ids": [1, 2, 3, 4, 5],
-            "stop_conditions": {"max_tokens": 16},
-            "sampling_options": {"temperature": 0.0},
-        }),
+        cast(
+            dict,
+            {
+                "token_ids": [1, 2, 3, 4, 5],
+                "stop_conditions": {"max_tokens": 16},
+                "sampling_options": {"temperature": 0.0},
+            },
+        ),
         cast(object, ctx),  # type: ignore[arg-type]
     ):
         chunks.append(chunk)

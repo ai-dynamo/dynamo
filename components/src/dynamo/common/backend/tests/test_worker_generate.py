@@ -122,7 +122,11 @@ async def test_worker_forwards_chunks_and_skips_abort_on_clean_completion():
         yield {
             "token_ids": [3],
             "finish_reason": "stop",
-            "completion_usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            "completion_usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 3,
+                "total_tokens": 8,
+            },
         }
 
     engine = _RecordingEngine(chunks)
