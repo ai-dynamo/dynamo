@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 #
 # The fixed-length header prevents delimiter-ambiguity collisions: no two
 # distinct (header, pixel) pairs can produce the same preimage.
+#
+# struct format "<BBBBII":
+#   <       little-endian, no padding
+#   BBBB    four uint8 fields  (version, mode, dtype, channels)
+#   II      two uint32 fields  (height, width)
 _HEADER_STRUCT = struct.Struct("<BBBBII")
 _VERSION_BYTE = 0x01
 _MODE_RGB = 0x00
