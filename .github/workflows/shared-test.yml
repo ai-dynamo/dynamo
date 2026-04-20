@@ -101,11 +101,12 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
-          CUDA_MAJOR=${CUDA_VERSION%%.*}
-          if [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
-            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
-          else
-            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-cuda${CUDA_MAJOR}
+          TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
+
+          IMAGE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
+          if [ -n "${CUDA_VERSION}" ]; then
+            CUDA_MAJOR=${CUDA_VERSION%%.*}
+            IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
           fi
 
           RUNTIME_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}
