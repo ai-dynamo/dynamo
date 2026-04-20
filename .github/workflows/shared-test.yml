@@ -125,9 +125,9 @@ jobs:
         if not available:
             # # DEBUG ONLY — remove before merging to main. Sleeps 10 minutes
             # # so the container can be exec'd into to inspect GPU state.
-            # import time
-            # print("Sleeping 10 minutes for debugging; remove before merging.", flush=True)
-            # time.sleep(600)
+            import time
+            print("Sleeping 10 minutes for debugging; remove before merging.", flush=True)
+            time.sleep(600)
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
       # - name: Checkout repository
       #   uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
