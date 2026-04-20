@@ -84,7 +84,9 @@ _SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset(
 def _agent_subprocess_env(extra_env: dict[str, str]) -> dict[str, str]:
     """Build a minimal env for codex/claude subprocesses: allowlist from
     `os.environ` merged with explicit test-scoped vars."""
-    base = {k: v for k in _SUBPROCESS_ENV_ALLOWLIST if (v := os.environ.get(k)) is not None}
+    base = {
+        k: v for k in _SUBPROCESS_ENV_ALLOWLIST if (v := os.environ.get(k)) is not None
+    }
     base.update(extra_env)
     return base
 
