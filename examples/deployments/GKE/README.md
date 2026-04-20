@@ -119,12 +119,12 @@ metadata:
 spec:
   services:
     Frontend:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
     VllmDecodeWorker:
 ​​      resources:
         limits:
           gpu: "3"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
           args:
             - |
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH

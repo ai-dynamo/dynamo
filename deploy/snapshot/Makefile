@@ -73,7 +73,7 @@ docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
 .PHONY: docker-build-placeholder
 docker-build-placeholder: ## Build placeholder image for checkpoint restore (linux/amd64 only). Requires PLACEHOLDER_BASE_IMG.
 ifndef PLACEHOLDER_BASE_IMG
-	$(error PLACEHOLDER_BASE_IMG is required. Example: make docker-build-placeholder PLACEHOLDER_BASE_IMG=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1-cuda13)
+	$(error PLACEHOLDER_BASE_IMG is required. Example: make docker-build-placeholder PLACEHOLDER_BASE_IMG=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1)
 endif
 	@BASE_IMAGE_USER="$$( $(CONTAINER_TOOL) image inspect --format '{{.Config.User}}' ${PLACEHOLDER_BASE_IMG} 2>/dev/null || true )"; \
 	if [ -z "$$BASE_IMAGE_USER" ]; then \
