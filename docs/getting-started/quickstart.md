@@ -123,6 +123,16 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
   --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
+### Verify your deployment is healthy
+
+```bash
+curl -sf http://localhost:8000/health && echo OK
+```
+
+Expected output: `OK`. If you get a connection refused or non-zero exit, the frontend has not finished starting — give it a few more seconds and retry.
+
+> **Note:** `/v1/health/ready` is being added in a follow-up; use `/health` for now. See [Health Checks](../observability/health-checks.md).
+
 ## Test Your Deployment
 
 ```bash
