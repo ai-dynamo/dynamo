@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
-      - "ops-4330/support-local-models"
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
