@@ -263,6 +263,7 @@ def test_sglang_kv_router_basic(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.timeout(300)  # fail fast instead of hanging the whole job if worker startup deadlocks
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,

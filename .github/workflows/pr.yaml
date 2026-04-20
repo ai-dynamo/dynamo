@@ -317,6 +317,111 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # ---------------------------------------------------------------------------
+  # TEMPORARY: reproduce the nightly sglang hang in a focused, fast-feedback
+  # job so we can capture diagnostics. The nightly `sglang-pipeline Test (amd64)`
+  # deadlocks after test_sglang_kv_router_basic[tcp] -> the next test
+  # (test_router_decisions_sglang_multiple_workers) never completes. This job
+  # runs only the minimum preceding sequence we suspect of leaving orphan GPU
+  # state, so we get an answer in ~30-45 minutes instead of 3-5 hours.
+  # Delete this job once the hang is understood and fixed.
+  # ---------------------------------------------------------------------------
+  sglang-hang-repro:
+    name: sglang-hang-repro (temp)
+    needs: [changed-files, sglang-build]
+    if: |
+      always() && !cancelled() &&
+      needs.sglang-build.result == 'success' &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true')
+    runs-on: prod-tester-amd-gpu-v1
+    timeout-minutes: 75
+    env:
+      CONTAINER_NAME: hang-repro-${{ github.run_id }}-${{ github.run_attempt }}-pytest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Calculate test image tag
+        id: tag
+        shell: bash
+        env:
+          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
+        run: |
+          set -euo pipefail
+          IMAGE_TAG="${{ github.sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-cuda12"
+          TEST_IMAGE="${ECR_REPOSITORY}:${IMAGE_TAG}-test"
+          echo "test_image=${TEST_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Using test image: ${TEST_IMAGE}"
+      - name: Docker login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${{ steps.tag.outputs.test_image }}"
+      - name: Run 4-test poisoning sequence
+        id: repro
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -o pipefail
+          # Run ONLY the sequence we suspect of triggering the nightly hang.
+          # --timeout=300 (pytest-timeout, thread method) kills any single test
+          # that exceeds 5 min -- much faster than the 5h nightly timeout.
+          docker run --gpus all --network host --rm \
+            --name "${CONTAINER_NAME}" \
+            -w /workspace \
+            -e DYNAMO_TEST_FRAMEWORK=sglang \
+            -e DYNAMO_TEST_PLATFORM=amd64 \
+            -e DYNAMO_TEST_TYPE=pre_merge_gpu \
+            "${{ steps.tag.outputs.test_image }}" \
+            sh -c 'umask 0022 && pytest -v --tb=short --timeout=300 --timeout-method=thread \
+              -o cache_dir=/tmp/.pytest_cache --basetemp=/tmp/pytest_temp \
+              tests/gpu_memory_service/test_quiesce_resume.py::test_gms_basic_quiesce_resume_sglang \
+              tests/gpu_memory_service/test_shadow_failover.py::test_gms_shadow_engine_failover_sglang \
+              "tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic[tcp]" \
+              "tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers[tcp]"'
+      - name: Diagnose on hang or failure
+        # Mirrors the diagnostic step in .github/actions/pytest/action.yml but
+        # scoped to this job's container. Fires even if the pytest step was
+        # cancelled by timeout-minutes.
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+            echo "ℹ️  No lingering ${CONTAINER_NAME} — nothing to diagnose."
+            exit 0
+          fi
+          echo "⚠️  Container ${CONTAINER_NAME} survived the step — gathering diagnostics."
+          echo "=== host: docker ps ===";            docker ps --no-trunc
+          echo "=== host: nvidia-smi ===";           nvidia-smi || true
+          echo "=== host: listening sockets (top 80) ==="
+          (ss -tunlp 2>/dev/null || netstat -tunlp 2>/dev/null) | head -80 || true
+          echo "=== container: process tree ==="
+          docker exec "${CONTAINER_NAME}" sh -c 'ps auxf 2>/dev/null || ps -ef' || true
+          echo "=== container: pytest/sglang/dynamo pids ==="
+          docker exec "${CONTAINER_NAME}" sh -c "pgrep -af 'pytest|sglang|dynamo' 2>/dev/null" || true
+          echo "=== container: py-spy dumps ==="
+          docker exec "${CONTAINER_NAME}" sh -c '
+            command -v py-spy >/dev/null 2>&1 || pip install --quiet --disable-pip-version-check py-spy 2>/dev/null || true
+            for pid in $(pgrep -f "pytest|python.*dynamo.sglang" 2>/dev/null); do
+              echo "--- py-spy dump --pid $pid ---"
+              py-spy dump --pid "$pid" 2>&1 || true
+            done
+          ' || true
+          echo "=== container: /proc/<pid>/stack ==="
+          docker exec "${CONTAINER_NAME}" sh -c '
+            for pid in $(pgrep -f "pytest|python.*dynamo.sglang" 2>/dev/null); do
+              echo "--- /proc/$pid/stack ---"
+              cat "/proc/$pid/stack" 2>/dev/null || echo "(kernel stack unavailable)"
+            done
+          ' || true
+          echo "=== cleanup: force-removing ${CONTAINER_NAME} ==="
+          docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]

@@ -271,6 +271,65 @@ runs:
         # Always continue to results processing
         exit 0
 
+    - name: Diagnose on hang or cancellation
+      # Fires after every pytest run. If the step was cancelled by a timeout
+      # or pytest left a container/subprocess alive, dump enough state to know
+      # where it got stuck. A healthy run produces essentially no output.
+      if: always()
+      shell: bash
+      env:
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+      run: |
+        set +e
+        CONTAINER_NAME="${CONTAINER_ID}_pytest"
+
+        # If the pytest container never survived the step (normal happy path)
+        # there is nothing to diagnose.
+        if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+          echo "ℹ️  No lingering ${CONTAINER_NAME} container — nothing to diagnose."
+          exit 0
+        fi
+
+        echo "⚠️  Found lingering ${CONTAINER_NAME} — capturing diagnostics."
+
+        echo "=============== host: docker ps ==============="
+        docker ps --no-trunc
+
+        echo "=============== host: nvidia-smi ==============="
+        nvidia-smi || true
+
+        echo "=============== host: ss -tunlp (abbreviated) ==============="
+        (ss -tunlp 2>/dev/null || netstat -tunlp 2>/dev/null) | head -100 || true
+
+        echo "=============== container: process tree ==============="
+        docker exec "${CONTAINER_NAME}" sh -c 'ps auxf 2>/dev/null || ps -ef' || true
+
+        echo "=============== container: pytest/sglang/dynamo pids ==============="
+        PIDS=$(docker exec "${CONTAINER_NAME}" sh -c "pgrep -af 'pytest|sglang|dynamo' 2>/dev/null" || true)
+        echo "${PIDS}"
+
+        echo "=============== container: py-spy dumps ==============="
+        # py-spy may not be installed in every image; install into a venv we can ignore.
+        docker exec "${CONTAINER_NAME}" sh -c '
+          command -v py-spy >/dev/null 2>&1 || pip install --quiet --disable-pip-version-check py-spy 2>/dev/null || true
+          for pid in $(pgrep -f "pytest|python.*dynamo.sglang" 2>/dev/null); do
+            echo "--- py-spy dump --pid $pid ---"
+            py-spy dump --pid "$pid" 2>&1 || true
+          done
+        ' || true
+
+        echo "=============== container: /proc/<pid>/stack (kernel side) ==============="
+        docker exec "${CONTAINER_NAME}" sh -c '
+          for pid in $(pgrep -f "pytest|python.*dynamo.sglang" 2>/dev/null); do
+            echo "--- /proc/$pid/stack ---"
+            cat "/proc/$pid/stack" 2>/dev/null || echo "(kernel stack unavailable)"
+          done
+        ' || true
+
+        # Kill the container so it does not hold the runner for the next step.
+        echo "=============== cleanup: force-removing ${CONTAINER_NAME} ==============="
+        docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
     - name: Process Test Results
       shell: bash
       run: |
