@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _MODELS_DIR_ENV_KEYS, _apply_models_dir_env, _restore_models_dir_env
+from tests.conftest import (
+    _MODELS_DIR_ENV_KEYS,
+    _apply_models_dir_env,
+    _restore_models_dir_env,
+)
 
 
 @pytest.mark.pre_merge
