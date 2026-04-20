@@ -187,6 +187,36 @@ class WorkerFactory:
         finally:
             handler.cleanup()
 
+    async def _maybe_wait_for_failover_lock(
+        self,
+        handler,
+        runtime: DistributedRuntime,
+        config: Config,
+    ) -> None:
+        # Shadow mode: lock-driven activation.
+        # Flow: sleep → startup probe passes → block on lock → wake → register.
+        if not config.gms_shadow_mode:
+            return
+
+        await handler._quiesce_controller.quiesce(1)
+
+        runtime.set_health_status(True)
+        logger.info(
+            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        )
+
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{engine_id}")
+        logger.info("[Shadow] Lock acquired, waking engine")
+
+        await handler._quiesce_controller.resume()
+        handler._quiesce_controller.mark_resumed()
+        logger.info("[Shadow] Engine awake, registering with discovery")
+
     async def _create_decode_worker(
         self,
         runtime: DistributedRuntime,
@@ -354,27 +384,7 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        if config.gms_shadow_mode:
-            # Shadow mode: lock-driven activation.
-            # Flow: sleep → startup probe passes → block on lock → wake → register.
-            await handler._quiesce_controller.quiesce(1)
-
-            runtime.set_health_status(True)
-            logger.info(
-                "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
-            )
-
-            from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-            lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-            engine_id = os.environ.get("ENGINE_ID", "0")
-            lock = FlockFailoverLock(lock_path)
-            await lock.acquire(engine_id=f"engine-{engine_id}")
-            logger.info("[Shadow] Lock acquired, waking engine")
-
-            await handler._quiesce_controller.resume()
-            handler._quiesce_controller.mark_resumed()
-            logger.info("[Shadow] Engine awake, registering with discovery")
+        await self._maybe_wait_for_failover_lock(handler, runtime, config)
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -573,6 +583,8 @@ class WorkerFactory:
         logger.info(
             "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
         )
+
+        await self._maybe_wait_for_failover_lock(handler, runtime, config)
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
