@@ -137,7 +137,14 @@ class ReplayPlannerAdapter:
         self._scaling_target_decode: Optional[int] = None
 
         # Diagnostics recorder for HTML report generation
-        self._recorder = DiagnosticsRecorder(config=planner_config)
+        decode_max_kv = (
+            capabilities.decode.max_kv_tokens
+            if capabilities and capabilities.decode
+            else None
+        )
+        self._recorder = DiagnosticsRecorder(
+            config=planner_config, max_kv_tokens=decode_max_kv
+        )
         self._cumulative_gpu_hours: float = 0.0
         self._last_tick_s: float = 0.0
         self._last_traffic: Metrics = Metrics()
@@ -217,15 +224,6 @@ class ReplayPlannerAdapter:
             gpu_d = self._config.decode_engine_num_gpu or 0
             self._cumulative_gpu_hours += (num_p * gpu_p + num_d * gpu_d) * dt_h
         self._last_tick_s = now_s
-
-        # Build observed Metrics from traffic in tick_input
-        if tick_input.traffic is not None:
-            t = tick_input.traffic
-            self._last_traffic = Metrics(
-                num_req=t.num_req,
-                isl=t.isl,
-                osl=t.osl,
-            )
 
         self._recorder.record(
             tick_input,
@@ -422,11 +420,23 @@ class ReplayPlannerAdapter:
             t = self._bridge.drain_traffic()
             duration_s = t.get("duration_s", 0.0)
             if duration_s > 0:
+                num_req = float(t.get("num_req", 0))
                 traffic = TrafficObservation(
                     duration_s=duration_s,
-                    num_req=float(t.get("num_req", 0)),
+                    num_req=num_req,
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
+                )
+                # Stash observed TTFT/ITL for the diagnostics recorder.
+                # When num_req == 0, the Rust accumulator returns 0 as a
+                # placeholder; only record latency values when we actually
+                # observed requests in this window.
+                self._last_traffic = Metrics(
+                    ttft=t.get("avg_ttft_ms") if num_req > 0 else None,
+                    itl=t.get("avg_itl_ms") if num_req > 0 else None,
+                    num_req=traffic.num_req,
+                    isl=traffic.isl,
+                    osl=traffic.osl,
                 )
 
         return TickInput(
