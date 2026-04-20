@@ -115,6 +115,7 @@ jobs:
       run: |
         import sys
         import torch
+        print(f"Python version: {sys.version}")
         available = torch.cuda.is_available()
         count = torch.cuda.device_count() if available else 0
         name = torch.cuda.get_device_name(0) if available else "None"
