@@ -142,3 +142,16 @@ curl localhost:8000/v1/chat/completions \
        "messages": [{"role": "user", "content": "Hello!"}],
        "max_tokens": 50}'
 ```
+
+## Next Steps
+
+| | |
+|---|---|
+| [Architecture](../design-docs/architecture.md) | How the frontend, router, and workers fit together. |
+| [Health Checks](../observability/health-checks.md) | Liveness/readiness probes and what they mean. |
+| [Metrics](../observability/metrics.md) | Prometheus scrape endpoints and label conventions. |
+| [KV Cache Aware Routing](../components/router/router-concepts.md#kv-cache-routing) | How the router places requests for prefix reuse. |
+| [Frontend Guide](../components/frontend/README.md) | Worker discovery, multi-model routing, OpenAI compat. |
+| [`nvext.timing`](../components/frontend/nvext.md#response-extensions) | Per-phase timing telemetry in OpenAI responses. |
+| [Kubernetes Quickstart](../kubernetes/README.md) | Go from single-node to a Dynamo Graph deployment. |
+| [Troubleshooting](../troubleshooting.md) | Common failures and their fixes. *(added by PR E)* |
