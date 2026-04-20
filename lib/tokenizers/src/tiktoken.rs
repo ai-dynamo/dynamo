@@ -172,7 +172,7 @@ fn detect_bpe_pattern(directory: &Path) -> Result<&'static str> {
         _ => Err(Error::msg(format!(
             "Unsupported tiktoken model_type '{model_type}'. \
              Currently supported: kimi, kimi_k2, kimi_k25, deepseek_v3. \
-             To add a new model type, extend detect_bpe_pattern() in dynamo-tokenizers/src/tiktoken.rs \
+             To add a new model type, extend detect_bpe_pattern() in lib/tokenizers/src/tiktoken.rs \
              with the appropriate BPE regex pattern. \
              Alternatively, provide a tokenizer.json (HuggingFace format) instead."
         ))),

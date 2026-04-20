@@ -180,8 +180,8 @@ pub fn log_json_err(filename: &str, json: &str, err: &serde_json::Error) {
         return;
     }
 
-    let start_index = (line - 2).max(0);
-    let end_index = (line + 3).min(json_lines.len());
+    let start_index = line.saturating_sub(2);
+    let end_index = line.saturating_add(3).min(json_lines.len());
 
     let mut context_lines: Vec<String> = (start_index..end_index)
         .map(|i| {

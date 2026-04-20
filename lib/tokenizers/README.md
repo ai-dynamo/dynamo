@@ -1,7 +1,7 @@
 # Tokenizers
 
 ## Introduction
-`dynamo-tokenizers` is designed for efficient and versatile tokenization in natural language processing. It supports both HuggingFace models, offering a streamlined API for text encoding and decoding.
+`dynamo-tokenizers` provides efficient, versatile tokenization for NLP workloads. It supports HuggingFace and TikToken tokenizers (plus a FastTokenizer hybrid mode) through a streamlined encoding/decoding API.
 
 ## Features
 - **Hash Verification**: Ensures tokenization consistency and accuracy across different models.
