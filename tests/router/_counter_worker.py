@@ -18,6 +18,9 @@ import sys
 
 request_count = 0
 
+# Register needs a model path, so we use a HF model name here.
+HF_MODEL_NAME = "Qwen/Qwen3-0.6B"
+
 
 async def generate(request, context):
     global request_count
@@ -60,6 +63,7 @@ async def main():
         ModelInput.Text,
         ModelType.Chat,
         endpoint,
+        HF_MODEL_NAME,
         "counter",
         router_config=RouterConfig(RouterMode.DeviceAwareWeighted),
     )
