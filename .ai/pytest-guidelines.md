@@ -46,10 +46,10 @@ downloads and avoid any writes to the cache:
 python3 -m pytest --models-dir=/path/to/hf_cache -xvv tests/serve/test_vllm.py
 ```
 
-The expected layout is a **bare `HF_HUB_CACHE` directory** — the same directory
-that `HF_HUB_CACHE` normally points at (contains `models--org--name/` subdirs).
-If your path has a `hub/` subdirectory (i.e. an `HF_HOME`-style layout), that is
-detected automatically and `HF_HOME` is set instead.
+Accepts either a **bare `HF_HUB_CACHE` directory** (contains `models--org--name/`
+subdirs) or an **`HF_HOME` directory** (auto-detected: if a `hub/` subdirectory is
+present, `HF_HOME` is used; otherwise `HF_HUB_CACHE` is used). A warning is logged
+when the `HF_HOME` layout is detected so you can verify the choice is correct.
 
 What `--models-dir` does:
 - Sets `HF_HUB_CACHE` (or `HF_HOME`) to the supplied path.

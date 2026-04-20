@@ -86,8 +86,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Path to a pre-populated HuggingFace cache (read-only safe). "
         "When set, skips the predownload fixtures and runs tests in "
         "HF_HUB_OFFLINE mode against this cache. "
-        "Expects a bare HF_HUB_CACHE layout (i.e. the directory that "
-        "HF_HUB_CACHE normally points at). "
+        "Accepts either a bare HF_HUB_CACHE directory or an HF_HOME "
+        "directory (auto-detected by the presence of a hub/ subdirectory). "
         "Sets DYNAMO_MODELS_DIR in the environment — code that performs "
         "network downloads (e.g. LoRA adapters) will pytest.skip() "
         "when this flag is active. "
@@ -149,7 +149,7 @@ def pytest_configure(config: pytest.Config) -> None:
     if models_dir and not Path(models_dir).is_dir():
         pytest.exit(
             f"--models-dir: directory does not exist: {models_dir}",
-            returncode=4,
+            returncode=2,
         )
 
     vram_limit = config.getoption("max_vram_gib", default=None)
@@ -461,13 +461,19 @@ def _apply_models_dir_env(models_dir: str) -> tuple[dict, str]:
     """
     orig = {k: os.environ.get(k) for k in _MODELS_DIR_ENV_KEYS}
     if (Path(models_dir) / "hub").is_dir():
-        logging.info("--models-dir: detected HF_HOME layout (hub/ subdirectory found)")
+        logging.warning(
+            "--models-dir: detected HF_HOME layout (hub/ subdirectory found). "
+            "If this is wrong (e.g. you have a model named hub/), rename hub/ "
+            "or pass a bare HF_HUB_CACHE directory instead."
+        )
         os.environ["HF_HOME"] = models_dir
     else:
         logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
         os.environ["HF_HUB_CACHE"] = models_dir
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     tmp_cache_dir = tempfile.mkdtemp(prefix="dynamo_hf_conv_")
+    # TRANSFORMERS_CACHE is deprecated since transformers≥4.22; TRANSFORMERS_OFFLINE=1
+    # is the primary guard. This redirect prevents writes on older versions.
     os.environ["TRANSFORMERS_CACHE"] = tmp_cache_dir
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # sets HF_HUB_OFFLINE=1
@@ -476,9 +482,16 @@ def _apply_models_dir_env(models_dir: str) -> tuple[dict, str]:
 
 def _restore_models_dir_env(orig: dict, tmp_cache_dir: str | None = None) -> None:
     """Undo _apply_models_dir_env. Call after fixture yield."""
+    # _disable pops HF_HUB_OFFLINE; the loop below then restores the original value
+    # (no-op if orig was None, set-back if orig had a pre-existing value). Safe.
     _disable_offline_with_mistral_patch()  # pops HF_HUB_OFFLINE + cleans sitecustomize
     if tmp_cache_dir:
-        shutil.rmtree(tmp_cache_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(tmp_cache_dir)
+        except OSError as e:
+            logging.warning(
+                "--models-dir: failed to clean temp cache %s: %s", tmp_cache_dir, e
+            )
     for k, v in orig.items():
         if v is None:
             os.environ.pop(k, None)
@@ -490,8 +503,9 @@ def _restore_models_dir_env(orig: dict, tmp_cache_dir: str | None = None) -> Non
 def _models_dir_env(pytestconfig):
     """Set up HF env vars for --models-dir mode. No-op when flag is absent.
 
-    Session-scoped so env setup/teardown happens exactly once regardless of
-    how many fixtures depend on this.
+    Session-scoped: runs once per worker process. Under pytest-xdist each worker
+    applies and restores env vars independently — there is no cross-worker
+    coordination needed since env vars are process-local.
     """
     models_dir = pytestconfig.getoption("--models-dir")
     if not models_dir:

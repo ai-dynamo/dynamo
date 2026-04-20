@@ -37,6 +37,12 @@ def test_apply_hf_home_layout(tmp_path):
     try:
         assert os.environ["HF_HOME"] == str(tmp_path)
         assert "HF_HUB_CACHE" not in os.environ
+        assert os.environ["HF_HUB_OFFLINE"] == "1"
+        assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+        assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
+        cache = os.environ.get("TRANSFORMERS_CACHE")
+        assert cache is not None and cache != str(tmp_path)
+        assert Path(cache).is_dir() and os.access(cache, os.W_OK)
     finally:
         _restore_models_dir_env(orig, tmp_cache)
 
@@ -44,9 +50,9 @@ def test_apply_hf_home_layout(tmp_path):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_restore_clears_vars_that_were_absent(tmp_path):
+def test_restore_clears_vars_that_were_absent(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
-        os.environ.pop(k, None)
+        monkeypatch.delenv(k, raising=False)
     orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
     _restore_models_dir_env(orig, tmp_cache)
     for k in _MODELS_DIR_ENV_KEYS:
@@ -56,10 +62,10 @@ def test_restore_clears_vars_that_were_absent(tmp_path):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_restore_preserves_preexisting_values(tmp_path):
+def test_restore_preserves_preexisting_values(tmp_path, monkeypatch):
     sentinel = {k: f"preexisting_{k}" for k in _MODELS_DIR_ENV_KEYS}
     for k, v in sentinel.items():
-        os.environ[k] = v
+        monkeypatch.setenv(k, v)
     orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
     _restore_models_dir_env(orig, tmp_cache)
     for k, v in sentinel.items():

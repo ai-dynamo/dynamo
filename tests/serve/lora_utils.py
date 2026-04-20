@@ -234,12 +234,12 @@ class MinioService:
     def download_lora(self) -> str:
         """Download LoRA from Hugging Face Hub, returns temp directory path.
 
-        Raises RuntimeError when DYNAMO_MODELS_DIR is set (--models-dir active).
-        Callers in test fixtures should check os.environ.get("DYNAMO_MODELS_DIR")
-        and call pytest.skip() before invoking this method.
+        Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
         """
         if os.environ.get("DYNAMO_MODELS_DIR"):
-            raise RuntimeError(
+            import pytest
+
+            pytest.skip(
                 "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
                 "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
             )
