@@ -24,7 +24,10 @@ import yaml
 
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
-from dynamo.planner.config.backend_components import MockerComponentName
+from dynamo.planner.config.backend_components import (
+    MockerComponentName,
+    VllmComponentName,
+)
 from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import (
     PlannerConfig,
@@ -70,15 +73,20 @@ def assemble_final_config(
     best_prefill_config=None,
     best_decode_config=None,
     aic_spec: Optional[AICInterpolationSpec] = None,
+    resolved_backend: Optional[str] = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
     1. **Mocker** — swap the base to the mocker DGD template if enabled.
-    2. **Planner** — inject the Planner service + planner-config ConfigMap.
+    2. **vLLM self-benchmark** — when the resolved backend is vLLM, set
+       ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
+       endpoint is populated at runtime. The planner consumes this as
+       priority 1 of its bootstrap chain, superseding AIC and files.
+    3. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_spec`` is given (rapid mode), it is embedded in the
        planner config so the planner runs AIC interpolation at bootstrap
-       instead of reading profiling NPZ.
-    3. **Profile data** — attach interpolation-data ConfigMap when mocker
+       if the endpoint is unavailable.
+    4. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled.
     """
     if not dgd_config:
@@ -103,7 +111,13 @@ def assemble_final_config(
     else:
         base = dgd_config
 
-    # Steps 2-3: layer features, collecting ConfigMaps
+    # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
+    # the get_perf_metrics endpoint is available to the planner. Mocker
+    # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.
+    if not mocker and resolved_backend == "vllm":
+        enable_vllm_benchmark_mode(base)
+
+    # Steps 3-4: layer features, collecting ConfigMaps
     config_maps: list[dict] = []
 
     if planner:
@@ -125,6 +139,54 @@ def assemble_final_config(
     if config_maps:
         return config_maps + [base]
     return base
+
+
+def _vllm_worker_roles() -> dict[str, str]:
+    """Canonical DGD service name → DYN_BENCHMARK_MODE role.
+
+    Sourced from :class:`VllmComponentName` so we stay in sync with the
+    rest of the planner/profiler if the k8s service names are ever
+    renamed.
+    """
+    return {
+        VllmComponentName.prefill_worker_k8s_name: "prefill",
+        VllmComponentName.decode_worker_k8s_name: "decode",
+        VllmComponentName.agg_worker_k8s_name: "agg",
+    }
+
+
+def enable_vllm_benchmark_mode(config_dict: dict) -> None:
+    """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
+
+    Mutates ``config_dict`` in place. Each recognised worker service
+    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
+    mode matching its role so its startup self-benchmark publishes
+    ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
+
+    Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
+    overrides) the existing entry is replaced with the role-correct value.
+    """
+    services = config_dict.get("spec", {}).get("services", {})
+    for svc_name, mode in _vllm_worker_roles().items():
+        svc = services.get(svc_name)
+        if svc is None:
+            continue
+        main_container = svc.setdefault("extraPodSpec", {}).setdefault(
+            "mainContainer", {}
+        )
+        env_list = main_container.setdefault("env", [])
+        # Strip any existing DYN_BENCHMARK_MODE; append canonical value.
+        env_list[:] = [
+            e
+            for e in env_list
+            if not (isinstance(e, dict) and e.get("name") == "DYN_BENCHMARK_MODE")
+        ]
+        env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
+        logger.info(
+            "Enabled vLLM self-benchmark on service %s (DYN_BENCHMARK_MODE=%s)",
+            svc_name,
+            mode,
+        )
 
 
 def generate_mocker_config(dgdr) -> dict:

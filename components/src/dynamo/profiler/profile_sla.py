@@ -457,6 +457,7 @@ async def run_profile(
             best_prefill_config,
             best_decode_config,
             aic_spec=aic_spec,
+            resolved_backend=resolved_backend,
         )
 
         # --- Apply DGD overrides (user-supplied partial DGD) ---
