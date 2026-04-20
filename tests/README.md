@@ -113,7 +113,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
+| Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
