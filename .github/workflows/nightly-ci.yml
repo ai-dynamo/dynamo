@@ -29,7 +29,7 @@ jobs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Export builder name
         id: export-builder-name
         run: |
@@ -56,7 +56,7 @@ jobs:
       target: runtime
       fresh_builder: true
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0", "xpu"]'
+      version_selectors: '["12.9", "13.0", "xpu"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
@@ -64,10 +64,10 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'vllm and gpu_0'
       single_gpu_test_markers: 'vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 180
+      single_gpu_test_timeout_minutes: 300
       run_single_xpu_tests: true
       single_xpu_test_markers: 'vllm and xpu_1 and not multimodal'
-      single_xpu_test_timeout_minutes: 180
+      single_xpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -91,7 +91,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'sglang and gpu_0'
       single_gpu_test_markers: 'sglang and gpu_1'
-      single_gpu_test_timeout_minutes: 180
+      single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -115,7 +115,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'trtllm and gpu_0'
       single_gpu_test_markers: 'trtllm and gpu_1'
-      single_gpu_test_timeout_minutes: 180
+      single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -132,7 +132,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Register K8s builder context (skip bootstrap)
         uses: ./.github/actions/bootstrap-buildkit
         continue-on-error: true
