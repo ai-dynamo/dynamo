@@ -14,7 +14,7 @@
 #   hybrid models.
 #
 # Dynamo 0.9.1 compatibility notes:
-#   - Change image tags from :1.0.0 to :0.9.1
+#   - Change image tags from :1.0.1 to :0.9.1
 #   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
 #   - With deepseek_r1 parser, enable_thinking: false will not work correctly
 #   - Keep enable_block_reuse: false in both kv_cache_config blocks. Current
