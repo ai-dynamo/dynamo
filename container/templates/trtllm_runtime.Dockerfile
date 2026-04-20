@@ -230,11 +230,15 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
-# Install dynamo, NIXL, and dynamo-specific dependencies
+# Install dynamo, NIXL, and dynamo-specific dependencies.
+# `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
+# install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
+# JIT compilation on sm_100a, where cubins are not pre-compiled).
 ARG ENABLE_KVBM
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
+      pip \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
@@ -252,9 +256,12 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
+# `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
+# install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
+# JIT compilation on sm_100a, where cubins are not pre-compiled).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+    uv pip install pip /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)

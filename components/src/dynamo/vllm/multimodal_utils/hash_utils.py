@@ -6,6 +6,7 @@ from typing import Any, Sequence
 
 import blake3
 import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,10 @@ def image_to_bytes(img: Any) -> bytes:
 
     if isinstance(img, Image.Image | np.ndarray):
         return img.tobytes()
+
+    if isinstance(img, torch.Tensor):
+        # Make sure the bytes are on the CPU
+        return img.cpu().numpy().tobytes()
 
     raise TypeError(f"Unsupported image type for hashing: {type(img)}")
 

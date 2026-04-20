@@ -139,6 +139,15 @@ rules:
 - apiGroups:
   - grove.io
   resources:
+  - podcliques
+  - podcliquescalinggroups
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - grove.io
+  resources:
   - podcliques/scale
   - podcliquescalinggroups/scale
   verbs:
