@@ -120,3 +120,9 @@ curl localhost:8000/v1/chat/completions \
        "messages": [{"role": "user", "content": "Hello!"}],
        "max_tokens": 50}'
 ```
+
+## Next Steps
+
+| | |
+|---|---|
+| [Troubleshooting](../troubleshooting.md) | Common failures and their fixes. |
