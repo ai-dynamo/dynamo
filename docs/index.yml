@@ -42,6 +42,8 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - page: Troubleshooting
+        path: troubleshooting.md
       - page: Glossary
         path: reference/glossary.md
 
