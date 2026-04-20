@@ -45,6 +45,20 @@ def validate_model_path(value: str) -> str:
     return value
 
 
+def _nullable_float(value: str) -> Optional[float]:
+    """Parse a float, or return None for the literal 'None'."""
+    if value is None or value == "None":
+        return None
+    return float(value)
+
+
+def _nullable_int(value: str) -> Optional[int]:
+    """Parse an int, or return None for the literal 'None'."""
+    if value is None or value == "None":
+        return None
+    return int(value)
+
+
 class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
@@ -330,38 +344,37 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--active-decode-blocks-threshold",
             env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-            default=None,
+            default=1.0,
             help=(
-                "Threshold percentage (0.0-1.0) for determining when a worker is considered busy "
-                "based on KV cache block utilization. If not set, blocks-based busy detection is disabled. "
-                "Default: unset (check disabled)."
+                "Threshold fraction (0.0-1.0) of KV cache block utilization above which a worker "
+                "is considered busy. Pass 'None' on the CLI to disable this check. Default: 1.0."
             ),
-            arg_type=float,
+            arg_type=_nullable_float,
         )
         add_argument(
             g,
             flag_name="--active-prefill-tokens-threshold",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=None,
+            default=10_000_000,
             help=(
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. If not set, this check is disabled. "
-                "Uses OR logic with --active-prefill-tokens-threshold-frac. Default: unset (check disabled)."
+                "threshold, the worker is marked as busy. Pass 'None' on the CLI to disable this "
+                "check. Uses OR logic with --active-prefill-tokens-threshold-frac. Default: 10000000."
             ),
-            arg_type=int,
+            arg_type=_nullable_int,
         )
         add_argument(
             g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=None,
+            default=10.0,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. If not set, this check is "
-                "disabled. Uses OR logic with --active-prefill-tokens-threshold. Default: unset (check disabled)."
+                "active_prefill_tokens > frac * max_num_batched_tokens. Pass 'None' on the CLI to "
+                "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 10.0."
             ),
-            arg_type=float,
+            arg_type=_nullable_float,
         )
         add_argument(
             g,
