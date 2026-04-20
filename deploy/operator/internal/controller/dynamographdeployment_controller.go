@@ -35,6 +35,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -53,6 +54,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -90,6 +92,8 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
@@ -657,6 +661,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
+
+	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
+	if r.RuntimeConfig.DRAEnabled {
+		for serviceName, component := range dynamoDeployment.Spec.Services {
+			gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
+			claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+				return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
+			}
+		}
+	} else {
+		for _, component := range dynamoDeployment.Spec.Services {
+			if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+			}
+		}
+	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
 	if err != nil {
@@ -1356,18 +1381,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
 	}
 
-	identity := component.Checkpoint.Identity
-
-	checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
-		Model:                identity.Model,
-		BackendFramework:     identity.BackendFramework,
-		DynamoVersion:        identity.DynamoVersion,
-		TensorParallelSize:   identity.TensorParallelSize,
-		PipelineParallelSize: identity.PipelineParallelSize,
-		Dtype:                identity.Dtype,
-		MaxModelLen:          identity.MaxModelLen,
-		ExtraParameters:      identity.ExtraParameters,
-	}
+	checkpointIdentity := *component.Checkpoint.Identity.DeepCopy()
 
 	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
 	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
@@ -1375,7 +1389,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment,
 		component,
 		serviceName,
-		identity.BackendFramework,
+		checkpointIdentity.BackendFramework,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
@@ -1387,6 +1401,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment.Namespace,
 		checkpointIdentity,
 		podTemplate,
+		component.GPUMemoryService,
 	)
 }
 
@@ -1405,10 +1420,14 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, err
 	}
 
-	// Create a copy of the component spec without checkpoint config
-	// The checkpoint job is CREATING the checkpoint, not restoring from one
+	// Create a copy of the component spec stripped of features that buildCheckpointJob
+	// or the checkpoint controller handle independently. GenerateBasePodSpec would
+	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
+	// frontend sidecar) that conflict with the checkpoint path's own setup.
 	componentForJob := component.DeepCopy()
 	componentForJob.Checkpoint = nil
+	componentForJob.GPUMemoryService = nil
+	componentForJob.FrontendSidecar = nil
 
 	// Ensure DYN_NAMESPACE is set for checkpoint job using the same logic as regular pods
 	// This is required for service discovery and distributed coordination

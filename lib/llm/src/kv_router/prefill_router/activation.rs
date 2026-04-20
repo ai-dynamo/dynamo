@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use tokio::sync::oneshot;
@@ -41,6 +42,8 @@ impl PrefillRouter {
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
+            deactivated: std::sync::atomic::AtomicBool::new(false),
+            activated: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -71,6 +74,8 @@ impl PrefillRouter {
             model_name,
             namespace,
             is_eagle,
+            deactivated: std::sync::atomic::AtomicBool::new(false),
+            activated: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Spawn background task to wait for activation
@@ -175,6 +180,7 @@ impl PrefillRouter {
 
         // Set the router (ignore error if already set)
         let _ = self.prefill_router.set(inner_router);
+        self.activated.store(true, Ordering::Release);
 
         tracing::info!(
             router_mode = ?self.router_mode,
@@ -190,5 +196,71 @@ impl PrefillRouter {
         {
             monitor.set_prefill_client(client.clone());
         }
+    }
+
+    // -- Prefill death handling --
+
+    /// Deactivate the prefill router. Called when all prefill workers are removed.
+    /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
+    /// The inner router is preserved so that when workers rejoin (same endpoint/discovery),
+    /// the Client's discovery subscription picks them up automatically.
+    pub fn deactivate(&self) {
+        self.deactivated.store(true, Ordering::Release);
+        tracing::info!(
+            model_name = %self.model_name,
+            namespace = %self.namespace,
+            enforce_disagg = self.enforce_disagg,
+            "Prefill router deactivated (all prefill workers removed)"
+        );
+    }
+
+    /// Reactivate a deactivated router. Called when prefill workers rejoin.
+    /// The inner router's Client re-discovers workers via its discovery subscription.
+    ///
+    /// Note: there is a brief race between flipping `deactivated=false` (making
+    /// `can_serve_requests()` return true) and the Client actually rediscovering
+    /// workers. Requests arriving in this window may fail at prefill resolution.
+    /// This is bounded by discovery propagation time (typically sub-second).
+    ///
+    /// Also note: reactivation reuses the existing inner router built from the
+    /// original endpoint. If prefill rejoins under a different endpoint identity
+    /// (e.g., reconfigured deployment), the stale Client would not discover the
+    /// new workers. This is acceptable for normal restart scenarios where the
+    /// endpoint identity is stable.
+    pub fn reactivate(&self) {
+        self.deactivated.store(false, Ordering::Release);
+        tracing::info!(
+            model_name = %self.model_name,
+            namespace = %self.namespace,
+            "Prefill router reactivated (prefill workers rejoined)"
+        );
+    }
+
+    /// Whether this router is currently deactivated (prefill workers died).
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated.load(Ordering::Acquire)
+    }
+
+    /// Whether this router can serve requests in its current state.
+    /// - !enforce_disagg (aggregated passthrough): always servable unless deactivated
+    /// - enforce_disagg: only servable when prefill has activated AND is not deactivated,
+    ///   so a cold-started strict-disagg model isn't listed before prefill rendezvoused.
+    pub fn can_serve_requests(&self) -> bool {
+        if self.is_deactivated() {
+            return !self.enforce_disagg;
+        }
+
+        if !self.enforce_disagg {
+            return true;
+        }
+
+        self.activated.load(Ordering::Acquire)
+    }
+
+    /// Mark this router as activated for testing purposes.
+    /// In production, `activate()` sets this flag when the inner router is populated.
+    #[cfg(test)]
+    pub(crate) fn mark_activated_for_test(&self) {
+        self.activated.store(true, Ordering::Release);
     }
 }

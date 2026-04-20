@@ -638,7 +638,7 @@ mod tests {
             &self,
             _token_ids: &[TokenIdType],
             _skip_special_tokens: bool,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<traits::DecodeResult> {
             Err(anyhow::anyhow!(
                 "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
             ))

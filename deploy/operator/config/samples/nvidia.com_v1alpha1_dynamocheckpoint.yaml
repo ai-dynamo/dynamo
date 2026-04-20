@@ -27,6 +27,10 @@ spec:
     dtype: "bfloat16"
     maxModelLen: 2048
 
+  # Optional: enable GMS-specific checkpoint capture and restore helpers.
+  gpuMemoryService:
+    enabled: false
+
   # Job configuration for checkpoint creation
   job:
     activeDeadlineSeconds: 3600

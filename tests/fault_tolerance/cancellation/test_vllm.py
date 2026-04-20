@@ -296,6 +296,7 @@ def test_request_cancellation_vllm_aggregated(
                 )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2606")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2

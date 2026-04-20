@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
@@ -47,15 +47,23 @@ pub struct WorkerKvQueryRequest {
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,
-    /// End event ID (inclusive). If `None`, returns up to newest available.
+    /// End event ID (inclusive). Used for validation and `TooNew` responses.
+    /// Successful buffer-backed recovery may still return through the current
+    /// newest buffered event.
     pub end_event_id: Option<u64>,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WorkerKvQueryResponse {
-    /// Events served from the circular buffer (with original event IDs)
-    Events(Vec<RouterEvent>),
+    /// Events served from the circular buffer (with original event IDs),
+    /// always covering the requested `start_event_id` through the current
+    /// buffered tail. `last_event_id` is taken from the same buffer snapshot
+    /// and should be used as the recovery watermark after applying the batch.
+    Events {
+        events: Vec<RouterEvent>,
+        last_event_id: u64,
+    },
     /// Full tree dump (with synthetic 0-indexed event IDs).
     /// Includes `last_event_id`: the newest real event ID in the worker's buffer
     /// at the time of the dump, so the caller can set its tracking cursor correctly.
@@ -289,6 +297,8 @@ pub enum WorkerTask {
     RemoveWorker(WorkerId),
     /// Remove a single dp_rank for a worker.
     RemoveWorkerDpRank(WorkerId, DpRank),
+    /// Best-effort maintenance task for shared-state backends.
+    CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
     Terminate,
 }
@@ -298,29 +308,4 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShardedMatchRequest {
-    pub(super) sequence: Vec<LocalBlockHash>,
-    pub(super) early_exit: bool,
-    pub(super) resp: mpsc::Sender<OverlapScores>,
-    #[cfg(feature = "bench")]
-    pub(super) created_at: Instant,
-}
-
-impl ShardedMatchRequest {
-    pub(super) fn new(
-        sequence: Vec<LocalBlockHash>,
-        early_exit: bool,
-        resp: mpsc::Sender<OverlapScores>,
-    ) -> Self {
-        Self {
-            sequence,
-            early_exit,
-            resp,
-            #[cfg(feature = "bench")]
-            created_at: Instant::now(),
-        }
-    }
 }

@@ -39,6 +39,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
+| `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
 ### Header Overrides
 
@@ -129,6 +130,31 @@ Backend details:
 }
 ```
 
+## Session Control
+
+`session_control` enables subagent KV isolation with sticky routing. The router uses `session_id` to keep a session on the same worker and can issue `open` / `close` lifecycle RPCs around streaming sessions.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
+| `session_control.action` | `string` | omitted | Optional lifecycle action: `"open"` or `"close"`. |
+| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Only used with `action: "open"`. |
+
+```json
+{
+    "nvext": {
+        "session_control": {
+            "session_id": "subagent-1",
+            "action": "open",
+            "timeout": 300
+        }
+    }
+}
+```
+
+Requires `--router-mode=kv` on the frontend. Session control activates automatically when requests carry `nvext.session_control`. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
+
+
 ## Response Extensions
 
 When the client requests response metadata via `extra_fields`, the response includes an `nvext` object with the requested fields:
@@ -163,5 +189,5 @@ When the client requests response metadata via `extra_fields`, the response incl
 | Document | Description |
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
-| [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling and eviction policies |
+| [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |

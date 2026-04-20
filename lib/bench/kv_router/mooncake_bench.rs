@@ -7,9 +7,7 @@ use common::*;
 
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
-};
+use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
     ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
@@ -25,13 +23,6 @@ use tokio_util::sync::CancellationToken;
 enum IndexerArgs {
     /// Single-threaded radix tree indexer.
     RadixTree {},
-
-    /// Sharded radix tree indexer that partitions workers across independent shards.
-    RadixTreeSharded {
-        /// Number of independent shards to split workers across.
-        #[clap(long, default_value = "4")]
-        num_shards: usize,
-    },
 
     /// Position-based nested map indexer with jump search.
     NestedMap {
@@ -68,12 +59,6 @@ impl IndexerArgs {
             IndexerArgs::RadixTree {} => {
                 Arc::new(KvIndexer::new(cancel_token, block_size, metrics))
             }
-            IndexerArgs::RadixTreeSharded { num_shards } => Arc::new(KvIndexerSharded::new(
-                cancel_token,
-                num_shards,
-                block_size,
-                metrics,
-            )),
             IndexerArgs::NestedMap {
                 jump_size,
                 num_event_workers,
@@ -115,7 +100,6 @@ impl IndexerArgs {
         let nw = num_event_workers;
         let indexer_args = match name {
             "radix-tree" => IndexerArgs::RadixTree {},
-            "radix-tree-sharded" => IndexerArgs::RadixTreeSharded { num_shards: 4 },
             "nested-map" => IndexerArgs::NestedMap {
                 jump_size: 8,
                 num_event_workers: nw,
@@ -127,7 +111,7 @@ impl IndexerArgs {
                 num_event_workers: nw,
             },
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
+                "Unknown indexer '{}'. Valid names: radix-tree, \
                  nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed",
                 name
             ),
@@ -148,14 +132,15 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree,
+    /// radix-tree, nested-map, concurrent-radix-tree,
     /// concurrent-radix-tree-compressed.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map, concurrent-radix-tree).
-    /// Ignored by radix-tree and radix-tree-sharded.
+    /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
+    /// concurrent-radix-tree-compressed).
+    /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
 
@@ -555,7 +540,6 @@ async fn main() -> anyhow::Result<()> {
     let indexer_names: Vec<String> = if args.compare.is_empty() {
         let name = match args.get_indexer() {
             IndexerArgs::RadixTree {} => "radix-tree",
-            IndexerArgs::RadixTreeSharded { .. } => "radix-tree-sharded",
             IndexerArgs::NestedMap { .. } => "nested-map",
             IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
             IndexerArgs::ConcurrentRadixTreeCompressed { .. } => "concurrent-radix-tree-compressed",

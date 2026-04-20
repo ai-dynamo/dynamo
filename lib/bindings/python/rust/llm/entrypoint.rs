@@ -324,6 +324,7 @@ pub(crate) struct EntrypointArgs {
     namespace_prefix: Option<String>,
     is_prefill: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
     aic_perf_config: Option<AicPerfConfig>,
 }
@@ -332,7 +333,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -355,6 +356,7 @@ impl EntrypointArgs {
         namespace_prefix: Option<String>,
         is_prefill: bool,
         migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
         aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
@@ -404,6 +406,7 @@ impl EntrypointArgs {
             namespace_prefix,
             is_prefill,
             migration_limit,
+            migration_max_seq_len,
             chat_engine_factory,
             aic_perf_config,
         })
@@ -438,6 +441,7 @@ pub fn make_engine<'p>(
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .migration_limit(Some(args.migration_limit))
+        .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port)

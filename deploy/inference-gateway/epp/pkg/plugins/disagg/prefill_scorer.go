@@ -120,7 +120,6 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	}
 
 	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
-	prefillDpRank := strconv.FormatUint(uint64(result.DpRank), 10)
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
 		"prefillWorkerID", prefillWorkerID,
 		"prefillDpRank", result.DpRank,
@@ -134,7 +133,11 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		req.Headers = map[string]string{}
 	}
 	req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
-	req.Headers[PrefillDpRankHeader] = prefillDpRank
+	if result.DpRank != dynscorer.UnsetDpRank {
+		req.Headers[PrefillDpRankHeader] = strconv.FormatUint(uint64(result.DpRank), 10)
+	} else {
+		delete(req.Headers, PrefillDpRankHeader)
+	}
 
 	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,
 	// and the FFI router's internal selection is authoritative.

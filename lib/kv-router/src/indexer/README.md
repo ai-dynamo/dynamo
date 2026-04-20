@@ -17,7 +17,6 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `concurrent_radix_tree.rs` | `ConcurrentRadixTree` — thread-safe variant with `Arc<RwLock<Block>>` nodes and `DashMap` lookup |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
 | `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTree` or `PositionalIndexer` |
-| `sharded.rs` | `KvIndexerSharded` — N independent `RadixTree` shards each in its own OS thread, scatter-gather for matches |
 | `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
 | `pruning.rs` | `PruneManager` — TTL-based expiration and size-based pruning via `BinaryHeap<BlockEntry>` |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |

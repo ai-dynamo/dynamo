@@ -133,6 +133,43 @@ If `prefill_pool_mapping = [[0, 1], [0, 1]]` and `ttft_resolution=2`:
 - High ISL + Low TTFT target → pool 0
 - High ISL + High TTFT target → pool 1
 
+### Priority-Based Pool Override
+
+Both prefill and decode strategies support optional `priority_overrides` rules.
+When a request carries a priority value (from `nvext.agent_hints.priority`), the
+global router evaluates the override rules **after** the grid lookup. The first
+rule whose `[min_priority, max_priority]` range contains the request priority
+wins, and the request is routed to that rule's `target_pool` instead of the
+grid result. If no rule matches (or no priority is present), the grid result
+is used as normal.
+
+This is useful for straggler mitigation in RL workloads: the RL framework can
+tag slow requests with a high priority, and the global router redirects them to
+a dedicated min-latency pool.
+
+```jsonc
+"priority_overrides": [
+    {
+        "min_priority": 10,     // inclusive lower bound
+        "max_priority": 100,    // inclusive upper bound
+        "target_pool": 1        // pool index to route to
+    }
+]
+```
+
+Priority is set by the client via the NVIDIA OpenAI extension:
+
+```json
+{
+    "messages": [...],
+    "nvext": {
+        "agent_hints": {
+            "priority": 50
+        }
+    }
+}
+```
+
 ### Passing SLA Targets
 
 Clients can pass TTFT and ITL targets via `extra_args` in the request:

@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo import prometheus_names
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.prometheus import register_embedding_cache_metrics
 from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -46,6 +47,14 @@ async def init_multimodal_encode_worker(
     ).client()
 
     handler = MultimodalEncodeWorkerHandler(config, pd_worker_client, shutdown_event)
+
+    if handler._embedding_cache is not None:
+        register_embedding_cache_metrics(
+            endpoint=generate_endpoint,
+            cache=handler._embedding_cache,
+            model_name=server_args.served_model_name,
+            component_name=dynamo_args.component,
+        )
 
     await pd_worker_client.wait_for_instances()
 

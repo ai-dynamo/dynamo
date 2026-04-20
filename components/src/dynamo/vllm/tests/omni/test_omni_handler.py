@@ -7,6 +7,8 @@ import pytest
 
 try:
     from PIL import Image
+    from vllm.sampling_params import SamplingParams
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
@@ -25,7 +27,7 @@ pytestmark = [
 ]
 
 
-def _make_handler():
+def _make_handler(stage_types=("diffusion",)):
     with patch(
         "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
     ):
@@ -36,6 +38,22 @@ def _make_handler():
     config.served_model_name = None
     config.output_modalities = ["text"]
     handler.config = config
+
+    defaults = []
+    for st in stage_types:
+        if st == "diffusion":
+            defaults.append(OmniDiffusionSamplingParams())
+        else:
+            llm_default = MagicMock(spec=SamplingParams)
+            llm_default.clone.return_value = SamplingParams()
+            defaults.append(llm_default)
+
+    engine_client = MagicMock()
+    engine_client.default_sampling_params_list = defaults
+    engine_client.engine.get_stage_metadata.side_effect = lambda i: {
+        "stage_type": stage_types[i]
+    }
+    handler.engine_client = engine_client
     return handler
 
 
@@ -165,6 +183,36 @@ class TestI2VEngineInputs:
         empty = VideoNvExt()
         assert empty.boundary_ratio is None
         assert empty.guidance_scale_2 is None
+
+
+class TestBuildSamplingParamsList:
+    def test_single_diffusion_stage(self):
+        handler = _make_handler(stage_types=("diffusion",))
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert len(result) == 1
+        assert result[0] is sp
+
+    def test_llm_then_diffusion(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert len(result) == 2
+        assert isinstance(result[0], SamplingParams)
+        assert result[1] is sp
+
+    def test_fallback_when_defaults_empty(self):
+        handler = _make_handler()
+        handler.engine_client.default_sampling_params_list = []
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert result == [sp]
+
+    def test_llm_default_is_cloned(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        sp = OmniDiffusionSamplingParams()
+        handler._build_sampling_params_list(sp)
+        handler.engine_client.default_sampling_params_list[0].clone.assert_called_once()
 
 
 class TestBuildOriginalPrompt:

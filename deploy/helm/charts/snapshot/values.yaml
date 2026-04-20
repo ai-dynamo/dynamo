@@ -137,8 +137,8 @@ config:
   restore:
     # Path to the nsrestore binary in the placeholder image
     nsRestorePath: /usr/local/bin/nsrestore
-    # Maximum seconds to wait for a restored pod to become Ready (0 = no timeout)
-    restoreReadyTimeoutSeconds: 0
+    # Maximum seconds to allow a restore attempt before snapshot-agent marks it failed
+    restoreTimeoutSeconds: 7200
 
   criu:
     # Path to the criu binary

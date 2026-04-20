@@ -17,6 +17,7 @@ if not torch.cuda.is_available():
         "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
         allow_module_level=True,
     )
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
@@ -375,6 +376,139 @@ class TestHandleCancellationAbortToggle:
 
         await handler._handle_cancellation(generation_result, context)
 
+        generation_result.abort.assert_not_called()
+
+
+class TestDeferredAbortGuard:
+    """Tests for _DeferredAbort in disaggregated decode cancellation.
+
+    In disaggregated serving, decode abort must be deferred until the first
+    generation result is received (indicating KV cache transfer is complete).
+    _DeferredAbort wraps GenerationResult.abort() to spawn a background task
+    that waits for the first token before calling real abort.
+    """
+
+    def _make_handler(self, disable_request_abort: bool = False) -> HandlerBase:
+        config = MagicMock()
+        config.disable_request_abort = disable_request_abort
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    @pytest.mark.asyncio
+    async def test_deferred_abort_before_first_token(self):
+        """abort() before first token should NOT call real abort immediately."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        # Make generation_result iterable (background task will try to read it)
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        never_resolve = asyncio.get_event_loop().create_future()
+        generation_result.__anext__ = MagicMock(return_value=never_resolve)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()
+
+        # Real abort should NOT have been called — deferred to background task
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deferred_abort_after_first_token(self):
+        """abort() after signal_first_token should call real abort immediately."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        guard = _DeferredAbort(generation_result)
+
+        guard.signal_first_token()
+        guard.abort()
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_task_completes(self):
+        """Background task should call abort after first result from generation_result."""
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            val = await result_queue.get()
+            if val is StopAsyncIteration:
+                raise StopAsyncIteration
+            return val
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()  # Spawns background task
+
+        generation_result.abort.assert_not_called()
+
+        # Simulate first result arriving (KV transfer complete)
+        await result_queue.put("first_token")
+        await asyncio.sleep(0.05)  # Let background task run
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_guard_in_non_disagg_mode(self):
+        """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-no-guard"
+
+        # Pass real generation_result (no wrapper) — non-disagg path
+        await handler._handle_cancellation(generation_result, context)
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_shutdown_calls_abort_directly(self):
+        """Shutdown calls abort on whatever is passed (wrapper or real), immediately."""
+        handler = self._make_handler(disable_request_abort=False)
+        handler.shutdown_event = asyncio.Event()
+
+        # Pass a _DeferredAbort wrapper — shutdown should still call .abort()
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        guard = _DeferredAbort(generation_result)
+
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-shutdown"
+
+        task = asyncio.create_task(handler._handle_cancellation(guard, context))
+        await asyncio.sleep(0.05)
+
+        # Trigger shutdown
+        handler.shutdown_event.set()
+
+        with pytest.raises(EngineShutdown):
+            await task
+        # Shutdown calls guard.abort() → since no first token, spawns background task
+        # The important thing is EngineShutdown is raised and abort path is entered
+
+    @pytest.mark.asyncio
+    async def test_disable_request_abort_skips_guard(self):
+        """When disable_request_abort=True, abort is never called (guard irrelevant)."""
+        handler = self._make_handler(disable_request_abort=True)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-disabled"
+
+        await handler._handle_cancellation(generation_result, context)
         generation_result.abort.assert_not_called()
 
 

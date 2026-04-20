@@ -14,13 +14,13 @@ import os
 import socket
 from typing import Optional, Tuple, Type, TypeVar
 
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     ErrorResponse,
     HandshakeRequest,
     HandshakeResponse,
 )
 from gpu_memory_service.common.protocol.wire import recv_message_sync, send_message_sync
-from gpu_memory_service.common.types import RequestedLockType
 
 T = TypeVar("T")
 

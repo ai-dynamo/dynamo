@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
+import importlib
 import inspect
 import json
 import logging
+import os
 import random
+import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import (
@@ -23,18 +27,53 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm import (
+    KvEventPublisher,
+    ModelInput,
+    ModelType,
+    WorkerMetricsPublisher,
+    lora_name_to_id,
+    register_llm,
+    unregister_llm,
+)
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
+logger = logging.getLogger(__name__)
+
+# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
+# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
+_lora_manager = None
+
+
+def get_lora_manager():
+    """Get the LoRAManager singleton, initializing it on first call if enabled."""
+    global _lora_manager
+
+    if _lora_manager is not None:
+        return _lora_manager
+
+    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
+        try:
+            from dynamo.common.lora import LoRAManager
+
+            _lora_manager = LoRAManager()
+            logger.info("LoRAManager initialized successfully")
+            return _lora_manager
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
+            )
+
+    return None
+
 
 class SGLangEngineQuiesceController:
     def __init__(self, engine: sgl.Engine):
         self._engine = engine
-        self._quiesced_tags: Optional[list[str]] = None
         self._is_quiesced = False
 
     @property
@@ -55,7 +94,6 @@ class SGLangEngineQuiesceController:
             ReleaseMemoryOccupationReqInput(tags=tags),
             None,
         )
-        self._quiesced_tags = None if tags is None else list(tags)
         self._is_quiesced = True
         return True
 
@@ -68,9 +106,8 @@ class SGLangEngineQuiesceController:
             ResumeMemoryOccupationReqInput,
         )
 
-        request_tags = self._quiesced_tags if tags is None else list(tags)
         await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=request_tags),
+            ResumeMemoryOccupationReqInput(tags=tags),
             None,
         )
         await self._engine.tokenizer_manager.continue_generation(
@@ -79,7 +116,6 @@ class SGLangEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
-        self._quiesced_tags = None
         self._is_quiesced = False
 
 
@@ -135,7 +171,495 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
         pass
 
 
-class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
+class RLMixin:
+    """Mixin providing generic tokenizer_manager passthrough for RL training.
+
+    Requires the host class to have ``self.engine`` with a
+    ``tokenizer_manager`` attribute.
+    """
+
+    engine: sgl.Engine  # provided by BaseWorkerHandler
+
+    def _resolve_arg(self, arg: Any) -> Any:
+        """Resolve a single argument from the generic call body.
+
+        If ``arg`` is a dict with exactly one key starting with ``"io_struct."``,
+        treat it as a typed constructor: import the class from
+        ``sglang.srt.managers.io_struct`` and construct it with the nested kwargs.
+        Otherwise return the value as-is.
+        """
+        if isinstance(arg, dict) and len(arg) == 1:
+            key = next(iter(arg))
+            if isinstance(key, str) and key.startswith("io_struct."):
+                class_name = key[len("io_struct.") :]
+                module = importlib.import_module("sglang.srt.managers.io_struct")
+                cls = getattr(module, class_name)
+                return cls(**arg[key])
+        return arg
+
+    def _normalize_result(self, result: Any) -> dict:
+        """Convert a tokenizer_manager method return value to a JSON-safe dict."""
+        if result is None:
+            return {"status": "ok"}
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                return {"success": result[0], "message": result[1]}
+            if len(result) == 3:
+                return {
+                    "success": result[0],
+                    "message": result[1],
+                    "num_paused_requests": result[2],
+                }
+        if isinstance(result, list):
+            return {
+                "result": [
+                    dataclasses.asdict(item)
+                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                    else item
+                    for item in result
+                ]
+            }
+        if dataclasses.is_dataclass(result) and not isinstance(result, type):
+            return dataclasses.asdict(result)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, (str, int, float, bool)):
+            return {"result": result}
+        return {"result": str(result)}
+
+    async def call_tokenizer_manager(self, body: dict) -> dict:
+        """Generic passthrough to any tokenizer_manager method.
+
+        Body format::
+
+            {
+                "method": "method_name",
+                "args": [arg1, arg2, ...],
+                "kwargs": {"key": value, ...}
+            }
+
+        Each element in args/kwargs is either a plain value or a typed
+        constructor ``{"io_struct.ClassName": {kwargs}}``.
+        """
+        method_name = body["method"]
+        raw_args = body.get("args", [])
+        raw_kwargs = body.get("kwargs", {})
+
+        args = [self._resolve_arg(a) for a in raw_args]
+        kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
+
+        tm = self.engine.tokenizer_manager
+        # Ensure the handle_loop task is running so communicator responses
+        # are received.  Several tokenizer_manager methods call this
+        # internally, but not all of them (e.g. flush_cache does not).
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+
+        method = getattr(tm, method_name)
+        result = await method(*args, **kwargs)
+        return self._normalize_result(result)
+
+    def register_rl_engine_routes(self, runtime) -> None:
+        """Register RL-specific engine routes.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route(
+            "call_tokenizer_manager", self.call_tokenizer_manager
+        )
+
+
+class LoraMixin:
+    """Mixin providing LoRA adapter load/unload/list management.
+
+    Requires the host class to have ``self.engine``, ``self.config``,
+    and ``self.generate_endpoint``.
+    """
+
+    engine: sgl.Engine  # provided by BaseWorkerHandler
+    config: Config
+    generate_endpoint: Any
+
+    def _init_lora_tracking(self) -> None:
+        """Initialize LoRA tracking state. Call from host __init__."""
+        self.lora_id_for_name: dict[str, int] = {}
+        self.lora_name_to_path: dict[str, str] = {}
+        # Per-LoRA locks to prevent concurrent load/unload for the same adapter.
+        # Matches the vLLM pattern (handlers.py) for cross-backend consistency.
+        self._lora_load_locks: dict[str, asyncio.Lock] = {}
+        self._lora_load_locks_guard = threading.Lock()
+
+    def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
+        """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
+        with self._lora_load_locks_guard:
+            lock = self._lora_load_locks.get(lora_name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._lora_load_locks[lora_name] = lock
+            return lock
+
+    def _resolve_lora(self, request: Dict[str, Any]) -> Optional[str]:
+        """Return the LoRA name to pass as ``lora_path`` to SGLang, or *None*.
+
+        SGLang's lora_registry and lora_ref_cache are keyed by lora_name,
+        so we pass the name (not the filesystem path) as lora_path.
+        """
+        model_name = request.get("model")
+        if model_name and model_name in self.lora_id_for_name:
+            return model_name
+        return None
+
+    async def load_lora(self, request: Optional[Dict[str, Any]] = None):
+        """
+        Load a LoRA adapter dynamically into the SGLang engine.
+
+        Request format:
+        {
+            "lora_name": str,
+            "source": {
+                "uri": str  # e.g., "s3://bucket/path" or "file:///path"
+            }
+        }
+
+        This method is idempotent - concurrent calls for the same LoRA will be
+        serialized and only one load operation will happen.
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' and 'source.uri'",
+                }
+                return
+
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            source = request.get("source")
+            if not source or not isinstance(source, dict):
+                yield {
+                    "status": "error",
+                    "message": "'source' object is required in request",
+                }
+                return
+
+            lora_uri = source.get("uri")
+            if not lora_uri:
+                yield {
+                    "status": "error",
+                    "message": "'source.uri' is required in request",
+                }
+                return
+
+            # Use LoRAManager to download from URI
+            lora_manager = get_lora_manager()
+            if lora_manager is None:
+                yield {
+                    "status": "error",
+                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+                }
+                return
+
+            # Serialize load/unload operations per lora_name.
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                try:
+                    # Idempotency check after acquiring lock — another concurrent
+                    # request may have loaded this LoRA while we waited.
+                    if lora_name in self.lora_id_for_name:
+                        lora_id = self.lora_id_for_name[lora_name]
+                        logger.info(
+                            f"LoRA adapter already loaded (concurrent request completed): "
+                            f"{lora_name} with ID {lora_id}"
+                        )
+                        yield {
+                            "status": "success",
+                            "message": f"LoRA adapter '{lora_name}' already loaded",
+                            "lora_name": lora_name,
+                            "lora_id": lora_id,
+                        }
+                        return
+
+                    logger.info(
+                        f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
+                    )
+                    download_result = await lora_manager.download_lora(lora_uri)
+
+                    if download_result["status"] != "success":
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                        }
+                        return
+
+                    lora_path = download_result["local_path"]
+
+                    # Generate deterministic ID from lora_name
+                    lora_id = lora_name_to_id(lora_name)
+
+                    # Add the LoRA to the SGLang engine via tokenizer_manager
+                    if (
+                        hasattr(self.engine, "tokenizer_manager")
+                        and self.engine.tokenizer_manager
+                    ):
+                        from sglang.srt.managers.io_struct import (
+                            LoadLoRAAdapterReqInput,
+                        )
+
+                        load_req = LoadLoRAAdapterReqInput(
+                            lora_name=lora_name,
+                            lora_path=lora_path,
+                        )
+                        load_result = (
+                            await self.engine.tokenizer_manager.load_lora_adapter(
+                                load_req
+                            )
+                        )
+                        if not load_result.success:
+                            yield {
+                                "status": "error",
+                                "message": f"SGLang failed to load LoRA adapter '{lora_name}': {load_result.error_message}",
+                            }
+                            return
+                    else:
+                        yield {
+                            "status": "error",
+                            "message": "SGLang engine does not support LoRA loading (tokenizer_manager not available)",
+                        }
+                        return
+
+                    # Track the LoRA
+                    self.lora_id_for_name[lora_name] = lora_id
+                    self.lora_name_to_path[lora_name] = lora_path
+                    logger.info(
+                        f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    )
+
+                    # Publish LoRA as a ModelDeploymentCard
+                    if self.generate_endpoint is not None and self.config is not None:
+                        try:
+                            user_data = {
+                                "lora_adapter": True,
+                                "lora_id": lora_id,
+                            }
+
+                            await register_llm(
+                                model_input=ModelInput.Tokens,
+                                model_type=ModelType.Chat | ModelType.Completions,
+                                endpoint=self.generate_endpoint,
+                                model_path=self.config.server_args.model_path,
+                                kv_cache_block_size=self.config.server_args.page_size,
+                                user_data=user_data,
+                                lora_name=lora_name,
+                                base_model_path=self.config.server_args.model_path,
+                            )
+                            logger.info(
+                                f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Failed to publish LoRA {lora_name} ModelDeploymentCard"
+                            )
+                            # Rollback: remove the LoRA from the engine
+                            try:
+                                from sglang.srt.managers.io_struct import (
+                                    UnloadLoRAAdapterReqInput,
+                                )
+
+                                rollback_req = UnloadLoRAAdapterReqInput(
+                                    lora_name=lora_name
+                                )
+                                await self.engine.tokenizer_manager.unload_lora_adapter(
+                                    rollback_req
+                                )
+                                self.lora_id_for_name.pop(lora_name, None)
+                                self.lora_name_to_path.pop(lora_name, None)
+                            except Exception:
+                                logger.exception(f"Failed to rollback LoRA {lora_name}")
+
+                            yield {
+                                "status": "error",
+                                "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                            return
+
+                    yield {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+                finally:
+                    # Avoid lock-map growth on failed loads: if this attempt did
+                    # not leave the LoRA loaded, remove the lock entry.
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.lora_id_for_name
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
+        except Exception as e:
+            logger.exception("Failed to load LoRA adapter")
+            yield {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, request: Optional[Dict[str, Any]] = None):
+        """
+        Unload a LoRA adapter dynamically from the SGLang engine.
+
+        Request format:
+        {
+            "lora_name": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' field",
+                }
+                return
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            # Serialize load/unload operations per lora_name.
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                try:
+                    # Check after acquiring lock — a concurrent unload may have
+                    # already removed this LoRA while we waited.
+                    if lora_name not in self.lora_id_for_name:
+                        yield {
+                            "status": "error",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
+                        }
+                        return
+
+                    lora_id = self.lora_id_for_name[lora_name]
+                    lora_path = self.lora_name_to_path.get(lora_name)
+
+                    # Unload from SGLang engine
+                    if (
+                        hasattr(self.engine, "tokenizer_manager")
+                        and self.engine.tokenizer_manager
+                    ):
+                        from sglang.srt.managers.io_struct import (
+                            UnloadLoRAAdapterReqInput,
+                        )
+
+                        unload_req = UnloadLoRAAdapterReqInput(lora_name=lora_name)
+                        unload_result = (
+                            await self.engine.tokenizer_manager.unload_lora_adapter(
+                                unload_req
+                            )
+                        )
+                        if not unload_result.success:
+                            yield {
+                                "status": "error",
+                                "message": f"SGLang failed to unload LoRA adapter '{lora_name}': {unload_result.error_message}",
+                            }
+                            return
+                    else:
+                        yield {
+                            "status": "error",
+                            "message": "SGLang engine does not support LoRA unloading (tokenizer_manager not available)",
+                        }
+                        return
+
+                    # Remove from tracking
+                    del self.lora_id_for_name[lora_name]
+                    self.lora_name_to_path.pop(lora_name, None)
+
+                    # Unregister from discovery
+                    if self.generate_endpoint is not None:
+                        try:
+                            await unregister_llm(
+                                endpoint=self.generate_endpoint,
+                                lora_name=lora_name,
+                            )
+                            logger.info(
+                                f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Failed to unregister LoRA {lora_name} ModelDeploymentCard"
+                            )
+                            # Rollback: re-add the LoRA to engine
+                            try:
+                                from sglang.srt.managers.io_struct import (
+                                    LoadLoRAAdapterReqInput,
+                                )
+
+                                rollback_req = LoadLoRAAdapterReqInput(
+                                    lora_name=lora_name,
+                                    lora_path=lora_path,
+                                )
+                                await self.engine.tokenizer_manager.load_lora_adapter(
+                                    rollback_req
+                                )
+                                self.lora_id_for_name[lora_name] = lora_id
+                                if lora_path:
+                                    self.lora_name_to_path[lora_name] = lora_path
+                            except Exception:
+                                logger.exception(f"Failed to rollback LoRA {lora_name}")
+
+                            yield {
+                                "status": "error",
+                                "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                            return
+
+                    logger.info(
+                        f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    )
+                    yield {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+                finally:
+                    # Remove lock entry once the LoRA is not loaded (or never was).
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.lora_id_for_name
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
+        except Exception as e:
+            logger.exception("Failed to unload LoRA adapter")
+            yield {"status": "error", "message": str(e)}
+
+    async def list_loras(self, _request: Optional[Dict[str, Any]] = None):
+        """
+        List all loaded LoRA adapters.
+        Returns a dictionary of lora_name -> lora_id mappings.
+        """
+        try:
+            loras = dict(self.lora_id_for_name)
+            yield {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.exception("Failed to list LoRA adapters")
+            yield {"status": "error", "message": str(e)}
+
+
+class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -195,6 +719,9 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             SGLangEngineQuiesceController(engine) if engine is not None else None
         )
         self._quiesce_lock = asyncio.Lock()
+
+        # LoRA tracking (via LoraMixin)
+        self._init_lora_tracking()
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
@@ -381,6 +908,78 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
+    async def open_session(self, body: dict) -> dict:
+        """Open a streaming session for subagent KV isolation.
+
+        Args:
+            body: Dict with "session_id", optional "timeout" (default 120),
+                  and optional "capacity_of_str_len" (default 65536).
+        """
+        from sglang.srt.managers.io_struct import OpenSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        timeout = body.get("timeout", 120)
+        capacity = body.get("capacity_of_str_len", 65536)
+        try:
+            obj = OpenSessionReqInput(
+                capacity_of_str_len=capacity,
+                session_id=session_id,
+                streaming=True,
+                timeout=float(timeout),
+            )
+            result = await self.engine.tokenizer_manager.open_session(obj, None)
+            if result is None:
+                return {
+                    "status": "ok",
+                    "session_id": session_id,
+                    "message": "Session already exists",
+                }
+            return {"status": "ok", "session_id": result}
+        except Exception as e:
+            logging.error(f"Failed to open session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def close_session(self, body: dict) -> dict:
+        """Close a streaming session and release its KV resources.
+
+        Args:
+            body: Dict with "session_id".
+        """
+        from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        try:
+            obj = CloseSessionReqInput(session_id=session_id)
+            await self.engine.tokenizer_manager.close_session(obj, None)
+            return {"status": "ok", "session_id": session_id}
+        except Exception as e:
+            logging.error(f"Failed to close session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def session_control(self, request, context=None):
+        """Service mesh endpoint for session lifecycle operations.
+
+        Args:
+            request: Dict with "action" key ("open_session" or "close_session")
+                     and action-specific parameters.
+            context: Optional Dynamo context (unused but required by protocol).
+
+        Yields:
+            Single dict with operation result.
+        """
+        action = request.get("action")
+        if action == "open_session":
+            result = await self.open_session(request)
+        elif action == "close_session":
+            result = await self.close_session(request)
+        else:
+            result = {"status": "error", "message": f"Unknown action: {action}"}
+        yield result
+
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -410,6 +1009,10 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
         )
+        if getattr(self.config, "dynamo_args", None) and getattr(
+            self.config.dynamo_args, "enable_rl", False
+        ):
+            self.register_rl_engine_routes(runtime)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -437,6 +1040,18 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        if not getattr(self.config.server_args, "enable_streaming_session", False):
+            return {}
+        routing = request.get("routing") or {}
+        session_control = routing.get("session_control") or {}
+        session_id = session_control.get("session_id")
+        if not session_id:
+            return {}
+
+        # Streaming sessions only need the session identifier on each turn.
+        return {"session_params": {"id": session_id}}
 
     @staticmethod
     def _get_guided_decoding_params(
