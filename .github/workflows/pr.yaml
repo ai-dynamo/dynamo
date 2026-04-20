@@ -214,10 +214,13 @@ jobs:
     needs: [changed-files]
     runs-on: ubuntu-slim
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    outputs:
+      container_name_tmp: ${{ steps.hello.outputs.container_name_tmp }}
     steps:
       - name: hello
+        id: hello
         run: |
-          echo "hello"
+          echo "container_name_tmp=d94b350d2cedbd0a5b789cc6983e9ac7827aea8c" >> $GITHUB_OUTPUT
 
   # sglang-dev-build:
   #   name: sglang-dev
@@ -330,6 +333,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
+      container_name_tmp: ${{ needs.trtllm-build.outputs.container_name_tmp }}
     secrets: inherit
 
   # sglang-multi-gpu-test:
