@@ -33,7 +33,12 @@ on:
         type: number
         default: 60
       extra_tags:
-        description: 'Tag prefixes (newline-separated); {framework}-{target}[-cuda{N}] suffix is auto-appended to each'
+        description: 'Additional tags (newline-separated full tag values)'
+        required: false
+        type: string
+        default: ''
+      extra_test_tags:
+        description: 'Tag prefixes for the test image (newline-separated); {framework}-{target}[-cuda{N}] suffix is auto-appended to each'
         required: false
         type: string
         default: ''
@@ -177,14 +182,13 @@ jobs:
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
-          TAG_BUILDER: ${{ steps.calculate-target-tag.outputs.tag_builder }}
         run: |
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
           if [ -n "$EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
-                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}-${TAG_BUILDER}"$'\n'
+                RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
           fi
@@ -263,6 +267,8 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          EXTRA_TEST_TAGS: ${{ inputs.extra_test_tags }}
+          TAG_BUILDER: ${{ steps.calculate-target-tag.outputs.tag_builder }}
         run: |
           PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
           CACHE_TAG="test-${PLAIN_TAG}-cache"
@@ -286,6 +292,15 @@ jobs:
             NO_CACHE_ARG="--no-cache"
           fi
 
+          EXTRA_TAG_ARGS=""
+          if [ -n "$EXTRA_TEST_TAGS" ]; then
+            while IFS= read -r tag_prefix; do
+              if [ -n "$tag_prefix" ]; then
+                EXTRA_TAG_ARGS+="-t ${ECR_HOSTNAME}/ai-dynamo/dynamo:${tag_prefix}-${TAG_BUILDER} "
+              fi
+            done <<< "$EXTRA_TEST_TAGS"
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
@@ -294,7 +309,8 @@ jobs:
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
             ${CACHE_ARGS} \
-            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
+            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} \
+            ${EXTRA_TAG_ARGS} .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
