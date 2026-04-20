@@ -23,7 +23,7 @@ def image_to_bytes(img: Any) -> bytes:
 
     if isinstance(img, torch.Tensor):
         # Make sure the bytes are on the CPU
-        return img.cpu().tobytes()
+        return img.cpu().numpy().tobytes()
 
     raise TypeError(f"Unsupported image type for hashing: {type(img)}")
 
