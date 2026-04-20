@@ -100,6 +100,19 @@ def run_dynamo_headless(config: Config) -> None:
             configure_gms_lock_mode(config.engine_args)
             validate_cudagraph_mode(config.engine_args)
 
+    if config.engine_args.load_format == "mx":
+        try:
+            from modelexpress import register_modelexpress_loaders
+
+            if config.model_express_url:
+                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+            register_modelexpress_loaders()
+        except ImportError as e:
+            raise ImportError(
+                f"ModelExpress package required for --load-format={config.engine_args.load_format}. "
+                "Install with: pip install modelexpress"
+            ) from e
+
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
     from vllm.entrypoints.cli.serve import run_headless
