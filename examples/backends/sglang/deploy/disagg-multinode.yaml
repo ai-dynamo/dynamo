@@ -21,7 +21,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: my-registry/sglang-runtime:1.0.1
     decode:
       multinode:
         nodeCount: 2
@@ -33,7 +33,7 @@ spec:
           gpu: "4"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: my-registry/sglang-runtime:1.0.1
           workingDir: /workspace/examples/backends/sglang
           command:
           - python3
@@ -69,7 +69,7 @@ spec:
           gpu: "4"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: my-registry/sglang-runtime:1.0.1
           workingDir: /workspace/examples/backends/sglang
           command:
           - python3

@@ -55,7 +55,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:1.0.1
           workingDir: /workspace/examples/backends/trtllm
           command:
             - python3
@@ -86,7 +86,7 @@ spec:
           #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
           #   Dynamo <  1.1.0: use the backend runtime image
           #     <registry>/tensorrtllm-runtime:<version>.
-          image: my-registry/dynamo-planner:my-tag
+          image: my-registry/dynamo-planner:1.0.1
           ports:
             - name: metrics
               containerPort: 9085
@@ -130,7 +130,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:1.0.1
           workingDir: /workspace/
           command:
             - python3
@@ -156,7 +156,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:1.0.1
           workingDir: /workspace/
           command:
             - python3
