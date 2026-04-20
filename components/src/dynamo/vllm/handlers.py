@@ -2121,4 +2121,5 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # original prompt and sufficient metadata to reconstruct mm embedding
             # as request input.
             return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
-        return None
+        # return empty dict as a hint that no embedding params are needed
+        return {}
