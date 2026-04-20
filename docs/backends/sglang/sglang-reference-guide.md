@@ -52,6 +52,35 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 
 The current supported parser names for both flags are documented in [Tool Calling](../../agents/tool-calling.md#supported-tool-call-parsers) and [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers).
 
+### Runtime Tuning Environment Variables
+
+These environment variables tune handler-process runtime behavior and have no
+command-line equivalent. Applied at the start of `init_decode` / `init_prefill`.
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `DYN_WORKER_DISABLE_GC` | `0` | Disable Python GC on the handler process. See below. |
+
+#### `DYN_WORKER_DISABLE_GC`
+
+Under high concurrency (thousands of in-flight streaming coroutines), Python's
+generational garbage collector can pause the handler for hundreds of ms to
+several seconds while holding the GIL. During such a pause, incoming NATS
+messages are not accepted and outbound SSE chunks are not yielded, which can
+push the system into a lower-throughput equilibrium it cannot recover from
+during a load burst.
+
+| Value | Behavior |
+|-------|----------|
+| `0` (or unset) | No change — stock CPython GC. |
+| `1` | `gc.collect()` then `gc.disable()` at handler startup. Reference counting continues, so most objects are freed promptly. **Cyclic garbage leaks** — fine for bounded-lifetime processes (benchmarks, short-lived jobs); not recommended for always-on servers. |
+
+When disabled, the handler logs at startup:
+
+```
+GC disabled for decode handler (DYN_WORKER_DISABLE_GC=1)
+```
+
 ## Tokenizer Behavior
 
 By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).

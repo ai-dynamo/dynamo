@@ -17,6 +17,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.gc_control import configure_gc
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
@@ -134,10 +135,12 @@ class WorkerFactory:
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
+            configure_gc("encode")
             await self._create_multimodal_encode_worker(
                 runtime, config, shutdown_event, shutdown_endpoints
             )
         elif config.disaggregation_mode == DisaggregationMode.PREFILL:
+            configure_gc("prefill")
             await self._create_prefill_worker(
                 runtime,
                 config,
@@ -147,6 +150,7 @@ class WorkerFactory:
             )
         else:
             # AGGREGATED or DECODE
+            configure_gc("decode")
             await self._create_decode_worker(
                 runtime,
                 config,
