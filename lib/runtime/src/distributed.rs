@@ -80,6 +80,10 @@ pub struct DistributedRuntime {
 
     // Registry for /engine/* route callbacks
     engine_routes: crate::engine_routes::EngineRouteRegistry,
+
+    // Resolved event transport kind — set once at construction time from
+    // DYN_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
+    event_transport_kind: crate::discovery::EventTransportKind,
 }
 
 impl MetricsHierarchy for DistributedRuntime {
@@ -108,7 +112,8 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (discovery_backend, nats_config, request_plane) = config.dissolve();
+        let (discovery_backend, nats_config, request_plane, event_transport_kind) =
+            config.dissolve();
 
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
@@ -200,6 +205,7 @@ impl DistributedRuntime {
             request_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
+            event_transport_kind,
         };
 
         // Initialize the uptime gauge in SystemHealth
@@ -417,30 +423,15 @@ impl DistributedRuntime {
 
     /// Returns the event transport kind this runtime was configured with.
     ///
-    /// If `DYN_EVENT_PLANE` was explicitly set, that value wins.  Otherwise the
-    /// default is derived from the discovery backend:
-    ///
-    /// - Local backends (`file`, `mem`): defaults to ZMQ — no external services required.
-    /// - Distributed backends (`etcd`, `kubernetes`): defaults to NATS.
+    /// The value is resolved once at construction time by `event_transport_for_backend`:
+    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the discovery
+    /// backend drives the default (ZMQ for `file`/`mem`, NATS for `etcd`/`kubernetes`).
     ///
     /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
     /// access to a `DistributedRuntime`, so that local-only workflows work without
     /// setting `DYN_EVENT_PLANE` explicitly.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
-        use crate::config::environment_names::event_plane::DYN_EVENT_PLANE;
-        use crate::discovery::EventTransportKind;
-        match std::env::var(DYN_EVENT_PLANE).as_deref() {
-            Ok("nats") => EventTransportKind::Nats,
-            Ok("zmq") | Ok("") => EventTransportKind::Zmq,
-            // Not explicitly set: derive from whether NATS is available.
-            Err(_) | Ok(_) => {
-                if self.nats_client.is_some() {
-                    EventTransportKind::Nats
-                } else {
-                    EventTransportKind::Zmq
-                }
-            }
-        }
+        self.event_transport_kind
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -613,11 +604,52 @@ impl DiscoveryBackend {
     }
 }
 
+/// Compute the event transport kind from `DYN_EVENT_PLANE` and the discovery backend.
+///
+/// This is the single authoritative place that maps (env var, backend) → transport kind.
+/// When `DYN_EVENT_PLANE` is unset or empty the backend drives the default:
+/// local backends (`file`/`mem`) → ZMQ, distributed backends (`etcd`/`kubernetes`) → NATS.
+fn event_transport_for_backend(backend: &DiscoveryBackend) -> crate::discovery::EventTransportKind {
+    use crate::config::environment_names::event_plane::DYN_EVENT_PLANE;
+    use crate::discovery::EventTransportKind;
+    match std::env::var(DYN_EVENT_PLANE).as_deref() {
+        Ok("nats") => EventTransportKind::Nats,
+        Ok("zmq") => EventTransportKind::Zmq,
+        // Unset or empty: derive from backend type.
+        Ok("") | Err(_) => {
+            if backend.is_local() {
+                EventTransportKind::Zmq
+            } else {
+                EventTransportKind::Nats
+            }
+        }
+        Ok(other) => {
+            let default_kind = if backend.is_local() {
+                EventTransportKind::Zmq
+            } else {
+                EventTransportKind::Nats
+            };
+            tracing::warn!(
+                "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
+                 Defaulting to {:?}.",
+                other,
+                default_kind
+            );
+            default_kind
+        }
+    }
+}
+
 #[derive(Dissolve)]
 pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
+    /// Resolved event transport kind — computed once at config time from
+    /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
+    /// so callers always get the same answer regardless of which other services
+    /// happen to be reachable.
+    pub event_transport_kind: crate::discovery::EventTransportKind,
 }
 
 impl DistributedConfig {
@@ -645,6 +677,11 @@ impl DistributedConfig {
             }
         };
 
+        // Resolve event transport kind once — the single source of truth used both to
+        // decide whether to open a NATS connection and to answer
+        // `DistributedRuntime::default_event_transport_kind()` later.
+        let event_transport_kind = event_transport_for_backend(&discovery_backend);
+
         // NATS is used for more than just NATS request-plane RPC:
         // - KV router events (JetStream or NATS core + local indexer)
         // - inter-router replica sync (NATS core)
@@ -652,21 +689,13 @@ impl DistributedConfig {
         // Enable the NATS client when any of these hold:
         // 1. Request plane is NATS
         // 2. NATS_SERVER is explicitly configured by the user
-        // 3. DYN_EVENT_PLANE is explicitly set to "nats"
-        //
-        // Condition 3 intentionally does NOT fire when DYN_EVENT_PLANE is unset and the
-        // discovery backend is local (file/mem). Local backends require no external services,
-        // so the event plane defaults to ZMQ in that context. For distributed backends
-        // (etcd, kubernetes) the unset default remains NATS to preserve existing behaviour.
-        let event_plane_explicitly_nats =
-            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
-                .map(|v| v.eq_ignore_ascii_case("nats"))
-                // Not set: default to NATS only for distributed backends.
-                .unwrap_or(!discovery_backend.is_local());
-
+        // 3. The resolved event transport kind is NATS
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
-            || event_plane_explicitly_nats;
+            || matches!(
+                event_transport_kind,
+                crate::discovery::EventTransportKind::Nats
+            );
 
         DistributedConfig {
             discovery_backend,
@@ -676,6 +705,7 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            event_transport_kind,
         }
     }
 
@@ -685,21 +715,24 @@ impl DistributedConfig {
             ..Default::default()
         };
         let request_plane = RequestPlaneMode::from_env();
-        let event_plane_is_nats =
-            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
-                .map(|v| v.eq_ignore_ascii_case("nats"))
-                .unwrap_or(true);
+        let discovery_backend =
+            DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
+        let event_transport_kind = event_transport_for_backend(&discovery_backend);
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
-            || event_plane_is_nats;
+            || matches!(
+                event_transport_kind,
+                crate::discovery::EventTransportKind::Nats
+            );
         DistributedConfig {
-            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config))),
+            discovery_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
                 None
             },
             request_plane,
+            event_transport_kind,
         }
     }
 
@@ -712,6 +745,7 @@ impl DistributedConfig {
             // This won't be used in process local, so we likely need a "none" option to
             // communicate that and avoid opening the ports.
             request_plane: RequestPlaneMode::Tcp,
+            event_transport_kind: crate::discovery::EventTransportKind::Zmq,
         }
     }
 }
@@ -813,6 +847,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
     }
