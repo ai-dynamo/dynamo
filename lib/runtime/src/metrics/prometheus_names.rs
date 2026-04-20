@@ -376,14 +376,16 @@ pub mod work_handler {
     /// Backend processing: handle_payload entry to first response sent
     pub const TIME_TO_FIRST_RESPONSE_SECONDS: &str = "time_to_first_response_seconds";
 
-    /// Current items in the bounded work queue awaiting a worker (gauge)
+    /// Current items in the bounded work queue awaiting dispatcher pickup (gauge)
     pub const QUEUE_DEPTH: &str = "queue_depth";
 
     /// Configured capacity of the bounded work queue (gauge, static)
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
-    /// Total times queueing failed because the work queue was full or closed
-    pub const QUEUE_FULL_TOTAL: &str = "queue_full_total";
+    /// Total times enqueuing work failed because the dispatcher channel was closed.
+    /// Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
+    /// this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
+    pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
     pub const PERMIT_WAIT_SECONDS: &str = "permit_wait_seconds";

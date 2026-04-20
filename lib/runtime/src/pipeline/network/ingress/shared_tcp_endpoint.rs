@@ -8,8 +8,9 @@
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
-    WORK_HANDLER_PERMIT_WAIT_SECONDS, WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY,
-    WORK_HANDLER_QUEUE_CAPACITY, WORK_HANDLER_QUEUE_DEPTH, WORK_HANDLER_QUEUE_FULL_TOTAL,
+    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL, WORK_HANDLER_PERMIT_WAIT_SECONDS,
+    WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
+    WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
@@ -166,6 +167,10 @@ impl SharedTcpServer {
                             tracing::trace!("TCP worker dispatcher shutting down: channel closed");
                             break;
                         };
+                        // Item is out of the mpsc channel — drop queue_depth now so the
+                        // gauge strictly reflects channel occupancy. Permit-acquire wait is
+                        // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
+                        WORK_HANDLER_QUEUE_DEPTH.dec();
 
                         // Acquire permit before spawning (bounds concurrency). Time the wait so
                         // pool starvation (permit exhaustion) shows up as rising p99 in
@@ -175,9 +180,6 @@ impl SharedTcpServer {
                             Ok(p) => p,
                             Err(_) => {
                                 tracing::trace!("TCP worker dispatcher: semaphore closed");
-                                // Drain queue-depth accounting for the item we just popped but
-                                // won't process.
-                                WORK_HANDLER_QUEUE_DEPTH.dec();
                                 break;
                             }
                         };
@@ -206,11 +208,6 @@ impl SharedTcpServer {
 
     /// Handle a single work item
     async fn handle_work_item(work_item: WorkItem) {
-        // The item is now leaving the "waiting" state (channel queue + permit acquire)
-        // and entering the "running" state (pool_active_tasks was incremented by the
-        // dispatcher before spawning).
-        WORK_HANDLER_QUEUE_DEPTH.dec();
-
         tracing::trace!(
             instance_id = work_item.instance_id,
             "TCP worker processing request"
@@ -557,7 +554,7 @@ impl SharedTcpServer {
                 }
                 Err(e) => {
                     WORK_HANDLER_QUEUE_DEPTH.dec();
-                    WORK_HANDLER_QUEUE_FULL_TOTAL.inc();
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,

@@ -18,13 +18,14 @@ fn work_handler_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::WORK_HANDLER, suffix)
 }
 
-/// Current items sitting in the bounded work queue awaiting a worker. Incremented
-/// on successful `work_tx.send()` and decremented when the dispatcher hands the
-/// item to `handle_work_item`. Combines channel queueing and permit-acquire wait.
+/// Current items sitting in the bounded mpsc work queue awaiting dispatcher
+/// pickup. Incremented on successful `work_tx.send()` and decremented immediately
+/// after `work_rx.recv()`. Permit-acquire wait is NOT counted here — see
+/// `WORK_HANDLER_PERMIT_WAIT_SECONDS`.
 pub static WORK_HANDLER_QUEUE_DEPTH: Lazy<IntGauge> = Lazy::new(|| {
     IntGauge::new(
         work_handler_metric_name(work_handler::QUEUE_DEPTH),
-        "Current items in the bounded work queue awaiting a worker",
+        "Current items in the bounded work queue awaiting dispatcher pickup",
     )
     .expect("work_handler_queue_depth gauge")
 });
@@ -38,14 +39,15 @@ pub static WORK_HANDLER_QUEUE_CAPACITY: Lazy<IntGauge> = Lazy::new(|| {
     .expect("work_handler_queue_capacity gauge")
 });
 
-/// Total times `work_tx.send()` failed because the queue was full or the
-/// dispatcher channel was closed.
-pub static WORK_HANDLER_QUEUE_FULL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+/// Total times `work_tx.send().await` returned an error, which for tokio's
+/// bounded mpsc only happens when the receiver (dispatcher task) is gone — the
+/// channel applies backpressure on "full" rather than returning an error.
+pub static WORK_HANDLER_ENQUEUE_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     IntCounter::new(
-        work_handler_metric_name(work_handler::QUEUE_FULL_TOTAL),
-        "Times a request was rejected because the work queue was saturated or closed",
+        work_handler_metric_name(work_handler::ENQUEUE_REJECTED_TOTAL),
+        "Times enqueuing work failed because the dispatcher channel was closed",
     )
-    .expect("work_handler_queue_full_total counter")
+    .expect("work_handler_enqueue_rejected_total counter")
 });
 
 /// Time spent waiting to acquire a worker-pool permit. Normal operation is
@@ -99,8 +101,8 @@ pub fn ensure_work_handler_pool_metrics_registered(registry: &MetricsRegistry) {
             "work_handler_queue_capacity",
         );
         registry.add_metric_or_warn(
-            Box::new(WORK_HANDLER_QUEUE_FULL_TOTAL.clone()),
-            "work_handler_queue_full_total",
+            Box::new(WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.clone()),
+            "work_handler_enqueue_rejected_total",
         );
         registry.add_metric_or_warn(
             Box::new(WORK_HANDLER_PERMIT_WAIT_SECONDS.clone()),
@@ -126,7 +128,7 @@ pub fn ensure_work_handler_pool_metrics_registered_prometheus(
             (|| -> Result<(), prometheus::Error> {
                 registry.register(Box::new(WORK_HANDLER_QUEUE_DEPTH.clone()))?;
                 registry.register(Box::new(WORK_HANDLER_QUEUE_CAPACITY.clone()))?;
-                registry.register(Box::new(WORK_HANDLER_QUEUE_FULL_TOTAL.clone()))?;
+                registry.register(Box::new(WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.clone()))?;
                 registry.register(Box::new(WORK_HANDLER_PERMIT_WAIT_SECONDS.clone()))?;
                 registry.register(Box::new(WORK_HANDLER_POOL_ACTIVE_TASKS.clone()))?;
                 registry.register(Box::new(WORK_HANDLER_POOL_CAPACITY.clone()))?;
