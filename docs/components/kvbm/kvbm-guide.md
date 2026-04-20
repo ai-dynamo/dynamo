@@ -19,7 +19,7 @@ docker run --gpus all --rm -it \
   /bin/bash
 ```
 
-For installation from source or custom builds, see [Local Installation](../../kubernetes/local-installation.md) and [Release Artifacts](../../reference/release-artifacts.md).
+For installation from source or custom builds, see [Local Installation](../../getting-started/local-installation.md) and [Release Artifacts](../../reference/release-artifacts.md).
 
 ## Run KVBM Standalone
 

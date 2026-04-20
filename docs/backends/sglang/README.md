@@ -14,7 +14,7 @@ Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines
 
 ## Prerequisites
 
-- **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../kubernetes/local-installation.md#cuda-requirements). Not required when running the pre-built `sglang-runtime` container.
+- **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../getting-started/local-installation.md#system-requirements). Not required when running the pre-built `sglang-runtime` container.
 - **`HF_TOKEN`** for gated models. Export it on every node that pulls the model weights, and accept the model license on the Hugging Face model page before launch:
 
   ```bash
