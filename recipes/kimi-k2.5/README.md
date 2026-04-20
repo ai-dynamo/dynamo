@@ -1,5 +1,27 @@
 # Kimi-K2.5 Recipes
 
+> [!IMPORTANT]
+> **These recipes require a top-of-tree Dynamo image — the published `:1.0.1` tag does not have the fixes needed for Kimi-K2.5.**
+>
+> The deploy YAMLs ship with `image: nvcr.io/nvidia/ai-dynamo/<runtime>:my-tag` on purpose. Before `kubectl apply`, build your own image from `main` and replace `my-tag` with that tag.
+>
+> **Build your own image**
+>
+> ```bash
+> # From a checkout of ai-dynamo/dynamo at the commit you want to run:
+> python container/render.py --framework trtllm --target runtime --output-short-filename
+> docker build -t <your-registry>/ai-dynamo/tensorrtllm-runtime:my-tag -f container/rendered.Dockerfile .
+> docker push <your-registry>/ai-dynamo/tensorrtllm-runtime:my-tag
+> ```
+>
+> Then substitute in each `deploy.yaml`:
+>
+> ```bash
+> yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub("nvcr\.io/nvidia/ai-dynamo/(.+):my-tag", "<your-registry>/ai-dynamo/$1:my-tag")' deploy.yaml
+> ```
+>
+> See [`container/README.md`](../../container/README.md) for image-build details.
+
 Deployment recipes for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
 
 ## Available Configurations
