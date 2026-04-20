@@ -159,7 +159,6 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		"decodeWorkerID", workerIDStr,
 		"decodeDpRank", result.DpRank,
 		"isDisaggregated", isDisaggregated,
-		"tokenCount", len(result.TokenData),
 		"tokenCount", len(result.TokenData))
 
 	if req.Headers == nil {
