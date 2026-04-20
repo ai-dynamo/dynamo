@@ -20,7 +20,7 @@ mod kube;
 pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
-use crate::component::TransportType;
+use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
 
 /// Transport kind for event plane - used for configuration and env var selection.
@@ -298,6 +298,9 @@ pub enum DiscoverySpec {
         endpoint: String,
         /// Transport type and routing information
         transport: TransportType,
+        /// Optional execution device for this endpoint instance.
+        /// Used by hetero routing to distinguish CPU and CUDA workers.
+        device_type: Option<DeviceType>,
     },
     Model {
         namespace: String,
@@ -368,12 +371,14 @@ impl DiscoverySpec {
                 component,
                 endpoint,
                 transport,
+                device_type,
             } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
                 endpoint,
                 instance_id,
                 transport,
+                device_type,
             }),
             Self::Model {
                 namespace,

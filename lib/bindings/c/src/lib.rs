@@ -520,6 +520,7 @@ impl RouterHandles {
                 None,
                 0.0,
                 None,
+                None,
                 allowed_worker_ids,
             )
             .await

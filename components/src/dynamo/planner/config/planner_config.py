@@ -24,6 +24,7 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
@@ -55,8 +56,16 @@ class PlannerConfig(BaseModel):
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
+    optimization_target: Literal["throughput", "latency", "sla"] = Field(
+        default="throughput",
+        description=(
+            "Scaling optimization target. "
+            "'throughput' (default) and 'latency' use static thresholds on queue "
+            "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'sla' uses regression-based scaling that targets specific ttft/itl values."
+        ),
+    )
 
-    no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
     throughput_adjustment_interval: int = (
         SLAPlannerDefaults.throughput_adjustment_interval
@@ -68,6 +77,17 @@ class PlannerConfig(BaseModel):
     prefill_engine_num_gpu: Optional[int] = None
 
     profile_results_dir: str = SLAPlannerDefaults.profile_results_dir
+
+    aic_interpolation: Optional[AICInterpolationSpec] = Field(
+        default=None,
+        description=(
+            "AIConfigurator interpolation spec populated by the profiler in "
+            "rapid mode. When set, the planner runs the AIC sweep in-process "
+            "at bootstrap and uses the resulting FPMs to seed the regression "
+            "models (priority 2 between the get_perf_metrics endpoint and "
+            "the legacy profile_results_dir file loader)."
+        ),
+    )
 
     ttft: float = SLAPlannerDefaults.ttft
     itl: float = SLAPlannerDefaults.itl
@@ -126,9 +146,12 @@ class PlannerConfig(BaseModel):
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Advisory mode: compute and log decisions without executing scaling
+    advisory: bool = SLAPlannerDefaults.advisory
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
-        default=None,
+        default=24.0,
         description=(
             "Generate an HTML diagnostics report every N hours (simulated time). "
             "Set to None to disable periodic report generation."
@@ -137,6 +160,22 @@ class PlannerConfig(BaseModel):
     report_output_dir: str = Field(
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
+    )
+    report_filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fixed filename for HTML diagnostics reports. "
+            "When set, reports are written to report_output_dir/report_filename "
+            "instead of the default timestamped name."
+        ),
+    )
+    live_dashboard_port: int = Field(
+        default=8080,
+        description=(
+            "Port for the live diagnostics dashboard HTTP server. "
+            "Set to 0 to disable. When enabled, visit http://host:port/ "
+            "to view a real-time Plotly report of accumulated snapshots."
+        ),
     )
 
     @model_validator(mode="after")
@@ -163,6 +202,20 @@ class PlannerConfig(BaseModel):
                 "Please specify the namespace where GlobalPlanner is running."
             )
 
+        # Easy mode: force load scaling on, throughput scaling off
+        if self.optimization_target != "sla":
+            self.enable_load_scaling = True
+            self.enable_throughput_scaling = False
+            if (
+                self.ttft != SLAPlannerDefaults.ttft
+                or self.itl != SLAPlannerDefaults.itl
+            ):
+                logger.warning(
+                    "optimization_target=%s ignores ttft/itl values; "
+                    "set optimization_target='sla' to use SLA-based scaling",
+                    self.optimization_target,
+                )
+
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:
             raise ValueError(
@@ -180,6 +233,15 @@ class PlannerConfig(BaseModel):
                     "pre_deployment_sweeping_mode cannot be 'none' when "
                     "enable_throughput_scaling is True. Throughput-based scaling "
                     "requires pre-deployment sweeping to profile engine performance."
+                )
+            if (
+                self.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
+                and self.aic_interpolation is None
+            ):
+                logger.warning(
+                    "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
+                    "is not set; planner will fall back to profile_results_dir "
+                    "files if the get_perf_metrics endpoint is unavailable."
                 )
 
         if self.enable_load_scaling:

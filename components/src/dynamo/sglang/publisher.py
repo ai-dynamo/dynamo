@@ -16,7 +16,6 @@ from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_soc
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
-    from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -131,9 +130,8 @@ class DynamoSglangPublisher:
         while self._running:
             try:
                 # Receive KvMetrics object from SGLang scheduler via ZMQ
-                # KvMetrics class: sglang/srt/managers/scheduler_metrics_mixin.py lines 45-54
-                # Sent from: sglang/srt/managers/scheduler_metrics_mixin.py lines 482-499 (_emit_kv_metrics)
-                kv_metrics: KvMetrics = await self._sock.recv_pyobj()
+                # KvMetrics class: sglang/srt/observability/scheduler_metrics_mixin.py
+                kv_metrics = await self._sock.recv_pyobj()
                 dp_rank = (
                     kv_metrics.data_parallel_rank
                     if kv_metrics.data_parallel_rank is not None

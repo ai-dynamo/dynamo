@@ -152,12 +152,24 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         librdmacm-devel \
         numactl-devel \
         # Libfabric support
-        hwloc \
-        hwloc-devel \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
         zlib-devel
+
+# Build hwloc >= 2.3 from source (RHEL8 ships 2.2 which lacks hwloc_location API
+# required by nixl v1.0.x libfabric topology code)
+ARG HWLOC_VERSION=2.12.0
+RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
+    cd /tmp && \
+    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
+    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
+    cd hwloc-${HWLOC_VERSION} && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/hwloc-*
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -243,8 +255,9 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # Always build FFmpeg so libs are available for Rust checks in CI
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -280,11 +293,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
+    find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
 # Build and install UCX
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -349,8 +364,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 {% if device == "cuda" %}
 ARG NIXL_LIBFABRIC_REF
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -381,8 +397,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 {% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.760
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
@@ -423,11 +440,12 @@ COPY components/ /opt/dynamo/components/
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/root/.cache/uv \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -491,8 +509,9 @@ ARG USE_SCCACHE
 ARG CUDA_MAJOR
 {% endif %}
 
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -549,9 +568,10 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 ARG PYTHON_VERSION
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cache/uv \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -569,11 +589,12 @@ COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/root/.cache/uv \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
@@ -584,7 +605,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     source ${VIRTUAL_ENV}/bin/activate && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out target/wheels && \
+        KVBM_FEATURES=""; \
+        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
+        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
         if [ "$DEVICE" = "cuda" ]; then \
             auditwheel repair \
                 --exclude libnixl.so \

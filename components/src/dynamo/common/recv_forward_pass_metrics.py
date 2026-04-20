@@ -137,11 +137,7 @@ async def run(args: argparse.Namespace) -> None:
     from dynamo.llm import FpmEventSubscriber
 
     loop = asyncio.get_running_loop()
-    event_plane = os.environ.get("DYN_EVENT_PLANE", "nats")
-    enable_nats = args.request_plane == "nats" or event_plane == "nats"
-    runtime = DistributedRuntime(
-        loop, args.discovery_backend, args.request_plane, enable_nats
-    )
+    runtime = DistributedRuntime(loop, args.discovery_backend, args.request_plane)
     endpoint = runtime.endpoint(f"{args.namespace}.{args.component}.{args.endpoint}")
 
     subscriber = FpmEventSubscriber(endpoint)

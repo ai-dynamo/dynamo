@@ -139,7 +139,7 @@ spec:
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/prefill.yaml"
           - name: MODEL_PATH
-            value: "/opt/models/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+            value: "openai/gpt-oss-120b"
           - name: HF_HOME
             value: /opt/models
           volumeMounts:
@@ -204,7 +204,7 @@ spec:
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/decode.yaml"
           - name: MODEL_PATH
-            value: "/opt/models/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+            value: "openai/gpt-oss-120b"
           - name: HF_HOME
             value: /opt/models
           volumeMounts:

@@ -36,6 +36,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Check whether an error chain indicates the request was cancelled.
+pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
+    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const NON_CANCELLATION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
@@ -244,7 +251,9 @@ struct MetricsHandlerState {
 
 pub struct Metrics {
     request_counter: IntCounterVec,
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
     inflight_gauge: IntGaugeVec,
+    active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
     http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
@@ -497,6 +506,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let active_requests_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ACTIVE_REQUESTS),
+                "Number of requests currently being handled by the frontend, from HTTP handler entry to response completion",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let client_disconnect_gauge = prometheus::IntGauge::new(
             frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
             "Number of disconnected clients",
@@ -514,7 +532,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 256.0, 10);
+            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -715,6 +733,7 @@ impl Metrics {
         Metrics {
             request_counter,
             inflight_gauge,
+            active_requests_gauge,
             client_disconnect_gauge,
             http_queue_gauge,
             request_duration,
@@ -792,11 +811,13 @@ impl Metrics {
     }
 
     fn inc_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).inc()
+        self.inflight_gauge.with_label_values(&[model]).inc();
+        self.active_requests_gauge.with_label_values(&[model]).inc();
     }
 
     fn dec_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).dec()
+        self.inflight_gauge.with_label_values(&[model]).dec();
+        self.active_requests_gauge.with_label_values(&[model]).dec();
     }
 
     /// Increment the gauge for client disconnections
@@ -820,6 +841,7 @@ impl Metrics {
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.active_requests_gauge.clone()))?;
         registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
         registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
@@ -1444,11 +1466,17 @@ impl Drop for ResponseMetricCollector {
                 .observe(avg_detokenize_latency_ms);
         }
 
-        // Publish final OSL when the collector is dropped
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
+        // Publish final OSL when the collector is dropped, but only for
+        // requests that actually produced output tokens. Recording zero for
+        // failed/cancelled requests would corrupt histogram averages (sum/count)
+        // and percentiles. Failures are already tracked by requests_total with
+        // status and error_type labels.
+        if self.osl > 0 {
+            self.metrics
+                .output_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(self.osl as f64);
+        }
 
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
@@ -2340,6 +2368,79 @@ mod tests {
             ])
             .get();
         assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_active_requests_tracks_inflight_guard() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model-active";
+
+        // Both gauges start at 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+
+        {
+            let _guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                true,
+                "req-1",
+            );
+
+            // Both gauges increment together
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+
+            {
+                let _guard2 = metrics.clone().create_inflight_guard(
+                    model,
+                    Endpoint::ChatCompletions,
+                    true,
+                    "req-2",
+                );
+                assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 2);
+                assert_eq!(
+                    metrics
+                        .active_requests_gauge
+                        .with_label_values(&[model])
+                        .get(),
+                    2
+                );
+            }
+            // guard2 dropped
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+        }
+        // guard dropped — both back to 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
     }
 
     #[test]

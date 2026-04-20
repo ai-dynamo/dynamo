@@ -177,6 +177,10 @@ pub mod frontend_service {
     /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
+    /// Number of requests currently being handled by the frontend, from HTTP handler
+    /// entry to response completion. Clearer name for what inflight_requests measures.
+    pub const ACTIVE_REQUESTS: &str = "active_requests";
+
     /// Number of disconnected clients (gauge that can go up and down)
     pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
@@ -191,6 +195,9 @@ pub mod frontend_service {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
+
+    /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
 
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
@@ -533,12 +540,24 @@ pub mod router {
 
     /// Output sequence length in tokens observed at the router
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+
+    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
 }
 
 /// Frontend pipeline stage and event-loop metrics
 pub mod frontend_perf {
     /// Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     pub const STAGE_DURATION_SECONDS: &str = "stage_duration_seconds";
+    /// Per-stage inflight request gauge (labels: stage, phase)
+    /// Tracks how many requests are currently in each pipeline stage.
+    /// Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    pub const STAGE_REQUESTS: &str = "stage_requests";
+
+    /// Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    pub const STAGE_PREPROCESS: &str = "preprocess";
+    pub const STAGE_ROUTE: &str = "route";
+    pub const STAGE_DISPATCH: &str = "dispatch";
     /// Tokenization time in preprocessor
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor

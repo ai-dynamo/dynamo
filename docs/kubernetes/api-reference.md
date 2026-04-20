@@ -302,6 +302,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the inputs that determine checkpoint equivalence |  | Required: \{\} <br /> |
+| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService enables checkpoint-time GPU Memory Service wiring.<br />It is intentionally outside spec.identity, so it does not affect the<br />checkpoint identity hash or deduplication. |  | Optional: \{\} <br /> |
 | `job` _[DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)_ | Job defines the configuration for the checkpoint creation Job |  | Required: \{\} <br /> |
 
 
@@ -402,6 +403,8 @@ _Appears in:_
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
+| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -444,6 +447,8 @@ _Appears in:_
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
+| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -799,6 +804,27 @@ _Appears in:_
 | `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
 
 
+#### FailoverSpec
+
+
+
+FailoverSpec configures active-passive failover for a worker component.
+Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
+annotation on the DGD.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled activates failover mode. The main container is cloned into two<br />engine containers (active + standby) sharing GPUs via DRA. The standby<br />acquires the flock when the active engine fails. |  |  |
+| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology. Must match gpuMemoryService.mode. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
+| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine containers per rank.<br />Reserved for future use — the operator currently creates exactly one shadow. | 1 | Maximum: 1 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+
+
 #### FrontendSidecarSpec
 
 
@@ -819,6 +845,47 @@ _Appears in:_
 | `args` _string array_ | Args overrides the default frontend arguments. When specified, these replace<br />the default ["-m", "dynamo.frontend"] entirely.<br />For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments. |  | Optional: \{\} <br /> |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the frontend sidecar container. |  | Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables for the frontend sidecar.<br />These are merged with (and can override) the auto-generated Dynamo env vars. |  | Optional: \{\} <br /> |
+
+
+#### GPUMemoryServiceMode
+
+_Underlying type:_ _string_
+
+GPUMemoryServiceMode selects the GMS deployment topology.
+
+
+
+_Appears in:_
+- [FailoverSpec](#failoverspec)
+- [GPUMemoryServiceSpec](#gpumemoryservicespec)
+
+| Field | Description |
+| --- | --- |
+| `intraPod` | GMSModeIntraPod runs GMS as a sidecar within the same pod.<br /> |
+| `interPod` | GMSModeInterPod runs GMS as a separate pod (not yet supported).<br /> |
+
+
+#### GPUMemoryServiceSpec
+
+
+
+GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
+When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
+via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
+(weights + kv_cache) and communicates with the main container over UDS sockets.
+
+
+
+_Appears in:_
+- [DynamoCheckpointSpec](#dynamocheckpointspec)
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled activates the GMS sidecar. GPU resources on the main container<br />are replaced with a DRA ResourceClaim for shared GPU access. |  |  |
+| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
+| `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
 
 
 #### IngressSpec
@@ -1475,19 +1542,28 @@ _Underlying type:_ _string_
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 _Validation:_
-- Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s]
+- Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
 
 | Field | Description |
 | --- | --- |
-| `gb200_sxm` |  |
-| `h200_sxm` |  |
-| `h100_sxm` |  |
+| `gb200_sxm` | --- Blackwell ---<br /> |
 | `b200_sxm` |  |
-| `a100_sxm` |  |
-| `l40s` |  |
+| `h200_sxm` | --- Hopper ---<br /> |
+| `h100_sxm` |  |
+| `h100_pcie` |  |
+| `a100_sxm` | --- Ampere ---<br /> |
+| `a100_pcie` |  |
+| `l40s` | --- Ada ---<br /> |
+| `l40` |  |
+| `l4` |  |
+| `v100_sxm` | --- Older NVIDIA ---<br /> |
+| `v100_pcie` |  |
+| `t4` |  |
+| `mi200` | --- AMD ---<br /> |
+| `mi300` |  |
 
 
 #### HardwareSpec
@@ -1504,10 +1580,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+| `interconnect` _string_ | Interconnect describes the GPU interconnect type within a node.<br />Examples: "pcie", "nvlink", "infiniband". |  | Optional: \{\} <br /> |
+| `rdma` _boolean_ | RDMA indicates whether RDMA is available on the cluster. |  | Optional: \{\} <br /> |
 
 
 
@@ -1913,6 +1991,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
+
+
 
 
 #### LWSConfiguration

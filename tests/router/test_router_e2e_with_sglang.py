@@ -146,9 +146,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 str(page_size),
             ]
 
-            # Disable CUDA graphs for faster startup & lower memory
+            # Disable CUDA graphs for faster startup & lower memory.
+            # sglang 0.5.10+ has piecewise CUDA graphs (separate flag) that
+            # consume ~7 GB during capture — must also be disabled for
+            # multi-worker same-GPU tests to avoid OOM.
             if disable_cuda_graph:
                 command.append("--disable-cuda-graph")
+                command.append("--disable-piecewise-cuda-graph")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if mem_fraction_static is not None:

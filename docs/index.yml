@@ -220,13 +220,25 @@ navigation:
         contents:
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
+          - page: Tokenizer
+            path: components/frontend/Tokenizer.md
       - section: Router
         path: components/router/README.md
         contents:
           - page: Router Guide
             path: components/router/router-guide.md
+          - page: Routing Concepts
+            path: components/router/router-concepts.md
+          - page: Configuration and Tuning
+            path: components/router/router-configuration.md
+          - page: Disaggregated Serving
+            path: components/router/router-disaggregated-serving.md
+          - page: Router Operations
+            path: components/router/router-operations.md
           - page: Router Examples
             path: components/router/router-examples.md
+          - page: Standalone Indexer
+            path: components/router/standalone-indexer.md
           - page: KV Event Replay — Dynamo vs vLLM
             path: components/router/kv-event-replay-comparison.md
       - section: Planner

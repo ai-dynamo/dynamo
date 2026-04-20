@@ -204,10 +204,14 @@ impl RetryManager {
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
-                return Err(Error::msg(format!(
-                    "Context id {} is stopped or killed",
-                    self.context.id()
-                )));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message(format!(
+                        "Context id {} is stopped or killed",
+                        self.context.id()
+                    ))
+                    .build()
+                    .into());
             }
             response_stream = Some(self.next_generate.generate(request).await);
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
@@ -959,6 +963,15 @@ mod tests {
                 error
                     .to_string()
                     .contains(&format!("Context id {} is stopped or killed", context_id))
+            );
+            // Verify the error is a typed DynamoError with Cancelled type
+            let dynamo_err = error
+                .downcast_ref::<DynamoError>()
+                .expect("Error should be a DynamoError");
+            assert_eq!(
+                dynamo_err.error_type(),
+                ErrorType::Cancelled,
+                "Stopped/killed context should produce a Cancelled error"
             );
         }
 

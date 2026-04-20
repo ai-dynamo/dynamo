@@ -55,6 +55,7 @@ dynamo/
 ├── tests/                          # End-to-end and cross-component tests
 │   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
 │   ├── kvbm_integration/           # KVBM integration tests
+│   ├── gpu_memory_service/         # GPU Memory Service E2E tests
 │   ├── fault_tolerance/            # Fault tolerance, migration, cancellation
 │   ├── deploy/                     # Deployment tests
 │   ├── frontend/                   # Frontend HTTP/gRPC tests
@@ -83,20 +84,21 @@ dynamo/
 
 **Python tests** (`pytest`):
 
-| Type              | Description                              | Location                                     |
-|-------------------|------------------------------------------|----------------------------------------------|
-| Unit              | Single function/class, isolated          | `components/src/dynamo/<component>/tests/`   |
-| Integration       | Interactions between modules/services    | `components/src/dynamo/<component>/tests/`   |
-| End-to-End        | User workflows, CLI, API                 | `tests/serve/`, `tests/deploy/`, etc.        |
-| KVBM Integration  | KV block manager integration             | `tests/kvbm_integration/`                    |
-| Router            | Router E2E with backends                 | `tests/router/`                              |
-| Planner           | Planner unit + integration tests         | `components/src/dynamo/planner/tests/`       |
-| Frontend          | Frontend HTTP/gRPC tests                 | `tests/frontend/`                            |
-| Profiler          | Profiler unit + integration tests        | `components/src/dynamo/profiler/tests/`      |
-| Global Planner    | Global planner unit tests                | `components/src/dynamo/global_planner/tests/`|
-| Fault Tolerance   | Chaos, migration, cancellation           | `tests/fault_tolerance/`                     |
-| Deployment        | Deployment validation                    | `tests/deploy/`                              |
-| Benchmark         | Performance/load                         | `benchmarks/`                                |
+| Type               | Description                           | Location                                      |
+|--------------------|---------------------------------------|-----------------------------------------------|
+| Unit               | Single function/class, isolated       | `components/src/dynamo/<component>/tests/`    |
+| Integration        | Interactions between modules/services | `components/src/dynamo/<component>/tests/`    |
+| End-to-End         | User workflows, CLI, API              | `tests/serve/`, `tests/deploy/`, etc.         |
+| KVBM Integration   | KV block manager integration          | `tests/kvbm_integration/`                     |
+| GPU Memory Service | GPU Memory Service E2E                | `tests/gpu_memory_service/`                   |
+| Router             | Router E2E with backends              | `tests/router/`                               |
+| Planner            | Planner unit + integration tests      | `components/src/dynamo/planner/tests/`        |
+| Frontend           | Frontend HTTP/gRPC tests              | `tests/frontend/`                             |
+| Profiler           | Profiler unit + integration tests     | `components/src/dynamo/profiler/tests/`       |
+| Global Planner     | Global planner unit tests             | `components/src/dynamo/global_planner/tests/` |
+| Fault Tolerance    | Chaos, migration, cancellation        | `tests/fault_tolerance/`                      |
+| Deployment         | Deployment validation                 | `tests/deploy/`                               |
+| Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
 ---
 
@@ -551,6 +553,14 @@ The profiler automatically detects the engine type and uses the appropriate bina
 **Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
+
+**Requirement (all engines):** Do not hardcode `CUDA_VISIBLE_DEVICES` in launch scripts. The profiler and parallel test runner set `CUDA_VISIBLE_DEVICES` to pin each test to a specific GPU. A script that overrides this (e.g. `CUDA_VISIBLE_DEVICES=0`) will ignore the assignment and land on the wrong GPU. Instead, inherit from the environment with a default:
+
+```bash
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+```
+
+Then pass the variable to each worker: `CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python3 -m dynamo.vllm ...`. For multi-GPU scripts that assign distinct GPUs per worker, use named env vars with defaults (e.g. `PREFILL_CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_VISIBLE_DEVICES:-0}"`).
 
 ### Engine-specific mapping
 

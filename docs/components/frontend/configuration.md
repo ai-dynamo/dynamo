@@ -106,6 +106,12 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 | `--metrics-prefix` | `DYN_METRICS_PREFIX` | `dynamo_frontend` | Prefix for frontend Prometheus metrics |
 | `--dump-config-to` | `DYN_DUMP_CONFIG_TO` | — | Dump resolved config to file path |
 
+## Tokenizer
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer: `default` (HuggingFace) or `fastokens` (high-performance Rust tokenizer). See [Tokenizer](Tokenizer.md) |
+
 ## Experimental
 
 | CLI Argument | Env Var | Default | Description |
@@ -179,6 +185,6 @@ All endpoint paths can be overridden via environment variables:
 - [Frontend Overview](README.md) — quick start and feature matrix
 - [Frontend Guide](frontend-guide.md) — KServe gRPC configuration
 - [NVIDIA Request Extensions (nvext)](nvext.md) — custom request fields
-- [Router Guide](../router/router-guide.md) — detailed routing configuration
+- [Configuration and Tuning](../router/router-configuration.md) — detailed routing configuration
 - [Metrics](../../observability/metrics.md) — available Prometheus metrics
 - [Fault Tolerance](../../fault-tolerance/README.md) — request migration and rejection

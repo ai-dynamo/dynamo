@@ -37,7 +37,7 @@ from typing import Dict, List, Optional
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
-    cuda_set_current_device,
+    cuda_ensure_initialized,
     cuda_synchronize,
     cuda_validate_pointer,
     cumem_address_free,
@@ -134,22 +134,25 @@ class GMSClientMemoryManager:
         socket_path: str,
         *,
         device: int = 0,
+        tag: Optional[str] = None,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
+        self.tag = tag
 
         self._client: Optional[_GMSClientSession] = None
         self._mappings: Dict[int, LocalMapping] = {}  # va -> mapping
         self._inverse_mapping: Dict[str, int] = {}
 
         self._unmapped = False
+        self._aborted = False
         self._granted_lock_type: Optional[GrantedLockType] = None
 
         # VA-stable unmap/remap state
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
-        cuda_set_current_device(self.device)
+        cuda_ensure_initialized()
         self.granularity = cumem_get_allocation_granularity(device)
 
     # ==================== Properties ====================
@@ -183,9 +186,34 @@ class GMSClientMemoryManager:
 
         Updates self._granted_lock_type based on granted lock type. Saves memory layout hash
         for stale detection if server is in committed state.
+
+        On reconnect after abort (e.g. after CRIU restore on a different GPU),
+        refreshes the socket path from the current GPU UUID so we connect to
+        the correct GMS server.
         """
         if self._client is not None:
             raise RuntimeError("Memory manager is already connected")
+
+        # After abort + CRIU restore the process may be on a different GPU.
+        # Re-derive socket path from current UUID so we talk to the right server.
+        if self._aborted and self.tag is not None:
+            from gpu_memory_service.common.utils import (
+                get_socket_path,
+                invalidate_uuid_cache,
+            )
+
+            invalidate_uuid_cache()
+            new_path = get_socket_path(self.device, self.tag)
+            if new_path != self.socket_path:
+                logger.info(
+                    "Refreshed socket path for tag=%s: %s -> %s",
+                    self.tag,
+                    self.socket_path,
+                    new_path,
+                )
+                self.socket_path = new_path
+            self._aborted = False
+
         self._client = _GMSClientSession(
             self.socket_path,
             lock_type=lock_type,
@@ -211,6 +239,7 @@ class GMSClientMemoryManager:
         Clean callers should unmap first. This also supports abrupt session
         drop with live mappings still present.
         """
+        self._aborted = True
         if self._client is not None:
             try:
                 self._client.close()
@@ -464,8 +493,6 @@ class GMSClientMemoryManager:
         Checks layout hash for staleness. Validates each allocation still
         exists and size matches before remapping.
         """
-        cuda_set_current_device(self.device)
-
         # Stale layout check
         current_hash = self.get_memory_layout_hash()
         if (
@@ -580,18 +607,30 @@ class GMSClientMemoryManager:
 
     # ==================== Lifecycle ====================
 
-    def close(self) -> None:
-        """Strict cleanup.
+    def close(self, *, best_effort: bool = False) -> None:
+        """Cleanup mappings and abort.
 
         synchronize + unmap all + free all VAs + abort.
+
+        Args:
+            best_effort: If True, skip cuda_synchronize and swallow
+                errors during cleanup. Used after checkpoint where
+                cuda-checkpoint may have torn down the device context
+                (cuda_synchronize calls os._exit via fail()).
         """
-        cuda_synchronize()
-
-        for va in list(self._mappings.keys()):
-            self.unmap_va(va)
-            self.free_va(va)
-
-        self.abort()
+        if best_effort:
+            try:
+                self.abort()
+            except Exception:
+                pass
+            self._mappings.clear()
+            self._inverse_mapping.clear()
+        else:
+            cuda_synchronize()
+            for va in list(self._mappings.keys()):
+                self.unmap_va(va)
+                self.free_va(va)
+            self.abort()
         self._unmapped = False
         self._va_preserved = False
         from gpu_memory_service.client.torch.allocator import (

@@ -210,6 +210,7 @@ impl KvReplayRouter {
                         .context("max_output_tokens does not fit into u32")?,
                 ),
                 None,
+                None,
             )
             .await?;
         usize::try_from(response.best_worker.worker_id)
