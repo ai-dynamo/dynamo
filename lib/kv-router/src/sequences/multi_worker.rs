@@ -1238,6 +1238,8 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-a".to_string(),
                     token_sequence: Some(prompt_a.clone()),
+                    isl: 3,
+                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1252,6 +1254,8 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-b".to_string(),
                     token_sequence: Some(prompt_b.clone()),
+                    isl: 3,
+                    overlap: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
