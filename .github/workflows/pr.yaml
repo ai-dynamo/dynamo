@@ -355,19 +355,14 @@ jobs:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/shared-test.yml
+    uses: ./.github/workflows/shared-test-container.yml
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
       platform: '["amd64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
-      run_gpu_tests: false
     secrets: inherit
 
   # ============================================================================
