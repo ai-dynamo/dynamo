@@ -131,6 +131,7 @@ class ImageLoader:
         self, metadata: Dict[str, Any]
     ) -> Image.Image:
         """Read decoded image via NIXL and convert numpy array to PIL Image."""
+        assert self._nixl_connector is not None
         arr = await read_decoded_media_via_nixl(self._nixl_connector, metadata)
         # TRT-LLM's input processor requires PIL Images (accesses .height/.width
         # for token count calculation). fromarray() is near-zero-cost: it wraps

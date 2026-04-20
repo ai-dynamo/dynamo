@@ -294,7 +294,7 @@ class MultimodalRequestProcessor:
         multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
             processed_mm_data = {}
-            loaded_embeddings = []
+            loaded_embeddings: list[torch.Tensor] = []
 
             # Process images and embedding paths from image_url field
             image_items = multi_modal_data.get("image_url", [])
