@@ -125,8 +125,10 @@ Also available: [`tensorrtllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/res
 Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then:
 
 ```bash
-uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm] or [trtllm]
+uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm]
 ```
+
+> **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/getting-started/local-installation.md) for TRT-LLM-specific instructions.
 
 Then start the frontend and a worker as shown above. See the [full installation guide](docs/getting-started/local-installation.md) for system dependencies and backend-specific notes.
 
