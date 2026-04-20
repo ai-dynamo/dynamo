@@ -49,10 +49,13 @@ type DynamoGraphDeploymentSpec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// Services are the services deployed as part of this graph. Names must be
-	// unique within the list.
+	// unique within the list; the API server enforces this via the
+	// listType=map + listMapKey=name markers below (no CEL rule needed, which
+	// keeps the CRD within its x-kubernetes-validations cost budget).
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=25
-	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, x.name == y.name))",message="service names must be unique"
 	Services []DynamoComponentDeploymentService `json:"services,omitempty"`
 
 	// Env is the list of environment variables applied to all services in the
