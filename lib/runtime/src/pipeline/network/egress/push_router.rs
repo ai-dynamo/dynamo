@@ -9,7 +9,7 @@ use crate::{
     },
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
-    metrics::frontend_perf::STAGE_DURATION_SECONDS,
+    metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
@@ -771,7 +771,7 @@ where
         let request = request.map(|req| AddressedRequest::new(req, address));
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["route"])
+            .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
         let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);

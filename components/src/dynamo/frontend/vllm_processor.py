@@ -466,12 +466,30 @@ class EngineFactory:
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
+
+        # Resolve stream_interval: env var override > backend config > default (20)
+        stream_interval = self.stream_interval
+        if not os.getenv("DYN_VLLM_STREAM_INTERVAL"):
+            backend_interval = (
+                mdc.runtime_config().get("runtime_data", {}).get("stream_interval")
+            )
+            if backend_interval is not None:
+                try:
+                    stream_interval = max(1, int(backend_interval))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid stream_interval=%r from backend runtime_config, "
+                        "using default=%d",
+                        backend_interval,
+                        stream_interval,
+                    )
+
         output_processor = OutputProcessor(
             tokenizer,
             log_stats=False,
-            stream_interval=self.stream_interval,
+            stream_interval=stream_interval,
         )
-        logger.info("vLLM OutputProcessor stream_interval=%d", self.stream_interval)
+        logger.info("vLLM OutputProcessor stream_interval=%d", stream_interval)
 
         tool_parser_name = self.flags.tool_call_parser or mdc.runtime_config().get(
             "tool_call_parser"

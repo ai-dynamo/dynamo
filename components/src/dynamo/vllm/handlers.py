@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
-import binascii
-import io
 import logging
 import os
 import tempfile
@@ -16,10 +13,11 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -371,6 +369,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -388,6 +387,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
+        self.model_config = model_config
         self.enable_multimodal = enable_multimodal
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
@@ -1105,41 +1105,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         Decode base64-encoded prompt embeddings in PyTorch format.
 
+        Use vllm's safe loader to prevent out-of-bounds writes from maliciously crafted tensors.
+
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor
 
         Returns:
-            torch.Tensor: Decoded prompt embeddings with preserved shape and dtype
+            torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
             ValueError: If decoding fails or format is invalid
         """
-        try:
-            # Step 1: Decode base64 to bytes
-            embeds_bytes = base64.b64decode(prompt_embeds_base64)
-
-            # Step 2: Load PyTorch tensor from bytes
-            buffer = io.BytesIO(embeds_bytes)
-            embeddings_tensor = torch.load(buffer, weights_only=True)
-
-            # Step 3: Validate it's a tensor
-            if not isinstance(embeddings_tensor, torch.Tensor):
-                raise ValueError(
-                    f"prompt_embeds must be a torch.Tensor, got {type(embeddings_tensor)}"
-                )
-
-            logger.debug(
-                f"Decoded PyTorch format embeddings: shape={embeddings_tensor.shape}, "
-                f"dtype={embeddings_tensor.dtype}, size={len(embeds_bytes)} bytes"
+        if not isinstance(prompt_embeds_base64, str):
+            raise ValueError(
+                f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
             )
 
-            return embeddings_tensor
+        if self.model_config is None:
+            raise ValueError("ModelConfig is unavailable for prompt_embeds validation.")
 
-        except binascii.Error as e:
-            logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
-            raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
+        try:
+            return safe_load_prompt_embeds(
+                self.model_config, prompt_embeds_base64.encode()
+            )
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
             raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
@@ -1163,16 +1153,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             ValueError: If decoding fails or tensor is invalid
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
+        if embeddings_tensor.dim() != 2:
+            raise ValueError(
+                f"prompt embeds should have dim 2 after vllm processing, but found dim {embeddings_tensor.dim()}"
+            )
 
         # Extract sequence length from tensor shape for usage reporting
-        # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
-        if embeddings_tensor.dim() == 2:
-            sequence_length = embeddings_tensor.shape[0]
-        elif embeddings_tensor.dim() == 3:
-            sequence_length = embeddings_tensor.shape[1]
-        else:
-            # Fallback for unexpected shapes
-            sequence_length = embeddings_tensor.shape[0]
+        sequence_length = embeddings_tensor.shape[0]
 
         # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
         prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
@@ -1351,6 +1338,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length = None
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
+            if not self.config.engine_args.enable_prompt_embeds:
+                msg = (
+                    "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
+                )
+                logger.error(
+                    f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
+                    f"{request_id}: {msg}"
+                )
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
+                        "token_ids": [],
+                    },
+                )
             try:
                 (
                     prompt,
@@ -1627,6 +1630,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -1639,13 +1643,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             engine,
             default_sampling_params,
-            model_max_len,
-            enable_multimodal,
-            generate_endpoint,
-            use_vllm_tokenizer,
-            shutdown_event,
-            enable_frontend_decoding,
-            encode_worker_client,
+            model_max_len=model_max_len,
+            model_config=model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
         )
 
     async def generate(self, request, context):
@@ -1680,6 +1685,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = prefill_result.get("disaggregated_params", {}).get(
                 "embedding_params"
             )
+            # Normalize embedding_params to None if it is an empty dict
+            if not embedding_params:
+                embedding_params = None
         else:
             kv_params = None
             embedding_params = None
@@ -1718,6 +1726,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.error("Request %s: %s", request_id, msg)
                     yield {"status": "error", "message": msg}
                     return
+            else:
+                # Non-qwen model, assume the multi_modal_data has been consumed
+                # in prefill, so we can use the expanded prompt token ids
+                # without multimodal data
+                if embedding_params and "expanded_prompt_token_ids" in embedding_params:
+                    request["token_ids"] = embedding_params["expanded_prompt_token_ids"]
+                    has_mm_data = False
             # TODO(DIS-1661): video/audio re-downloaded on decode.
             # TODO(DIS-1664): mixed image+video in disagg decode is not
             # supported — synthetic image data would be overwritten.
@@ -1904,6 +1919,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -1916,13 +1932,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             config,
             engine,
             default_sampling_params,
-            model_max_len,
-            enable_multimodal,
-            generate_endpoint,
-            use_vllm_tokenizer,
-            shutdown_event,
-            enable_frontend_decoding,
-            encode_worker_client,
+            model_max_len=model_max_len,
+            model_config=model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
         )
 
         # Cache Qwen VL grid parameters for computing image_grid_thw from
@@ -1960,7 +1977,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context,
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -2042,10 +2058,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                # For prefill worker, only one res will be generated,
+                # so we can always build embedding params here without conditionals
+                embedding_params = self._build_embedding_params(
+                    multi_modal_data or {}, res.prompt_token_ids
+                )
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params, embedding_params
+                        res.kv_transfer_params,
+                        embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -2066,18 +2088,36 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 yield output
 
-    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+    def _build_disaggregated_params(
+        self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None
+    ):
         disaggregated_params = {}
         if kv_transfer_params is not None:
             disaggregated_params["kv_transfer_params"] = kv_transfer_params
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
+        if expanded_prompt_token_ids is not None:
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 
     def _build_embedding_params(
-        self, multi_modal_data: dict[str, Any]
+        self, multi_modal_data: dict[str, Any], prompt_token_ids: list[int]
     ) -> Dict[str, Any] | None:
+        # [gluo NOTE] there could be different model architectures that
+        # need different embedding params, will add more logic if needed
         if not is_qwen_vl_model(self.config.model):
-            return None
-        return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+            # For non-qwen models, vLLM doesn't trigger mm preprocess so
+            # decode worker only needs expanded prompt to properly fetch KV blocks
+            # from prefill.
+            if multi_modal_data:
+                return {"expanded_prompt_token_ids": prompt_token_ids}
+        else:
+            # For qwen models, vLLM triggers mm preprocess so decode worker will
+            # perform token expansion unconditionally, so we need to pass
+            # original prompt and sufficient metadata to reconstruct mm embedding
+            # as request input.
+            return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+        return None
