@@ -529,8 +529,6 @@ Guidance when adding a test:
 - Before marking a new test `pre_merge`, check the test's expected runtime and confirm the pre-merge pipeline still fits under 30 min. If it wouldn't, move the test to `post_merge` or `nightly`, or shrink it (mock heavy dependencies, smaller checkpoint, fewer cases).
 - If a pipeline is already near its budget, prefer downgrading existing slow tests (`pre_merge` → `post_merge`, `post_merge` → `nightly`) over adding more.
 
-Per-job timeouts configured in `.github/workflows/` (e.g., `cpu_only_test_timeout_minutes`, `single_gpu_test_timeout_minutes`) are upper-bound safety nets to kill runaway jobs; they are **not** targets. Aim to stay well below them so that the aggregate pipeline budgets above hold.
-
 ### Time Budget Industry Practices
 
 Our per-test time targets are informed by widely adopted test size classifications:
