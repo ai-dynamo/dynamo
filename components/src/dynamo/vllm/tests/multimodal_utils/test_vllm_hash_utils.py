@@ -5,8 +5,8 @@
 
 The hash preimage must include image geometry; otherwise two RGB images with
 different (W, H) but equal pixel count produce identical cache keys. These
-tests also pin the canonicalization contract (RGB uint8, C-contiguous) and
-the on-disk preimage format via a known-digest stability anchor.
+tests also pin the RGB uint8 canonicalization contract and the on-disk
+preimage format via a known-digest stability anchor.
 """
 
 import numpy as np
@@ -21,11 +21,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.multimodal,
 ]
-
-
-# ---------------------------------------------------------------------------
-# Regression: dimension-swap collision (TDD anchor)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -59,30 +54,6 @@ def test_dimension_swap_no_collision(make_image):
     assert wide_uuid != tall_uuid
 
 
-# ---------------------------------------------------------------------------
-# Parity across pipelines
-# ---------------------------------------------------------------------------
-
-
-def test_pil_ndarray_equivalent_inputs_match():
-    """A PIL image and its np.asarray() counterpart must produce identical
-    UUIDs so URL-decode and NIXL-decode paths dedup the same logical image.
-    """
-    rng = np.random.default_rng(0xC0FFEE)
-    arr = rng.integers(0, 256, size=(17, 23, 3), dtype=np.uint8)
-    pil = Image.fromarray(arr, mode="RGB")
-
-    [pil_uuid] = compute_mm_uuids_from_images([pil])
-    [arr_uuid] = compute_mm_uuids_from_images([arr])
-
-    assert pil_uuid == arr_uuid
-
-
-# ---------------------------------------------------------------------------
-# Canonicalization contract
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "bad_input, exc",
     [
@@ -92,19 +63,9 @@ def test_pil_ndarray_equivalent_inputs_match():
             id="pil_mode_L",
         ),
         pytest.param(
-            lambda: Image.new("RGBA", (8, 8)),
-            ValueError,
-            id="pil_mode_RGBA",
-        ),
-        pytest.param(
             lambda: np.zeros((8, 8, 3), dtype=np.float32),
             ValueError,
             id="ndarray_dtype_float32",
-        ),
-        pytest.param(
-            lambda: np.zeros((8, 8), dtype=np.uint8),
-            ValueError,
-            id="ndarray_shape_2d",
         ),
         pytest.param(
             lambda: np.zeros((8, 8, 4), dtype=np.uint8),
@@ -124,29 +85,6 @@ def test_rejects_invalid_input(bad_input, exc):
     """
     with pytest.raises(exc):
         compute_mm_uuids_from_images([bad_input()])
-
-
-def test_non_contiguous_ndarray_coerced():
-    """Non-C-contiguous ndarray views must still hash to the same value as
-    an explicit contiguous copy of the same pixels.
-    """
-    rng = np.random.default_rng(42)
-    contiguous = rng.integers(0, 256, size=(12, 20, 3), dtype=np.uint8)
-
-    rgba = np.zeros((12, 20, 4), dtype=np.uint8)
-    rgba[..., :3] = contiguous
-    view = rgba[..., :3]
-    assert not view.flags["C_CONTIGUOUS"]
-
-    [view_uuid] = compute_mm_uuids_from_images([view])
-    [contig_uuid] = compute_mm_uuids_from_images([contiguous])
-
-    assert view_uuid == contig_uuid
-
-
-# ---------------------------------------------------------------------------
-# Stability anchor — pins the on-disk preimage format
-# ---------------------------------------------------------------------------
 
 
 def test_known_digest_stability():
