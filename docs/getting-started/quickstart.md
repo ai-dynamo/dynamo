@@ -40,6 +40,11 @@ See [Release Artifacts](../reference/release-artifacts.md#container-images) for 
 versions and backend guides for run instructions: [SGLang](../backends/sglang/README.md) |
 [TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
 
+> **Prerequisites**
+>
+> - **CUDA toolkit headers.** Building the Python wheels from source requires CUDA dev headers on your `PATH`. See [Local Installation — System Requirements](local-installation.md#system-requirements).
+> - **Hugging Face token.** Gated models (Llama, Kimi, Qwen-VL, …) require `HF_TOKEN` in your environment **and** accepting the model card's license on huggingface.co. Set `export HF_TOKEN=hf_…` before launching.
+
 **Option B: Install from PyPI**
 
 ```bash
