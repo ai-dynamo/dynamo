@@ -12,6 +12,15 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with SGLang's native engine arguments. It supports LLM inference, embedding models, multimodal vision models, and diffusion-based generation (LLM, image, video).
 
+## Prerequisites
+
+- **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../kubernetes/local-installation.md#cuda-requirements). Not required when running the pre-built `sglang-runtime` container.
+- **`HF_TOKEN`** for gated models. Export it on every node that pulls the model weights, and accept the model license on the Hugging Face model page before launch:
+
+  ```bash
+  export HF_TOKEN=hf_...
+  ```
+
 ## Installation
 
 ### Install Latest Release
@@ -62,8 +71,11 @@ docker run \
     --ulimit memlock=-1 --ulimit stack=67108864 \
     --ulimit nofile=65536:65536 \
     --cap-add CAP_SYS_PTRACE --ipc host \
+    -v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface \
     dynamo:latest-sglang
 ```
+
+Mount the host Hugging Face cache into the container (`-v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface`); without this mount, each container restart re-downloads the model.
 </Accordion>
 
 ## Feature Support Matrix
@@ -110,6 +122,19 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
 ```
+### Disaggregated Serving
+
+Launch a disaggregated Qwen3-0.6B deployment (smallest model, useful for plumbing validation):
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+./launch/disagg.sh
+```
+
+> **Performance caveat:** Qwen3-0.6B is small enough that the disaggregated pathway is dominated by transport overhead and will often look slower than aggregated. Use it for plumbing validation, not benchmarks. Switch to Qwen3-32B-FP8 or larger for realistic disagg numbers.
+
+> **Known race:** `examples/backends/sglang/launch/disagg.sh` can start the frontend before prefill and decode workers are fully ready, causing the first few requests to 503. Re-run after ~10 seconds. Tracked as an engineering follow-up (VDR §1.3 item 10 — `disagg.sh` race condition).
+
 ### Kubernetes Deployment
 
 You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see the [SGLang Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy).
