@@ -41,7 +41,7 @@ Symptom: `kubectl get pvc` shows `Pending`. `kubectl describe pvc <name>` shows 
 
 Cause: recipes default to `storageClassName: standard`, which doesn't exist on every cluster.
 
-Fix: pick the right class for your environment. See the [storage-class table in `recipes/README.md`](../recipes/README.md#storage-class).
+Fix: pick the right class for your environment. See the `storageClassName` note in [`recipes/README.md` Prerequisites](../recipes/README.md#prerequisites).
 
 ## Driver mismatch — cryptic PyTorch error
 
