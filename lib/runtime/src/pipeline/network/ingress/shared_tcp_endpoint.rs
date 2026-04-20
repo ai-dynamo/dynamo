@@ -94,9 +94,22 @@ struct EndpointHandler {
 
 impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
-        let worker_pool_size = get_worker_pool_size();
-        let work_queue_size = get_work_queue_size();
+        Self::new_with_sizes(
+            bind_addr,
+            cancellation_token,
+            get_worker_pool_size(),
+            get_work_queue_size(),
+        )
+    }
 
+    /// Construct a server with explicit worker-pool and work-queue sizes.
+    /// Prefer `new` in production; this bypasses env vars for tests.
+    pub fn new_with_sizes(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+        worker_pool_size: usize,
+        work_queue_size: usize,
+    ) -> Arc<Self> {
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
             worker_pool_size,
@@ -988,5 +1001,216 @@ mod tests {
 
         // Cleanup
         cancellation_token.cancel();
+    }
+
+    /// Outcome buckets for backpressure repro tests.
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    struct BackpressureOutcome {
+        total: usize,
+        success: usize,
+        overload: usize,
+        cannot_connect: usize,
+        other: usize,
+        elapsed: Duration,
+    }
+
+    /// Stand up a loopback server + client, fire `total_requests`
+    /// concurrently, classify each outcome, return counts.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_backpressure_scenario(
+        scenario: &str,
+        server_pool: usize,
+        server_queue: usize,
+        handler_delay: Duration,
+        client_pool_size: usize,
+        client_channel_buffer: usize,
+        client_request_timeout: Duration,
+        total_requests: usize,
+    ) -> BackpressureOutcome {
+        use crate::pipeline::network::egress::tcp_client::{TcpRequestClient, TcpRequestConfig};
+        use crate::pipeline::network::egress::unified_client::{Headers, RequestPlaneClient};
+        use std::sync::atomic::AtomicUsize;
+
+        crate::logging::init();
+
+        let cancellation_token = CancellationToken::new();
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server = SharedTcpServer::new_with_sizes(
+            bind_addr,
+            cancellation_token.clone(),
+            server_pool,
+            server_queue,
+        );
+
+        let actual_addr = server
+            .clone()
+            .bind_and_start()
+            .await
+            .expect("server should bind");
+
+        let handler = Arc::new(SlowMockHandler::new(handler_delay));
+        let endpoint_path = format!("test.repro.{scenario}");
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false,
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+
+        server
+            .register_endpoint(
+                endpoint_path.clone(),
+                handler.clone() as Arc<dyn PushWorkHandler>,
+                1,
+                "test".to_string(),
+                "repro".to_string(),
+                scenario.to_string(),
+                system_health,
+            )
+            .await
+            .expect("register_endpoint should succeed");
+
+        let client = Arc::new(
+            TcpRequestClient::with_config(TcpRequestConfig {
+                request_timeout: client_request_timeout,
+                connect_timeout: Duration::from_secs(2),
+                pool_size: client_pool_size,
+                channel_buffer: client_channel_buffer,
+            })
+            .expect("client should build"),
+        );
+
+        let address = format!(
+            "tcp://{}:{}/{}",
+            actual_addr.ip(),
+            actual_addr.port(),
+            endpoint_path
+        );
+
+        let succ = Arc::new(AtomicUsize::new(0));
+        let overload = Arc::new(AtomicUsize::new(0));
+        let cannot_connect = Arc::new(AtomicUsize::new(0));
+        let other = Arc::new(AtomicUsize::new(0));
+
+        let start = Instant::now();
+        let mut handles = Vec::with_capacity(total_requests);
+        for i in 0..total_requests {
+            let address = address.clone();
+            let client = client.clone();
+            let succ = succ.clone();
+            let overload = overload.clone();
+            let cannot_connect = cannot_connect.clone();
+            let other = other.clone();
+
+            handles.push(tokio::spawn(async move {
+                let headers = Headers::new();
+                let payload = Bytes::from(format!("req_{i}"));
+                match client.send_request(address, payload, headers).await {
+                    Ok(_) => {
+                        succ.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        // Walk the error chain to find the DynamoError + ErrorType.
+                        let mut source: Option<&(dyn std::error::Error + 'static)> =
+                            Some(e.as_ref() as &(dyn std::error::Error + 'static));
+                        let mut classified = false;
+                        while let Some(err) = source {
+                            if let Some(dyn_err) = err.downcast_ref::<crate::error::DynamoError>() {
+                                match dyn_err.error_type() {
+                                    crate::error::ErrorType::Overload => {
+                                        overload.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    crate::error::ErrorType::CannotConnect => {
+                                        cannot_connect.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    _ => {
+                                        other.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                classified = true;
+                                break;
+                            }
+                            source = err.source();
+                        }
+                        if !classified {
+                            other.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+        let elapsed = start.elapsed();
+
+        let s = succ.load(Ordering::Relaxed);
+        let o = overload.load(Ordering::Relaxed);
+        let c = cannot_connect.load(Ordering::Relaxed);
+        let x = other.load(Ordering::Relaxed);
+        let total = s + o + c + x;
+
+        println!(
+            "[{scenario}] total={total} success={s} overload={o} \
+             cannot_connect={c} other={x} elapsed={elapsed:?}",
+        );
+
+        cancellation_token.cancel();
+
+        BackpressureOutcome {
+            total,
+            success: s,
+            overload: o,
+            cannot_connect: c,
+            other: x,
+            elapsed,
+        }
+    }
+
+    /// Server-side mpsc queue saturation: tiny queue + slow handler vs 200
+    /// concurrent clients. With `try_send` + `OVERLOAD_SENTINEL` we see clean
+    /// `Overload` rejections; reverting to `.send().await` reproduces the
+    /// production `CannotConnect` ACK-timeout pathology.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_backpressure_server_queue_saturation() {
+        let outcome = run_backpressure_scenario(
+            "server_queue_saturation",
+            /* server_pool            */ 4,
+            /* server_queue           */ 32,
+            /* handler_delay          */ Duration::from_millis(100),
+            /* client_pool_size       */ 8,
+            /* client_channel_buffer  */ 64,
+            /* client_request_timeout */ Duration::from_secs(2),
+            /* total_requests         */ 200,
+        )
+        .await;
+
+        assert_eq!(outcome.total, 200, "every request must be accounted for");
+        assert!(outcome.success > 0, "at least some requests must succeed");
+    }
+
+    /// Client-side admission saturation: ample server, tiny client
+    /// (pool_size=1, channel_buffer=8). Before/after signal for changes to
+    /// the client admission path — removing the gate should drop wall-time
+    /// and keep `cannot_connect` at zero.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_backpressure_client_admission_saturation() {
+        let outcome = run_backpressure_scenario(
+            "client_admission_saturation",
+            /* server_pool            */ 8,
+            /* server_queue           */ 1024,
+            /* handler_delay          */ Duration::from_millis(100),
+            /* client_pool_size       */ 1,
+            /* client_channel_buffer  */ 8,
+            /* client_request_timeout */ Duration::from_secs(3),
+            /* total_requests         */ 200,
+        )
+        .await;
+
+        assert_eq!(outcome.total, 200, "every request must be accounted for");
+        assert!(outcome.success > 0, "at least some requests must succeed");
     }
 }
