@@ -635,8 +635,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 - profile_prefix (str|None): Optional prefix for profile output files.
         """
         profile_prefix = body.get("profile_prefix")
-        await self.engine_client.start_profile(profile_prefix=profile_prefix)
-        return {"status": "ok", "message": "Profiling started"}
+        try:
+            await self.engine_client.start_profile(profile_prefix=profile_prefix)
+            return {"status": "ok", "message": "Profiling started"}
+        except Exception as e:
+            logger.error(f"Failed to start profiling: {e}")
+            return {"status": "error", "message": str(e)}
 
     async def stop_profile(self, body: dict) -> dict:
         """Stop profiling on the engine.
@@ -644,8 +648,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Args:
             body: Unused, but required for handler signature.
         """
-        await self.engine_client.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
+        try:
+            await self.engine_client.stop_profile()
+            return {"status": "ok", "message": "Profiling stopped"}
+        except Exception as e:
+            logger.error(f"Failed to stop profiling: {e}")
+            return {"status": "error", "message": str(e)}
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
