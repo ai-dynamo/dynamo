@@ -116,6 +116,7 @@ def test_models_dir_nonexistent_exits_with_code_2():
             "pytest",
             "--models-dir=/nonexistent_path_xyz_dynamo_8362",
             "--collect-only",
+            "tests/test_models_dir_flag.py",
         ],
         capture_output=True,
         text=True,
