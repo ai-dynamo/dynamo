@@ -423,15 +423,15 @@ where
         }
 
         // Observe per-request shared cache metrics.
-        if let Some(hits) = sc_hits_for_metrics {
-            if let Some(m) = metrics::RouterRequestMetrics::get() {
-                if num_blocks > 0 {
-                    m.shared_cache_hit_rate
-                        .observe(hits.total_hits as f64 / num_blocks as f64);
-                }
-                let beyond = hits.hits_beyond(response.overlap_blocks);
-                m.shared_cache_beyond_blocks.observe(beyond as f64);
+        if let Some(hits) = sc_hits_for_metrics
+            && let Some(m) = metrics::RouterRequestMetrics::get()
+        {
+            if num_blocks > 0 {
+                m.shared_cache_hit_rate
+                    .observe(hits.total_hits as f64 / num_blocks as f64);
             }
+            let beyond = hits.hits_beyond(response.overlap_blocks);
+            m.shared_cache_beyond_blocks.observe(beyond as f64);
         }
 
         #[cfg(feature = "bench")]

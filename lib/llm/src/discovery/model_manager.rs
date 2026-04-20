@@ -896,7 +896,6 @@ impl ModelManager {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
-    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -904,18 +903,6 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
-    }
-
-    async fn make_test_endpoint(name: &str) -> Endpoint {
-        let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let namespace = drt.namespace(format!("test-ns-{name}")).unwrap();
-        let component = namespace
-            .component(format!("test-component-{name}"))
-            .unwrap();
-        component.endpoint("generate")
     }
 
     // -- CRUD delegation tests --
