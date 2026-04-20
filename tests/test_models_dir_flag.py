@@ -29,9 +29,7 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
-        cache = os.environ.get("TRANSFORMERS_CACHE")
-        assert cache is not None and cache != str(tmp_path)
-        assert Path(cache).is_dir() and os.access(cache, os.W_OK)
+        assert "TRANSFORMERS_CACHE" not in os.environ
     finally:
         _restore_models_dir_env(orig, tmp_cache)
 
@@ -50,9 +48,7 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
-        cache = os.environ.get("TRANSFORMERS_CACHE")
-        assert cache is not None and cache != str(tmp_path)
-        assert Path(cache).is_dir() and os.access(cache, os.W_OK)
+        assert "TRANSFORMERS_CACHE" not in os.environ
     finally:
         _restore_models_dir_env(orig, tmp_cache)
 
@@ -88,16 +84,13 @@ def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
-def test_apply_sets_writable_transformers_cache(tmp_path, monkeypatch):
+def test_apply_does_not_set_transformers_cache(tmp_path, monkeypatch):
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("TRANSFORMERS_CACHE", raising=False)
     orig, tmp_cache = _apply_models_dir_env(str(tmp_path))
     try:
-        cache = os.environ.get("TRANSFORMERS_CACHE")
-        assert cache is not None
-        assert cache != str(tmp_path)
-        assert Path(cache).is_dir()
-        assert os.access(cache, os.W_OK)
+        assert "TRANSFORMERS_CACHE" not in os.environ
     finally:
         _restore_models_dir_env(orig, tmp_cache)
 

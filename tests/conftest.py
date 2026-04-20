@@ -447,17 +447,15 @@ _MODELS_DIR_ENV_KEYS = (
     "HF_HOME",
     "HF_HUB_OFFLINE",
     "TRANSFORMERS_OFFLINE",
-    "TRANSFORMERS_CACHE",
     "DYNAMO_MODELS_DIR",
 )
 
 
-def _apply_models_dir_env(models_dir: str) -> tuple[dict, str]:
+def _apply_models_dir_env(models_dir: str) -> tuple[dict, None]:
     """Set HF env vars for read-only cache mode.
 
-    Returns (orig_values, tmp_cache_dir). Pass both to _restore_models_dir_env.
-    tmp_cache_dir is a writable temp dir for TRANSFORMERS_CACHE so auto-conversion
-    files are not written into the read-only cache.
+    Returns (orig_values, None). The None second element is kept for API
+    compatibility with _restore_models_dir_env.
     """
     orig = {k: os.environ.get(k) for k in _MODELS_DIR_ENV_KEYS}
     if (Path(models_dir) / "hub").is_dir():
@@ -471,13 +469,9 @@ def _apply_models_dir_env(models_dir: str) -> tuple[dict, str]:
         logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
         os.environ["HF_HUB_CACHE"] = models_dir
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    tmp_cache_dir = tempfile.mkdtemp(prefix="dynamo_hf_conv_")
-    # TRANSFORMERS_CACHE is deprecated since transformers≥4.22; TRANSFORMERS_OFFLINE=1
-    # is the primary guard. This redirect prevents writes on older versions.
-    os.environ["TRANSFORMERS_CACHE"] = tmp_cache_dir
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # sets HF_HUB_OFFLINE=1
-    return orig, tmp_cache_dir
+    return orig, None
 
 
 def _restore_models_dir_env(orig: dict, tmp_cache_dir: str | None = None) -> None:
