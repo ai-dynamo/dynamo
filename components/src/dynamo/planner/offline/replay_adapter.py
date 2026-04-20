@@ -421,11 +421,16 @@ class ReplayPlannerAdapter:
             duration_s = t.get("duration_s", 0.0)
             if duration_s > 0:
                 num_req = float(t.get("num_req", 0))
+                # The mocker publishes avg_kv_hit_rate as 0.0 when the
+                # window had no admissions with non-zero ISL blocks;
+                # pass it through as-is so the state machine can decide
+                # whether to feed its predictor.
                 traffic = TrafficObservation(
                     duration_s=duration_s,
                     num_req=num_req,
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
+                    kv_hit_rate=t.get("avg_kv_hit_rate"),
                 )
                 # Stash observed TTFT/ITL for the diagnostics recorder.
                 # When num_req == 0, the Rust accumulator returns 0 as a
@@ -437,6 +442,7 @@ class ReplayPlannerAdapter:
                     num_req=traffic.num_req,
                     isl=traffic.isl,
                     osl=traffic.osl,
+                    kv_hit_rate=traffic.kv_hit_rate,
                 )
 
         return TickInput(

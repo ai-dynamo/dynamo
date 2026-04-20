@@ -303,7 +303,14 @@ impl DisaggRuntime {
 
     /// Turn prefill router admissions into concrete worker dispatches.
     fn dispatch_prefill_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
-        for WorkerAdmission { uuid, worker_idx } in admissions {
+        for WorkerAdmission {
+            uuid,
+            worker_idx,
+            overlap_blocks,
+            isl_blocks,
+        } in admissions
+        {
+            self.traffic.on_admission(overlap_blocks, isl_blocks);
             if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
                 bail!("offline disagg replay expected queued prefill request for {uuid}");
             }
@@ -313,8 +320,16 @@ impl DisaggRuntime {
     }
 
     /// Turn decode router admissions into concrete worker dispatches.
+    ///
+    /// Note: only the prefill router's admissions are fed to
+    /// ``traffic.on_admission``; decode-router admissions reflect the
+    /// same requests re-routing after prefill completes and would double
+    /// count overlap observations.
     fn dispatch_decode_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
-        for WorkerAdmission { uuid, worker_idx } in admissions {
+        for WorkerAdmission {
+            uuid, worker_idx, ..
+        } in admissions
+        {
             if self.state(uuid)?.phase != DisaggPhase::QueuedDecode {
                 bail!("offline disagg replay expected queued decode request for {uuid}");
             }
