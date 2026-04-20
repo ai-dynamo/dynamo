@@ -25,8 +25,12 @@ import (
  *    - Use regex-based injection to find embedded Python+SGLang commands within args
  *    - Insert flags after the Python command but before any shell operators (|, &, ;)
  *
- * The needsShell flag indicates when environment variables require shell interpretation
+ * All MultinodeDeployer implementations must return Kubernetes env-var
+ * expansion syntax ("$(VAR)") from GetLeaderHostname / GetNodeRank so the
+ * kubelet substitutes variables before the container starts, regardless of
+ * whether the final command is python directly or wrapped in sh -c.
  */
+
 // shellQuoteForBashC quotes a string so it survives shell interpretation inside sh -c.
 // Simple args (flags, paths) pass through unchanged; args containing special characters
 // (JSON, env vars, spaces, quotes) are wrapped in double quotes with inner escaping.
@@ -69,7 +73,6 @@ func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, 
 			container.Command = []string{"sh", "-c"}
 			container.Args = []string{shellCommand}
 		} else {
-			// Simple append to args
 			flagsSlice := strings.Fields(flags)
 			container.Args = append(container.Args, flagsSlice...)
 		}

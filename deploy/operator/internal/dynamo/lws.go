@@ -6,13 +6,26 @@ type LWSMultinodeDeployer struct {
 	MultinodeDeployer
 }
 
+// GetLeaderHostname returns the leader address in Kubernetes env-var
+// expansion syntax. LWS injects LWS_LEADER_ADDRESS into every pod of a
+// LeaderWorkerSet, and the kubelet substitutes $(VAR) references in
+// container Args/Command before the container starts, which means the
+// same string works whether flags are appended directly to a python
+// command or wrapped in sh -c. Returning the bare shell form
+// ($LWS_LEADER_ADDRESS) would be passed literally to direct-python
+// commands and break distributed init.
 func (d *LWSMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	return "$LWS_LEADER_ADDRESS"
+	return "$(LWS_LEADER_ADDRESS)"
 }
 
+// GetNodeRank returns the current pod's rank within its LWS group in
+// Kubernetes env-var expansion syntax. needsShell is false because
+// $(LWS_WORKER_INDEX) is substituted by the kubelet in container
+// Args/Command before the container starts, so no sh -c wrapper is
+// required. This contrasts with Grove, which returns a shell
+// arithmetic expression and therefore does need shell interpretation.
 func (d *LWSMultinodeDeployer) GetNodeRank() (string, bool) {
-	// This requires shell expansion for variable substitution
-	return "$(LWS_WORKER_INDEX)", true
+	return "$(LWS_WORKER_INDEX)", false
 }
 
 func (d *LWSMultinodeDeployer) NeedsDNSWait() bool {
