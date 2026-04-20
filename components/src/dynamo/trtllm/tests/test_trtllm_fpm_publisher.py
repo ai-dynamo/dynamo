@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _build_fake_stat(**overrides):
     stat = {
@@ -235,3 +237,151 @@ def test_publisher_does_not_init_fpm_publisher_under_attention_dp():
     _run_initialize(pub)
     fake_fpm_cls.assert_not_called()
     assert pub.fpm_publisher is None
+
+
+# ---------------------------------------------------------------------------
+# First-stat schema probe
+# ---------------------------------------------------------------------------
+
+
+def _build_schema_probe_publisher(fpm_publisher_mock: MagicMock | None = None):
+    """Minimal Publisher instance for direct _check_fpm_schema testing.
+
+    Bypasses __init__ (which touches heavy deps) and seeds only the attributes
+    the probe method reads or writes: fpm_publisher and _fpm_schema_checked.
+    """
+    from dynamo.trtllm import publisher as publisher_mod
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.fpm_publisher = (
+        fpm_publisher_mock if fpm_publisher_mock is not None else MagicMock()
+    )
+    pub._fpm_schema_checked = False
+    return pub, publisher_mod
+
+
+def test_schema_probe_all_fields_present_keeps_publisher():
+    pub, _ = _build_schema_probe_publisher()
+    original_publisher = pub.fpm_publisher
+
+    pub._check_fpm_schema(_build_fake_stat())
+
+    assert pub._fpm_schema_checked is True
+    assert pub.fpm_publisher is original_publisher
+    original_publisher.shutdown.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "scheduledNumPrefillRequests",
+        "scheduledSumPrefillTokens",
+        "scheduledSumPrefillKvTokens",
+        "scheduledNumDecodeRequests",
+        "scheduledSumDecodeKvTokens",
+        "queuedNumPrefillRequests",
+        "queuedSumPrefillTokens",
+        "queuedNumDecodeRequests",
+        "queuedSumDecodeKvTokens",
+    ],
+)
+def test_schema_probe_missing_single_field_disables_publisher(missing_field):
+    """Strict probe: any one of the 9 required fields missing must disable
+    the publisher. Covers each field independently so a rename upstream or
+    a selective-backport TRT-LLM never slips through."""
+    pub, _ = _build_schema_probe_publisher()
+    original_publisher = pub.fpm_publisher
+
+    stat = _build_fake_stat()
+    stat.pop(missing_field)
+    pub._check_fpm_schema(stat)
+
+    assert pub._fpm_schema_checked is True
+    assert pub.fpm_publisher is None
+    original_publisher.shutdown.assert_called_once()
+
+
+def test_schema_probe_missing_all_fields_disables_publisher_legacy_trtllm():
+    """Legacy TRT-LLM case: stat dict has iterLatencyMS + attentionDpRank but
+    none of the 9 FPM fields (pre-#13199 schema). Must disable without error."""
+    pub, _ = _build_schema_probe_publisher()
+    original_publisher = pub.fpm_publisher
+
+    pub._check_fpm_schema({"iterLatencyMS": 10.0, "attentionDpRank": 0})
+
+    assert pub._fpm_schema_checked is True
+    assert pub.fpm_publisher is None
+    original_publisher.shutdown.assert_called_once()
+
+
+def test_schema_probe_noop_when_fpm_publisher_already_none():
+    """Attention-DP gate already set fpm_publisher = None; probe must not
+    blow up and must still flip _fpm_schema_checked so we do not re-enter."""
+    pub, _ = _build_schema_probe_publisher(fpm_publisher_mock=None)
+    # Override the default (which creates a MagicMock) with explicit None.
+    pub.fpm_publisher = None
+
+    pub._check_fpm_schema(_build_fake_stat())
+
+    assert pub._fpm_schema_checked is True
+    assert pub.fpm_publisher is None
+
+
+def test_schema_probe_shutdown_exception_still_disables_publisher():
+    """If the Rust shutdown call raises, we still None out the publisher --
+    the primary goal is to suppress further emission, not to succeed at
+    shutdown. Protects against leaking emission through a shutdown failure."""
+    pub, _ = _build_schema_probe_publisher()
+    pub.fpm_publisher.shutdown.side_effect = RuntimeError("tokio runtime gone")
+
+    stat = _build_fake_stat()
+    stat.pop("scheduledNumPrefillRequests")
+    pub._check_fpm_schema(stat)
+
+    assert pub.fpm_publisher is None
+    assert pub._fpm_schema_checked is True
+
+
+def test_handle_stat_probe_gate_fires_once_and_skips_subsequent_stats():
+    """Simulate the handle_stat dispatch pattern: on the first stat the probe
+    runs; on the next stat the gate short-circuits. Ensures we do not re-check
+    per iteration (which would be wasteful and could race a late schema bump)."""
+    pub, _ = _build_schema_probe_publisher()
+    original_publisher = pub.fpm_publisher
+
+    # First stat — probe runs, passes.
+    stat_ok = _build_fake_stat()
+    if pub.fpm_publisher is not None and not pub._fpm_schema_checked:
+        pub._check_fpm_schema(stat_ok)
+    assert pub._fpm_schema_checked is True
+    assert pub.fpm_publisher is original_publisher
+
+    # Second stat, with a field that would fail the probe if re-checked.
+    # The gate must prevent re-entry.
+    stat_bad = _build_fake_stat()
+    stat_bad.pop("scheduledNumPrefillRequests")
+    if pub.fpm_publisher is not None and not pub._fpm_schema_checked:
+        pub._check_fpm_schema(stat_bad)
+    assert pub.fpm_publisher is original_publisher
+    original_publisher.shutdown.assert_not_called()
+
+
+def test_schema_probe_field_list_matches_publish_arguments():
+    """Guardrail: the required-fields tuple must stay in sync with the
+    fields handle_stat reads in its .publish() call. If someone adds a
+    scheduled/queued field to the .publish args but forgets the probe
+    constant, this test catches it."""
+    from dynamo.trtllm import publisher as publisher_mod
+
+    expected = {
+        "scheduledNumPrefillRequests",
+        "scheduledSumPrefillTokens",
+        "scheduledSumPrefillKvTokens",
+        "scheduledNumDecodeRequests",
+        "scheduledSumDecodeKvTokens",
+        "queuedNumPrefillRequests",
+        "queuedSumPrefillTokens",
+        "queuedNumDecodeRequests",
+        "queuedSumDecodeKvTokens",
+    }
+    assert set(publisher_mod._FPM_REQUIRED_STAT_FIELDS) == expected

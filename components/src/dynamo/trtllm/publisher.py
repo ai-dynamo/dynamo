@@ -55,6 +55,23 @@ _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
 
+# IterationStats fields that TensorRT-LLM#13199 adds and that the FPM
+# publisher consumes. The first-stat schema probe in handle_stat requires
+# ALL of these to be present; any missing field disables the publisher so
+# we do not emit all-zero snapshots that the Planner would misread as
+# "worker idle" and act on.
+_FPM_REQUIRED_STAT_FIELDS = (
+    "scheduledNumPrefillRequests",
+    "scheduledSumPrefillTokens",
+    "scheduledSumPrefillKvTokens",
+    "scheduledNumDecodeRequests",
+    "scheduledSumDecodeKvTokens",
+    "queuedNumPrefillRequests",
+    "queuedSumPrefillTokens",
+    "queuedNumDecodeRequests",
+    "queuedSumDecodeKvTokens",
+)
+
 
 def _to_signed_i64(value: int | None) -> int | None:
     """Convert a Python int to signed 64-bit range by two's complement."""
@@ -343,6 +360,11 @@ class Publisher:
         # Allocated with one per-DP-rank channel; the Rust side handles the
         # 1 s idle heartbeat internally.
         self.fpm_publisher: Optional[FpmDirectPublisher] = None
+        # One-shot schema probe gate. The first IterationStats delivered to
+        # handle_stat is checked against _FPM_REQUIRED_STAT_FIELDS; on mismatch
+        # the publisher is shut down and None'd. Prevents silent planner poison
+        # when running against a TRT-LLM version that predates #13199.
+        self._fpm_schema_checked: bool = False
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
@@ -504,6 +526,40 @@ class Publisher:
             else:
                 sleep_s = min_sleep
 
+    def _check_fpm_schema(self, stat: dict) -> None:
+        """One-shot probe: disable FPM publisher if any required TRT-LLM
+        IterationStats field is missing.
+
+        Runs exactly once (gated by ``self._fpm_schema_checked``). Strict: if
+        any field in ``_FPM_REQUIRED_STAT_FIELDS`` is missing, the publisher
+        is shut down and set to ``None`` so the subsequent
+        ``if self.fpm_publisher is not None:`` short-circuit suppresses all
+        FPM emission for the lifetime of this worker. This prevents silent
+        planner poison when running against a TRT-LLM that predates
+        NVIDIA/TensorRT-LLM#13199 — otherwise every field would default to 0
+        and the emitted snapshot would be byte-identical to the idle
+        heartbeat, making the Planner treat a loaded worker as idle.
+        """
+        self._fpm_schema_checked = True
+        if self.fpm_publisher is None:
+            return
+        missing = [f for f in _FPM_REQUIRED_STAT_FIELDS if f not in stat]
+        if not missing:
+            return
+        logging.warning(
+            "TRT-LLM IterationStats is missing required FPM fields %s; "
+            "disabling FpmDirectPublisher to prevent planner poison. "
+            "Upgrade TRT-LLM past NVIDIA/TensorRT-LLM#13199 to enable FPM.",
+            missing,
+        )
+        try:
+            self.fpm_publisher.shutdown()
+        except Exception as e:
+            logging.warning(
+                f"FpmDirectPublisher shutdown after schema mismatch failed: {e}"
+            )
+        self.fpm_publisher = None
+
     async def _publish_stats_task(self):
         """
         Publish stats to the metrics publisher.
@@ -550,6 +606,14 @@ class Publisher:
             # NLOHMANN serialization). Variance fields are not yet computed
             # in TRT-LLM's PyExecutor and default to 0.0 in the Rust
             # snapshot.
+            #
+            # The first stat delivered here triggers a one-shot schema probe:
+            # if any required field is missing (e.g. running against a
+            # TRT-LLM that predates #13199) the probe shuts down the
+            # publisher, which flips the guard below to short-circuit FPM
+            # emission for the rest of this worker's lifetime.
+            if self.fpm_publisher is not None and not self._fpm_schema_checked:
+                self._check_fpm_schema(stat)
             if self.fpm_publisher is not None:
                 try:
                     dp_rank = int(stat.get("attentionDpRank", 0))
