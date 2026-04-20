@@ -86,13 +86,6 @@ const (
 	// Sidecar image
 	SidecarImage = "bitnami/kubectl:latest"
 
-	// PlannerImageName is the image-name component of the published planner/profiler
-	// image. The profiler job must run from this image because the backend runtime
-	// images no longer carry planner/profiler Python dependencies (see DYN-2540).
-	// derivePlannerImage swaps spec.image's name component with this value while
-	// preserving the registry and tag.
-	PlannerImageName = "dynamo-planner"
-
 	// Volume names
 	VolumeNameProfilingOutput = "profiling-output"
 	VolumeNameProfilingConfig = "profiling-config"
@@ -1258,17 +1251,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// --output-dir must match ProfilingOutputPath so the sidecar can find profiler_status.yaml
 		profilerArgs := []string{"--config", specJSON, "--output-dir", ProfilingOutputPath}
 
-		// spec.image identifies the deployment's image family (frontend or backend
-		// runtime); the defaulting webhook fills it in for production builds. The
-		// profiler job itself must run from the planner/profiler image because the
-		// backend runtime images no longer carry planner deps (DYN-2540), so we derive
-		// the planner image from spec.image, preserving the registry and tag.
+		// Use image from spec; the defaulting webhook fills this in for production builds.
 		// Guard against empty image in case the webhook didn't run (e.g. local dev builds).
-		if dgdr.Spec.Image == "" {
+		//
+		// Starting with Dynamo 1.1.0, the profiler's runtime dependencies
+		// (kubernetes_asyncio, pmdarima, prophet, aiconfigurator, ...) live in the
+		// dedicated dynamo-planner image, not in backend runtime or frontend images.
+		// Users on 1.1.0+ must set spec.image to a planner image
+		// (e.g. nvcr.io/nvidia/ai-dynamo/dynamo-planner:<version>); earlier versions
+		// can continue using the frontend/backend image they were using before.
+		imageName := dgdr.Spec.Image
+		if imageName == "" {
 			return nil, false, fmt.Errorf("spec.image is required but not set; ensure the defaulting webhook ran or set spec.image explicitly")
 		}
-		imageName := derivePlannerImage(dgdr.Spec.Image)
-		logger.Info("Using profiler image", "image", imageName, "derivedFrom", dgdr.Spec.Image)
+		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
 			Name:         ContainerNameProfiler,
@@ -1509,37 +1505,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		hw.TotalGPUs = &total
 	}
 	return nil
-}
-
-// derivePlannerImage swaps the image-name component of ref for PlannerImageName,
-// preserving the registry path, tag, and digest. Mirrors the Python
-// dynamo.profiler.utils.profile_common.derive_planner_image helper so the profiler
-// job and the Planner service in the generated DGD share the same derivation rule.
-//
-// Examples:
-//
-//	"nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3"
-//	  → "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
-//	"nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0rc0"
-//	  → "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0rc0"
-func derivePlannerImage(ref string) string {
-	prefix := ""
-	suffix := ref
-	if i := strings.LastIndex(ref, "/"); i >= 0 {
-		prefix = ref[:i+1]
-		suffix = ref[i+1:]
-	}
-	nameAndTag := suffix
-	digestSuffix := ""
-	if j := strings.Index(suffix, "@"); j >= 0 {
-		nameAndTag = suffix[:j]
-		digestSuffix = suffix[j:]
-	}
-	tag := ""
-	if k := strings.LastIndex(nameAndTag, ":"); k >= 0 {
-		tag = nameAndTag[k:]
-	}
-	return prefix + PlannerImageName + tag + digestSuffix
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.
