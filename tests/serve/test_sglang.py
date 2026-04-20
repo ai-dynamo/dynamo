@@ -114,6 +114,7 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(96),
             pytest.mark.timeout(195),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
