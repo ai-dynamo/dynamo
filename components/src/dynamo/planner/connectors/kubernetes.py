@@ -203,7 +203,7 @@ class KubernetesConnector(PlannerConnector):
                 model_name = decode_model_name
             elif decode_model_name is None:
                 model_name = prefill_model_name
-            elif prefill_model_name != decode_model_name:
+            elif prefill_model_name.lower() != decode_model_name.lower():
                 raise DeploymentModelNameMismatchError(
                     prefill_model_name, decode_model_name
                 )
@@ -224,7 +224,7 @@ class KubernetesConnector(PlannerConnector):
 
         # If user provided a model name and it doesn't match the model name from the deployment, raise an error
         if self.user_provided_model_name:
-            if model_name != self.user_provided_model_name:
+            if model_name.lower() != self.user_provided_model_name:
                 raise UserProvidedModelNameMismatchError(
                     model_name, self.user_provided_model_name
                 )
