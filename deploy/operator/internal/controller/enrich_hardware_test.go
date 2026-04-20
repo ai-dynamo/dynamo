@@ -65,7 +65,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 		discoveredGPU *gpupkg.GPUInfo
 
 		// Expected outcome.
-		wantErr       bool
+		wantErr       string // non-empty means error expected, substring match
 		wantGPUSKU    string
 		wantVRAM      float64
 		wantGPUsNode  int32
@@ -120,14 +120,14 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 		},
 		{
 			name:    "no fields set, discovery fails",
-			wantErr: true,
+			wantErr: "auto-discovery failed",
 		},
 		{
 			name: "three fields set, discovery fails",
 			hardware: &nvidiacomv1beta1.HardwareSpec{
 				GPUSKU: "h100_sxm", VRAMMB: ptr.To(81920.0), NumGPUsPerNode: ptr.To(int32(8)),
 			},
-			wantErr: true,
+			wantErr: "auto-discovery failed",
 		},
 	}
 
@@ -141,7 +141,7 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 					return tt.discoveredGPU, nil
 				})
 				r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
-			} else if tt.wantErr {
+			} else if tt.wantErr != "" {
 				// No discovery — will fail if discovery is attempted.
 				r = newFakeReconciler()
 			} else {
@@ -161,8 +161,9 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 
 			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 
-			if tt.wantErr {
+			if tt.wantErr != "" {
 				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
 				return
 			}
 			require.NoError(t, err)

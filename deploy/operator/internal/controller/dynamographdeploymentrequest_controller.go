@@ -1046,13 +1046,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
-	// Check if user provided hardware info in the typed spec
-	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
-		dgdr.Spec.Hardware.VRAMMB != nil ||
-		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
-
-	// If manual config is provided, validation passes
-	if hasManualConfig {
+	// All four hardware fields set — discovery not needed.
+	hw := dgdr.Spec.Hardware
+	if hw != nil && hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil && hw.TotalGPUs != nil {
 		return nil
 	}
 
@@ -1064,9 +1060,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 				"\n\n1. Re-enable GPU discovery (if it was disabled during Helm install):" +
 				"\n   helm upgrade ... --set dynamo-operator.gpuDiscovery.enabled=true" +
 				"\n\n2. Add hardware config to spec.hardware:" +
+				"\n   gpuSku: \"h100_sxm\"" +
+				"\n   vramMb: 81920" +
 				"\n   numGpusPerNode: 8" +
-				"\n   gpuSku: \"H100-SXM5-80GB\"" +
-				"\n   vramMb: 81920")
+				"\n   totalGpus: 8")
 	}
 
 	_, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
@@ -1077,7 +1074,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	// Refine the logger message
 	reason := GetGPUDiscoveryFailureReason(err)
 	logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
-	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode")
+	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
 }
 
 // GetGPUDiscoveryFailureReason classifies a GPU discovery error and

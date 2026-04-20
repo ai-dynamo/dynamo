@@ -206,16 +206,12 @@ func NewGPUDiscoveryCache() *GPUDiscoveryCache {
 //
 // This method is safe for concurrent use.
 func (c *GPUDiscoveryCache) Get(sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
 	e, ok := c.entries[sku]
-	if !ok {
-		return nil, false
-	}
-	if time.Now().Before(e.expiresAt) && e.value != nil {
+	c.mu.RUnlock()
+	if ok && time.Now().Before(e.expiresAt) && e.value != nil {
 		return e.value, true
 	}
-	delete(c.entries, sku)
 	return nil, false
 }
 
