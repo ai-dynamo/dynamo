@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
-    pip install --break-system-packages "accelerate>=0.17.0"
+    pip install --break-system-packages --no-deps "accelerate==1.13.0"
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
