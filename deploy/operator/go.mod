@@ -6,7 +6,7 @@ require (
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/ai-dynamo/dynamo/deploy/snapshot v0.0.0
-	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.7.0.20260416230835-611224c12fe3
+	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.8
 	github.com/bsm/gomega v1.27.10
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0
