@@ -266,13 +266,13 @@ impl OpenAIPreprocessor {
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        // Populate mm_routing_info for approximate MM-aware KV routing.
-        // Controlled by DYN_ROUTER_MM_APPROX=1. Requires both images AND a
-        // tokenized prompt. Backend-agnostic: just URL-hash-based routing.
-        if Self::mm_approx_routing_enabled() {
-            self.gather_mm_approx_routing_info(request, &mut builder, formatted_prompt.as_deref())
-                .with_context(|| "Failed to gather MM approx routing info")?;
-        }
+        // Populate mm_routing_info from cheap URL hashes so the KV router
+        // can cluster repeat multimodal requests onto the same worker. Safe
+        // to always do in the Rust frontend: the exact-MM-routing path lives
+        // in the Python vLLM processor, which overrides this if needed.
+        // No-op for text-only requests.
+        self.gather_mm_approx_routing_info(request, &mut builder, formatted_prompt.as_deref())
+            .with_context(|| "Failed to gather MM approx routing info")?;
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["preprocess"])
@@ -516,16 +516,6 @@ impl OpenAIPreprocessor {
         }
 
         Ok(())
-    }
-
-    /// Read `DYN_ROUTER_MM_APPROX` (default off) to decide whether to emit
-    /// MM-aware routing metadata. Checked per-request so flipping the env var
-    /// is hot-reloadable from a test harness.
-    fn mm_approx_routing_enabled() -> bool {
-        matches!(
-            std::env::var("DYN_ROUTER_MM_APPROX").as_deref(),
-            Ok("1") | Ok("true") | Ok("True") | Ok("TRUE")
-        )
     }
 
     /// Read the KV block size that we lay `block_mm_infos` out for.

@@ -66,9 +66,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
-echo "=== Starting frontend (KV router, approximate mode, MM approx) ==="
+echo "=== Starting frontend (KV router, approximate mode, MM approx auto-on) ==="
 env "${COMMON_ENV[@]}" \
-    "DYN_ROUTER_MM_APPROX=1" \
     "DYN_ROUTER_MM_APPROX_BLOCK_SIZE=${BLOCK_SIZE}" \
     "DYN_LOG=debug" \
 python -m dynamo.frontend \
