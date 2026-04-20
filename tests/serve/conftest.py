@@ -102,6 +102,13 @@ def minio_lora_service():
         # Start or connect to MinIO
         service.start()
 
+        # Skip LoRA tests when --models-dir (read-only cache mode) is active.
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            pytest.skip(
+                "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
+                "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
+            )
+
         # Create bucket and upload LoRA
         service.create_bucket()
         local_path = service.download_lora()

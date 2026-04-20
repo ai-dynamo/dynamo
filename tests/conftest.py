@@ -440,6 +440,8 @@ def _disable_offline_with_mistral_patch():
 
 _download_lock_path = os.path.join(tempfile.gettempdir(), "pytest_model_download.lock")
 
+# PYTHONPATH is intentionally excluded: _disable_offline_with_mistral_patch() removes
+# its entry via str.replace, which is idempotent and needs no snapshot.
 _MODELS_DIR_ENV_KEYS = (
     "HF_HUB_CACHE",
     "HF_HOME",
@@ -450,23 +452,33 @@ _MODELS_DIR_ENV_KEYS = (
 )
 
 
-def _apply_models_dir_env(models_dir: str) -> dict:
-    """Set HF env vars for read-only cache mode. Returns orig values for teardown."""
+def _apply_models_dir_env(models_dir: str) -> tuple[dict, str]:
+    """Set HF env vars for read-only cache mode.
+
+    Returns (orig_values, tmp_cache_dir). Pass both to _restore_models_dir_env.
+    tmp_cache_dir is a writable temp dir for TRANSFORMERS_CACHE so auto-conversion
+    files are not written into the read-only cache.
+    """
     orig = {k: os.environ.get(k) for k in _MODELS_DIR_ENV_KEYS}
     if (Path(models_dir) / "hub").is_dir():
+        logging.info("--models-dir: detected HF_HOME layout (hub/ subdirectory found)")
         os.environ["HF_HOME"] = models_dir
     else:
+        logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
         os.environ["HF_HUB_CACHE"] = models_dir
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_CACHE"] = tempfile.mkdtemp(prefix="dynamo_hf_conv_")
+    tmp_cache_dir = tempfile.mkdtemp(prefix="dynamo_hf_conv_")
+    os.environ["TRANSFORMERS_CACHE"] = tmp_cache_dir
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # sets HF_HUB_OFFLINE=1
-    return orig
+    return orig, tmp_cache_dir
 
 
-def _restore_models_dir_env(orig: dict) -> None:
+def _restore_models_dir_env(orig: dict, tmp_cache_dir: str | None = None) -> None:
     """Undo _apply_models_dir_env. Call after fixture yield."""
     _disable_offline_with_mistral_patch()  # pops HF_HUB_OFFLINE + cleans sitecustomize
+    if tmp_cache_dir:
+        shutil.rmtree(tmp_cache_dir, ignore_errors=True)
     for k, v in orig.items():
         if v is None:
             os.environ.pop(k, None)
@@ -485,9 +497,11 @@ def _models_dir_env(pytestconfig):
     if not models_dir:
         yield
         return
-    orig = _apply_models_dir_env(models_dir)
-    yield
-    _restore_models_dir_env(orig)
+    orig, tmp_cache_dir = _apply_models_dir_env(models_dir)
+    try:
+        yield
+    finally:
+        _restore_models_dir_env(orig, tmp_cache_dir)
 
 
 @pytest.fixture(scope="session")

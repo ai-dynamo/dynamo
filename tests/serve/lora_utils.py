@@ -232,11 +232,14 @@ class MinioService:
                 raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
-        """Download LoRA from Hugging Face Hub, returns temp directory path."""
-        if os.environ.get("DYNAMO_MODELS_DIR"):
-            import pytest
+        """Download LoRA from Hugging Face Hub, returns temp directory path.
 
-            pytest.skip(
+        Raises RuntimeError when DYNAMO_MODELS_DIR is set (--models-dir active).
+        Callers in test fixtures should check os.environ.get("DYNAMO_MODELS_DIR")
+        and call pytest.skip() before invoking this method.
+        """
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            raise RuntimeError(
                 "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
                 "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
             )
