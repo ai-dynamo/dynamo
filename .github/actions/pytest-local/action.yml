@@ -44,6 +44,25 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: verify minio 
+      shell: bash
+      run: |
+        # Wait for MinIO to be ready
+        echo "⏳ Waiting for MinIO to be ready..."
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+            echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
+            break
+          fi
+          ATTEMPT=$((ATTEMPT + 1))
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
+            exit 1
+          fi
+          sleep 1
+        done
     - name: Verify GPU visibility
       if: inputs.verify_gpu == 'true'
       shell: python
