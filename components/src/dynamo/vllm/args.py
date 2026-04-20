@@ -26,6 +26,8 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
 
+# Side-effect import: monkey-patches vLLM Scheduler for /engine/sleep under NIXL KV transfer.
+from . import scheduler_patches  # noqa: F401
 from . import envs
 
 logger = logging.getLogger(__name__)
@@ -275,6 +277,11 @@ def update_engine_config_with_dynamo(
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
+    elif getattr(engine_config, "scheduler_cls", None) is None:
+        # Force EngineCore to import scheduler_patches under spawn mp.
+        defaults[
+            "scheduler_cls"
+        ] = "dynamo.vllm.scheduler_patches.PatchedAsyncScheduler"
 
     if dynamo_config.benchmark_mode is not None:
         if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:

@@ -51,12 +51,16 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def record(
         self,
-        scheduler_stats: SchedulerStats,
+        scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
         *args: object,
         **kwargs: object,
     ) -> None:
+        # vLLM passes scheduler_stats=None during sleep-mode transitions; skip
+        # the publish to avoid AttributeError + EngineCore crash.
+        if scheduler_stats is None:
+            return
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, kv_used_blocks=active_decode_blocks)
 
