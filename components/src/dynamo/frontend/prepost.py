@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +25,8 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PreprocessResult:
@@ -34,6 +39,29 @@ class PreprocessResult:
 
 _ASYNC_TOKENIZER_POOL: dict[int, AsyncMicrobatchTokenizer] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+DEBUG_FRONTEND = os.getenv("DYN_FRONTEND_DEBUG", "0") == "1"
+DEBUG_FRONTEND_MAX_TEXT = int(os.getenv("DYN_FRONTEND_DEBUG_MAX_TEXT", "240"))
+
+
+def _debug_enabled() -> bool:
+    return DEBUG_FRONTEND
+
+
+def _short_text(value: Any, limit: int = DEBUG_FRONTEND_MAX_TEXT) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...<trimmed:{len(text) - limit}>"
+
+
+def _hash_messages(messages: Sequence[Any]) -> str:
+    payload: list[Any] = []
+    for message in messages:
+        if hasattr(message, "model_dump"):
+            payload.append(message.model_dump(exclude_none=False))
+        else:
+            payload.append(message)
+    return hashlib.sha256(repr(payload).encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> AsyncMicrobatchTokenizer:
@@ -103,6 +131,8 @@ def _prepare_request(
     else:
         request_for_sampling = ChatCompletionRequest.model_validate(request)
 
+    original_tools_count = len(request_for_sampling.tools or [])
+    original_messages_hash = _hash_messages(request_for_sampling.messages)
     tool_parser: ToolParser | None = None
     # With enable_auto_tool_choice the model may emit tool calls even when the
     # client did not supply an explicit `tools` list, so we activate the parser
@@ -152,6 +182,26 @@ def _prepare_request(
         ),
     )
 
+    if _debug_enabled():
+        logger.info(
+            "[DYN_DEBUG preprocess] request_summary messages=%d messages_hash=%s tool_choice=%r "
+            "tools_in=%d tools_exposed=%d tool_parser=%s auto_tool_choice=%s "
+            "reasoning_effort=%r add_generation_prompt=%r continue_final_message=%r "
+            "chat_template_kwargs_keys=%s tokenize_in_template=%s",
+            len(request_for_sampling.messages),
+            original_messages_hash,
+            request_for_sampling.tool_choice,
+            original_tools_count,
+            len(tool_dicts or []),
+            tool_parser.__class__.__name__ if tool_parser is not None else None,
+            enable_auto_tool_choice,
+            request_for_sampling.reasoning_effort,
+            request_for_sampling.add_generation_prompt,
+            request_for_sampling.continue_final_message,
+            sorted(chat_template_kwargs.keys()),
+            tokenize_in_template,
+        )
+
     return (
         request_for_sampling,
         tool_parser,
@@ -170,6 +220,7 @@ async def preprocess_chat_request(
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
 ) -> PreprocessResult:
+    t0 = time.monotonic()
     (
         request_for_sampling,
         tool_parser,
@@ -184,7 +235,9 @@ async def preprocess_chat_request(
         enable_auto_tool_choice=enable_auto_tool_choice,
     )
 
+    t_prepare = time.monotonic()
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+    t_render = time.monotonic()
 
     if "prompt_token_ids" in engine_prompt:
         tokens = list(engine_prompt["prompt_token_ids"])
@@ -195,6 +248,25 @@ async def preprocess_chat_request(
             add_special_tokens=request_for_sampling.add_special_tokens,
         )
         tokens = list(encoded.input_ids)
+    t_tokenize = time.monotonic()
+
+    if _debug_enabled():
+        prompt_text = engine_prompt.get("prompt")
+        logger.info(
+            "[DYN_DEBUG preprocess] render_summary prepare_ms=%.1f render_ms=%.1f tokenize_ms=%.1f "
+            "prompt_tokens=%d has_prompt_text=%s prompt_text_hash=%s prompt_preview=%r",
+            (t_prepare - t0) * 1000,
+            (t_render - t_prepare) * 1000,
+            (t_tokenize - t_render) * 1000,
+            len(tokens),
+            isinstance(prompt_text, str),
+            (
+                hashlib.sha256(prompt_text.encode("utf-8", "ignore")).hexdigest()[:16]
+                if isinstance(prompt_text, str)
+                else None
+            ),
+            _short_text(prompt_text) if isinstance(prompt_text, str) else None,
+        )
 
     return PreprocessResult(
         request_for_sampling=request_for_sampling,
@@ -216,11 +288,13 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        debug_request_id: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
+        self.debug_request_id = debug_request_id
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
@@ -246,6 +320,18 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._debug_reasoning_started = False
+        self._debug_logged_fast_path = False
+
+    def _debug(self, message: str, *args: Any) -> None:
+        if not _debug_enabled():
+            return
+        prefix = (
+            f"[DYN_DEBUG stream rid={self.debug_request_id}] "
+            if self.debug_request_id
+            else "[DYN_DEBUG stream] "
+        )
+        logger.info(prefix + message, *args)
 
     @staticmethod
     def _merge_tool_call(
@@ -308,6 +394,14 @@ class StreamingPostProcessor:
         )
         existing = self.in_progress_tool_calls.get(index)
         self.in_progress_tool_calls[index] = self._merge_tool_call(existing, tool_delta)
+        merged = self.in_progress_tool_calls[index]
+        self._debug(
+            "tool_call_extracted index=%d id=%r name=%r args_len=%d",
+            index,
+            merged.id,
+            merged.function.name if merged.function else None,
+            len(merged.function.arguments or "") if merged.function else 0,
+        )
 
     def _extract_tool_calls_from_text(
         self, text: str, *, saved_reasoning: str | None = None
@@ -348,6 +442,13 @@ class StreamingPostProcessor:
             existing = self.in_progress_tool_calls.get(tool_delta.index)
             merged = self._merge_tool_call(existing, tool_delta)
             self.in_progress_tool_calls[tool_delta.index] = merged
+            self._debug(
+                "tool_call_stream index=%d id=%r name=%r args_len=%d",
+                merged.index,
+                merged.id,
+                merged.function.name if merged.function else None,
+                len(merged.function.arguments or "") if merged.function else 0,
+            )
 
     def _dump_in_progress_tool_calls(self) -> list[dict[str, Any]]:
         return [
@@ -384,6 +485,9 @@ class StreamingPostProcessor:
         delta_text = output.text or ""
         delta: dict[str, Any] = {}
         if self._fast_plain_text:
+            if not self._debug_logged_fast_path:
+                self._debug("fast_plain_text enabled")
+                self._debug_logged_fast_path = True
             if delta_text:
                 delta = {
                     "role": "assistant",
@@ -415,6 +519,12 @@ class StreamingPostProcessor:
             if buffer_complete:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
+                self._debug(
+                    "tool_buffer_complete len=%d finish_reason=%r preview=%r",
+                    len(buffered_text),
+                    output.finish_reason,
+                    _short_text(buffered_text),
+                )
                 delta_message = self._extract_tool_calls_from_text(buffered_text)
             else:
                 # Still accumulating; emit nothing for this chunk.
@@ -440,6 +550,13 @@ class StreamingPostProcessor:
             if self.reasoning_parser.is_reasoning_end_streaming(
                 current_token_ids, delta_token_ids
             ):
+                self._debug(
+                    "reasoning_end delta_preview=%r reasoning_len=%d content_len=%d finish_reason=%r",
+                    _short_text(delta_text),
+                    len(delta_message.reasoning or "") if delta_message else 0,
+                    len(delta_message.content or "") if delta_message else 0,
+                    output.finish_reason,
+                )
                 self.reasoning_is_done = True
                 saved_reasoning = delta_message.reasoning if delta_message else None
                 post_content = (delta_message.content if delta_message else None) or ""
@@ -457,6 +574,12 @@ class StreamingPostProcessor:
                     # extraction (streaming parser can't handle the combined
                     # reasoning-end + tool-start in a single chunk).
                     self._tool_text_buffer = post_content
+                    self._debug(
+                        "tool_buffer_start len=%d finish_reason=%r preview=%r",
+                        len(post_content),
+                        output.finish_reason,
+                        _short_text(post_content),
+                    )
                     if output.finish_reason:
                         # If finish_reason is already set, this is the final
                         # chunk; parse buffered text now instead of waiting for
@@ -494,6 +617,13 @@ class StreamingPostProcessor:
                     current_token_ids=current_token_ids,
                     delta_token_ids=delta_token_ids,
                 )
+            elif delta_message and delta_message.reasoning and not self._debug_reasoning_started:
+                self._debug_reasoning_started = True
+                self._debug(
+                    "reasoning_start len=%d preview=%r",
+                    len(delta_message.reasoning or ""),
+                    _short_text(delta_message.reasoning or delta_text),
+                )
         else:
             if self._should_parse_tools():
                 no_prev_reasoning = (
@@ -526,6 +656,10 @@ class StreamingPostProcessor:
             delta = {"role": "assistant"}
             content = delta_message.content
             if self.in_progress_tool_calls and self._is_control_only_content(content):
+                self._debug(
+                    "control_only_content_suppressed preview=%r",
+                    _short_text(content),
+                )
                 content = None
             if content:
                 delta["content"] = content
@@ -543,4 +677,17 @@ class StreamingPostProcessor:
 
         self.previous_text = current_text
         self.previous_token_ids = current_token_ids
+        if choice is not None:
+            delta_out = choice.get("delta") or {}
+            self._debug(
+                "emit_choice finish_reason=%r has_content=%s content_len=%d has_reasoning=%s "
+                "reasoning_len=%d tool_calls=%d delta_tokens=%d",
+                choice.get("finish_reason"),
+                "content" in delta_out,
+                len(delta_out.get("content") or ""),
+                "reasoning_content" in delta_out,
+                len(delta_out.get("reasoning_content") or ""),
+                len(delta_out.get("tool_calls") or []),
+                len(delta_token_ids),
+            )
         return choice

@@ -6,6 +6,8 @@
 #
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import time
@@ -43,6 +45,22 @@ from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import extract_mm_urls, random_uuid
 
 logger = logging.getLogger(__name__)
+DEBUG_FRONTEND = os.getenv("DYN_FRONTEND_DEBUG", "0") == "1"
+DEBUG_LONG_WAIT_MS = int(os.getenv("DYN_FRONTEND_DEBUG_LONG_WAIT_MS", "120000"))
+DEBUG_MAX_TEXT = int(os.getenv("DYN_FRONTEND_DEBUG_MAX_TEXT", "240"))
+
+
+def _short_text(value: Any, limit: int = DEBUG_MAX_TEXT) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...<trimmed:{len(text) - limit}>"
+
+
+def _hash_request_messages(messages: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(
+        json.dumps(messages, sort_keys=True, default=str).encode("utf-8", "ignore")
+    ).hexdigest()[:16]
 
 
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
@@ -125,6 +143,7 @@ class VllmProcessor:
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
+        t0 = time.monotonic()
 
         # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
         # The Rust HTTP layer accepts None/missing, so normalize before validation.
@@ -143,6 +162,23 @@ class VllmProcessor:
                     if isinstance(img_url, dict) and img_url.get("detail") is None:
                         img_url["detail"] = "auto"
 
+        if DEBUG_FRONTEND:
+            logger.info(
+                "[DYN_DEBUG ingress rid=%s] model=%r messages=%d messages_hash=%s tools=%d "
+                "tool_choice=%r has_reasoning=%s max_tokens=%r max_completion_tokens=%r routing=%r last_role=%r",
+                request_id,
+                request.get("model"),
+                len(messages),
+                _hash_request_messages(messages),
+                len(request.get("tools") or []),
+                request.get("tool_choice"),
+                request.get("reasoning") is not None,
+                request.get("max_tokens"),
+                request.get("max_completion_tokens"),
+                request.get("routing"),
+                messages[-1].get("role") if messages and isinstance(messages[-1], dict) else None,
+            )
+
         pre = await preprocess_chat_request(
             request,
             tokenizer=self.tokenizer,
@@ -157,6 +193,7 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
+        t_pre = time.monotonic()
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -294,7 +331,22 @@ class VllmProcessor:
             tool_parser=tool_parser,
             reasoning_parser_class=self.reasoning_parser_class,
             chat_template_kwargs=chat_template_kwargs,
+            debug_request_id=request_id,
         )
+
+        if DEBUG_FRONTEND:
+            logger.info(
+                "[DYN_DEBUG ingress rid=%s] preprocess_done pre_ms=%.1f prompt_tokens=%d tool_parser=%s "
+                "reasoning_parser=%s sampling_max_tokens=%r stop=%r stop_token_ids=%r",
+                request_id,
+                (t_pre - t0) * 1000,
+                len(tokens),
+                tool_parser.__class__.__name__ if tool_parser is not None else None,
+                self.reasoning_parser_class.__name__ if self.reasoning_parser_class is not None else None,
+                sampling_params.max_tokens,
+                sampling_params.stop,
+                sampling_params.stop_token_ids,
+            )
 
         async for item in self._generate_and_stream(
             request_id,
@@ -316,6 +368,15 @@ class VllmProcessor:
         post: StreamingPostProcessor,
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
+        stream_start = time.monotonic()
+        first_chunk_time: float | None = None
+        first_token_time: float | None = None
+        total_new_tokens = 0
+        chunk_count = 0
+        emitted_choices = 0
+        last_raw_finish_reason = None
+        last_finish_reason = None
+        last_stop_reason = None
 
         try:
             if self.is_kv_router:
@@ -338,6 +399,9 @@ class VllmProcessor:
                 )
 
             async for dynamo_response in dynamo_stream:
+                now = time.monotonic()
+                if first_chunk_time is None:
+                    first_chunk_time = now
                 if self.is_kv_router:
                     engine_response = dynamo_response
                 elif hasattr(dynamo_response, "data"):
@@ -358,6 +422,13 @@ class VllmProcessor:
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
+                chunk_count += 1
+                total_new_tokens += len(engine_response["token_ids"])
+                if engine_response["token_ids"] and first_token_time is None:
+                    first_token_time = now
+                last_raw_finish_reason = raw_finish_reason
+                last_finish_reason = finish_reason
+                last_stop_reason = stop_reason
 
                 vllm_response = EngineCoreOutput(
                     request_id=vllm_preproc.request_id,
@@ -382,6 +453,7 @@ class VllmProcessor:
                         choices.append(choice)
 
                 if choices:
+                    emitted_choices += len(choices)
                     dynamo_out = {
                         "id": request_id,
                         "choices": choices,
@@ -394,6 +466,35 @@ class VllmProcessor:
 
                     yield dynamo_out
         finally:
+            total_ms = (time.monotonic() - stream_start) * 1000
+            first_chunk_ms = (
+                (first_chunk_time - stream_start) * 1000
+                if first_chunk_time is not None
+                else None
+            )
+            first_token_ms = (
+                (first_token_time - stream_start) * 1000
+                if first_token_time is not None
+                else None
+            )
+            should_log_summary = DEBUG_FRONTEND or last_raw_finish_reason == "length" or total_ms >= DEBUG_LONG_WAIT_MS
+            if should_log_summary:
+                logger.info(
+                    "[DYN_PERF rid=%s] total_ms=%.1f first_chunk_ms=%s first_token_ms=%s "
+                    "chunks=%d emitted_choices=%d new_tokens=%d raw_finish_reason=%r finish_reason=%r "
+                    "stop_reason=%r model=%r",
+                    request_id,
+                    total_ms,
+                    f"{first_chunk_ms:.1f}" if first_chunk_ms is not None else None,
+                    f"{first_token_ms:.1f}" if first_token_ms is not None else None,
+                    chunk_count,
+                    emitted_choices,
+                    total_new_tokens,
+                    last_raw_finish_reason,
+                    last_finish_reason.name if last_finish_reason is not None else None,
+                    last_stop_reason,
+                    request.get("model"),
+                )
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
