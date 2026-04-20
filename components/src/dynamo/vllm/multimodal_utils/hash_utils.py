@@ -12,7 +12,7 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-ImageInput = Union[Image.Image, np.ndarray]
+ImageInput = Union[Image.Image, np.ndarray, torch.Tensor]
 
 # Preimage layout (12 bytes, fixed-length) || pixel bytes.
 #   offset  bytes  field
