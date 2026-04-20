@@ -130,6 +130,101 @@ def load_video_frames(path: str) -> tuple["torch.Tensor", float]:
     return frames, fps
 
 
+def to_mp4(
+    frames: "torch.Tensor",
+    fps: float,
+    interval: float | None = None,
+) -> "bytes | list[bytes]":
+    """Encode a frame tensor to MP4 bytes.
+
+    Args:
+        frames:   UInt8 tensor of shape (T, H, W, C) with values in [0, 255].
+        fps:      Frame rate for the output video.
+        interval: If given, split the video into chunks of at most this many
+                  seconds.  Returns a list of MP4 byte strings, one per chunk.
+                  If None, returns a single MP4 byte string.
+
+    Returns:
+        A single ``bytes`` object when *interval* is None, or a ``list[bytes]``
+        with one entry per chunk when *interval* is provided.
+
+    Raises:
+        ImportError: If torchvision is not installed.
+        ValueError:  If *frames* is empty or *fps* is not positive.
+    """
+    try:
+        from torchvision.io import write_video
+    except ImportError as exc:
+        raise ImportError(
+            "torchvision is required for video encoding. "
+            "Install with: pip install torchvision"
+        ) from exc
+
+    import tempfile
+
+    if frames.shape[0] == 0:
+        raise ValueError("frames tensor is empty")
+    if fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps}")
+
+    def _encode_chunk(chunk: "torch.Tensor") -> bytes:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            tmp_path = f.name
+        try:
+            write_video(tmp_path, chunk, fps=fps, video_codec="libx264")
+            with open(tmp_path, "rb") as f:
+                return f.read()
+        finally:
+            os.unlink(tmp_path)
+
+    if interval is None:
+        return _encode_chunk(frames)
+
+    frames_per_chunk = max(1, int(interval * fps))
+    chunks = [
+        frames[start : start + frames_per_chunk]
+        for start in range(0, frames.shape[0], frames_per_chunk)
+    ]
+    return [_encode_chunk(chunk) for chunk in chunks]
+
+
+def to_jpeg(
+    frames: "torch.Tensor",
+    quality: int = 75,
+) -> "list[bytes]":
+    """Encode a frame tensor to a list of JPEG byte strings, one per frame.
+
+    Args:
+        frames:  UInt8 tensor of shape (T, H, W, C) with values in [0, 255].
+        quality: JPEG quality, 1–100 (default: 75).
+
+    Returns:
+        List of ``bytes`` objects, one JPEG-encoded image per frame.
+
+    Raises:
+        ImportError: If torchvision is not installed.
+        ValueError:  If *frames* is empty.
+    """
+    try:
+        from torchvision.io import encode_jpeg
+    except ImportError as exc:
+        raise ImportError(
+            "torchvision is required for JPEG encoding. "
+            "Install with: pip install torchvision"
+        ) from exc
+
+    if frames.shape[0] == 0:
+        raise ValueError("frames tensor is empty")
+
+    result = []
+    for frame in frames:
+        # encode_jpeg expects (C, H, W) uint8
+        chw = frame.permute(2, 0, 1).contiguous()
+        jpeg_tensor = encode_jpeg(chw, quality=quality)
+        result.append(jpeg_tensor.numpy().tobytes())
+    return result
+
+
 # ── Backend ───────────────────────────────────────────────────────────────────
 
 
@@ -137,12 +232,11 @@ class VideoStreamBackend:
     def __init__(self, args: argparse.Namespace) -> None:
         self.model_name: str = args.model
         self.video_file_path: str | None = args.video_file_path
+        self.output_format: str = args.output_format  # "jpeg" or "mp4"
+        self.mp4_interval: float | None = args.mp4_interval
 
         self.frames: torch.Tensor | None = None
         self.video_fps: float = 0.0
-
-        # One request at a time — generation pipeline is not re-entrant
-        self._generate_lock = asyncio.Lock()
 
     async def initialize_model(self) -> None:
         """Load model weights and warm up the generation pipeline."""
@@ -150,39 +244,17 @@ class VideoStreamBackend:
             load_video_frames, self.video_file_path
         )
 
-    # ── Frame generation ──────────────────────────────────────────────────────
-
-    def _generate_frame(
-        self,
-        prompt: str,
-        frame_index: int,
-        width: int,
-        height: int,
-        num_inference_steps: int,
-        guidance_scale: float,
-        seed: int | None,
-        negative_prompt: str | None,
-    ) -> bytes:
-        """
-        Generate a single video frame and return it as raw JPEG bytes.
-
-        The returned bytes must be a valid JPEG image — the HTTP frontend
-        writes them directly into a multipart/x-mixed-replace boundary
-        without further encoding.
-        """
-        raise NotImplementedError
-
     # ── Dynamo endpoint ───────────────────────────────────────────────────────
 
     @dynamo_endpoint(NvCreateVideoRequest, NvVideosResponse)
     async def generate(self, request: NvCreateVideoRequest):
         """
-        Streaming endpoint — yields one NvVideosResponse per frame.
+        Streaming endpoint — yields one NvVideosResponse per output unit.
 
-        Each response carries a single JPEG frame in data[0].b64_json.
-        The 'status' field is "in_progress" for all frames except the last,
-        which uses "completed".  The 'progress' field advances from 0 to 100
-        across the sequence so callers can display a progress indicator.
+        In JPEG mode each response carries a single frame; in MP4 mode each
+        response carries one MP4 clip (the whole clip, or one interval-length
+        chunk when --mp4-interval is set).  The 'status' field is
+        "in_progress" for all but the last response, which uses "completed".
         """
         nvext = request.nvext
 
@@ -203,76 +275,72 @@ class VideoStreamBackend:
         num_frames = (
             nvext.num_frames
             if nvext and nvext.num_frames is not None
-            else fps * seconds
+            else int(fps * seconds)
         )
         if num_frames <= 0:
             raise ValueError("num_frames must be positive")
 
-        num_inference_steps = (
-            nvext.num_inference_steps
-            if nvext and nvext.num_inference_steps is not None
-            else DEFAULT_NUM_INFERENCE_STEPS
-        )
-        guidance_scale = (
-            nvext.guidance_scale
-            if nvext and nvext.guidance_scale is not None
-            else DEFAULT_GUIDANCE_SCALE
-        )
-        seed = nvext.seed if nvext else None
-        negative_prompt = nvext.negative_prompt if nvext else None
-
         video_id = f"video_{uuid.uuid4().hex}"
         created_ts = int(time.time())
 
+        available = self.frames.shape[0]
+        if num_frames > available:
+            logger.warning(
+                "[%s] Requested %d frames but only %d available, clamping",
+                video_id,
+                num_frames,
+                available,
+            )
+            num_frames = available
+        frames_slice = self.frames[:num_frames]
+
         logger.info(
-            "[%s] generate: prompt='%s...' size=%s frames=%d fps=%d steps=%d",
+            "[%s] generate: prompt='%s...' size=%s frames=%d fps=%d format=%s",
             video_id,
             request.prompt[:60],
             size,
             num_frames,
             fps,
-            num_inference_steps,
+            self.output_format,
         )
 
-        async with self._generate_lock:
-            for frame_idx in range(num_frames):
-                t = time.perf_counter()
+        t = time.perf_counter()
 
-                jpeg_bytes = await asyncio.to_thread(
-                    self._generate_frame,
-                    prompt=request.prompt,
-                    frame_index=frame_idx,
-                    width=width,
-                    height=height,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    seed=seed,
-                    negative_prompt=negative_prompt,
-                )
+        if self.output_format == "mp4":
+            encoded = await asyncio.to_thread(
+                to_mp4, frames_slice, fps, self.mp4_interval
+            )
+            chunks: list[bytes] = encoded if isinstance(encoded, list) else [encoded]
+        else:
+            chunks = await asyncio.to_thread(to_jpeg, frames_slice)
 
-                elapsed = time.perf_counter() - t
-                is_last = frame_idx == num_frames - 1
-                progress = int((frame_idx + 1) / num_frames * 100)
+        total = len(chunks)
+        for i, chunk_bytes in enumerate(chunks):
+            elapsed = time.perf_counter() - t
+            is_last = i == total - 1
+            logger.debug(
+                "[%s] chunk %d/%d ready in %.3fs",
+                video_id,
+                i + 1,
+                total,
+                elapsed,
+            )
+            yield NvVideosResponse(
+                id=video_id,
+                model=request.model,
+                status="completed" if is_last else "in_progress",
+                progress=int((i + 1) / total * 100),
+                created=created_ts,
+                data=[VideoData(b64_json=base64.b64encode(chunk_bytes).decode())],
+                inference_time_s=elapsed,
+            ).model_dump()
 
-                logger.debug(
-                    "[%s] frame %d/%d done in %.3fs",
-                    video_id,
-                    frame_idx + 1,
-                    num_frames,
-                    elapsed,
-                )
-
-                yield NvVideosResponse(
-                    id=video_id,
-                    model=request.model,
-                    status="completed" if is_last else "in_progress",
-                    progress=progress,
-                    created=created_ts,
-                    data=[VideoData(b64_json=base64.b64encode(jpeg_bytes).decode())],
-                    inference_time_s=elapsed,
-                ).model_dump()
-
-        logger.info("[%s] Streaming request finished (%d frames)", video_id, num_frames)
+        logger.info(
+            "[%s] Streaming request finished (%d chunks, format=%s)",
+            video_id,
+            total,
+            self.output_format,
+        )
 
 
 # ── Dynamo wiring ─────────────────────────────────────────────────────────────
@@ -330,16 +398,29 @@ def _parse_args() -> argparse.Namespace:
         dest="video_file_path",
         help="Path to a video file to use as the source for frame generation",
     )
+    parser.add_argument(
+        "--output-format",
+        choices=["jpeg", "mp4"],
+        default="jpeg",
+        dest="output_format",
+        help="Output format: 'jpeg' streams one frame per response; "
+        "'mp4' streams one MP4 clip per response (default: jpeg)",
+    )
+    parser.add_argument(
+        "--mp4-interval",
+        type=float,
+        default=1,
+        dest="mp4_interval",
+        metavar="SECONDS",
+        help="Only used with --output-format mp4. Split the clip into chunks "
+        "of at most this many seconds. Omit to return the whole clip as one response.",
+    )
     return parser.parse_args()
 
 
 async def main(args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
-    discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND")
-    if not discovery_backend:
-        discovery_backend = (
-            "kubernetes" if os.environ.get("KUBERNETES_SERVICE_HOST") else "file"
-        )
+    discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
     logger.info("Using discovery backend: %s", discovery_backend)
     logger.info("Resolved worker namespace: %s", _get_worker_namespace())
     runtime = DistributedRuntime(loop, discovery_backend, "tcp")
