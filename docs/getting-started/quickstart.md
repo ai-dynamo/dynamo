@@ -154,7 +154,6 @@ curl localhost:8000/v1/chat/completions \
 | [Frontend Guide](../components/frontend/README.md) | Worker discovery, multi-model routing, OpenAI compat. |
 | [`nvext.timing`](../components/frontend/nvext.md#response-extensions) | Per-phase timing telemetry in OpenAI responses. |
 | [Kubernetes Quickstart](../kubernetes/README.md) | Go from single-node to a Dynamo Graph deployment. |
-| [Troubleshooting](../troubleshooting.md) | Common failures and their fixes. *(added by PR E)* |
 
 ## From the blog
 
