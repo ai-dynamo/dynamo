@@ -117,7 +117,7 @@ pub struct ActiveSequences {
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub(super) fn new(block_size: usize) -> Self {
-        assert!(block_size > 1, "block_size must be greater than 1");
+        assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
             requests: HashMap::new(),
