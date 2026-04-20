@@ -20,7 +20,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -55,6 +55,25 @@ kubectl get gateway inference-gateway -n ${NAMESPACE}
 # inference-gateway   agentgateway   <none>   True         1m
 ```
 
+
+### 2b. Istio Gateway (Alternative) ###
+
+If you are using Istio as your gateway implementation instead of kGateway, the EPP uses secure serving (TLS) by default. You must create an Istio `DestinationRule` so the gateway proxy can communicate with the EPP service. Without this, the Istio ext_proc filter will fail with `connection termination` errors.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: <dgd-name>-epp
+spec:
+  host: <dgd-name>-epp.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      insecureSkipVerify: true
+      mode: SIMPLE
+```
+
+Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
 
 ### 3. Setup secrets ###
 

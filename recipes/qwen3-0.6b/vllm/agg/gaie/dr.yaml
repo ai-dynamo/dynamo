@@ -1,0 +1,11 @@
+# DestinationRule for Qwen3-0.6B aggregated GAIE deployment with Istio
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: qwen3-0-6b-agg-epp
+spec:
+  host: qwen3-0-6b-agg-epp.default.svc.cluster.local
+  trafficPolicy:
+    tls:
+      insecureSkipVerify: true
+      mode: SIMPLE
