@@ -24,6 +24,12 @@ try:
 except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
+
 
 def _dgdr(
     planner: PlannerConfig | None = None,

@@ -18,6 +18,12 @@ from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.monitoring import perf_metrics as pm
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
+
 
 def _make_spec() -> AICInterpolationSpec:
     pick = PickedParallelConfig(tp=1, dp=8, moe_tp=1, moe_ep=8)

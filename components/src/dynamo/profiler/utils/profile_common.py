@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -202,9 +203,6 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
         and dgdr.features.planner is not None
         and dgdr.features.planner.enable_throughput_scaling
     ):
-        # Lazy-imported to avoid a module-level dep cycle.
-        from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
-
         sweep_mode = dgdr.features.planner.pre_deployment_sweeping_mode
         return sweep_mode != PlannerPreDeploymentSweepMode.Rapid
     return False

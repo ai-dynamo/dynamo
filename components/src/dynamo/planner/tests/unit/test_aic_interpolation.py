@@ -20,6 +20,12 @@ from dynamo.planner.config.parallelization import (
 )
 from dynamo.planner.monitoring import aic_interpolation as aic_mod
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
+
 
 def _make_spec(
     *,
@@ -459,3 +465,8 @@ class TestConcurrencySweep:
 
     def test_zero_max_returns_empty(self):
         assert aic_mod._concurrency_sweep(0, 4) == []
+
+    def test_granularity_one_returns_top_of_range(self):
+        # Before the guard this raised ZeroDivisionError: (max-1)/(1-1).
+        assert aic_mod._concurrency_sweep(10, 1) == [10]
+        assert aic_mod._concurrency_sweep(1, 1) == [1]

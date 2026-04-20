@@ -34,7 +34,6 @@ doesn't apply to a static simulator).
 """
 
 import logging
-from typing import TYPE_CHECKING
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -47,8 +46,10 @@ from dynamo.planner.config.parallelization import (
     picked_to_aic_model_config_kwargs,
 )
 
-if TYPE_CHECKING:
-    from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator
+# aic_estimator itself lazy-imports aiconfigurator, so importing the wrapper
+# class at module load time does NOT pull in the optional dependency —
+# ImportError only materialises when the class is instantiated.
+from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,11 @@ def _sweep_decode(
     max_kv_tokens_aggregate = per_rank_max_kv * attention_dp
 
     osl_sweep = 500  # mirror profile_decode.py: short OSL for stable ITL measurement
+    if spec.sweep_max_context_length - osl_sweep <= 100:
+        raise ValueError(
+            f"sweep_max_context_length {spec.sweep_max_context_length} is too "
+            f"small to profile decode (need > {100 + osl_sweep})"
+        )
     isl_step = max(
         1,
         (spec.sweep_max_context_length - osl_sweep)
@@ -193,6 +199,10 @@ def _concurrency_sweep(max_concurrency: int, granularity: int) -> list[int]:
     """
     if max_concurrency <= 0 or granularity <= 0:
         return []
+    if granularity == 1:
+        # Single sample: take the top of the range, so the one data point is
+        # informative rather than the trivial concurrency=1 case.
+        return [max_concurrency]
     if max_concurrency <= granularity:
         return list(range(1, max_concurrency + 1))
     step = (max_concurrency - 1) / (granularity - 1)
