@@ -63,6 +63,24 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 > [!WARNING]
 > **v0.9.0 Helm Chart Issue:** The initial v0.9.0 `dynamo-platform` Helm chart sets the operator image to v0.7.1 instead of v0.9.0. Use `RELEASE_VERSION=0.9.0-post1` or add `--set dynamo-operator.controllerManager.manager.image.tag=0.9.0` to your helm install command.
 
+**Pre-flight: confirm Dynamo CRDs are installed**
+
+Before any `kubectl apply -f ...` of a `DynamoGraphDeployment` or related manifest, confirm the operator's CRDs are present:
+
+```bash
+kubectl get crd | grep dynamo
+```
+
+Expected output (at least these three):
+
+```
+dynamocomponentdeployments.nvidia.com
+dynamographdeployments.nvidia.com
+dynamographdeploymentrequests.nvidia.com
+```
+
+If the list is empty, the Dynamo operator is not installed. Re-run the platform install above. The same pre-check is documented for recipes — see [recipes/README.md → Pre-flight: confirm Dynamo CRDs are installed](../../recipes/README.md#pre-flight-confirm-dynamo-crds-are-installed).
+
 **For Shared/Multi-Tenant Clusters:**
 
 > **DEPRECATED:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead.
