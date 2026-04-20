@@ -59,5 +59,5 @@ KVBM has three primary logical layers:
 - **[KVBM Design](../../design-docs/kvbm-design.md)** — Architecture deep dive, components, and data flows
 - **[LMCache Integration](../../integrations/lmcache-integration.md)** — Use LMCache with Dynamo vLLM backend
 - **[FlexKV Integration](../../integrations/flexkv-integration.md)** — Use FlexKV for KV cache management
-- **[SGLang HiCache](../../integrations/sglang-hicache.md)** — Enable SGLang's hierarchical cache with NIXL
+- **[SGLang HiCache](../../backends/sglang/sglang-hicache.md)** — Enable SGLang's hierarchical cache with NIXL
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** — NIXL communication library details
