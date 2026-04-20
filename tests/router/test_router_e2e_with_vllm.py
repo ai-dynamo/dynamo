@@ -643,6 +643,7 @@ def test_router_decisions_vllm_disagg(
         },
     )
 
+
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
