@@ -135,7 +135,7 @@ def _parse_hicache_storage_extra_config(
             return {}
         try:
             parsed = json.loads(raw_extra_config)
-        except Exception as e:
+        except json.JSONDecodeError as e:
             logging.warning(
                 f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
             )
@@ -168,7 +168,16 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
             MooncakeStoreConfig,
         )
+    except ImportError as e:
+        logging.warning(f"MooncakeStoreConfig import unavailable: {e}")
+        return None
 
+    # Graceful degradation: Mooncake runtime metadata is optional. If config
+    # resolution fails for any reason (file not found, malformed env vars,
+    # upstream API change), skip publishing the metadata rather than crashing
+    # the worker -- the worker still serves requests, just without HiCache
+    # router hints. Broad catch is intentional per python-guidelines.md.
+    try:
         if extra_config and (
             extra_config.get("master_server_address") is not None
             or extra_config.get("client_server_address") is not None

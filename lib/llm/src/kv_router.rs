@@ -386,8 +386,10 @@ where
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
+        // Clone the hits so we can compute `hits_beyond(overlap_blocks)` after
+        // scheduling returns, since `overlap_blocks` isn't known until then.
         let num_blocks = isl_tokens / self.block_size as usize;
-        let sc_total_hits = shared_cache_hits.as_ref().map(|h| h.total_hits);
+        let sc_hits_for_metrics = shared_cache_hits.clone();
 
         let response = self
             .scheduler
@@ -421,13 +423,13 @@ where
         }
 
         // Observe per-request shared cache metrics.
-        if let Some(total_hits) = sc_total_hits {
+        if let Some(hits) = sc_hits_for_metrics {
             if let Some(m) = metrics::RouterRequestMetrics::get() {
                 if num_blocks > 0 {
                     m.shared_cache_hit_rate
-                        .observe(total_hits as f64 / num_blocks as f64);
+                        .observe(hits.total_hits as f64 / num_blocks as f64);
                 }
-                let beyond = total_hits.saturating_sub(response.overlap_blocks);
+                let beyond = hits.hits_beyond(response.overlap_blocks);
                 m.shared_cache_beyond_blocks.observe(beyond as f64);
             }
         }

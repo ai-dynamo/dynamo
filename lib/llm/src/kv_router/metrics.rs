@@ -263,12 +263,13 @@ impl RoutingOverheadMetrics {
             let total = make(
                 routing_overhead::TOTAL_MS,
                 "Total routing overhead per request in milliseconds",
-                async_buckets,
+                async_buckets.clone(),
             )
             .expect("overhead_total_ms");
             let shared_cache_query = make(
                 routing_overhead::SHARED_CACHE_QUERY_MS,
                 "Time spent querying the shared KV cache in milliseconds",
+                async_buckets,
             )
             .expect("overhead_shared_cache_query_ms");
             let shared_cache_errors_total = {
