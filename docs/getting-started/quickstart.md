@@ -158,5 +158,5 @@ curl localhost:8000/v1/chat/completions \
 
 ## From the blog
 
-- [Full-Stack Optimizations for Agentic Inference](/dynamo/dev/blog/full-stack-optimizations-for-agentic-inference/)
-- [Flash Indexer: Inter-Galactic KV Routing](/dynamo/dev/blog/flash-indexer-inter-galactic-kv-routing/)
+- [Full-Stack Optimizations for Agentic Inference](/blog/agentic-inference)
+- [Flash Indexer: Inter-Galactic KV Routing](/blog/flash-indexer)
