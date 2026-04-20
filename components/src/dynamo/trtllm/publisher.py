@@ -320,6 +320,17 @@ class Publisher:
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
         self.attention_dp_size = engine.get_attention_dp_size()
+        # FPM publisher is gated off under attention-DP (attention_dp_size > 1)
+        # until per-rank FPM emission lands in a follow-up PR. Today only rank
+        # 0 receives stats (rank-0-only RPC gate in rpc_worker_mixin.py), so
+        # leaving the publisher on under attention-DP would make ranks 1..N-1
+        # emit permanent zero-heartbeats -- the Planner would interpret those
+        # as "idle workers" and take bad scaling decisions ("planner poison").
+        # get_attention_dp_size() returns tensor_parallel_size iff
+        # enable_attention_dp=True AND tp_size>1 (engine.py:118-120), so
+        # attention_dp_size == 1 is False only when effective attention-DP
+        # size > 1 -- precisely the planner-poison case we suppress.
+        self.fpm_enabled = self.attention_dp_size == 1
 
         # The first few kv events from the model engine are always "created" type events.
         # Use these events to capture the max_window_size of the model.
@@ -375,20 +386,32 @@ class Publisher:
             lambda _: logging.debug("metrics publisher endpoint created")
         )
 
-        # Setup the ForwardPassMetrics publisher. Each attention-DP rank gets
-        # its own channel; the Rust side owns heartbeat (1s) per rank.
-        try:
-            self.fpm_publisher = FpmDirectPublisher(
-                endpoint=self.endpoint,
-                worker_id=str(self.worker_id),
-                dp_size=self.attention_dp_size,
-            )
+        # Setup the ForwardPassMetrics publisher. Only instantiated when FPM
+        # is enabled (non-attention-DP: single-rank or plain-TP). Under
+        # attention-DP, self.fpm_publisher stays None and handle_stat's FPM
+        # publish branch is short-circuited via the `if self.fpm_publisher is
+        # not None:` guard. See the Publisher.__init__ comment on self.fpm_enabled
+        # for the rationale.
+        if self.fpm_enabled:
+            try:
+                self.fpm_publisher = FpmDirectPublisher(
+                    endpoint=self.endpoint,
+                    worker_id=str(self.worker_id),
+                    dp_size=self.attention_dp_size,
+                )
+                logging.info(
+                    f"FpmDirectPublisher initialized with dp_size={self.attention_dp_size}"
+                )
+            except Exception as e:
+                logging.warning(
+                    f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
+                )
+                self.fpm_publisher = None
+        else:
             logging.info(
-                f"FpmDirectPublisher initialized with dp_size={self.attention_dp_size}"
-            )
-        except Exception as e:
-            logging.warning(
-                f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
+                "FPM publisher disabled under attention-DP "
+                f"(effective dp_size={self.attention_dp_size}); "
+                "per-rank FPM emission is a follow-up."
             )
             self.fpm_publisher = None
 

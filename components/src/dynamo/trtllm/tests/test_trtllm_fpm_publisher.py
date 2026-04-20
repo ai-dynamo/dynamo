@@ -139,16 +139,18 @@ def test_iter_latency_ms_to_wall_time_secs_conversion():
     assert fpm.publish.call_args.args[-1] == 1.2345
 
 
-def test_publisher_initialize_constructs_fpm_direct_publisher():
-    """Confirm Publisher.initialize() constructs FpmDirectPublisher with
-    dp_size matching engine.get_attention_dp_size(). Uses heavy mocking to
-    avoid constructing the full Publisher dependencies."""
+def _build_publisher_stub(*, attention_dp_size: int, fpm_enabled: bool):
+    """Shared heavy-mock helper for the Publisher.initialize() tests below.
+
+    Bypasses Publisher.__init__ (which touches many heavy deps) and sets only
+    the attributes that initialize() reads or writes. Tests then call
+    pub.initialize() and inspect the mocked FpmDirectPublisher class.
+    """
     from dynamo.trtllm import publisher as publisher_mod
 
     engine = MagicMock()
-    engine.get_attention_dp_size.return_value = 4
+    engine.get_attention_dp_size.return_value = attention_dp_size
 
-    # Build a Publisher with the real __init__ but mock heavy dependencies.
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.endpoint = MagicMock()
     pub.engine = engine
@@ -159,7 +161,8 @@ def test_publisher_initialize_constructs_fpm_direct_publisher():
     pub.component_gauges = MagicMock()
     pub.enable_local_indexer = False
     pub.metrics_collector = None
-    pub.attention_dp_size = 4
+    pub.attention_dp_size = attention_dp_size
+    pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
     pub.metrics_publisher = None
     pub.fpm_publisher = None
@@ -177,7 +180,7 @@ def test_publisher_initialize_constructs_fpm_direct_publisher():
     pub._last_engine_event_id = None
 
     # Replace the real FpmDirectPublisher class with a mock factory so we can
-    # inspect what was passed to it.
+    # inspect what was passed to it (or assert it wasn't called).
     fake_fpm_cls = MagicMock()
     publisher_mod.FpmDirectPublisher = fake_fpm_cls
 
@@ -186,22 +189,49 @@ def test_publisher_initialize_constructs_fpm_direct_publisher():
     pub._init_publish_kv_cache_events_thread = MagicMock()
     pub._create_metrics_publisher_endpoint = MagicMock(return_value=MagicMock())
 
-    try:
-        # Run synchronously (no event loop) by monkey-patching asyncio.create_task.
-        import asyncio as _asyncio
+    return pub, publisher_mod, fake_fpm_cls
 
-        real_create_task = _asyncio.create_task
-        _asyncio.create_task = lambda coro: MagicMock(add_done_callback=lambda _: None)
+
+def _run_initialize(pub):
+    """Run pub.initialize() synchronously (no event loop required)."""
+    import asyncio as _asyncio
+
+    real_create_task = _asyncio.create_task
+    _asyncio.create_task = lambda coro: MagicMock(add_done_callback=lambda _: None)
+    try:
         try:
             pub.initialize()
-        finally:
-            _asyncio.create_task = real_create_task
-    except Exception:
-        # initialize() can run into other paths we don't care about; the
-        # assertion below tells us whether the FPM construction happened.
-        pass
+        except Exception:
+            # initialize() touches other subsystems we don't care about; the
+            # FPM-related assertions below tell us whether the construction
+            # (or non-construction) happened as expected.
+            pass
+    finally:
+        _asyncio.create_task = real_create_task
 
+
+def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled():
+    """Under non-attention-DP (attention_dp_size == 1, fpm_enabled == True),
+    Publisher.initialize() constructs FpmDirectPublisher with dp_size=1."""
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        attention_dp_size=1, fpm_enabled=True
+    )
+    _run_initialize(pub)
     fake_fpm_cls.assert_called_once()
     kwargs = fake_fpm_cls.call_args.kwargs
     assert kwargs["worker_id"] == "worker-abc"
-    assert kwargs["dp_size"] == 4
+    assert kwargs["dp_size"] == 1
+    assert pub.fpm_publisher is not None
+
+
+def test_publisher_does_not_init_fpm_publisher_under_attention_dp():
+    """Under attention-DP (attention_dp_size > 1, fpm_enabled == False), the
+    gate suppresses FpmDirectPublisher construction. pub.fpm_publisher stays
+    None so handle_stat's existing `if self.fpm_publisher is not None:` guard
+    skips all FPM publishes -- the Planner sees ZERO messages from this worker."""
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        attention_dp_size=4, fpm_enabled=False
+    )
+    _run_initialize(pub)
+    fake_fpm_cls.assert_not_called()
+    assert pub.fpm_publisher is None
