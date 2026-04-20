@@ -136,7 +136,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         router_id: u64,
         worker_type: &'static str,
     ) -> Self {
-        assert!(block_size > 1, "block_size must be greater than 1");
+        assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
         let workers = WorkerTable::new(block_size, &dp_range);
         let prompt_registry = PromptRegistry::new(workers.workers());
@@ -975,6 +975,19 @@ mod tests {
         )
     }
 
+    fn make_multi_sequences_with_block_size(
+        block_size: usize,
+    ) -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
+        ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size,
+            HashMap::from([(1_u64, (0_u32, 1_u32)), (2_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        )
+    }
+
     fn naive_potential_loads(
         sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         token_sequence: Option<&[SequenceHash]>,
@@ -1013,9 +1026,17 @@ mod tests {
     }
 
     fn seq_hashes_for_tokens(tokens: &[u32], lora_name: Option<&str>) -> Vec<SequenceHash> {
+        seq_hashes_for_tokens_with_block_size(tokens, 4, lora_name)
+    }
+
+    fn seq_hashes_for_tokens_with_block_size(
+        tokens: &[u32],
+        block_size: u32,
+        lora_name: Option<&str>,
+    ) -> Vec<SequenceHash> {
         let block_hashes = compute_block_hash_for_seq(
             tokens,
-            4,
+            block_size,
             BlockHashOptions {
                 lora_name,
                 ..Default::default()
@@ -1206,6 +1227,88 @@ mod tests {
             actual.0.get(&worker_b).copied(),
             Some(active_blocks[&worker_b] + base_prompt.len()),
         );
+    }
+
+    #[test]
+    fn unit_block_size_repeated_tokens_preserve_membership_and_trim() {
+        let sequences = make_multi_sequences_with_block_size(1);
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let decay_now = Instant::now();
+        let prompt_a = seq_hashes_for_tokens_with_block_size(&[7_u32, 7, 7], 1, None);
+        let prompt_b = seq_hashes_for_tokens_with_block_size(&[7_u32, 7, 8], 1, None);
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-a".to_string(),
+                    token_sequence: Some(prompt_a.clone()),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker: worker_a,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-b".to_string(),
+                    token_sequence: Some(prompt_b.clone()),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker: worker_b,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        let expected = naive_potential_loads(
+            &sequences,
+            Some(&prompt_b),
+            3,
+            &OverlapScores::default(),
+            false,
+            decay_now,
+        );
+        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+            Some(&prompt_b),
+            3,
+            OverlapScores::default(),
+            false,
+            decay_now,
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(actual.0.get(&worker_a).copied(), Some(4));
+        assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
+
+        sequences.free(&"req-b".to_string(), decay_now).unwrap();
+
+        let expected_after_free = naive_potential_loads(
+            &sequences,
+            Some(&prompt_b),
+            3,
+            &OverlapScores::default(),
+            false,
+            decay_now,
+        );
+        let actual_after_free = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+            Some(&prompt_b),
+            3,
+            OverlapScores::default(),
+            false,
+            decay_now,
+        );
+        assert_eq!(actual_after_free, expected_after_free);
+        assert_eq!(actual_after_free.0.get(&worker_a).copied(), Some(4));
+        assert_eq!(actual_after_free.0.get(&worker_b).copied(), Some(3));
+
+        sequences.free(&"req-a".to_string(), decay_now).unwrap();
+        sequences.assert_completely_drained(decay_now);
     }
 
     #[tokio::test(start_paused = true)]

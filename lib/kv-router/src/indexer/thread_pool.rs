@@ -99,6 +99,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
+        super::warn_on_unit_block_size("thread_pool", kv_block_size);
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
