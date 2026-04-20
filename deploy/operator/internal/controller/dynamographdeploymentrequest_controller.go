@@ -1052,26 +1052,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	isNamespaceScoped := r.Config.Namespace.Restricted != ""
-	if isNamespaceScoped {
-		return fmt.Errorf(
-			"GPU hardware info required but cannot be auto-discovered." +
-				"\n\nOptions to resolve:" +
-				"\n\n1. Re-enable GPU discovery (if it was disabled during Helm install):" +
-				"\n   helm upgrade ... --set dynamo-operator.gpuDiscovery.enabled=true" +
-				"\n\n2. Add hardware config to spec.hardware:" +
-				"\n   gpuSku: \"h100_sxm\"" +
-				"\n   vramMb: 81920" +
-				"\n   numGpusPerNode: 8" +
-				"\n   totalGpus: 8")
-	}
-
+	// Try DCGM discovery. In namespace-scoped mode this requires a ClusterRole
+	// granting pod list/get (provisioned by the Helm chart when
+	// gpuDiscovery.enabled=true).
 	_, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
 	if err == nil {
-		// GPU discovery is available, validation passes
 		return nil
 	}
-	// Refine the logger message
+
 	reason := GetGPUDiscoveryFailureReason(err)
 	logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
 	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
