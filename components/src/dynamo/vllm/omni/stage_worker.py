@@ -26,7 +26,11 @@ from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
-from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
+from dynamo.vllm.omni.utils import (
+    _build_sampling_params,
+    _endpoint_stage_name,
+    parse_omni_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,8 @@ class OmniStageWorker:
         self._output_modalities = output_modalities or []
         self._default_video_fps = default_video_fps
         self.stage_config = stage_config
+        self._is_prefill_only = getattr(stage_config, "is_prefill_only", False)
+        self._is_decode_only = getattr(stage_config, "is_decode_only", False)
 
         func_path = getattr(stage_config, "custom_process_input_func", None)
         self._processor = _load_processor(func_path)
@@ -97,14 +103,15 @@ class OmniStageWorker:
                 yield {"error": str(e), "finished": True}
                 return
 
-            if len(stage_list) != len(
-                self._engine_input_source or stage_connector_refs
-            ):
+            # stage_list is sparse (indexed by stage_id); count filled entries
+            filled = sum(1 for p in stage_list if p.engine_outputs is not None)
+            expected = len(self._engine_input_source or stage_connector_refs)
+            if filled != expected:
                 logger.warning(
                     "Stage %d: expected %d stage inputs, got %d",
                     self.stage_id,
-                    len(self._engine_input_source or stage_connector_refs),
-                    len(stage_list),
+                    expected,
+                    filled,
                 )
 
             if self._processor is not None:
@@ -133,7 +140,9 @@ class OmniStageWorker:
                 else:
                     prompt = upstream
         elif req.request_id is not None:
-            # Stage 0 via router: raw request forwarded with request_id — parse it.
+            # Stage 0 (or PD decode) via router: raw request forwarded with
+            # request_id — parse it.  PD decode also receives the original
+            # request so it re-tokenizes the same prompt as prefill.
             parsed = await parse_omni_request(
                 request,
                 self._output_modalities,
@@ -155,6 +164,13 @@ class OmniStageWorker:
         )
 
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
+
+        # PD sampling param overrides
+        if self._is_prefill_only and sp is not None:
+            sp = _apply_prefill_sampling_params(sp, request_id)
+        elif self._is_decode_only and req.kv_transfer_params and sp is not None:
+            sp = _apply_decode_sampling_params(sp, req.kv_transfer_params)
+
         last_result = None
 
         try:
@@ -174,6 +190,22 @@ class OmniStageWorker:
             return
 
         # --- Write output ---
+        # PD prefill: extract KV connector metadata from engine output.
+        # The actual KV data transfers directly via NIXL between engines.
+        if self._is_prefill_only:
+            kv_params = _extract_kv_transfer_params(last_result)
+            if kv_params is None:
+                logger.warning(
+                    "Stage %d (prefill): engine output has no kv_transfer_params",
+                    self.stage_id,
+                )
+            yield {
+                "kv_transfer_params": kv_params,
+                "original_prompt": original_prompt,
+                "finished": True,
+            }
+            return
+
         # Check for a downstream connector first, regardless of final_output.
         # In vllm-omni's native mode, multiple stages can set final_output=True
         # (meaning "produces user-visible output"). In Dynamo's disaggregated
@@ -282,11 +314,15 @@ class OmniStageWorker:
         """Fetch previous stage outputs from connectors for the processor/engine.
 
         Fetches only the stages listed in engine_input_source (or all refs if empty).
-        Returns _Proxy objects in engine_input_source order.
+        Returns a stage_id-indexed list (sparse) so processor functions can use
+        ``stage_list[engine_input_source[i]]`` directly — this matches vllm-omni's
+        orchestrator convention where ``stage_list`` is indexed by stage_id.
         Raises RuntimeError on any failure so the caller can propagate it as an error chunk.
         """
         sources = self._engine_input_source or sorted(stage_connector_refs.keys())
-        stage_list = []
+        # Build sparse list indexed by stage_id for processor compatibility.
+        max_stage_id = max(sources) if sources else 0
+        stage_list: list[_Proxy] = [_Proxy() for _ in range(max_stage_id + 1)]
         for stage_k in sources:
             if (meta_k := stage_connector_refs.get(stage_k)) is None:
                 raise RuntimeError(
@@ -316,7 +352,7 @@ class OmniStageWorker:
                 if isinstance(payload_data, dict)
                 else payload_data
             )
-            stage_list.append(_Proxy(engine_outputs=[engine_inputs]))
+            stage_list[stage_k] = _Proxy(engine_outputs=[engine_inputs])
         return stage_list
 
 
@@ -341,10 +377,12 @@ async def init_omni_stage(
     my_config = stage_configs[stage_id]
     stage_type: str = getattr(my_config, "stage_type", "llm")
 
-    # Stage worker registers at {ns}.{model_stage}.generate — NOT {ns}.backend.generate.
-    # Router registers at {ns}.backend.generate and discovers workers by model_stage.
-    model_stage = getattr(my_config.engine_args, "model_stage", f"stage{stage_id}")
-    generate_endpoint = runtime.endpoint(f"{config.namespace}.{model_stage}.generate")
+    # Stage worker registers at {ns}.{endpoint_name}.generate — NOT {ns}.backend.generate.
+    # Router registers at {ns}.backend.generate and discovers workers by endpoint_name.
+    # For PD stages, endpoint_name differs from model_stage (e.g. thinker_prefill vs thinker)
+    # so that both PD workers get unique endpoints.
+    endpoint_name = _endpoint_stage_name(my_config, stage_id)
+    generate_endpoint = runtime.endpoint(f"{config.namespace}.{endpoint_name}.generate")
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = _create_engine(config.model, my_config, stage_type)
@@ -408,6 +446,69 @@ async def init_omni_stage(
 def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:
     """Build the connector dict key used by initialize_orchestrator_connectors."""
     return (str(from_stage), str(to_stage))
+
+
+# ── PD disaggregation helpers ──────────────────────────────────────
+
+
+def _apply_prefill_sampling_params(sp_list: list, request_id: str) -> list:
+    """Clone SamplingParams for prefill: max_tokens=1, kv_transfer for remote decode."""
+    from vllm.sampling_params import SamplingParams
+
+    result = []
+    for sp in sp_list:
+        if not isinstance(sp, SamplingParams):
+            result.append(sp)
+            continue
+        sp = sp.clone()
+        sp.max_tokens = 1
+        # MooncakeConnector/NixlConnector cancel KV transfer unless
+        # finish_reason='length', so clear stop conditions.
+        sp.stop = []
+        sp.stop_token_ids = []
+        if sp.extra_args is None:
+            sp.extra_args = {}
+        sp.extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+        result.append(sp)
+    return result
+
+
+def _apply_decode_sampling_params(sp_list: list, kv_transfer_params: dict) -> list:
+    """Inject kv_transfer_params into decode sampling params."""
+    from vllm.sampling_params import SamplingParams
+
+    result = []
+    for sp in sp_list:
+        if not isinstance(sp, SamplingParams):
+            result.append(sp)
+            continue
+        sp = sp.clone()
+        if sp.extra_args is None:
+            sp.extra_args = {}
+        sp.extra_args["kv_transfer_params"] = {
+            "do_remote_prefill": True,
+            "do_remote_decode": False,
+            **kv_transfer_params,
+        }
+        result.append(sp)
+    return result
+
+
+def _extract_kv_transfer_params(engine_output: Any) -> dict | None:
+    """Extract kv_transfer_params from an OmniRequestOutput (or list)."""
+    outputs = engine_output if isinstance(engine_output, list) else [engine_output]
+    for output in outputs:
+        kv_params = getattr(output, "kv_transfer_params", None)
+        if kv_params is not None:
+            if hasattr(kv_params, "items"):
+                return dict(kv_params)
+            if hasattr(kv_params, "model_dump"):
+                return kv_params.model_dump()
+            return kv_params
+    return None
 
 
 def _load_processor(func_path: str | None) -> Any:

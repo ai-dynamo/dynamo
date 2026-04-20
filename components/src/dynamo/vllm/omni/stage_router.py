@@ -24,7 +24,7 @@ from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.stage_worker import _resolve_model_type
 from dynamo.vllm.omni.types import StageOutput
-from dynamo.vllm.omni.utils import shm_deserialize
+from dynamo.vllm.omni.utils import _endpoint_stage_name, shm_deserialize
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,12 @@ class OmniStageRouter:
         self.config = config
         self.stage_configs = load_stage_configs_from_yaml(stage_configs_path)
         self.stage_clients: Dict[str, Any] = {}
+        self._pd_pair = self._detect_pd_pair()
+        if self._pd_pair:
+            logger.info(
+                "PD disaggregation detected: prefill=stage-%d, decode=stage-%d",
+                *self._pd_pair,
+            )
 
         media_fs = (
             get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
@@ -51,9 +57,22 @@ class OmniStageRouter:
             default_fps=config.default_video_fps,
         )
 
-    def set_stage_client(self, model_stage: str, client: Any) -> None:
-        self.stage_clients[model_stage] = client
-        logger.info("Registered stage client: %s", model_stage)
+    def _detect_pd_pair(self) -> tuple[int, int] | None:
+        """Scan stage_configs for a prefill/decode pair."""
+        prefill_idx = None
+        decode_idx = None
+        for i, cfg in enumerate(self.stage_configs):
+            if getattr(cfg, "is_prefill_only", False):
+                prefill_idx = i
+            if getattr(cfg, "is_decode_only", False):
+                decode_idx = i
+        if prefill_idx is not None and decode_idx is not None:
+            return (prefill_idx, decode_idx)
+        return None
+
+    def set_stage_client(self, endpoint_name: str, client: Any) -> None:
+        self.stage_clients[endpoint_name] = client
+        logger.info("Registered stage client: %s", endpoint_name)
 
     async def generate(
         self,
@@ -65,13 +84,11 @@ class OmniStageRouter:
 
         stage_outputs: List[StageOutput] = []
         for stage_idx, stage_cfg in enumerate(self.stage_configs):
-            model_stage = getattr(
-                stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
-            )
-            client = self.stage_clients.get(model_stage)
+            endpoint_name = _endpoint_stage_name(stage_cfg, stage_idx)
+            client = self.stage_clients.get(endpoint_name)
             if client is None:
                 yield {
-                    "error": f"No client for stage '{model_stage}'",
+                    "error": f"No client for stage '{endpoint_name}'",
                     "finished": True,
                 }
                 return
@@ -79,6 +96,17 @@ class OmniStageRouter:
             if stage_idx == 0:
                 # This is a workaround for now to pass in the raw request to stage 0. StageRequest validates it but ignores any unknown keys, so it gets passed through.
                 stage_request = {"request_id": request_id, **request}
+            elif self._pd_pair and stage_idx == self._pd_pair[1]:
+                # PD decode stage: re-send the original request so the decode
+                # engine re-tokenizes the prompt (same tokens as prefill).
+                # Include kv_transfer_params so the decode engine can locate
+                # the KV cache exported by the prefill engine via NIXL.
+                prefill_output = stage_outputs[self._pd_pair[0]]
+                stage_request = {
+                    "request_id": request_id,
+                    "kv_transfer_params": prefill_output.kv_transfer_params,
+                    **request,
+                }
             else:
                 stage_request = stage_outputs[-1].to_next_stage_request(request_id)
 
@@ -168,14 +196,12 @@ async def init_omni_stage_router(
 
     # Discover stage endpoints
     for stage_cfg in router.stage_configs:
-        model_stage = getattr(
-            stage_cfg.engine_args, "model_stage", f"stage{stage_cfg.stage_id}"
-        )
+        endpoint_name = _endpoint_stage_name(stage_cfg, stage_cfg.stage_id)
         client = await runtime.endpoint(
-            f"{config.namespace}.{model_stage}.generate"
+            f"{config.namespace}.{endpoint_name}.generate"
         ).client()
         await client.wait_for_instances()
-        router.set_stage_client(model_stage, client)
+        router.set_stage_client(endpoint_name, client)
 
     final_cfg = router.stage_configs[-1]
     final_output_type = getattr(final_cfg, "final_output_type", "image")
