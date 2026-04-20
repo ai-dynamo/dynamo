@@ -111,7 +111,6 @@ jobs:
           - 9001:9001
     steps:
     - name: Verify GPU visibility
-      if: inputs.verify_gpu == 'true'
       shell: python
       run: |
         import sys
