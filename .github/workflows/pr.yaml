@@ -367,6 +367,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: '0'
       run_gpu_tests: false
     secrets: inherit
 
