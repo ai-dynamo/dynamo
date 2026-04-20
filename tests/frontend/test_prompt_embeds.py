@@ -52,7 +52,8 @@ pytestmark = [
 class VllmPromptEmbedsWorkerProcess(ManagedProcess):
     """Vllm Worker process configured for prompt embeddings testing.
 
-    Uses file-based KV store and TCP request plane (no NATS/etcd required).
+    Uses file-based KV store and TCP request plane. No NATS or etcd required:
+    the file backend automatically defaults the event plane to ZMQ.
     """
 
     def __init__(
@@ -135,8 +136,9 @@ def start_services(
 ) -> Generator[ServicePorts, None, None]:
     """Start frontend and vllm worker processes for prompt embeds testing.
 
-    Uses file-based KV store and TCP request plane (no NATS/etcd needed).
-    This makes tests simpler and faster by avoiding external dependencies.
+    Uses file-based KV store and TCP request plane. No NATS or etcd needed:
+    the file backend automatically defaults the event plane to ZMQ, avoiding
+    all external service dependencies and keeping tests simpler and faster.
 
     The `file_storage_backend` fixture sets up a temporary directory and
     configures DYN_FILE_KV environment variable.

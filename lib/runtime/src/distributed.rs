@@ -415,6 +415,34 @@ impl DistributedRuntime {
         self.request_plane
     }
 
+    /// Returns the event transport kind this runtime was configured with.
+    ///
+    /// If `DYN_EVENT_PLANE` was explicitly set, that value wins.  Otherwise the
+    /// default is derived from the discovery backend:
+    ///
+    /// - Local backends (`file`, `mem`): defaults to ZMQ — no external services required.
+    /// - Distributed backends (`etcd`, `kubernetes`): defaults to NATS.
+    ///
+    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
+    /// access to a `DistributedRuntime`, so that local-only workflows work without
+    /// setting `DYN_EVENT_PLANE` explicitly.
+    pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
+        use crate::config::environment_names::event_plane::DYN_EVENT_PLANE;
+        use crate::discovery::EventTransportKind;
+        match std::env::var(DYN_EVENT_PLANE).as_deref() {
+            Ok("nats") => EventTransportKind::Nats,
+            Ok("zmq") | Ok("") => EventTransportKind::Zmq,
+            // Not explicitly set: derive from whether NATS is available.
+            Err(_) | Ok(_) => {
+                if self.nats_client.is_some() {
+                    EventTransportKind::Nats
+                } else {
+                    EventTransportKind::Zmq
+                }
+            }
+        }
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -570,6 +598,21 @@ pub enum DiscoveryBackend {
     KvStore(kv::Selector),
 }
 
+impl DiscoveryBackend {
+    /// Returns true if this backend requires no external services (file or in-memory).
+    ///
+    /// Local backends do not need etcd, NATS, or any other infrastructure daemon.
+    /// This is used to drive smart defaults: for example, the event plane defaults to
+    /// ZMQ (not NATS) when a local backend is in use and `DYN_EVENT_PLANE` is not set.
+    pub fn is_local(&self) -> bool {
+        matches!(
+            self,
+            DiscoveryBackend::KvStore(kv::Selector::File(_))
+                | DiscoveryBackend::KvStore(kv::Selector::Memory)
+        )
+    }
+}
+
 #[derive(Dissolve)]
 pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
@@ -580,27 +623,9 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
-        // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (JetStream or NATS core + local indexer)
-        // - inter-router replica sync (NATS core)
-        //
-        // Historically we only connected to NATS when the request plane was NATS, which made
-        // `DYN_REQUEST_PLANE=tcp|http` incompatible with KV routing modes that rely on NATS.
-        // Enable the NATS client when any of these hold:
-        // 1. Request plane is NATS
-        // 2. NATS_SERVER is explicitly configured
-        // 3. Event plane is NATS (the default)
-        let event_plane_is_nats =
-            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
-                .map(|v| v.eq_ignore_ascii_case("nats"))
-                .unwrap_or(true);
 
-        let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
-            || event_plane_is_nats;
-
-        // DYN_DISCOVERY_BACKEND selects the discovery mechanism
-        // Valid values: "kubernetes", "etcd" (default), "file", "mem"
+        // Determine the discovery backend first — we need it to compute the NATS default below.
+        // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
         let backend_str =
             std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "etcd".to_string());
 
@@ -619,6 +644,29 @@ impl DistributedConfig {
                 DiscoveryBackend::KvStore(selector)
             }
         };
+
+        // NATS is used for more than just NATS request-plane RPC:
+        // - KV router events (JetStream or NATS core + local indexer)
+        // - inter-router replica sync (NATS core)
+        //
+        // Enable the NATS client when any of these hold:
+        // 1. Request plane is NATS
+        // 2. NATS_SERVER is explicitly configured by the user
+        // 3. DYN_EVENT_PLANE is explicitly set to "nats"
+        //
+        // Condition 3 intentionally does NOT fire when DYN_EVENT_PLANE is unset and the
+        // discovery backend is local (file/mem). Local backends require no external services,
+        // so the event plane defaults to ZMQ in that context. For distributed backends
+        // (etcd, kubernetes) the unset default remains NATS to preserve existing behaviour.
+        let event_plane_explicitly_nats =
+            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                // Not set: default to NATS only for distributed backends.
+                .unwrap_or(!discovery_backend.is_local());
+
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_explicitly_nats;
 
         DistributedConfig {
             discovery_backend,
