@@ -983,12 +983,10 @@ pub fn chat_completion_to_response(
     for item in &mut output {
         if let OutputItem::Message(msg) = item {
             for content in &mut msg.content {
-                if let OutputMessageContent::OutputText(text) = content {
-                    if !keep_logprobs {
-                        text.logprobs = Some(Vec::new());
-                    } else if text.logprobs.is_none() {
-                        text.logprobs = Some(Vec::new());
-                    }
+                if let OutputMessageContent::OutputText(text) = content
+                    && (!keep_logprobs || text.logprobs.is_none())
+                {
+                    text.logprobs = Some(Vec::new());
                 }
             }
         }
