@@ -12024,7 +12024,9 @@ spec:
                 services:
                   description: |-
                     Services are the services deployed as part of this graph. Names must be
-                    unique within the list.
+                    unique within the list; the API server enforces this via the
+                    listType=map + listMapKey=name markers below (no CEL rule needed, which
+                    keeps the CRD within its x-kubernetes-validations cost budget).
                   items:
                     description: |-
                       DynamoComponentDeploymentService pairs a service name with its shared spec.
@@ -20486,9 +20488,9 @@ spec:
                     type: object
                   maxItems: 25
                   type: array
-                  x-kubernetes-validations:
-                    - message: service names must be unique
-                      rule: self.all(x, self.exists_one(y, x.name == y.name))
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
                 topologyConstraint:
                   description: |-
                     TopologyConstraint is the deployment-level topology constraint. When set,
