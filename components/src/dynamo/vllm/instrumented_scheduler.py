@@ -108,6 +108,10 @@ from dynamo.common.forward_pass_metrics import (
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
+# Import for side effect: applies the reset_prefix_cache patch needed for
+# disaggregated sleep support (NixlConnector delay-free blocks).
+from dynamo.vllm import scheduler_patches  # noqa: F401
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig

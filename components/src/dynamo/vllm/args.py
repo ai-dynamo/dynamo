@@ -275,6 +275,16 @@ def update_engine_config_with_dynamo(
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
+    else:
+        # Install the Dynamo scheduler patch when the user has not chosen a
+        # custom scheduler. The module applies a reset_prefix_cache patch
+        # required for /engine/sleep to succeed on prefill workers after a
+        # KV transfer (NixlConnector delay-free blocks).
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None:
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.scheduler_patches.PatchedAsyncScheduler"
 
     if dynamo_config.benchmark_mode is not None:
         if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
