@@ -8,15 +8,14 @@ from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.environ import envs
-from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import DynamoConfig
-
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
@@ -243,7 +242,9 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
         "master_server_address": master_server_address,
-        "master_metrics_port": int(getattr(mooncake_config, "master_metrics_port", 9003)),
+        "master_metrics_port": int(
+            getattr(mooncake_config, "master_metrics_port", 9003)
+        ),
     }
 
 
