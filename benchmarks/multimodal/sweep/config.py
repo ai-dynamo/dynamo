@@ -42,6 +42,8 @@ class SweepConfig:
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
+    nsys_capture: Optional[str] = None  # "cudaProfilerApi" | None
+    nsys_out: Optional[str] = None
 
     @property
     def sweep_mode(self) -> str:
@@ -84,6 +86,21 @@ class SweepConfig:
         if not self.request_rates and not self.concurrencies:
             raise ValueError(
                 "At least one of request_rates or concurrencies is required."
+            )
+
+        _SUPPORTED_NSYS_CAPTURE = {"cudaProfilerApi"}
+        if self.nsys_capture is not None:
+            if self.nsys_capture not in _SUPPORTED_NSYS_CAPTURE:
+                raise ValueError(
+                    f"nsys_capture={self.nsys_capture!r} is not supported. "
+                    f"Allowed: {sorted(_SUPPORTED_NSYS_CAPTURE)}."
+                )
+            if not self.nsys_out:
+                raise ValueError("nsys_out is required when nsys_capture is set.")
+        elif self.nsys_out is not None:
+            raise ValueError(
+                "nsys_out is set but nsys_capture is not. Set nsys_capture "
+                "or remove nsys_out."
             )
 
 
@@ -137,6 +154,8 @@ def load_config(
         skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
+        nsys_capture=raw.get("nsys_capture"),
+        nsys_out=raw.get("nsys_out"),
     )
 
     if cli_overrides:

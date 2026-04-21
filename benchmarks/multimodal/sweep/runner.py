@@ -4,8 +4,29 @@
 from __future__ import annotations
 
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+
+
+def _post_profile(url: str, label: str, *, required: bool) -> None:
+    """POST to vllm's /start_profile or /stop_profile.
+
+    When required=True, any failure raises RuntimeError so the sweep fails
+    fast instead of producing a misleading empty trace. When required=False,
+    failures log a warning and continue (used for stop in a finally block).
+    """
+    req = urllib.request.Request(url, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"{label} returned HTTP {resp.status}")
+    except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
+        msg = f"{label} at {url} failed: {e!r}"
+        if required:
+            raise RuntimeError(msg) from e
+        print(f"WARNING: {msg}", flush=True)
 
 
 def _build_aiperf_cmd(
@@ -68,8 +89,17 @@ def run_aiperf_single(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    start_profile_url: Optional[str] = None,
+    stop_profile_url: Optional[str] = None,
 ) -> None:
-    """Run a single aiperf profile invocation."""
+    """Run a single aiperf profile invocation.
+
+    When ``start_profile_url`` / ``stop_profile_url`` are supplied (typically
+    ``http://localhost:{port}/start_profile``), the runner arms / disarms
+    vllm's cudaProfilerApi trigger around the aiperf subprocess. Start is
+    required-success (fail fast); stop is best-effort in a finally block so
+    an aiperf crash can't leave nsys hanging on an un-finalized capture.
+    """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cmd = _build_aiperf_cmd(
         model=model,
@@ -83,20 +113,30 @@ def run_aiperf_single(
         artifact_dir=artifact_dir,
     )
 
+    if start_profile_url:
+        _post_profile(start_profile_url, "start_profile", required=True)
+
     print(f"  aiperf {sweep_mode}={sweep_value} -> {artifact_dir}", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
 
-    if proc.returncode != 0:
-        print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)
-        for stream_name, stream in [("stderr", proc.stderr), ("stdout", proc.stdout)]:
-            if stream:
-                for line in stream.strip().splitlines()[-15:]:
-                    print(f"    [{stream_name}] {line}", flush=True)
-        raise subprocess.CalledProcessError(
-            proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
-        )
+        if proc.returncode != 0:
+            print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)
+            for stream_name, stream in [
+                ("stderr", proc.stderr),
+                ("stdout", proc.stdout),
+            ]:
+                if stream:
+                    for line in stream.strip().splitlines()[-15:]:
+                        print(f"    [{stream_name}] {line}", flush=True)
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
+            )
 
-    print(f"  aiperf {sweep_mode}={sweep_value} done.", flush=True)
+        print(f"  aiperf {sweep_mode}={sweep_value} done.", flush=True)
+    finally:
+        if stop_profile_url:
+            _post_profile(stop_profile_url, "stop_profile", required=False)
 
 
 def run_sweep(

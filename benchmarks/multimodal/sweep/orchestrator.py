@@ -77,6 +77,10 @@ def run_sweep(
 
     server = ServerManager(port=config.port, timeout=config.timeout)
     env_overrides = dict(config.env) if config.env else {}
+    if config.nsys_capture is not None:
+        env_overrides["DYN_NSYS_CAPTURE"] = config.nsys_capture
+        env_overrides["DYN_NSYS_OUT"] = config.nsys_out  # validated non-None
+        print(f"  nsys capture:  {config.nsys_capture} -> {config.nsys_out}")
 
     try:
         for bench_cfg in config.configs:
@@ -169,6 +173,12 @@ def _run_config(
                 )
 
             try:
+                start_url = stop_url = None
+                if config.nsys_capture == "cudaProfilerApi":
+                    base = f"http://localhost:{config.port}"
+                    start_url = f"{base}/start_profile"
+                    stop_url = f"{base}/stop_profile"
+
                 run_aiperf_single(
                     model=config.model,
                     port=config.port,
@@ -179,6 +189,8 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    start_profile_url=start_url,
+                    stop_profile_url=stop_url,
                 )
             finally:
                 if config.restart_server_every_benchmark:
