@@ -257,7 +257,7 @@ class GlobalPlannerConnector(PlannerConnector):
         ``build_worker_info_from_defaults`` which leaves ``context_length``
         and ``max_kv_tokens`` unset, and load_scaling's easy-mode decisions
         bail out every tick — so the pool Planner silently sends no
-        ScaleRequests (DYN-2776 Issue A).
+        ScaleRequests.
         """
         local = self._get_local_k8s_connector()
         if local is not None:

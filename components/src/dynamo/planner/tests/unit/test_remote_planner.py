@@ -349,7 +349,7 @@ def test_connector_model_name_and_predicted_load(connector_runtime):
 def test_connector_get_worker_info_delegates_to_local_k8s(connector_runtime):
     """get_worker_info should delegate to a pool-local KubernetesConnector
     so that MDC-populated capabilities (context_length, max_kv_tokens, ...)
-    reach load-scaling under environment=global-planner. (DYN-2776 Issue A)
+    reach load-scaling under environment=global-planner.
     """
     from dynamo.planner.monitoring.worker_info import WorkerInfo
 
