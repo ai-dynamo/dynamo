@@ -58,14 +58,21 @@ def _iter_module_tensors(
             qualified = f"{prefix}{name}" if prefix else name
             yield (qualified, buf, "buffer")
 
-    # Other tensor attributes (not params/buffers/submodules)
+    # Other tensor attributes (not params/buffers/submodules).
+    # Skip @property descriptors: their backing storage is already surfaced
+    # elsewhere (e.g. DeepSeekV3MoeRoutingMethod.e_score_correction_bias is a
+    # read-only property wrapping a tensor owned by another module), and
+    # materialize_module_from_gms would fail on setattr() for read-only ones.
     skip = (
         set(module._parameters.keys())
         | set(module._buffers.keys())
         | set(module._modules.keys())
     )
+    module_cls = type(module)
     for attr_name in dir(module):
         if attr_name in skip or attr_name.startswith("__"):
+            continue
+        if isinstance(getattr(module_cls, attr_name, None), property):
             continue
         try:
             attr_val = getattr(module, attr_name, None)
