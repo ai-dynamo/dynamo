@@ -9,6 +9,30 @@ use kvbm_physical::TransferOptions;
 
 use super::*;
 
+/// Select the G1 block IDs that correspond to externally-matched (onboard) blocks.
+///
+/// When onboarding, the `block_ids` list contains ALL blocks for the request:
+///   [computed_blocks... | external_blocks... | new_blocks...]
+///
+/// The external (matched) blocks start right after the computed prefix and span
+/// `num_external_tokens / block_size` entries.
+///
+/// # Arguments
+/// * `block_ids` - All block IDs allocated for the request
+/// * `num_computed_tokens` - Tokens already present in G1 (prefix cache hit)
+/// * `num_external_tokens` - Tokens matched externally (to be onboarded)
+/// * `block_size` - Tokens per block
+fn select_onboard_block_ids(
+    block_ids: &[BlockId],
+    num_computed_tokens: usize,
+    num_external_tokens: usize,
+    block_size: usize,
+) -> Vec<BlockId> {
+    let num_computed_blocks = num_computed_tokens / block_size;
+    let num_external_blocks = num_external_tokens / block_size;
+    block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec()
+}
+
 impl ConnectorLeader {
     /// Prepare intra-pass onboarding by storing G2/G1 block pairs.
     ///
@@ -32,10 +56,8 @@ impl ConnectorLeader {
             .expect("session should exist")
             .num_computed_tokens;
 
-        let num_computed_blocks = num_computed_tokens / self.block_size();
-        let num_external_blocks = num_external_tokens / self.block_size();
         let g1_block_ids =
-            block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec();
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, self.block_size());
 
         // Record the block_ids - this assigns them to the token_block sequence hashes
         slot.apply_new_blocks(block_ids);
@@ -91,9 +113,12 @@ impl ConnectorLeader {
         let (staging_fut, onboard_blocks_ids) = {
             let mut slot = shared_slot.lock();
 
-            let num_external_blocks = num_external_tokens / self.block_size();
-            let onboard_start_block_idx = block_ids.len().saturating_sub(num_external_blocks);
-            let onboard_blocks_ids = block_ids[onboard_start_block_idx..].to_vec();
+            let num_computed_tokens = match slot.onboarding_state() {
+                Some(state) => state.num_computed_tokens,
+                None => 0,
+            };
+            let onboard_blocks_ids =
+                select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, self.block_size());
 
             // record the block_ids
             // this will assign the block_ids to the token_block sequence hashes
@@ -223,4 +248,86 @@ async fn execute_onboarding(
     //     duration,
     // );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLOCK_SIZE: usize = 16; // tokens per block
+
+    /// Onboard blocks must come from after the computed prefix,
+    /// not from the end of the block list.
+    ///
+    /// Scenario: 10 blocks total, first 2 are computed (already in G1),
+    /// next 3 are external (to be onboarded from G2), remaining 5 are new.
+    ///
+    /// block_ids:  [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+    ///              ^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ///              computed(2)  external(3)      new(5)
+    #[test]
+    fn test_select_onboard_blocks_after_computed_prefix() {
+        let block_ids: Vec<BlockId> = (100..110).collect(); // 10 blocks
+        let num_computed_tokens = 2 * BLOCK_SIZE; // 2 blocks already computed
+        let num_external_tokens = 3 * BLOCK_SIZE; // 3 blocks to onboard
+
+        let result =
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+
+        // Must select blocks [102, 103, 104] — the 3 blocks after the 2 computed ones
+        assert_eq!(result, vec![102, 103, 104]);
+    }
+
+    /// When nothing is computed, external blocks start at the beginning.
+    #[test]
+    fn test_select_onboard_blocks_no_computed_prefix() {
+        let block_ids: Vec<BlockId> = (100..108).collect(); // 8 blocks
+        let num_computed_tokens = 0;
+        let num_external_tokens = 5 * BLOCK_SIZE;
+
+        let result =
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+
+        assert_eq!(result, vec![100, 101, 102, 103, 104]);
+    }
+
+    /// When all blocks are external (full cache hit from G2).
+    #[test]
+    fn test_select_onboard_blocks_all_external() {
+        let block_ids: Vec<BlockId> = (100..106).collect(); // 6 blocks
+        let num_computed_tokens = 0;
+        let num_external_tokens = 6 * BLOCK_SIZE;
+
+        let result =
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+
+        assert_eq!(result, vec![100, 101, 102, 103, 104, 105]);
+    }
+
+    /// When all blocks are computed (nothing to onboard).
+    #[test]
+    fn test_select_onboard_blocks_nothing_external() {
+        let block_ids: Vec<BlockId> = (100..106).collect();
+        let num_computed_tokens = 6 * BLOCK_SIZE;
+        let num_external_tokens = 0;
+
+        let result =
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+
+        assert_eq!(result, Vec::<BlockId>::new());
+    }
+
+    /// Single external block after a large computed prefix.
+    #[test]
+    fn test_select_onboard_blocks_single_external_after_large_prefix() {
+        let block_ids: Vec<BlockId> = (100..120).collect(); // 20 blocks
+        let num_computed_tokens = 15 * BLOCK_SIZE;
+        let num_external_tokens = 1 * BLOCK_SIZE;
+
+        let result =
+            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+
+        // Block at index 15 (after 15 computed blocks)
+        assert_eq!(result, vec![115]);
+    }
 }
