@@ -203,6 +203,15 @@ def _load_ro(self, checkpoint_dir, checkpoint_loader, gms_client, device_index):
         if hasattr(model, "post_load_weights"):
             model.post_load_weights()
 
+        # Pre-bind shared submodules for speculative one-engine draft models.
+        # EAGLE3 / MTP / draft_target_one_model leave the draft's embed_tokens
+        # (and optionally lm_head) as None in MetaInitMode; they are normally
+        # bound via draft.load_weights_from_target_model(target) during disk
+        # load. The GMS metadata was registered after that binding, so the
+        # qualified names traverse draft.*.embed_tokens.weight. Pre-bind so
+        # materialize can resolve those paths.
+        _prebind_shared_draft_submodules(model)
+
         materialize_module_from_gms(gms_client, model, device_index=device_index)
         _last_imported_weights_bytes = int(gms_client.total_bytes)
 
@@ -224,6 +233,35 @@ def _load_ro(self, checkpoint_dir, checkpoint_loader, gms_client, device_index):
         torch.cuda.current_stream().synchronize()
 
     return model, moe_load_balancer
+
+
+def _prebind_shared_draft_submodules(model: torch.nn.Module) -> None:
+    """Share target's embed_tokens/lm_head into the draft before materialize.
+
+    Mirrors the shape of ``load_weights_from_target_model`` for the classes
+    under ``tensorrt_llm._torch.models.modeling_speculative`` but at the
+    module level (not at the parameter level) so the GMS RO walk can resolve
+    ``draft_model.model.embed_tokens.weight``-style qualified names.
+    """
+    draft = getattr(model, "draft_model", None)
+    if draft is None:
+        return
+    target_inner = getattr(model, "model", None)
+    if target_inner is None:
+        return
+
+    draft_inner = getattr(draft, "model", draft)
+    if (
+        getattr(draft_inner, "embed_tokens", None) is None
+        and getattr(target_inner, "embed_tokens", None) is not None
+    ):
+        draft_inner.embed_tokens = target_inner.embed_tokens
+
+    if (
+        getattr(draft, "lm_head", None) is None
+        and getattr(model, "lm_head", None) is not None
+    ):
+        draft.lm_head = model.lm_head
 
 
 def _ptr_in_gms(gms_client: "GMSClientMemoryManager", ptr: int) -> bool:

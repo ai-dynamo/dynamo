@@ -100,20 +100,34 @@ class TRTLLMEngineQuiesceController:
         self._is_quiesced = False
 
     def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
-        """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
+        """Call TRT-LLM collective_rpc for KV cache sleep/wake.
+
+        Non-Ray executors (single-process ``GenerationExecutorWorker``) have
+        no collective RPC; fall back to the local virtual-memory tag API.
+        """
         rpc = getattr(self._engine.llm, "_collective_rpc", None)
-        if rpc is None:
-            logger.warning(
-                "TRT-LLM does not expose _collective_rpc; skipping %s", method
-            )
-            return
-        try:
-            rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
-        except Exception:
-            if method != "wakeup":
-                raise
-            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
-            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+        if rpc is not None:
+            try:
+                rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
+                return
+            except Exception as exc:
+                if "does not support collective RPC" not in str(exc):
+                    if method != "wakeup":
+                        raise
+                    rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+                    return
+                logger.info(
+                    "TRT-LLM executor lacks collective RPC; using local tag API for %s",
+                    method,
+                )
+        from tensorrt_llm._torch.virtual_memory import (
+            materialize_with_tag,
+            release_with_tag,
+        )
+
+        action = release_with_tag if method == "sleep" else materialize_with_tag
+        for tag in rpc_tags:
+            action(tag)
 
     @staticmethod
     def _release_gms_weights() -> None:
