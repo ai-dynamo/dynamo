@@ -59,10 +59,6 @@ inputs:
     description: 'Skip the bootstrap step (only create the builder)'
     required: false
     default: 'false'
-  fresh_builder:
-    description: 'Force creation of a K8s builder rather than using dynamo builder (buildkit)'
-    required: false
-    default: 'false'
 
 runs:
   using: "composite"
@@ -88,7 +84,6 @@ runs:
       shell: bash
       run: |
         # If the builder already exists, these commands will just set the right configurations to use it
-        # when fresh_builder is true, it needs to create a new builder per workflow, not per job. We should not remove the builder if it exist.
         echo "🔨 Creating K8s builder '${{ inputs.builder_name }}'."
         docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
         '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
@@ -111,14 +106,14 @@ runs:
         '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
         '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \
         '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+
         sleep 3 # Give the builders some time to be ready
 
-        if [[ "${{ inputs.skip_bootstrap }}" != "true" && "${{ inputs.fresh_builder }}" != "true" ]]; then
-          echo "::warning::Build is using fallback pod. Please alert the ops team."
-          echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
-          echo "This build is using the **fallback pod** because the preferred remote builders are unavailable. Expected during nightly runs and outside business hours." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "::warning::Build is using fallback pod"
+        echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
+        echo "This build is using the **fallback pod** because the preferred remote builders are unavailable. Expected during nightly runs and outside business hours." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
 
 
     - name: Bootstrap buildkit
