@@ -116,6 +116,11 @@ func buildCheckpointJob(
 		}
 	}
 
+	// Mount the patched driver PVC + prepend LD_LIBRARY_PATH on main and
+	// GMS sidecars, if DYNAMO_DRIVER_OVERRIDE_PVC is set on the operator.
+	// Must run after EnsureGMSCheckpointJobSidecars so the sidecars exist.
+	checkpoint.InjectDriverOverride(&podTemplate.Spec, mainContainer)
+
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
 		defaultDeadline := int64(3600)

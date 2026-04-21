@@ -120,5 +120,10 @@ func InjectCheckpointIntoPodSpec(
 		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
 	}
 
+	// Mount the patched driver PVC + prepend LD_LIBRARY_PATH on main and
+	// GMS sidecars, if DYNAMO_DRIVER_OVERRIDE_PVC is set on the operator.
+	// Must run after EnsureGMSRestoreSidecars so the sidecars exist.
+	InjectDriverOverride(podSpec, mainContainer)
+
 	return nil
 }
