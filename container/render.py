@@ -99,12 +99,11 @@ def parse_args():
 def validate_args(args):
     valid_inputs = {
         "vllm": {
-            "device": ["cuda", "xpu", "cpu"],
+            "device": ["cuda"],
             "target": [
                 "runtime",
                 "dev",
                 "local-dev",
-                "framework",
                 "wheel_builder",
                 "base",
             ],

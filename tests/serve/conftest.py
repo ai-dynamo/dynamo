@@ -1,42 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 from io import BytesIO
 
 import pytest
 from pytest_httpserver import HTTPServer
 
-from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
-MULTIMODAL_IMG_PATH = os.path.join(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
-)
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 
 
-# Git LFS pointer files start with "version "; serve a real PNG when the asset is not pulled.
 def get_multimodal_test_image_bytes() -> bytes:
-    """Return valid PNG bytes for /llm-graphic.png (file or minimal fallback)."""
-    if os.path.isfile(MULTIMODAL_IMG_PATH):
-        with open(MULTIMODAL_IMG_PATH, "rb") as f:
-            data = f.read()
-        if not data.startswith(b"version "):
-            # GitHub path
-            return data
-
-    # Local path where we cannot retrieve the above .png file
+    """Return a deterministic green PNG for multimodal serve tests."""
 
     # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
     from PIL import Image
 
     buf = BytesIO()
-    # TODO: differerent models / tests may expect different colors. Need to reconcicle
-    # code to support all cases locally if needed.
+    # Keep the served test image synthetic so CI does not depend on Git LFS media
+    # contents that prompt models to OCR logo text instead of answering with colors.
     Image.new("RGB", (2, 2), color="green").save(buf, format="PNG")
     return buf.getvalue()
 
@@ -53,12 +39,11 @@ def image_server(httpserver: HTTPServer):
     Provide an HTTP server that serves test images for multimodal inference.
 
     This function-scoped fixture configures pytest-httpserver to serve
-    the LLM optimization diagram image. It's designed for testing multimodal
+    a deterministic synthetic image. It's designed for testing multimodal
     inference capabilities where models need to fetch images via HTTP.
 
     Currently serves:
-        - /llm-graphic.png - LLM diagram image for multimodal tests
-          (or a minimal PNG if the file is a Git LFS pointer / not pulled)
+        - /llm-graphic.png - 2x2 green PNG used by multimodal serve tests
 
     Usage:
         def test_multimodal(image_server):
