@@ -155,11 +155,25 @@ impl WorkloadDriver {
         self.max_in_flight = Some(cap);
     }
 
-    /// Failure-path companion: release a cap slot without touching session state.
-    /// No-op if `on_complete` already removed the UUID. Used when a request task
-    /// is cancelled or panics before reaching `on_complete`.
+    /// Failure-path companion: release a cap slot and terminate the owning session.
+    /// No-op if `on_complete` already ran. Used when a request task is cancelled
+    /// or panics before reaching `on_complete`.
+    ///
+    /// Terminating the session (marking it exhausted) prevents `run_workload` from
+    /// deadlocking: `pop_ready` skips sessions with `in_flight.is_some()`, so a
+    /// leaked session would leave `is_drained` stuck at `false` forever.
     pub fn release_cap_slot(&mut self, request_uuid: Uuid) {
-        self.in_flight.remove(&request_uuid);
+        let Some(in_flight) = self.in_flight.remove(&request_uuid) else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(in_flight.session_index) else {
+            return;
+        };
+        if session.in_flight == Some(request_uuid) {
+            session.in_flight = None;
+            session.next_turn_index = session.turns.len();
+            session.next_ready_at_ms = None;
+        }
     }
 
     pub fn pop_ready(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyTurn> {
@@ -428,6 +442,31 @@ mod tests {
             next.len(),
             1,
             "cap slot should be available after release_cap_slot"
+        );
+    }
+
+    #[test]
+    fn release_cap_slot_terminates_session_so_is_drained_completes() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+        let stuck_uuid = admitted[0].request_uuid;
+
+        driver.release_cap_slot(stuck_uuid);
+
+        let neighbor = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(
+            neighbor.len(),
+            1,
+            "other session must still be admissible after its neighbor was terminated"
+        );
+        driver.on_complete(neighbor[0].request_uuid, 1.0).unwrap();
+
+        assert!(
+            driver.is_drained(),
+            "is_drained must become true so run_workload can exit"
         );
     }
 }
