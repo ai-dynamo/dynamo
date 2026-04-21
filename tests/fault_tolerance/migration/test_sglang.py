@@ -247,8 +247,7 @@ def test_request_migration_sglang_aggregated(
         and request.getfixturevalue("request_plane") == "nats"
     ):
         pytest.skip(
-            "Flaky on NATS transport: first-token delay > 6s threshold. "
-            "OPS-4446"
+            "Flaky on NATS transport: first-token delay > 6s threshold. OPS-4446"
         )
 
     # Step 1: Start the frontend
