@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 import yaml
+from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
@@ -453,8 +454,6 @@ def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:
 
 def _apply_prefill_sampling_params(sp_list: list, request_id: str) -> list:
     """Clone SamplingParams for prefill: max_tokens=1, kv_transfer for remote decode."""
-    from vllm.sampling_params import SamplingParams
-
     result = []
     for sp in sp_list:
         if not isinstance(sp, SamplingParams):
@@ -478,8 +477,6 @@ def _apply_prefill_sampling_params(sp_list: list, request_id: str) -> list:
 
 def _apply_decode_sampling_params(sp_list: list, kv_transfer_params: dict) -> list:
     """Inject kv_transfer_params into decode sampling params."""
-    from vllm.sampling_params import SamplingParams
-
     result = []
     for sp in sp_list:
         if not isinstance(sp, SamplingParams):
