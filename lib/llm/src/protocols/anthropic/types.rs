@@ -443,7 +443,17 @@ pub fn chat_completion_to_anthropic_response(
     model: &str,
     api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
-    let _ = api_context; // Available for future enrichment (service_tier, etc.)
+    // Anthropic's extended thinking guide defines `thinking` content blocks
+    // as the response shape for requests with `thinking.type == "enabled"`.
+    // Ref: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+    let emit_thinking = api_context
+        .map(|context| {
+            context
+                .thinking
+                .as_ref()
+                .is_some_and(|thinking| thinking.thinking_type == "enabled")
+        })
+        .unwrap_or(true);
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.inner.choices.into_iter().next();
@@ -473,19 +483,7 @@ pub fn chat_completion_to_anthropic_response(
             }
         }
 
-        // Extract reasoning content (from --dyn-reasoning-parser, e.g. qwen3).
-        // The backend strips <think>...</think> from the text and surfaces it
-        // as reasoning_content on the message. Map this to a Thinking block
-        // so clients see proper extended thinking in the Anthropic response.
-        if let Some(thinking) = choice.message.reasoning_content.filter(|t| !t.is_empty()) {
-            content.insert(
-                0,
-                AnthropicResponseContentBlock::Thinking {
-                    thinking,
-                    signature: String::new(),
-                },
-            );
-        }
+        let reasoning_content = choice.message.reasoning_content.filter(|t| !t.is_empty());
 
         // Extract text content
         let text = match choice.message.content {
@@ -498,12 +496,44 @@ pub fn chat_completion_to_anthropic_response(
             }
             None => None,
         };
-        if let Some(text) = text {
-            // Text goes after thinking block (if any)
-            content.push(AnthropicResponseContentBlock::Text {
-                text,
-                citations: None,
-            });
+
+        match (emit_thinking, reasoning_content, text) {
+            (true, Some(thinking), text) => {
+                content.insert(
+                    0,
+                    AnthropicResponseContentBlock::Thinking {
+                        thinking,
+                        signature: String::new(),
+                    },
+                );
+                if let Some(text) = text {
+                    content.push(AnthropicResponseContentBlock::Text {
+                        text,
+                        citations: None,
+                    });
+                }
+            }
+            // Preserve backend reasoning output, but do not emit Anthropic
+            // `thinking` blocks when the client did not opt into that API mode.
+            (false, Some(reasoning), Some(text)) => {
+                content.push(AnthropicResponseContentBlock::Text {
+                    text: format!("{reasoning}{text}"),
+                    citations: None,
+                });
+            }
+            (false, Some(reasoning), None) => {
+                content.push(AnthropicResponseContentBlock::Text {
+                    text: reasoning,
+                    citations: None,
+                });
+            }
+            (_, None, Some(text)) => {
+                content.push(AnthropicResponseContentBlock::Text {
+                    text,
+                    citations: None,
+                });
+            }
+            (_, None, None) => {}
         }
     }
 
@@ -838,6 +868,108 @@ mod tests {
             }
             _ => panic!("expected text block"),
         }
+    }
+
+    fn anthropic_context_with_thinking(
+        thinking_type: Option<&str>,
+    ) -> crate::protocols::unified::AnthropicContext {
+        crate::protocols::unified::AnthropicContext {
+            thinking: thinking_type.map(|thinking_type| ThinkingConfig {
+                thinking_type: thinking_type.to_string(),
+                budget_tokens: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[allow(deprecated)]
+    fn chat_response_with_reasoning(
+        reasoning_content: Option<&str>,
+        content: Option<&str>,
+    ) -> NvCreateChatCompletionResponse {
+        NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: content.map(|content| {
+                            dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                                content.to_string(),
+                            )
+                        }),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: reasoning_content.map(str::to_string),
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    stop_reason: None,
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_reasoning_demoted_to_text_without_enabled_thinking_context() {
+        let ctx = anthropic_context_with_thinking(None);
+        let response = chat_completion_to_anthropic_response(
+            chat_response_with_reasoning(Some("hidden reasoning"), Some("Visible answer")),
+            "test-model",
+            Some(&ctx),
+        );
+
+        assert_eq!(response.content.len(), 1);
+        assert!(matches!(
+            &response.content[0],
+            AnthropicResponseContentBlock::Text { text, .. } if text == "hidden reasoningVisible answer"
+        ));
+    }
+
+    #[test]
+    fn test_reasoning_demoted_to_text_when_thinking_disabled() {
+        let ctx = anthropic_context_with_thinking(Some("disabled"));
+        let response = chat_completion_to_anthropic_response(
+            chat_response_with_reasoning(Some("hidden reasoning"), Some("Visible answer")),
+            "test-model",
+            Some(&ctx),
+        );
+
+        assert_eq!(response.content.len(), 1);
+        assert!(matches!(
+            &response.content[0],
+            AnthropicResponseContentBlock::Text { text, .. } if text == "hidden reasoningVisible answer"
+        ));
+    }
+
+    #[test]
+    fn test_reasoning_emitted_when_thinking_enabled() {
+        let ctx = anthropic_context_with_thinking(Some("enabled"));
+        let response = chat_completion_to_anthropic_response(
+            chat_response_with_reasoning(Some("visible thinking"), Some("Visible answer")),
+            "test-model",
+            Some(&ctx),
+        );
+
+        assert_eq!(response.content.len(), 2);
+        assert!(matches!(
+            &response.content[0],
+            AnthropicResponseContentBlock::Thinking { thinking, .. } if thinking == "visible thinking"
+        ));
+        assert!(matches!(
+            &response.content[1],
+            AnthropicResponseContentBlock::Text { text, .. } if text == "Visible answer"
+        ));
     }
 
     #[test]

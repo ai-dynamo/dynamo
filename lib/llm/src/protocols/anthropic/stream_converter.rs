@@ -26,6 +26,8 @@ pub struct AnthropicStreamConverter {
     message_id: String,
     /// Preserved Anthropic-specific request context for faithful response reconstruction.
     api_context: Option<AnthropicContext>,
+    /// Whether parsed reasoning_content should be exposed as Anthropic thinking blocks.
+    emit_thinking: bool,
     // Thinking/reasoning tracking
     thinking_block_started: bool,
     thinking_block_closed: bool,
@@ -60,10 +62,19 @@ struct ToolCallState {
 
 impl AnthropicStreamConverter {
     pub fn new(model: String, estimated_input_tokens: u32) -> Self {
+        Self::new_with_thinking(model, estimated_input_tokens, true)
+    }
+
+    pub fn new_with_thinking(
+        model: String,
+        estimated_input_tokens: u32,
+        emit_thinking: bool,
+    ) -> Self {
         Self {
             model,
             message_id: format!("msg_{}", Uuid::new_v4().simple()),
             api_context: None,
+            emit_thinking,
             thinking_block_started: false,
             thinking_block_closed: false,
             thinking_block_index: 0,
@@ -88,7 +99,14 @@ impl AnthropicStreamConverter {
         estimated_input_tokens: u32,
         context: AnthropicContext,
     ) -> Self {
-        let mut converter = Self::new(model, estimated_input_tokens);
+        // Anthropic's extended thinking guide defines `thinking` content blocks
+        // as the response shape for requests with `thinking.type == "enabled"`.
+        // Ref: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+        let emit_thinking = context
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.thinking_type == "enabled");
+        let mut converter = Self::new_with_thinking(model, estimated_input_tokens, emit_thinking);
         converter.api_context = Some(context);
         converter
     }
@@ -157,7 +175,8 @@ impl AnthropicStreamConverter {
             }
 
             // Handle reasoning/thinking content deltas
-            if let Some(ref reasoning) = delta.reasoning_content
+            if self.emit_thinking
+                && let Some(ref reasoning) = delta.reasoning_content
                 && !reasoning.is_empty()
             {
                 // Emit content_block_start on first thinking token
@@ -186,15 +205,23 @@ impl AnthropicStreamConverter {
                 events.push(make_sse_event("content_block_delta", &block_delta));
             }
 
-            // Handle text content deltas
-            let content_text = match &delta.content {
-                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
-                _ => None,
-            };
-
-            if let Some(text) = content_text
+            // When the request did not enable Anthropic extended thinking,
+            // preserve backend reasoning as text rather than dropping output or
+            // emitting an unrequested `thinking` block.
+            let mut text_parts = Vec::new();
+            if !self.emit_thinking
+                && let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                text_parts.push(reasoning.as_str());
+            }
+            if let Some(ChatCompletionMessageContent::Text(text)) = &delta.content
                 && !text.is_empty()
             {
+                text_parts.push(text.as_str());
+            }
+
+            for text in text_parts {
                 // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
                 if self.thinking_block_started && !self.thinking_block_closed {
                     self.thinking_block_closed = true;
@@ -496,7 +523,8 @@ impl AnthropicStreamConverter {
             }
 
             // Handle reasoning/thinking content deltas
-            if let Some(ref reasoning) = delta.reasoning_content
+            if self.emit_thinking
+                && let Some(ref reasoning) = delta.reasoning_content
                 && !reasoning.is_empty()
             {
                 if !self.thinking_block_started {
@@ -523,14 +551,20 @@ impl AnthropicStreamConverter {
                 events.push(make_tagged_event("content_block_delta", &ev));
             }
 
-            let content_text = match &delta.content {
-                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
-                _ => None,
-            };
-
-            if let Some(text) = content_text
+            let mut text_parts = Vec::new();
+            if !self.emit_thinking
+                && let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                text_parts.push(reasoning.as_str());
+            }
+            if let Some(ChatCompletionMessageContent::Text(text)) = &delta.content
                 && !text.is_empty()
             {
+                text_parts.push(text.as_str());
+            }
+
+            for text in text_parts {
                 // Close thinking block before text starts
                 if self.thinking_block_started && !self.thinking_block_closed {
                     self.thinking_block_closed = true;
@@ -739,6 +773,8 @@ mod tests {
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
     };
+
+    use crate::protocols::anthropic::types::ThinkingConfig;
 
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
@@ -958,6 +994,95 @@ mod tests {
             },
             nvext: None,
         }
+    }
+
+    fn context_with_thinking(
+        thinking_type: Option<&str>,
+    ) -> crate::protocols::unified::AnthropicContext {
+        crate::protocols::unified::AnthropicContext {
+            thinking: thinking_type.map(|thinking_type| ThinkingConfig {
+                thinking_type: thinking_type.to_string(),
+                budget_tokens: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_reasoning_demoted_to_text_without_enabled_thinking_context() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            context_with_thinking(None),
+        );
+
+        let ev = conv.process_chunk_tagged(&reasoning_chunk("hidden reasoning"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"],
+            "reasoning_content must not produce Anthropic thinking without request opt-in"
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Text { .. }
+            }
+        ));
+
+        let ev = conv.process_chunk_tagged(&text_chunk("Visible answer"));
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::TextDelta { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_reasoning_demoted_to_text_when_thinking_disabled() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            context_with_thinking(Some("disabled")),
+        );
+
+        let ev = conv.process_chunk_tagged(&reasoning_chunk("hidden reasoning"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"],
+            "thinking.type=disabled must not emit Anthropic thinking blocks"
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Text { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_reasoning_emitted_when_thinking_enabled() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            context_with_thinking(Some("enabled")),
+        );
+
+        let ev = conv.process_chunk_tagged(&reasoning_chunk("visible thinking"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Thinking { .. }
+            }
+        ));
     }
 
     /// Full reasoning flow: thinking → text → tool_use.
