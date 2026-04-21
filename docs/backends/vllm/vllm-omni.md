@@ -12,11 +12,13 @@ This guide assumes familiarity with deploying Dynamo with vLLM as described in t
 
 ### Installation
 
-Dynamo container images include vLLM-Omni pre-installed. If you are using `pip install ai-dynamo[vllm]`, vLLM-Omni is **not** included automatically because the matching release is not yet available on PyPI. Install it separately from source:
+Dynamo container images include vLLM-Omni pre-installed. If you are using `pip install ai-dynamo[vllm]`, vLLM-Omni is **not** included automatically because the matching release is not yet available on PyPI. Install it separately from source, pinning the vLLM-Omni release that matches your installed vLLM version (see the [vLLM-Omni releases](https://github.com/vllm-project/vllm-omni/releases) page):
 
 ```bash
-pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
+pip install git+https://github.com/vllm-project/vllm-omni.git@<version>
 ```
+
+> **ARM64 not supported:** vLLM-Omni is currently only installed on `amd64` builds. On `arm64`, the container build skips the install and vLLM-Omni features are unavailable.
 
 ## Supported Modalities
 
@@ -371,6 +373,8 @@ sequenceDiagram
 ### Quick Start: GLM-Image (2-Stage, 2 GPUs)
 
 GLM-Image is a 2-stage text-to-image model with an AR stage (generates prior token IDs) and a DiT stage (diffusion denoising + VAE decode). The built-in vLLM-Omni stage config already assigns each stage to a separate GPU.
+
+> **Experimental:** GLM-Image support is experimental; generation may fail or produce incorrect/garbled outputs for some prompts and sizes.
 
 ```bash
 bash examples/backends/vllm/launch/disagg_omni_glm_image.sh

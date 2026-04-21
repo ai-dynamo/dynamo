@@ -58,7 +58,15 @@ func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
 ) error {
-	if checkpointInfo == nil || !checkpointInfo.Enabled {
+	// Only mutate the worker pod spec once the checkpoint is Ready. Before
+	// the checkpoint exists, the worker must cold-start normally without
+	// the snapshot-control volume, DYN_SNAPSHOT_CONTROL_DIR, checkpoint PVC
+	// mount, or localhost seccomp profile — otherwise the Python worker
+	// enters checkpoint mode on env-var presence and sits quiesced waiting
+	// for a sentinel that only the checkpoint Job and restore-target path
+	// produce. The checkpoint Job itself is built separately through
+	// buildCheckpointJob + NewCheckpointJob and does get these.
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil
 	}
 

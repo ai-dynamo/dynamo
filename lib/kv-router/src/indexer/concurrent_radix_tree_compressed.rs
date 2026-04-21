@@ -68,6 +68,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
 
 macro_rules! read_lock {
@@ -117,10 +118,6 @@ impl Node {
             full_edge_workers: FxHashSet::default(),
             children: FxHashMap::default(),
         }
-    }
-
-    fn has_any_workers(&self) -> bool {
-        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
     }
 
     #[inline]
@@ -223,6 +220,22 @@ impl Node {
     }
 }
 
+impl CleanableNode for Node {
+    type ChildKey = LocalBlockHash;
+
+    fn has_any_workers(&self) -> bool {
+        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+
+    fn children(&self) -> &FxHashMap<LocalBlockHash, SharedNode> {
+        &self.children
+    }
+
+    fn remove_child(&mut self, key: &LocalBlockHash) {
+        self.children.remove(key);
+    }
+}
+
 /// Data returned by [`ConcurrentRadixTreeCompressed::split_node`] for deferred lookup updates.
 ///
 /// Callers must call [`ConcurrentRadixTreeCompressed::apply_split_lookup`] **after**
@@ -243,6 +256,7 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
+    cleanup: CleanupState,
 }
 
 impl Default for ConcurrentRadixTreeCompressed {
@@ -274,7 +288,27 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(RwLock::new(Node::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            cleanup: CleanupState::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_child_edge_count(&self) -> usize {
+        let mut queue = VecDeque::from([self.root.clone()]);
+        let mut count = 0usize;
+
+        while let Some(node) = queue.pop_front() {
+            let guard = node.read();
+            count += guard.children.len();
+            queue.extend(guard.children.values().cloned());
+        }
+
+        count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_cleanup_for_test(&self) {
+        cleanup::sweep_stale_children(&self.root);
     }
 
     // ------------------------------------------------------------------
@@ -1223,6 +1257,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
+                }
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
@@ -1238,6 +1275,20 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn try_schedule_cleanup(&self) -> bool {
+        self.cleanup.try_schedule()
+    }
+
+    fn cancel_scheduled_cleanup(&self) {
+        self.cleanup.cancel();
+    }
+
+    fn run_cleanup_task(&self) {
+        let mut cleanup_guard = CleanupGuard::new(&self.cleanup);
+        cleanup::sweep_stale_children(&self.root);
+        cleanup_guard.mark_completed();
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
