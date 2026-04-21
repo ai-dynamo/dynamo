@@ -479,11 +479,12 @@ mod push_handler_notify_tests {
         (server, connection_info)
     }
 
-    /// Registers an endpoint in the DRT: health check target + local engine +
-    /// returns the notifier that the real HealthCheckManager will listen on.
+    /// Registers an endpoint in the DRT with the given engine in local registry.
+    /// Returns the notifier that the real HealthCheckManager will listen on.
     fn register_endpoint(
         drt: &crate::DistributedRuntime,
         endpoint_name: &str,
+        local_engine: LocalAsyncEngine,
     ) -> Arc<tokio::sync::Notify> {
         let payload = serde_json::json!({
             "prompt": "health",
@@ -502,11 +503,8 @@ mod push_handler_notify_tests {
             payload,
         );
 
-        // Register a mock engine in local registry so send_health_check_request
-        // can call engine.generate() when the canary fires.
-        let mock_engine: LocalAsyncEngine = MockStreamingEngine::success(1);
         drt.local_endpoint_registry()
-            .register(endpoint_name.to_string(), mock_engine);
+            .register(endpoint_name.to_string(), local_engine);
 
         drt.system_health()
             .lock()
@@ -514,32 +512,35 @@ mod push_handler_notify_tests {
             .expect("Notifier should exist for registered endpoint")
     }
 
-    /// Tests that when a request flows through push_handler (streaming 5 chunks),
-    /// the real HealthCheckManager's canary timer is reset via notify_one(),
-    /// preventing the canary from firing and keeping the endpoint in its initial
-    /// NotReady state (i.e., send_health_check_request is never called).
+    /// Tests the full notification → timer reset → status Ready path.
+    ///
+    /// The local registry engine returns errors, so if the canary fires,
+    /// send_health_check_request will set NotReady. This proves that a
+    /// Ready status can only come from the notification path.
     #[tokio::test]
     async fn test_notifier_resets_canary_timer() {
         let drt = create_test_drt_async().await;
         let endpoint_name = "test.push_handler.timer_reset";
 
-        let notifier = register_endpoint(&drt, endpoint_name);
+        // Register with an error engine — if the canary fires, status stays NotReady.
+        let notifier = register_endpoint(&drt, endpoint_name, MockStreamingEngine::all_errors(1));
 
-        // Verify initial status is NotReady before any activity
+        // Endpoint starts NotReady
         let status = drt
             .system_health()
             .lock()
             .get_endpoint_health_status(endpoint_name);
         assert_eq!(status, Some(HealthStatus::NotReady));
 
-        let engine: Arc<MockStreamingEngine> = MockStreamingEngine::success(5);
+        // Set up the push_handler pipeline
+        let engine = MockStreamingEngine::success(5);
         let ingress =
             Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
         ingress
             .set_endpoint_health_check_notifier(notifier.clone())
             .unwrap();
 
-        // Pre-create the TCP receiver and encoded payload
+        // Pre-create request before starting HealthCheckManager
         let request_id = uuid::Uuid::new_v4().to_string();
         let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
         let payload = encode_request(
@@ -548,10 +549,7 @@ mod push_handler_notify_tests {
             &serde_json::json!({"prompt": "test"}),
         );
 
-        // Send the request through push_handler BEFORE starting the
-        // HealthCheckManager. This way we can use a separate Notify for
-        // counting without competing with the manager (notify_one only
-        // wakes one waiter).
+        // Phase 1: count notifications (no HealthCheckManager competing)
         let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = notify_count.clone();
         let notifier_for_counter = notifier.clone();
@@ -571,28 +569,16 @@ mod push_handler_notify_tests {
         let result = ingress
             .handle_payload(payload, Some(request_id.clone()))
             .await;
-        assert!(
-            result.is_ok(),
-            "handle_payload should succeed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "handle_payload should succeed");
 
-        // Wait for the counter task to finish collecting notifications
         counter_task.await.unwrap();
-
-        // Verify notifications were received. Notify coalesces multiple calls
-        // into single wakeups, so the exact count depends on scheduling. With
-        // 5 chunks + 1 stream completion = 6 notify_one() calls, we expect
-        // at least 2 wakeups - one for a streaming chunk, one for stream completion.
         let count = notify_count.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
             count >= 2,
-            "Expected at least 2 notification wakeup from push_handler streaming, got {count}"
+            "Expected at least 2 wakeups (chunks + completion), got {count}"
         );
 
-        // NOW start the HealthCheckManager. It will be the sole consumer of
-        // the notifier going forward. The canary wait is 500ms — we'll send
-        // another request to reset the timer, then verify it didn't fire.
+        // Phase 2: start HealthCheckManager, send another request to reset timer
         let config = HealthCheckConfig {
             canary_wait_time: Duration::from_millis(500),
             request_timeout: Duration::from_secs(1),
@@ -600,7 +586,6 @@ mod push_handler_notify_tests {
         let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
         manager.clone().start().await.unwrap();
 
-        // Send a second request to reset the canary timer
         let request_id2 = uuid::Uuid::new_v4().to_string();
         let (_server2, connection_info2) = setup_tcp_receiver(&request_id2).await;
         let payload2 = encode_request(
@@ -611,12 +596,10 @@ mod push_handler_notify_tests {
         let result2 = ingress.handle_payload(payload2, Some(request_id2)).await;
         assert!(result2.is_ok(), "second handle_payload should succeed");
 
-        // Wait less than canary_wait_time
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // The canary should NOT have fired. The status should be Ready because
-        // the notification from push_handler's successful streaming set it to
-        // Ready (without the canary ever needing to fire).
+        // Ready can only come from the notification path (the canary would set
+        // NotReady because the local registry engine returns errors).
         let status = drt
             .system_health()
             .lock()
@@ -624,8 +607,7 @@ mod push_handler_notify_tests {
         assert_eq!(
             status,
             Some(HealthStatus::Ready),
-            "Status should be Ready — push_handler's successful streaming \
-             should have set it via the notification path"
+            "Status should be Ready from notification path (canary engine returns errors)"
         );
     }
 
@@ -638,7 +620,7 @@ mod push_handler_notify_tests {
         let drt = create_test_drt_async().await;
         let endpoint_name = "test.push_handler.canary_fires";
 
-        let _notifier = register_endpoint(&drt, endpoint_name);
+        let _notifier = register_endpoint(&drt, endpoint_name, MockStreamingEngine::success(1));
 
         // Start the real HealthCheckManager with a very short canary wait
         let config = HealthCheckConfig {
