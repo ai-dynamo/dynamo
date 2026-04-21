@@ -792,14 +792,18 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 // This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
 // avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
 func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
+	// Normalize the service name the same way GenerateComponentService does
+	// so the DestinationRule host matches the actual Service DNS name.
+	normalizedName := strings.ReplaceAll(serviceName, ".", "-")
+
 	dr := &networkingv1beta1.DestinationRule{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
+			Name:      normalizedName,
 			Namespace: namespace,
 		},
 	}
 
-	if !meshConfig.IsEnabled() || meshConfig.Provider != "istio" || meshConfig.Istio == nil {
+	if !meshConfig.IsEnabled() || meshConfig.Istio == nil {
 		return dr
 	}
 
@@ -819,7 +823,7 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 	}
 
 	dr.Spec = istioNetworking.DestinationRule{
-		Host: fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, namespace),
+		Host: fmt.Sprintf("%s.%s.svc.cluster.local", normalizedName, namespace),
 		TrafficPolicy: &istioNetworking.TrafficPolicy{
 			Tls: &istioNetworking.ClientTLSSettings{
 				Mode:               tlsMode,

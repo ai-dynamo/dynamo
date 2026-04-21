@@ -227,6 +227,14 @@ func (i *IngressConfiguration) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
 }
 
+// ServiceMeshProvider enumerates the supported service mesh implementations.
+type ServiceMeshProvider string
+
+const (
+	// ServiceMeshProviderIstio selects Istio as the service mesh.
+	ServiceMeshProviderIstio ServiceMeshProvider = "istio"
+)
+
 // ServiceMeshConfiguration holds service mesh integration settings.
 // The operator uses this to generate mesh-specific resources (e.g., Istio
 // DestinationRules) for EPP components so that sidecar proxies connect
@@ -239,9 +247,9 @@ type ServiceMeshConfiguration struct {
 	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
 }
 
-// IsEnabled returns true if a service mesh provider is configured.
+// IsEnabled returns true if a supported service mesh provider is configured.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
-	return s.Provider != ""
+	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
 }
 
 // IstioMeshConfiguration holds Istio-specific mesh settings.

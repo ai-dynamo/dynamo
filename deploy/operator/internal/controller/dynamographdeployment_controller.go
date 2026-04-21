@@ -1605,20 +1605,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
 	}
 
-	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule)
-	if r.Config.ServiceMesh.IsEnabled() {
+	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule).
+	// Always run SyncResource so that previously created DestinationRules
+	// are cleaned up when the service mesh is disabled.
+	{
+		meshEnabled := r.Config.ServiceMesh.IsEnabled()
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
-			if !r.Config.ServiceMesh.IsEnabled() {
-				return destinationRule, true, nil
-			}
-			return destinationRule, false, nil
+			return destinationRule, !meshEnabled, nil
 		})
 		if err != nil {
 			logger.Error(err, "Failed to sync EPP DestinationRule")
 			return fmt.Errorf("failed to sync EPP DestinationRule: %w", err)
 		}
-		logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		if meshEnabled {
+			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		}
 	}
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())

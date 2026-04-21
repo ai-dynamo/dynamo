@@ -91,7 +91,7 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 	}
 
 	// ServiceMesh defaults
-	if obj.ServiceMesh.Provider == "istio" && obj.ServiceMesh.Istio == nil {
+	if ServiceMeshProvider(obj.ServiceMesh.Provider) == ServiceMeshProviderIstio && obj.ServiceMesh.Istio == nil {
 		obj.ServiceMesh.Istio = &IstioMeshConfiguration{}
 	}
 	if obj.ServiceMesh.Istio != nil {
