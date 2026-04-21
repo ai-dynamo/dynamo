@@ -121,7 +121,7 @@ def _disable_offline_with_mistral_patch():
 
 # Keys managed by _apply_models_dir_env / _restore_models_dir_env.
 # PYTHONPATH is intentionally excluded: _disable_offline_with_mistral_patch()
-# removes its entry via str.replace (idempotent, needs no snapshot).
+# removes its entry by exact-match list filtering (idempotent, needs no snapshot).
 _MODELS_DIR_ENV_KEYS = (
     "HF_HUB_CACHE",
     "HF_HOME",
