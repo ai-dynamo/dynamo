@@ -70,45 +70,16 @@ python -m benchmarks.multimodal.sweep \
   --skip-plots
 ```
 
-## Grouped Single-Turn Semantics (aiperf 0.7.0+)
+## Warmup semantics
 
-`aiperf==0.7.0` (via [PR 824](https://github.com/ai-dynamo/aiperf/pull/824))
-groups single_turn rows by JSONL `session_id`. A JSONL with 10 users × 10 turns
-each dispatches 10 causal-ordered chains (turn-(k+1) for user A only after
-turn-k for user A returns).
-
-Control the session count via `conversation_num`. For flat JSONLs (random
-requests, single_turn without shared `session_id`), `conversation_num` still
-works — each row is treated as a 1-turn conversation, so total requests =
-`conversation_num × 1 = conversation_num`. If unset, it defaults to the
-detected unique session_id count (or row count for flat JSONLs).
-
-### Upgrading aiperf in an existing container
-
-The benchmark image currently pins `aiperf==0.6.0`. Until the pin is bumped
-(tracked separately), any new cloud-session container starts pre-824 and
-must be upgraded before running the sweep. Install aiperf 0.7.0 from the
-pre-staged wheel:
-
-```bash
-pip install --no-deps --force-reinstall \
-  /home/scratch.qiwa_ent/workspace/aiperf-wheels/aiperf-0.7.0-py3-none-any.whl
-```
-
-Works on air-gapped nodes (scratch NFS is visible inside the Pyxis overlay).
-Sentinel that PR 824 is active:
-
-```bash
-python -c "from aiperf.dataset.loader.single_turn import SingleTurnDatasetLoader; import inspect; assert 'single_turn_data.session_id or' in inspect.getsource(SingleTurnDatasetLoader.load_dataset)"
-```
-
-### Warmup semantics
-
-`warmup_count: N` is a credit budget, NOT a session budget. aiperf's
-continuation-turn priority means the first `N` warmup credits feed `user_0`
-turns `0..N-1` (then sampler advances). Profiling then starts at `user_1` and
-wraps to a fresh `user_0` instance after `user_9`. `warmup_count > turns per
-session` consumes multiple sessions — keep it small.
+`warmup_count: N` is a **request (turn) budget**, not a session budget. For a
+10×10 JSONL with `warmup_count: 2`, warmup issues 2 total requests — both go
+to `user_0` (turns 0 and 1) because aiperf's continuation-turn priority keeps
+feeding the in-flight session until its budget runs out. Warmup does NOT
+consume 2 full sessions (20 requests). Profiling then starts at `user_1`,
+runs `user_1..user_9` to completion, and wraps to a fresh `user_0` instance
+for the 10th session. Keep `warmup_count` small (≤ turns-per-session) so
+warmup stays within a single session's prefix.
 
 ## Output Directory Structure
 
