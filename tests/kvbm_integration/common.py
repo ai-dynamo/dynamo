@@ -519,6 +519,9 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
             [{"cpu_blocks": 100, "gpu_blocks": 10, "model": "Qwen/Qwen3-0.6B"}], indirect=True)
         def test_example(llm_server_kvbm):
             ...
+
+    Pass ``"v2": True`` in the params to exercise the KVBM v2 connector
+    (``kvbm.v2.vllm.connector``) with the NIXL UCX backend enabled.
     """
     import os
     import time
@@ -533,6 +536,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         "model",
         os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
     )
+    v2 = params.get("v2", False)
 
     # Unpack NATS and etcd processes from runtime_services_dynamic_ports
     nats_process, etcd_process = runtime_services_dynamic_ports
@@ -567,6 +571,11 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     #   3. Add to command: "--gpu-memory-utilization", str(gpu_memory_fraction)
     #   Example: 2 workers → 42.5% each, 3 workers → 28.3% each
     #   Trade-off: Smaller GPU memory per worker = smaller KV cache = more CPU offloads
+    kv_transfer_config = (
+        '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.v2.vllm.connector","kv_role":"kv_both"}'
+        if v2
+        else '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}'
+    )
     command = [
         "vllm",
         "serve",
@@ -575,7 +584,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         "--port",
         str(port),
         "--kv-transfer-config",
-        '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
+        kv_transfer_config,
         model,
         "--max-model-len",
         "8000",  # Required to fit on L4 GPU with smaller models
@@ -611,6 +620,10 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     # CPU cache blocks override via env
     if cpu_blocks is not None:
         env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_blocks)
+
+    # KVBM v2 requires the NIXL UCX backend to be enabled.
+    if v2:
+        env["DYN_KVBM_NIXL_BACKEND_UCX"] = "true"
 
     # Start server with ManagedProcess
     timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
