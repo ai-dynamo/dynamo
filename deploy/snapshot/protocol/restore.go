@@ -30,7 +30,13 @@ type PodOptions struct {
 	SeccompProfile  string
 }
 
-func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
+// NewRestorePod shapes the input pod into a restore target: writes the
+// restore-target labels/annotations, turns every container listed in
+// CheckpointContainersAnnotation into a "sleep infinity" placeholder with
+// the snapshot-control + checkpoint-storage mounts, and forces
+// RestartPolicyNever. Returns nil if the annotation is missing, empty, or
+// names a container that isn't in the spec.
+func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	pod = pod.DeepCopy()
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
@@ -39,45 +45,54 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 		pod.Annotations = map[string]string{}
 	}
 	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
-	container := resolveWorkerContainer(&pod.Spec)
-	if container == nil {
-		return nil
+
+	names, err := ParseCheckpointContainers(pod.Annotations)
+	if err != nil {
+		return nil, fmt.Errorf("restore pod: %w", err)
 	}
-	PrepareRestorePodSpec(&pod.Spec, container, opts.Storage, opts.SeccompProfile, true)
+	if err := PrepareRestorePodSpec(&pod.Spec, names, opts.Storage, opts.SeccompProfile, true); err != nil {
+		return nil, err
+	}
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
-	return pod
+	return pod, nil
 }
 
-// resolveWorkerContainer returns the workload container, which is always
-// Containers[0]. GMS sidecars are appended after the workload.
-func resolveWorkerContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil || len(podSpec.Containers) == 0 {
-		return nil
-	}
-	return &podSpec.Containers[0]
-}
-
+// PrepareRestorePodSpec shapes each listed container into a restore
+// placeholder: adds the checkpoint-storage volume once to the pod and,
+// per container, the snapshot-control subPath mount, the control-dir env,
+// and (when isCheckpointReady) a "sleep infinity" command plus a
+// long-tail startup probe.
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
-	container *corev1.Container,
+	containerNames []string,
 	storage Storage,
 	seccompProfile string,
 	isCheckpointReady bool,
-) {
+) error {
+	if len(containerNames) == 0 {
+		return fmt.Errorf("restore requires at least one container name")
+	}
 	EnsureLocalhostSeccompProfile(podSpec, seccompProfile)
 	if storage.PVCName != "" {
 		InjectCheckpointVolume(podSpec, storage.PVCName)
 	}
-	if storage.BasePath != "" {
-		injectCheckpointVolumeMount(container, storage.BasePath)
+	for _, name := range containerNames {
+		container := findContainer(podSpec.Containers, name)
+		if container == nil {
+			return fmt.Errorf("restore pod spec has no container named %q", name)
+		}
+		if storage.BasePath != "" {
+			injectCheckpointVolumeMount(container, storage.BasePath)
+		}
+		EnsureControlVolume(podSpec, container, name)
+		if isCheckpointReady {
+			container.Command = []string{"sleep", "infinity"}
+			container.Args = nil
+			ensureRestoreStartupProbe(container)
+		}
 	}
-	EnsureControlVolume(podSpec, container)
-	if isCheckpointReady {
-		container.Command = []string{"sleep", "infinity"}
-		container.Args = nil
-		ensureRestoreStartupProbe(container)
-	}
+	return nil
 }
 
 func ensureRestoreStartupProbe(container *corev1.Container) {
@@ -98,17 +113,21 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 	container.StartupProbe = startup
 }
 
+// ValidateRestorePodSpec ensures the pod spec carries the checkpoint-storage
+// volume, the snapshot-control emptyDir, and that every listed container has
+// the per-container subPath mount, the checkpoint-storage mount, and the
+// DYN_SNAPSHOT_CONTROL_DIR env var.
 func ValidateRestorePodSpec(
 	podSpec *corev1.PodSpec,
+	containerNames []string,
 	storage Storage,
 	seccompProfile string,
 ) error {
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
-	container := resolveWorkerContainer(podSpec)
-	if container == nil {
-		return fmt.Errorf("restore target must have at least one container")
+	if len(containerNames) == 0 {
+		return fmt.Errorf("restore validation requires at least one container name")
 	}
 	if storage.PVCName != "" {
 		hasVolume := false
@@ -124,18 +143,6 @@ func ValidateRestorePodSpec(
 			return fmt.Errorf("missing %s volume for PVC %s", CheckpointVolumeName, storage.PVCName)
 		}
 	}
-	if storage.BasePath != "" {
-		hasMount := false
-		for _, mount := range container.VolumeMounts {
-			if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
-				hasMount = true
-				break
-			}
-		}
-		if !hasMount {
-			return fmt.Errorf("missing %s mount at %s", CheckpointVolumeName, storage.BasePath)
-		}
-	}
 	hasControlVolume := false
 	for _, volume := range podSpec.Volumes {
 		if volume.Name == SnapshotControlVolumeName && volume.EmptyDir != nil {
@@ -146,25 +153,43 @@ func ValidateRestorePodSpec(
 	if !hasControlVolume {
 		return fmt.Errorf("missing %s emptyDir volume; add it via snapshotprotocol.EnsureControlVolume", SnapshotControlVolumeName)
 	}
-	hasControlMount := false
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == SnapshotControlVolumeName && mount.MountPath == SnapshotControlMountPath {
-			hasControlMount = true
-			break
+	for _, name := range containerNames {
+		container := findContainer(podSpec.Containers, name)
+		if container == nil {
+			return fmt.Errorf("restore target pod spec has no container named %q", name)
 		}
-	}
-	if !hasControlMount {
-		return fmt.Errorf("missing %s mount at %s", SnapshotControlVolumeName, SnapshotControlMountPath)
-	}
-	hasControlEnv := false
-	for _, env := range container.Env {
-		if env.Name == SnapshotControlDirEnv {
-			hasControlEnv = true
-			break
+		if storage.BasePath != "" {
+			hasMount := false
+			for _, mount := range container.VolumeMounts {
+				if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
+					hasMount = true
+					break
+				}
+			}
+			if !hasMount {
+				return fmt.Errorf("container %q missing %s mount at %s", name, CheckpointVolumeName, storage.BasePath)
+			}
 		}
-	}
-	if !hasControlEnv {
-		return fmt.Errorf("missing %s env var on worker container", SnapshotControlDirEnv)
+		hasControlMount := false
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == SnapshotControlVolumeName && mount.MountPath == SnapshotControlMountPath && mount.SubPath == name {
+				hasControlMount = true
+				break
+			}
+		}
+		if !hasControlMount {
+			return fmt.Errorf("container %q missing %s subPath=%s mount at %s", name, SnapshotControlVolumeName, name, SnapshotControlMountPath)
+		}
+		hasControlEnv := false
+		for _, env := range container.Env {
+			if env.Name == SnapshotControlDirEnv {
+				hasControlEnv = true
+				break
+			}
+		}
+		if !hasControlEnv {
+			return fmt.Errorf("container %q missing %s env var", name, SnapshotControlDirEnv)
+		}
 	}
 	if seccompProfile == "" {
 		return nil
@@ -266,12 +291,14 @@ func DiscoverAndResolveStorage(
 	return ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
 }
 
+// PrepareRestorePodSpecForCheckpoint combines storage discovery with
+// PrepareRestorePodSpec for the given container names.
 func PrepareRestorePodSpecForCheckpoint(
 	ctx context.Context,
 	reader ctrlclient.Reader,
 	namespace string,
 	podSpec *corev1.PodSpec,
-	container *corev1.Container,
+	containerNames []string,
 	checkpointID string,
 	artifactVersion string,
 	seccompProfile string,
@@ -282,8 +309,7 @@ func PrepareRestorePodSpecForCheckpoint(
 		return err
 	}
 
-	PrepareRestorePodSpec(podSpec, container, storage, seccompProfile, isCheckpointReady)
-	return nil
+	return PrepareRestorePodSpec(podSpec, containerNames, storage, seccompProfile, isCheckpointReady)
 }
 
 // InjectCheckpointVolume adds the checkpoint PVC volume to the pod spec if

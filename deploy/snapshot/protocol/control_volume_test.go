@@ -12,7 +12,7 @@ import (
 func TestEnsureControlVolume(t *testing.T) {
 	t.Run("adds volume mount and env from empty", func(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
-		EnsureControlVolume(ps, &ps.Containers[0])
+		EnsureControlVolume(ps, &ps.Containers[0], "main")
 
 		if len(ps.Volumes) != 1 || ps.Volumes[0].Name != SnapshotControlVolumeName || ps.Volumes[0].EmptyDir == nil {
 			t.Fatalf("expected one %s emptyDir volume, got %#v", SnapshotControlVolumeName, ps.Volumes)
@@ -21,6 +21,9 @@ func TestEnsureControlVolume(t *testing.T) {
 		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != SnapshotControlVolumeName || c.VolumeMounts[0].MountPath != SnapshotControlMountPath {
 			t.Fatalf("expected one %s mount at %s, got %#v", SnapshotControlVolumeName, SnapshotControlMountPath, c.VolumeMounts)
 		}
+		if c.VolumeMounts[0].SubPath != "main" {
+			t.Fatalf("expected subPath=main, got %#v", c.VolumeMounts[0])
+		}
 		if len(c.Env) != 1 || c.Env[0].Name != SnapshotControlDirEnv || c.Env[0].Value != SnapshotControlMountPath {
 			t.Fatalf("expected env %s=%s, got %#v", SnapshotControlDirEnv, SnapshotControlMountPath, c.Env)
 		}
@@ -28,11 +31,30 @@ func TestEnsureControlVolume(t *testing.T) {
 
 	t.Run("idempotent", func(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
-		EnsureControlVolume(ps, &ps.Containers[0])
-		EnsureControlVolume(ps, &ps.Containers[0])
+		EnsureControlVolume(ps, &ps.Containers[0], "main")
+		EnsureControlVolume(ps, &ps.Containers[0], "main")
 		c := ps.Containers[0]
 		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 1 {
 			t.Fatalf("expected single volume/mount/env after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
+		}
+	})
+
+	t.Run("per-container subPath shares volume", func(t *testing.T) {
+		ps := &corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "engine-0"},
+			{Name: "engine-1"},
+		}}
+		EnsureControlVolume(ps, &ps.Containers[0], "engine-0")
+		EnsureControlVolume(ps, &ps.Containers[1], "engine-1")
+
+		if len(ps.Volumes) != 1 {
+			t.Fatalf("expected single shared emptyDir volume, got %#v", ps.Volumes)
+		}
+		if sub := ps.Containers[0].VolumeMounts[0].SubPath; sub != "engine-0" {
+			t.Fatalf("engine-0 subPath = %q, want engine-0", sub)
+		}
+		if sub := ps.Containers[1].VolumeMounts[0].SubPath; sub != "engine-1" {
+			t.Fatalf("engine-1 subPath = %q, want engine-1", sub)
 		}
 	})
 
@@ -42,12 +64,12 @@ func TestEnsureControlVolume(t *testing.T) {
 				t.Fatalf("expected no panic, got %v", r)
 			}
 		}()
-		EnsureControlVolume(nil, &corev1.Container{})
+		EnsureControlVolume(nil, &corev1.Container{}, "main")
 	})
 
 	t.Run("nil container no-op", func(t *testing.T) {
 		ps := &corev1.PodSpec{}
-		EnsureControlVolume(ps, nil)
+		EnsureControlVolume(ps, nil, "main")
 		if len(ps.Volumes) != 0 {
 			t.Fatalf("expected no volumes when container is nil, got %#v", ps.Volumes)
 		}
@@ -65,7 +87,7 @@ func TestEnsureControlVolume(t *testing.T) {
 				Env:          []corev1.EnvVar{{Name: "OTHER", Value: "x"}},
 			}},
 		}
-		EnsureControlVolume(ps, &ps.Containers[0])
+		EnsureControlVolume(ps, &ps.Containers[0], "main")
 		c := ps.Containers[0]
 		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 2 {
 			t.Fatalf("expected existing + control entries, got volumes=%#v mounts=%#v env=%#v", ps.Volumes, c.VolumeMounts, c.Env)

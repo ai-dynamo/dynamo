@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package protocol
 
 import (
@@ -14,11 +17,14 @@ func TestNewRestorePod(t *testing.T) {
 	readinessProbe := &corev1.Probe{PeriodSeconds: 7, TimeoutSeconds: 3}
 	livenessProbe := &corev1.Probe{InitialDelaySeconds: 11}
 	startupProbe := &corev1.Probe{FailureThreshold: 120}
-	restorePod := NewRestorePod(&corev1.Pod{
+	restorePod, err := NewRestorePod(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "worker",
-			Labels:      map[string]string{"existing": "label"},
-			Annotations: map[string]string{"existing": "annotation"},
+			Name:   "worker",
+			Labels: map[string]string{"existing": "label"},
+			Annotations: map[string]string{
+				"existing":                     "annotation",
+				CheckpointContainersAnnotation: "main",
+			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
@@ -43,6 +49,9 @@ func TestNewRestorePod(t *testing.T) {
 		},
 		SeccompProfile: DefaultSeccompLocalhostProfile,
 	})
+	if err != nil {
+		t.Fatalf("NewRestorePod: %v", err)
+	}
 
 	if restorePod.Name != "worker" || restorePod.Namespace != "test-ns" {
 		t.Fatalf("unexpected restore pod identity: %#v", restorePod.ObjectMeta)
@@ -55,6 +64,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if restorePod.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation: %#v", restorePod.Annotations)
+	}
+	if got := restorePod.Annotations[CheckpointContainersAnnotation]; got != "main" {
+		t.Fatalf("expected containers annotation preserved, got %q", got)
 	}
 	if restorePod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)
@@ -96,6 +108,9 @@ func TestNewRestorePod(t *testing.T) {
 	for _, m := range restorePod.Spec.Containers[0].VolumeMounts {
 		if m.Name == SnapshotControlVolumeName {
 			foundMount = true
+			if m.SubPath != "main" {
+				t.Fatalf("expected control subPath=main, got %#v", m)
+			}
 			break
 		}
 	}
@@ -115,16 +130,18 @@ func TestNewRestorePod(t *testing.T) {
 }
 
 func TestPrepareRestorePodSpec(t *testing.T) {
-	podSpec := corev1.PodSpec{}
 	readinessProbe := &corev1.Probe{PeriodSeconds: 13, SuccessThreshold: 1}
 	livenessProbe := &corev1.Probe{TimeoutSeconds: 5}
 	startupProbe := &corev1.Probe{FailureThreshold: 60}
-	container := corev1.Container{
-		Command:        []string{"python3", "-m", "dynamo.vllm"},
-		Args:           []string{"--model", "Qwen"},
-		ReadinessProbe: readinessProbe.DeepCopy(),
-		LivenessProbe:  livenessProbe.DeepCopy(),
-		StartupProbe:   startupProbe.DeepCopy(),
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:           "main",
+			Command:        []string{"python3", "-m", "dynamo.vllm"},
+			Args:           []string{"--model", "Qwen"},
+			ReadinessProbe: readinessProbe.DeepCopy(),
+			LivenessProbe:  livenessProbe.DeepCopy(),
+			StartupProbe:   startupProbe.DeepCopy(),
+		}},
 	}
 
 	storage := Storage{
@@ -132,8 +149,12 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",
 	}
-	PrepareRestorePodSpec(&podSpec, &container, storage, DefaultSeccompLocalhostProfile, true)
-	PrepareRestorePodSpec(&podSpec, &container, storage, DefaultSeccompLocalhostProfile, true)
+	if err := PrepareRestorePodSpec(&podSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec: %v", err)
+	}
+	if err := PrepareRestorePodSpec(&podSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec repeat: %v", err)
+	}
 
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", podSpec.SecurityContext)
@@ -141,6 +162,7 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if len(podSpec.Volumes) != 2 {
 		t.Fatalf("expected checkpoint and snapshot-control volumes, got %#v", podSpec.Volumes)
 	}
+	container := podSpec.Containers[0]
 	if len(container.VolumeMounts) != 2 {
 		t.Fatalf("expected checkpoint and snapshot-control mounts, got %#v", container.VolumeMounts)
 	}
@@ -201,7 +223,6 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 }
 
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
-	podSpec := corev1.PodSpec{}
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{Path: "/livez"},
@@ -210,14 +231,18 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 		TimeoutSeconds:   4,
 		FailureThreshold: 2,
 	}
-	container := corev1.Container{
+	podSpec := corev1.PodSpec{Containers: []corev1.Container{{
+		Name:          "main",
 		Command:       []string{"python3", "-m", "dynamo.vllm"},
 		Args:          []string{"--model", "Qwen"},
 		LivenessProbe: livenessProbe.DeepCopy(),
+	}}}
+
+	if err := PrepareRestorePodSpec(&podSpec, []string{"main"}, Storage{}, "", true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec: %v", err)
 	}
 
-	PrepareRestorePodSpec(&podSpec, &container, Storage{}, "", true)
-
+	container := podSpec.Containers[0]
 	if container.LivenessProbe == nil {
 		t.Fatalf("expected liveness probe to be preserved")
 	}
@@ -235,9 +260,14 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 	}
 }
 
-func TestNewRestorePodTargetsFirstContainerWhenSidecarsPresent(t *testing.T) {
-	restorePod := NewRestorePod(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+func TestNewRestorePodOnlyTouchesListedContainers(t *testing.T) {
+	restorePod, err := NewRestorePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker",
+			Annotations: map[string]string{
+				CheckpointContainersAnnotation: "worker",
+			},
+		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "worker", Image: "test:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
@@ -255,20 +285,24 @@ func TestNewRestorePodTargetsFirstContainerWhenSidecarsPresent(t *testing.T) {
 		},
 		SeccompProfile: DefaultSeccompLocalhostProfile,
 	})
+	if err != nil {
+		t.Fatalf("NewRestorePod: %v", err)
+	}
 
-	if got := restorePod.Spec.Containers[0].Command; len(got) != 2 || got[0] != "sleep" || got[1] != "infinity" {
-		t.Fatalf("expected first container placeholder command, got %#v", got)
+	worker := requireCheckpointContainer(t, restorePod.Spec.Containers, "worker")
+	if got := worker.Command; len(got) != 2 || got[0] != "sleep" || got[1] != "infinity" {
+		t.Fatalf("expected worker placeholder command, got %#v", got)
 	}
-	if restorePod.Spec.Containers[0].Args != nil {
-		t.Fatalf("expected first container args to be cleared: %#v", restorePod.Spec.Containers[0].Args)
-	}
-	if got := restorePod.Spec.Containers[1].Command; len(got) != 1 || got[0] != "sidecar" {
+	sidecar := requireCheckpointContainer(t, restorePod.Spec.Containers, "sidecar")
+	if got := sidecar.Command; len(got) != 1 || got[0] != "sidecar" {
 		t.Fatalf("expected sidecar command to remain unchanged, got %#v", got)
+	}
+	if len(sidecar.VolumeMounts) != 0 {
+		t.Fatalf("expected sidecar mounts untouched, got %#v", sidecar.VolumeMounts)
 	}
 }
 
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T) {
-	podSpec := corev1.PodSpec{}
 	readinessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{Command: []string{"cat", "/tmp/ready"}},
@@ -277,14 +311,18 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		SuccessThreshold: 3,
 		FailureThreshold: 4,
 	}
-	container := corev1.Container{
+	podSpec := corev1.PodSpec{Containers: []corev1.Container{{
+		Name:           "main",
 		Command:        []string{"python3", "-m", "dynamo.vllm"},
 		Args:           []string{"--model", "Qwen"},
 		ReadinessProbe: readinessProbe.DeepCopy(),
+	}}}
+
+	if err := PrepareRestorePodSpec(&podSpec, []string{"main"}, Storage{}, "", true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec: %v", err)
 	}
 
-	PrepareRestorePodSpec(&podSpec, &container, Storage{}, "", true)
-
+	container := podSpec.Containers[0]
 	if container.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
 	}
@@ -331,7 +369,7 @@ func validRestoreSpecFixture(profile string) *corev1.PodSpec {
 			Name: "main",
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: CheckpointVolumeName, MountPath: "/checkpoints"},
-				{Name: SnapshotControlVolumeName, MountPath: SnapshotControlMountPath},
+				{Name: SnapshotControlVolumeName, MountPath: SnapshotControlMountPath, SubPath: "main"},
 			},
 			Env: []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}},
 		}},
@@ -347,67 +385,54 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
+	if err := ValidateRestorePodSpec(podSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected restore pod spec to be valid, got %v", err)
 	}
 
 	badSpec := podSpec.DeepCopy()
 	badSpec.Volumes = []corev1.Volume{badSpec.Volumes[1]}
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume for PVC snapshot-pvc" {
+	if err := ValidateRestorePodSpec(badSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume for PVC snapshot-pvc" {
 		t.Fatalf("expected missing volume error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{badSpec.Containers[0].VolumeMounts[1]}
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage mount at /checkpoints" {
+	expected := `container "main" missing checkpoint-storage mount at /checkpoints`
+	if err := ValidateRestorePodSpec(badSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != expected {
 		t.Fatalf("expected missing mount error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.Volumes = []corev1.Volume{badSpec.Volumes[0]}
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf("missing %s emptyDir volume; add it via snapshotprotocol.EnsureControlVolume", SnapshotControlVolumeName) {
+	if err := ValidateRestorePodSpec(badSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf("missing %s emptyDir volume; add it via snapshotprotocol.EnsureControlVolume", SnapshotControlVolumeName) {
 		t.Fatalf("expected missing control volume error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{badSpec.Containers[0].VolumeMounts[0]}
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf("missing %s mount at %s", SnapshotControlVolumeName, SnapshotControlMountPath) {
+	expected = fmt.Sprintf("container %q missing %s subPath=%s mount at %s", "main", SnapshotControlVolumeName, "main", SnapshotControlMountPath)
+	if err := ValidateRestorePodSpec(badSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != expected {
 		t.Fatalf("expected missing control mount error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.Containers[0].Env = nil
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf("missing %s env var on worker container", SnapshotControlDirEnv) {
+	expected = fmt.Sprintf("container %q missing %s env var", "main", SnapshotControlDirEnv)
+	if err := ValidateRestorePodSpec(badSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != expected {
 		t.Fatalf("expected missing control env error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
 	badSpec.SecurityContext = nil
-	if err := ValidateRestorePodSpec(badSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
+	if err := ValidateRestorePodSpec(badSpec, []string{"main"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
 		t.Fatalf("expected missing seccomp error, got %v", err)
-	}
-}
-
-func TestValidateRestorePodSpecAcceptsFirstContainerAsWorker(t *testing.T) {
-	podSpec := validRestoreSpecFixture(DefaultSeccompLocalhostProfile)
-	podSpec.Containers[0].Name = "worker"
-	podSpec.Containers = append(podSpec.Containers, corev1.Container{Name: "sidecar"})
-
-	storage := Storage{
-		Type:     StorageTypePVC,
-		PVCName:  "snapshot-pvc",
-		BasePath: "/checkpoints",
-	}
-
-	// Containers[0] is always the worker, regardless of name
-	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
-		t.Fatalf("expected validation to pass for first container as worker, got %v", err)
 	}
 }
 
 func TestValidateRestorePodSpecAllowsWorkerWithSidecars(t *testing.T) {
 	podSpec := validRestoreSpecFixture(DefaultSeccompLocalhostProfile)
 	podSpec.Containers[0].Name = "worker"
+	podSpec.Containers[0].VolumeMounts[1].SubPath = "worker"
 	podSpec.Containers = append(podSpec.Containers, corev1.Container{Name: "sidecar"})
 
 	storage := Storage{
@@ -416,8 +441,22 @@ func TestValidateRestorePodSpecAllowsWorkerWithSidecars(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
+	if err := ValidateRestorePodSpec(podSpec, []string{"worker"}, storage, DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected worker with sidecars to validate, got %v", err)
+	}
+}
+
+func TestValidateRestorePodSpecRejectsMissingListedContainer(t *testing.T) {
+	podSpec := validRestoreSpecFixture(DefaultSeccompLocalhostProfile)
+	storage := Storage{
+		Type:     StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	}
+
+	expected := `restore target pod spec has no container named "missing"`
+	if err := ValidateRestorePodSpec(podSpec, []string{"missing"}, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != expected {
+		t.Fatalf("expected missing container error, got %v", err)
 	}
 }
 

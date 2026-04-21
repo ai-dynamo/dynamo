@@ -43,6 +43,11 @@ func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
 	return "checkpoint-job-" + checkpointID + "-" + ArtifactVersion(artifactVersion)
 }
 
+// NewCheckpointJob shapes the pod template into a batch/v1 Job that runs the
+// workload containers under cuda-checkpoint launch-job (optionally) and waits
+// on a ready-for-checkpoint readiness probe. The set of workload containers
+// comes from CheckpointContainersAnnotation on the input pod template; every
+// name must resolve to a container in the spec.
 func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) (*batchv1.Job, error) {
 	podTemplate = podTemplate.DeepCopy()
 	if podTemplate.Labels == nil {
@@ -56,37 +61,39 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if opts.SeccompProfile != "" {
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
-	if len(podTemplate.Spec.Containers) == 0 {
-		return nil, fmt.Errorf("checkpoint job requires at least one container")
-	}
-	mainContainer := &podTemplate.Spec.Containers[0]
 
-	// Snapshot contract: control volume + ready-file readiness probe. The
-	// agent reads the pod's Ready condition before starting CRIU dump, so
-	// the workload signals "model loaded, safe to checkpoint" by writing
-	// $DYN_SNAPSHOT_CONTROL_DIR/ready-for-checkpoint. Any per-container
-	// liveness/startup probes are cleared — a checkpoint job runs to a
-	// quiesce-and-sit state, not a long-lived serving state.
-	EnsureControlVolume(&podTemplate.Spec, mainContainer)
-	mainContainer.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"cat", filepath.Join(SnapshotControlMountPath, ReadyForCheckpointFile)},
-			},
-		},
-		PeriodSeconds: 1,
+	containerNames, err := ParseCheckpointContainers(podTemplate.Annotations)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint job: %w", err)
 	}
-	mainContainer.LivenessProbe = nil
-	mainContainer.StartupProbe = nil
 
-	if opts.WrapLaunchJob {
-		if len(mainContainer.Command) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
+	for _, name := range containerNames {
+		container := findContainer(podTemplate.Spec.Containers, name)
+		if container == nil {
+			return nil, fmt.Errorf("checkpoint job references unknown container %q in %s", name, CheckpointContainersAnnotation)
 		}
-		mainContainer.Command, mainContainer.Args = wrapWithCudaCheckpointLaunchJob(
-			mainContainer.Command,
-			mainContainer.Args,
-		)
+
+		// Snapshot contract per container: control-volume subPath mount,
+		// ready-file readiness probe, cleared liveness/startup probes so
+		// the checkpoint job runs to a quiesce-and-sit state.
+		EnsureControlVolume(&podTemplate.Spec, container, name)
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"cat", filepath.Join(SnapshotControlMountPath, ReadyForCheckpointFile)},
+				},
+			},
+			PeriodSeconds: 1,
+		}
+		container.LivenessProbe = nil
+		container.StartupProbe = nil
+
+		if opts.WrapLaunchJob {
+			if len(container.Command) == 0 {
+				return nil, fmt.Errorf("checkpoint job requires container.command on %q when cuda-checkpoint launch-job wrapping is enabled", name)
+			}
+			container.Command, container.Args = wrapWithCudaCheckpointLaunchJob(container.Command, container.Args)
+		}
 	}
 
 	return &batchv1.Job{
@@ -123,7 +130,7 @@ func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) Checkpo
 		}
 	}
 
-	status := job.Annotations[CheckpointStatusAnnotation]
+	status := job.Annotations[CheckpointJobStatusAnnotation]
 	if status == CheckpointStatusFailed {
 		observation := CheckpointObservation{
 			Phase:   CheckpointObservationPhaseFailed,
@@ -174,6 +181,15 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 		Type:             corev1.SeccompProfileTypeLocalhost,
 		LocalhostProfile: &profile,
 	}
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
 }
 
 // wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the

@@ -25,8 +25,11 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 func TestNewCheckpointJob(t *testing.T) {
 	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels:      map[string]string{"existing": "label"},
-			Annotations: map[string]string{"existing": "annotation"},
+			Labels: map[string]string{"existing": "label"},
+			Annotations: map[string]string{
+				"existing":                     "annotation",
+				CheckpointContainersAnnotation: "main",
+			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
@@ -63,12 +66,15 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Spec.Template.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation on template: %#v", job.Spec.Template.Annotations)
 	}
+	if got := job.Spec.Template.Annotations[CheckpointContainersAnnotation]; got != "main" {
+		t.Fatalf("expected containers annotation preserved, got %q", got)
+	}
 	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != SnapshotControlVolumeName {
 		t.Fatalf("expected only %s volume, got %#v", SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
 	}
 	main := &job.Spec.Template.Spec.Containers[0]
-	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != SnapshotControlMountPath {
-		t.Fatalf("expected only %s mount at %s, got %#v", SnapshotControlVolumeName, SnapshotControlMountPath, main.VolumeMounts)
+	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != SnapshotControlMountPath || main.VolumeMounts[0].SubPath != "main" {
+		t.Fatalf("expected %s mount at %s subPath=main, got %#v", SnapshotControlVolumeName, SnapshotControlMountPath, main.VolumeMounts)
 	}
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
@@ -114,8 +120,11 @@ func TestNewCheckpointJob(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobWrapsFirstContainer(t *testing.T) {
+func TestNewCheckpointJobWrapsOnlyListedContainers(t *testing.T) {
 	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CheckpointContainersAnnotation: "worker"},
+		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "worker", Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "Qwen"}},
@@ -136,7 +145,7 @@ func TestNewCheckpointJobWrapsFirstContainer(t *testing.T) {
 
 	worker := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
 	if len(worker.Command) != 1 || worker.Command[0] != "cuda-checkpoint" {
-		t.Fatalf("expected first container to be wrapped, got %#v", worker.Command)
+		t.Fatalf("expected listed container to be wrapped, got %#v", worker.Command)
 	}
 	expectedArgs := []string{"--launch-job", "python3", "-m", "dynamo.vllm", "--model", "Qwen"}
 	if len(worker.Args) != len(expectedArgs) {
@@ -155,36 +164,80 @@ func TestNewCheckpointJobWrapsFirstContainer(t *testing.T) {
 	if len(sidecar.Args) != 1 || sidecar.Args[0] != "infinity" {
 		t.Fatalf("expected sidecar args to remain unchanged, got %#v", sidecar.Args)
 	}
+	if len(sidecar.VolumeMounts) != 0 {
+		t.Fatalf("expected sidecar to have no snapshot-control mount, got %#v", sidecar.VolumeMounts)
+	}
 }
 
-func TestNewCheckpointJobAllowsSingleNonMainContainer(t *testing.T) {
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewCheckpointJobRejectsMissingAnnotation(t *testing.T) {
+	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:    "worker",
-				Command: []string{"python3", "-m", "dynamo.vllm"},
-				Args:    []string{"--model", "Qwen"},
-			}},
+			Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}},
 		},
 	}, CheckpointJobOptions{
-		Namespace:             "test-ns",
-		CheckpointID:          "hash",
-		ArtifactVersion:       "2",
-		Name:                  "test-job",
+		Namespace: "test-ns", CheckpointID: "hash", Name: "test-job",
+	})
+	if err == nil {
+		t.Fatalf("expected error on missing %s annotation", CheckpointContainersAnnotation)
+	}
+}
+
+func TestNewCheckpointJobRejectsUnknownContainer(t *testing.T) {
+	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CheckpointContainersAnnotation: "not-in-spec"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}},
+		},
+	}, CheckpointJobOptions{
+		Namespace: "test-ns", CheckpointID: "hash", Name: "test-job",
+	})
+	if err == nil {
+		t.Fatalf("expected error for unknown container")
+	}
+}
+
+func TestNewCheckpointJobWrapsMultipleContainers(t *testing.T) {
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CheckpointContainersAnnotation: "engine-0,engine-1"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "engine-0", Command: []string{"python3"}, Args: []string{"--rank=0"}},
+				{Name: "engine-1", Command: []string{"python3"}, Args: []string{"--rank=1"}},
+				{Name: "sidecar-frontend", Command: []string{"frontend"}},
+			},
+		},
+	}, CheckpointJobOptions{
+		Namespace: "test-ns", CheckpointID: "hash", Name: "test-job",
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
 		WrapLaunchJob:         true,
 	})
 	if err != nil {
-		t.Fatalf("expected checkpoint job, got error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	container := &job.Spec.Template.Spec.Containers[0]
-	if len(container.Command) != 1 || container.Command[0] != "cuda-checkpoint" {
-		t.Fatalf("expected single container to be wrapped, got %#v", container.Command)
+	for _, name := range []string{"engine-0", "engine-1"} {
+		c := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, name)
+		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].SubPath != name {
+			t.Fatalf("expected %s subPath mount, got %#v", name, c.VolumeMounts)
+		}
+		if c.ReadinessProbe == nil || c.ReadinessProbe.Exec == nil {
+			t.Fatalf("expected readiness probe on %s", name)
+		}
+		if len(c.Command) != 1 || c.Command[0] != "cuda-checkpoint" {
+			t.Fatalf("expected %s wrapped, got %#v", name, c.Command)
+		}
+	}
+	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar-frontend")
+	if len(sidecar.VolumeMounts) != 0 || sidecar.ReadinessProbe != nil {
+		t.Fatalf("expected sidecar-frontend untouched, got mounts=%#v probe=%#v", sidecar.VolumeMounts, sidecar.ReadinessProbe)
+	}
+	if len(job.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("expected single shared snapshot-control volume, got %#v", job.Spec.Template.Spec.Volumes)
 	}
 }
-
-
 
 func TestGetCheckpointJobName(t *testing.T) {
 	name := GetCheckpointJobName("abc123def4567890", "2")

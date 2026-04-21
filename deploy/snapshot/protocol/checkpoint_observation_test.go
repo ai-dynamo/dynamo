@@ -22,7 +22,7 @@ func TestObserveCheckpointJob(t *testing.T) {
 			},
 		}
 		if annotation != "" {
-			job.Annotations[CheckpointStatusAnnotation] = annotation
+			job.Annotations[CheckpointJobStatusAnnotation] = annotation
 		}
 		return job
 	}

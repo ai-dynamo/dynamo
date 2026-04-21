@@ -38,12 +38,15 @@ const (
 	ReadyForCheckpointFile = "ready-for-checkpoint"
 )
 
-// EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
-// mounts it on the given container at SnapshotControlMountPath, and sets
-// DYN_SNAPSHOT_CONTROL_DIR on the container's env. Idempotent — safe to call
-// from multiple code paths (operator checkpoint job, restore pod shaping, etc.).
-func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
-	if podSpec == nil || container == nil {
+// EnsureControlVolume adds the snapshot-control emptyDir to the pod spec and
+// mounts it on the given container at SnapshotControlMountPath with
+// subPath=containerName, plus DYN_SNAPSHOT_CONTROL_DIR on the container env.
+// Multiple containers share the emptyDir but each sees its own directory
+// (the agent writes sentinels into per-subPath files via /host/proc/<pid>/root,
+// and the kubelet hides other subPaths from the container).
+// Idempotent — safe to call from multiple code paths.
+func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container, containerName string) {
+	if podSpec == nil || container == nil || containerName == "" {
 		return
 	}
 
@@ -63,7 +66,7 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 
 	hasMount := false
 	for _, m := range container.VolumeMounts {
-		if m.Name == SnapshotControlVolumeName {
+		if m.Name == SnapshotControlVolumeName && m.SubPath == containerName {
 			hasMount = true
 			break
 		}
@@ -72,6 +75,7 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      SnapshotControlVolumeName,
 			MountPath: SnapshotControlMountPath,
+			SubPath:   containerName,
 		})
 	}
 
