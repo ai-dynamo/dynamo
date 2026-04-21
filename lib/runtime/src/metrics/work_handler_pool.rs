@@ -84,9 +84,6 @@ pub static WORK_HANDLER_POOL_CAPACITY: Lazy<IntGauge> = Lazy::new(|| {
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
 
-/// Guards idempotency for the raw `prometheus::Registry` registration path.
-static PROMETHEUS_REGISTERED: OnceCell<Result<(), String>> = OnceCell::new();
-
 /// Register worker-pool saturation metrics with the given registry. Idempotent.
 pub fn ensure_work_handler_pool_metrics_registered(registry: &MetricsRegistry) {
     let _ = METRICS_REGISTERED.get_or_init(|| {
@@ -115,26 +112,4 @@ pub fn ensure_work_handler_pool_metrics_registered(registry: &MetricsRegistry) {
             "work_handler_pool_capacity",
         );
     });
-}
-
-/// Register worker-pool saturation metrics with a raw Prometheus registry. Idempotent.
-pub fn ensure_work_handler_pool_metrics_registered_prometheus(
-    registry: &prometheus::Registry,
-) -> Result<(), prometheus::Error> {
-    PROMETHEUS_REGISTERED
-        .get_or_init(|| {
-            (|| -> Result<(), prometheus::Error> {
-                registry.register(Box::new(WORK_HANDLER_QUEUE_DEPTH.clone()))?;
-                registry.register(Box::new(WORK_HANDLER_QUEUE_CAPACITY.clone()))?;
-                registry.register(Box::new(WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.clone()))?;
-                registry.register(Box::new(WORK_HANDLER_PERMIT_WAIT_SECONDS.clone()))?;
-                registry.register(Box::new(WORK_HANDLER_POOL_ACTIVE_TASKS.clone()))?;
-                registry.register(Box::new(WORK_HANDLER_POOL_CAPACITY.clone()))?;
-                Ok(())
-            })()
-            .map_err(|e| e.to_string())
-        })
-        .as_ref()
-        .map(|_| ())
-        .map_err(|e| prometheus::Error::Msg(e.clone()))
 }
