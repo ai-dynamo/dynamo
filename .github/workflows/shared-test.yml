@@ -94,80 +94,76 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
     name: ${{ inputs.test_type }} ${{ inputs.cuda_version == '' && 'cpu' || format('cuda{0}', inputs.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ubuntu-slim
-    # runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'stg-tester-arm-v2' }}
-    # container:
-    #   image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.test_suite_name }}-runtime-test${{ inputs.container_name_tmp }}-${{ inputs.test_suite_name }}-runtime-test-cuda12 #  d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-trtllm-runtime-test-cuda13
-    #   env:
-    #     # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
-    #     # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
-    #     # USER here sidesteps two symptoms of that mismatch:
-    #     #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
-    #     #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
-    #     HOME: /__w/dynamo/dynamo
-    #     USER: dynamo
-    # permissions:
-    #   contents: read
-    # services:
-    #   minio:
-    #     image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
-    #     env:
-    #       MINIO_ROOT_USER: minioadmin
-    #       MINIO_ROOT_PASSWORD: minioadmin
-    #       MINIO_VOLUMES: /tmp/minio-data
-    #       MINIO_CONSOLE_ADDRESS: ':9001'
-    #     ports:
-    #       - 9000:9000
-    #       - 9001:9001
+    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'stg-tester-arm-v2' }}
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.test_suite_name }}-runtime-test${{ inputs.container_name_tmp }}-${{ inputs.test_suite_name }}-runtime-test-cuda12 #  d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-trtllm-runtime-test-cuda13
+      env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    permissions:
+      contents: read
+    services:
+      minio:
+        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+          MINIO_CONSOLE_ADDRESS: ':9001'
+        ports:
+          - 9000:9000
+          - 9001:9001
     steps:
-      - name: check container image tag
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        # Run from the container's baked-in workspace, not the GHA checkout,
+        # so the sanity check reflects what the image actually ships.
+        working-directory: /workspace
         run: |
-          echo "${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.container_image_tag }}"
-      # - name: Checkout repository
-      #   uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      # - name: Run Sanity Check on Runtime Image
-      #   shell: bash
-      #   # Run from the container's baked-in workspace, not the GHA checkout,
-      #   # so the sanity check reflects what the image actually ships.
-      #   working-directory: /workspace
-      #   run: |
-      #     set +e
-      #     python ./deploy/sanity_check.py --runtime-check --no-gpu-check
-      #     SANITY_CHECK_EXIT_CODE=$?
-      #     if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-      #       echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-      #       exit ${SANITY_CHECK_EXIT_CODE}
-      #     else
-      #       echo "✅ Sanity check passed"
-      #     fi
-      # - name: Run CPU-only tests (parallelized) from /workspace
-      #   if: ${{ inputs.run_cpu_only_tests }}
-      #   timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-      #   # pytest runs from the container's baked-in /workspace (see action's
-      #   # container_workspace input below), NOT from the GHA checkout at
-      #   # $GITHUB_WORKSPACE. Composite-action steps don't inherit the caller's
-      #   # working-directory, so it is passed as an explicit input instead.
-      #   uses: ./.github/actions/pytest-local
-      #   with:
-      #     container_workspace: /workspace
-      #     pytest_marks: ${{ inputs.cpu_only_test_markers }}
-      #     test_suite_name: ${{ inputs.test_suite_name }}
-      #     test_type: "pre_merge_cpu"
-      #     platform_arch: ${{ matrix.platform }}
-      #     hf_token: ${{ secrets.HF_TOKEN }}
-      #     parallel_mode: ${{ inputs.cpu_parallel_mode }}
-      #     framework: ${{ inputs.test_suite_name }}
-      # - name: Run GPU tests (sequential) from /workspace
-      #   timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-      #   if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-      #   uses: ./.github/actions/pytest-local
-      #   with:
-      #     container_workspace: /workspace
-      #     pytest_marks: ${{ inputs.gpu_test_markers }}
-      #     test_suite_name: ${{ inputs.test_suite_name }}
-      #     test_type: "pre_merge_gpu"
-      #     platform_arch: ${{ matrix.platform }}
-      #     hf_token: ${{ secrets.HF_TOKEN }}
-      #     parallel_mode: ${{ inputs.gpu_parallel_mode }}
-      #     framework: ${{ inputs.test_suite_name }}
-      #     verify_gpu: 'true'
+          set +e
+          python ./deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+      - name: Run CPU-only tests (parallelized) from /workspace
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        # pytest runs from the container's baked-in /workspace (see action's
+        # container_workspace input below), NOT from the GHA checkout at
+        # $GITHUB_WORKSPACE. Composite-action steps don't inherit the caller's
+        # working-directory, so it is passed as an explicit input instead.
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.cpu_only_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_cpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: ${{ inputs.cpu_parallel_mode }}
+          framework: ${{ inputs.test_suite_name }}
+      - name: Run GPU tests (sequential) from /workspace
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: ${{ inputs.gpu_parallel_mode }}
+          framework: ${{ inputs.test_suite_name }}
+          verify_gpu: 'true'
