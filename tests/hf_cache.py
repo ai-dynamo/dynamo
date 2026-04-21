@@ -163,18 +163,11 @@ def _apply_models_dir_env(models_dir: str) -> dict:
     return orig
 
 
-def _restore_models_dir_env(orig: dict, tmp_cache_dir: str | None = None) -> None:
+def _restore_models_dir_env(orig: dict) -> None:
     """Undo _apply_models_dir_env. Call after fixture yield."""
     # _disable pops HF_HUB_OFFLINE; the loop below then restores the original value
     # (no-op if orig was None, set-back if orig had a pre-existing value). Safe.
     _disable_offline_with_mistral_patch()  # pops HF_HUB_OFFLINE + cleans sitecustomize
-    if tmp_cache_dir:
-        try:
-            shutil.rmtree(tmp_cache_dir)
-        except OSError as e:
-            logging.warning(
-                "--models-dir: failed to clean temp cache %s: %s", tmp_cache_dir, e
-            )
     for k, v in orig.items():
         if v is None:
             os.environ.pop(k, None)

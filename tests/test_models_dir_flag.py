@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
 import os
 import subprocess
 import sys
@@ -119,25 +118,6 @@ def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
     )
     assert result.returncode == 2
     assert "does not exist" in result.stderr + result.stdout
-
-
-@pytest.mark.pre_merge
-@pytest.mark.unit
-@pytest.mark.gpu_0
-def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch, caplog):
-    """_restore_models_dir_env logs a warning but does not raise when tmp_cache_dir is gone."""
-    for k in _MODELS_DIR_ENV_KEYS:
-        monkeypatch.delenv(k, raising=False)
-    orig = _apply_models_dir_env(str(tmp_path))
-    nonexistent = str(tmp_path / "already_deleted")
-    with caplog.at_level(logging.WARNING):
-        _restore_models_dir_env(orig, nonexistent)  # must not raise
-    for k in _MODELS_DIR_ENV_KEYS:
-        assert k not in os.environ
-    assert any(
-        "--models-dir: failed to clean temp cache" in m and "already_deleted" in m
-        for m in caplog.messages
-    )
 
 
 @pytest.mark.pre_merge
