@@ -60,7 +60,7 @@ inputs:
     required: false
     default: 'false'
   fresh_builder:
-    description: 'Force creation of a new K8s builder even if one already exists. Used by the create-fresh-builder preliminary job.'
+    description: 'Force creation of a K8s builder rather than using dynamo builder (buildkit)'
     required: false
     default: 'false'
 
