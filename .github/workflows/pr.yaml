@@ -359,7 +359,7 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
