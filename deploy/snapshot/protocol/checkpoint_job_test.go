@@ -63,11 +63,27 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Spec.Template.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation on template: %#v", job.Spec.Template.Annotations)
 	}
-	if len(job.Spec.Template.Spec.Volumes) != 0 {
-		t.Fatalf("expected no checkpoint volume, got %#v", job.Spec.Template.Spec.Volumes)
+	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != SnapshotControlVolumeName {
+		t.Fatalf("expected only %s volume, got %#v", SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
 	}
-	if len(job.Spec.Template.Spec.Containers[0].VolumeMounts) != 0 {
-		t.Fatalf("expected no checkpoint volume mount, got %#v", job.Spec.Template.Spec.Containers[0].VolumeMounts)
+	main := &job.Spec.Template.Spec.Containers[0]
+	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != SnapshotControlMountPath {
+		t.Fatalf("expected only %s mount at %s, got %#v", SnapshotControlVolumeName, SnapshotControlMountPath, main.VolumeMounts)
+	}
+	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
+		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
+	}
+	expectedProbe := []string{"cat", SnapshotControlMountPath + "/" + ReadyForCheckpointFile}
+	if len(main.ReadinessProbe.Exec.Command) != len(expectedProbe) {
+		t.Fatalf("expected readiness probe %#v, got %#v", expectedProbe, main.ReadinessProbe.Exec.Command)
+	}
+	for i := range expectedProbe {
+		if main.ReadinessProbe.Exec.Command[i] != expectedProbe[i] {
+			t.Fatalf("expected readiness probe %#v, got %#v", expectedProbe, main.ReadinessProbe.Exec.Command)
+		}
+	}
+	if main.LivenessProbe != nil || main.StartupProbe != nil {
+		t.Fatalf("expected liveness and startup probes cleared, got liveness=%#v startup=%#v", main.LivenessProbe, main.StartupProbe)
 	}
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("expected restartPolicy Never, got %#v", job.Spec.Template.Spec.RestartPolicy)

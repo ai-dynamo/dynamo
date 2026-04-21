@@ -88,7 +88,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}},
 			gpuCount:            4,
-			expectedArgs:        []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
+			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 			expectProbesRemoved: true,
 		},
 		{
@@ -261,7 +261,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
 			gpuCount:          4,
-			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-rpc-port 13445 --data-parallel-size 8"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(LWS_LEADER_ADDRESS) --data-parallel-rpc-port 13445 --data-parallel-size 8"},
 			description:       "LWS shell commands should use LWS variables",
 		},
 		{
@@ -452,6 +452,9 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
 		},
 		{
+			// LWS worker: $(LWS_LEADER_ADDRESS) and $(LWS_WORKER_INDEX) are both
+			// kubelet-expanded, so flags are appended directly to Args without an
+			// sh -c wrapper.
 			name:              "worker uses mp (origin version >= threshold) LWS",
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
@@ -460,9 +463,34 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			annotations: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 			},
-			expectedArgs: []string{fmt.Sprintf(
-				"exec python3 -m dynamo.vllm %s 16 --distributed-executor-backend mp --nnodes 2 --master-addr $LWS_LEADER_ADDRESS --master-port %s --node-rank $(LWS_WORKER_INDEX) --headless",
-				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
+			expectedArgs: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed-executor-backend", "mp", "--nnodes", "2", "--master-addr", "$(LWS_LEADER_ADDRESS)", "--master-port", commonconsts.VLLMMpMasterPort, "--node-rank", "$(LWS_WORKER_INDEX)", "--headless"},
+		},
+		{
+			// Regression test: LWS leader with direct python command must emit
+			// Kubernetes $(LWS_LEADER_ADDRESS) syntax so the kubelet expands it
+			// from the LWS-injected env var. Emitting the bare shell $VAR causes
+			// vLLM to receive the literal string and fail to resolve the leader.
+			name:              "leader uses mp (origin version >= threshold) LWS",
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			expectedArgs: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed-executor-backend", "mp", "--nnodes", "2", "--master-addr", "$(LWS_LEADER_ADDRESS)", "--master-port", commonconsts.VLLMMpMasterPort, "--node-rank", "0"},
+		},
+		{
+			// Regression test: LWS leader on the data-parallel path. Same bug
+			// class as the MP leader case above - bare $LWS_LEADER_ADDRESS would
+			// not be expanded by K8s, so we emit $(LWS_LEADER_ADDRESS) instead.
+			name:              "leader with data parallel launch LWS",
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			annotations:       nil,
+			expectedArgs:      []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16", "--data-parallel-hybrid-lb", "--data-parallel-size-local", "8", "--data-parallel-start-rank", "0", "--data-parallel-address", "$(LWS_LEADER_ADDRESS)", "--data-parallel-rpc-port", "13445"},
 		},
 		{
 			name:              "leader prepends distributed data parallel flags (annotations don't affect DP path)",
@@ -516,7 +544,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
 			gpuCount:          8,
 			annotations:       nil,
-			expectedArgs:      []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
+			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 		},
 		{
 			name:              "main role does not modify args",
@@ -609,7 +637,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:v2",
-			expectedLeaderHost:  "$LWS_LEADER_ADDRESS",
+			expectedLeaderHost:  "${LWS_LEADER_ADDRESS}",
 		},
 		{
 			name:          "mp leader does not inject init container",

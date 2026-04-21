@@ -68,9 +68,9 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--migration-limit` | `DYN_MIGRATION_LIMIT` | `0` | Max request migrations per worker disconnect. 0 = disabled |
-| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | — | KV cache utilization fraction (0.0–1.0) for busy detection |
-| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | — | Absolute token count for prefill busy detection |
-| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | — | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold |
+| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
+| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
+| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `10.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
 
 ## Model Discovery
 
