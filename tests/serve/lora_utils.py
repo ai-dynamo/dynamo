@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import boto3
+import pytest
 import requests
 from botocore.client import Config
 from botocore.exceptions import ClientError
@@ -232,7 +233,16 @@ class MinioService:
                 raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
-        """Download LoRA from Hugging Face Hub, returns temp directory path."""
+        """Download LoRA from Hugging Face Hub, returns temp directory path.
+
+        Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
+        """
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            pytest.skip(
+                "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
+                "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
+            )
+
         self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
         self._logger.info(
             f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"

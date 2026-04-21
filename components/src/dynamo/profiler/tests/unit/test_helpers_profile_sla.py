@@ -552,11 +552,59 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_mocker_plus_planner_uses_mocker_base(self, tmp_path):
-        """Mocker + planner: mocker base is created first, then planner layered."""
+    def test_mocker_plus_planner_rapid_skips_profile_cm(self, tmp_path):
+        """Mocker + planner + rapid: mocker base is created first, then planner
+        layered. The profile-data ConfigMap is NOT emitted because the mocker
+        pulls AIC perf data at runtime via --aic-perf-model flags."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(),
+                mocker=MockerSpec(enabled=True),
+            )
+        )
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+        dgd_config = {"kind": "DGD"}
+        mocker_base = {"kind": "MockerDGD", "spec": {"services": {}}}
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+
+        with (
+            patch(
+                f"{_DGD_GEN}.generate_mocker_config",
+                return_value=mocker_base,
+            ) as mock_mocker,
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+                return_value=planner_cm,
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+            ) as mock_profile,
+        ):
+            result = assemble_final_config(
+                dgdr,
+                ops,
+                dgd_config,
+                PickedParallelConfig(tp=1),
+                PickedParallelConfig(tp=1),
+            )
+
+        mock_mocker.assert_called_once()
+        mock_planner.assert_called_once()
+        mock_profile.assert_not_called()
+        assert mock_planner.call_args.args[1] is mocker_base
+        assert result == [planner_cm, mocker_base]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_plus_planner_thorough_keeps_profile_cm(self, tmp_path):
+        """Mocker + planner + thorough: the profile-data ConfigMap is emitted
+        so both planner and mocker can consume the real-GPU NPZ files."""
+        dgdr = _make_dgdr(
+            features=FeaturesSpec(
+                planner=_make_planner(
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Thorough,
+                ),
                 mocker=MockerSpec(enabled=True),
             )
         )
@@ -571,15 +619,15 @@ class TestAssembleFinalConfig:
             patch(
                 f"{_DGD_GEN}.generate_mocker_config",
                 return_value=mocker_base,
-            ) as mock_mocker,
+            ),
             patch(
                 f"{_DGD_GEN}.add_planner_to_config",
                 return_value=planner_cm,
-            ) as mock_planner,
+            ),
             patch(
                 f"{_DGD_GEN}.add_profile_data_to_config",
                 return_value=profile_cm,
-            ),
+            ) as mock_profile,
         ):
             result = assemble_final_config(
                 dgdr,
@@ -589,9 +637,7 @@ class TestAssembleFinalConfig:
                 PickedParallelConfig(tp=1),
             )
 
-        mock_mocker.assert_called_once()
-        mock_planner.assert_called_once()
-        assert mock_planner.call_args.args[1] is mocker_base
+        mock_profile.assert_called_once()
         assert result == [planner_cm, profile_cm, mocker_base]
 
     @pytest.mark.pre_merge
@@ -1058,9 +1104,9 @@ class TestRunProfileSkipsInterpolationForAggConfig:
         # run_interpolation must be called, and with the resolved 'vllm' backend, not 'auto'
         mock_interp.assert_called_once()
         call_kwargs = mock_interp.call_args
-        # backend is the 8th positional argument (index 7)
+        # backend is the 6th positional argument (index 5)
         called_backend = (
-            call_kwargs.args[7]
+            call_kwargs.args[5]
             if call_kwargs.args
             else call_kwargs.kwargs.get("backend")
         )
