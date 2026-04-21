@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 SHADOW_KV_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB per GPU
 SHADOW_KV_CACHE_FRACTION = 0.01
 
+# Shadow mode forces this allreduce strategy on both engines. MNNVL (the
+# default for large MoE models) needs a ~180 GiB symmetric VA window per
+# process, and two co-located engines on the same 8 B200s cannot both
+# reserve one. NCCL uses a much smaller scratch buffer and is compatible
+# with co-location; the shadow's allreduce path is only exercised at
+# warmup and post-wake so the perf delta is acceptable.
+SHADOW_ALLREDUCE_STRATEGY = "NCCL"
+
 
 def is_shadow_mode() -> bool:
     """True when DYN_GMS_SHADOW_MODE=1 (set by llm_worker.py at startup)."""
@@ -44,6 +52,29 @@ def shrink_kv_cache_for_shadow(kv_cache_config) -> None:
         "[Shadow] Clamped KV cache to %.2f GiB (fraction=%s) for shadow init",
         SHADOW_KV_CACHE_MAX_BYTES / (1 << 30),
         SHADOW_KV_CACHE_FRACTION,
+    )
+
+
+def force_nccl_allreduce_for_shadow(arg_map: dict) -> None:
+    """Override ``allreduce_strategy`` to NCCL when shadow mode is on.
+
+    Applied to **both** engines in a shadow-failover pair (not just the
+    standby). MNNVL needs a ~180 GiB symmetric VA window per process;
+    two co-located engines cannot both allocate one on the same GPU set,
+    which shows up as engine-1 failing the AllReduce autotuner
+    (``ncclMemAlloc failed on at least one other rank``) and engine-0
+    hanging during NCCL warmup. NCCL works because its scratch buffer
+    is small enough to coexist with another engine's.
+    """
+    previous = arg_map.get("allreduce_strategy")
+    if previous == SHADOW_ALLREDUCE_STRATEGY:
+        return
+    arg_map["allreduce_strategy"] = SHADOW_ALLREDUCE_STRATEGY
+    logger.info(
+        "[Shadow] Forced allreduce_strategy=%s (was %s) to avoid MNNVL "
+        "symmetric VA collision between co-located engines",
+        SHADOW_ALLREDUCE_STRATEGY,
+        previous,
     )
 
 

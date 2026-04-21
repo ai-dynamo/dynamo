@@ -10,9 +10,11 @@ so they run anywhere.
 
 import pytest
 from gpu_memory_service.integrations.trtllm.utils import (
+    SHADOW_ALLREDUCE_STRATEGY,
     SHADOW_KV_CACHE_FRACTION,
     SHADOW_KV_CACHE_MAX_BYTES,
     configure_gms_lock_mode,
+    force_nccl_allreduce_for_shadow,
     is_shadow_mode,
     is_shadow_standby,
     shrink_kv_cache_for_shadow,
@@ -109,3 +111,21 @@ def test_shrink_kv_cache_clamps_fraction_and_bytes():
     shrink_kv_cache_for_shadow(cfg)
     assert cfg.free_gpu_memory_fraction == SHADOW_KV_CACHE_FRACTION
     assert cfg.max_gpu_total_bytes == SHADOW_KV_CACHE_MAX_BYTES
+
+
+def test_force_nccl_allreduce_overrides_mnnvl():
+    arg_map = {"allreduce_strategy": "MNNVL"}
+    force_nccl_allreduce_for_shadow(arg_map)
+    assert arg_map["allreduce_strategy"] == SHADOW_ALLREDUCE_STRATEGY
+
+
+def test_force_nccl_allreduce_sets_when_unset():
+    arg_map = {}
+    force_nccl_allreduce_for_shadow(arg_map)
+    assert arg_map["allreduce_strategy"] == SHADOW_ALLREDUCE_STRATEGY
+
+
+def test_force_nccl_allreduce_is_idempotent():
+    arg_map = {"allreduce_strategy": SHADOW_ALLREDUCE_STRATEGY}
+    force_nccl_allreduce_for_shadow(arg_map)
+    assert arg_map["allreduce_strategy"] == SHADOW_ALLREDUCE_STRATEGY

@@ -321,16 +321,22 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
-    # Shadow-standby engines (ENGINE_ID != 0 under gms_shadow_mode) must
-    # downsize the KV cache so their init fits alongside engine-0's active
-    # KV pool. Applied last so it is not overwritten by --extra-engine-args
-    # or --override-engine-args. Operates on both KvCacheConfig and dict
-    # shapes because publish-events path may have flattened it above.
+    # Shadow-mode init overrides, applied last so they are not overwritten
+    # by --extra-engine-args or --override-engine-args:
+    #   1. Force allreduce_strategy=NCCL on BOTH engines. MNNVL's 180 GiB
+    #      symmetric VA window cannot coexist with a second co-located
+    #      engine on the same GPU set.
+    #   2. Shrink KV cache on standby (ENGINE_ID != 0) to fit alongside
+    #      engine-0's active KV pool.
+    # Operates on both KvCacheConfig and dict shapes because the
+    # publish-events path may have flattened kv_cache_config above.
     if config.load_format == "gms" and config.gms_shadow_mode:
         from gpu_memory_service.integrations.trtllm.utils import (
+            force_nccl_allreduce_for_shadow,
             is_shadow_standby,
             shrink_kv_cache_for_shadow,
         )
+        force_nccl_allreduce_for_shadow(arg_map)
         if is_shadow_standby():
             current_kv = arg_map["kv_cache_config"]
             if isinstance(current_kv, dict):
