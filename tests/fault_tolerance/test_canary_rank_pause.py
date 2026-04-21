@@ -175,9 +175,7 @@ def test_canary_detects_rank_pause(
     predownload_models,  # noqa: ANN001
 ) -> None:
     base = trtllm_configs[scenario.base_config_key]
-    config = dataclasses.replace(
-        base, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
+    config = dataclasses.replace(base, frontend_port=dynamo_dynamic_ports.frontend_port)
     config.env.update(
         {
             "MODEL_PATH": config.model,
@@ -193,9 +191,13 @@ def test_canary_detects_rank_pause(
     )
     target_port = system_ports[scenario.system_port_index]
     health_url = f"http://localhost:{target_port}/health"
-    logger.info("[%s] health_url=%s canary=%s expected=%s",
-                scenario.label, health_url, scenario.canary_enabled,
-                scenario.expected)
+    logger.info(
+        "[%s] health_url=%s canary=%s expected=%s",
+        scenario.label,
+        health_url,
+        scenario.canary_enabled,
+        scenario.expected,
+    )
 
     # Build env + launch the worker using the exact same machinery as
     # test_deployment so the scenario matches real CI conditions.
