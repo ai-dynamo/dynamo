@@ -353,6 +353,12 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
             "TLLM_WORKER_USE_SINGLE_PROCESS": "1",
             "MPI4PY_MPIABI": "openmpi",
             "OMPI_MCA_coll_ucc_enable": "0",
+            "OMPI_MCA_coll_hcoll_enable": "0",
+            # Disable UCX/RDMA transports: the test harness runs on a single
+            # node inside a container without RDMA devices; UCX probing fails
+            # with "ucx send failed: Address not valid" on allgather.
+            "OMPI_MCA_pml": "ob1",
+            "OMPI_MCA_btl": "self,vader,tcp",
         }
         venv = os.environ.get("VIRTUAL_ENV")
         if venv:
