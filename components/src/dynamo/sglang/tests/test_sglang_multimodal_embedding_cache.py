@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
+from sglang.srt.managers.schedule_batch import Modality
 
 import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as encode_worker_module
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
