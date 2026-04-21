@@ -550,17 +550,24 @@ class BaseConfigModifier:
             pvc_path = ""
             if effective_model_path and effective_model_path.startswith(pvc_mount_path):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
-            result = cls.update_model_from_pvc(
-                cfg.model_dump(),
-                model_name=model_name,
-                pvc_name=pvc_name,
-                pvc_mount_path=pvc_mount_path,
-                pvc_path=pvc_path,
-            )
+            if pvc_path:
+                result = cls.update_model_from_pvc(
+                    cfg.model_dump(),
+                    model_name=model_name,
+                    pvc_name=pvc_name,
+                    pvc_mount_path=pvc_mount_path,
+                    pvc_path=pvc_path,
+                )
+            else:
+                cls._ensure_spec_pvc(cfg, pvc_name)
+                for _svc_name, svc in cfg.spec.services.items():
+                    cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                result = cls.update_model(
+                    cfg.model_dump(),
+                    model_name=model_name,
+                    model_path=effective_model_path,
+                )
         elif pvc_name and pvc_mount_path:
-            # PVC configured as an HF cache directory (no explicit model path
-            # within it).  Mount the PVC so workers can find cached weights,
-            # but keep the HF model ID as the worker model argument.
             cls._ensure_spec_pvc(cfg, pvc_name)
             for _svc_name, svc in cfg.spec.services.items():
                 cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
