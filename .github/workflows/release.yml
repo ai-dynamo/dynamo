@@ -259,9 +259,12 @@ jobs:
           copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
           # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
+          # Post-merge appends "-cpu" to the ECR tag for cpu_only builds (see
+          # shared-build-image.yml IMAGE_TAG_SUFFIX). Match that here or crane
+          # will hit MANIFEST_UNKNOWN. Broke 1.1.0rc0 and rc1 publish.
           echo ""
           echo "=== Planner Image ==="
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner-cpu"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
           copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
           # ---- Snapshot image ----
