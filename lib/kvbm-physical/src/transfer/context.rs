@@ -27,6 +27,17 @@ use notifications::RegisterPollingNotification;
 pub(crate) use super::notifications;
 pub use super::notifications::TransferCompleteNotification;
 
+/// Default capacity for background NIXL/CUDA notification channels.
+const DEFAULT_NOTIFICATION_CHANNEL_CAPACITY: usize = 1024;
+
+fn notification_channel_capacity() -> usize {
+    std::env::var("KVBM_NOTIFICATION_CHANNEL_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_NOTIFICATION_CHANNEL_CAPACITY)
+}
+
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"), public)]
 #[allow(dead_code)] // Fields are used in build() but derive macros confuse dead code analysis
@@ -256,10 +267,12 @@ impl TransferContext {
         }
         let cuda_pool = Arc::new(pool_builder.build()?);
 
-        // Create channels for background notification handlers
-        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
-        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(64);
-        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
+        // Create channels for background notification handlers.
+        // Overflow silently drops notifications and can orphan transfer requests.
+        let cap = notification_channel_capacity();
+        let (tx_nixl_status, rx_nixl_status) = mpsc::channel(cap);
+        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(cap);
+        let (tx_nixl_events, rx_nixl_events) = mpsc::channel(cap);
 
         // Spawn background handlers
         let handle = tokio_runtime.handle();

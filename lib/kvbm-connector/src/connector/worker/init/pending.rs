@@ -34,6 +34,9 @@ use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferManager;
 use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
 
+const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
+const DEFAULT_DISK_CACHE_DIR: &str = "/tmp";
+
 /// Cached state from `register_kv_caches` for deferred initialization.
 ///
 /// This struct holds all the information needed to complete NIXL registration
@@ -245,13 +248,14 @@ impl PendingWorkerState {
             let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
                 let mut disk_layout = self.layout_config.clone();
                 disk_layout.num_blocks = disk_blocks;
+                let disk_cache_dir = std::env::var(DISK_CACHE_KEY)
+                    .unwrap_or_else(|_| DEFAULT_DISK_CACHE_DIR.to_string());
+                let disk_path = PathBuf::from(disk_cache_dir)
+                    .join(format!("kvbm_g3_{}.bin", runtime.messenger().instance_id()));
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
-                    .allocate_disk(Some(PathBuf::from(format!(
-                        "/tmp/kvbm_g3_{}.bin",
-                        runtime.messenger().instance_id()
-                    ))))
+                    .allocate_disk(Some(disk_path))
                     .build()?;
 
                 let handle = transfer_manager.register_layout(disk_layout)?;
