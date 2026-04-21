@@ -4,6 +4,7 @@
 use anyhow::Result;
 use futures::future::{Either, Ready, ready};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::{
     pin::Pin,
     task::{Context, Poll},
@@ -169,6 +170,12 @@ pub struct LeaderLayoutConfig {
 
     /// Number of disk blocks for G3 tier (None = no disk tier).
     pub disk_block_count: Option<usize>,
+
+    /// Base directory for worker-local G3 backing files.
+    ///
+    /// When omitted, workers fall back to `/tmp`.
+    #[serde(default)]
+    pub disk_storage_path: Option<PathBuf>,
 
     /// Object storage configuration for G4 tier (None = no object tier).
     ///

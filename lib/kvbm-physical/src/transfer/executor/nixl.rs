@@ -372,7 +372,7 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
 
         if still_pending {
             // Register for async completion via status polling
-            Ok(ctx.register_nixl_status(xfer_req))
+            ctx.register_nixl_status(xfer_req)
         } else {
             // Transfer completed synchronously
             Ok(TransferCompleteNotification::completed())

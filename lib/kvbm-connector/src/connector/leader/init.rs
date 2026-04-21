@@ -268,6 +268,13 @@ impl ConnectorLeader {
                     rank: idx,
                     host_block_count,
                     disk_block_count,
+                    disk_storage_path: self
+                        .runtime
+                        .config()
+                        .cache
+                        .disk
+                        .as_ref()
+                        .and_then(|disk| disk.storage_path.clone()),
                     object: object_config.clone(),
                     parallelism: self.runtime.config().cache.parallelism,
                 };
@@ -408,6 +415,7 @@ impl ConnectorLeader {
             .messenger(self.runtime.messenger().clone())
             .registry(registry)
             .g2_manager(g2_manager)
+            .stage_chunk_size(self.runtime.config().onboard.stage_chunk_size)
             .workers(
                 worker_clients
                     .into_iter()
