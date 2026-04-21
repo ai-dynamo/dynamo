@@ -207,11 +207,19 @@ async def init_llm_worker(
     if config.load_format == "gms":
         try:
             from gpu_memory_service.integrations.trtllm import setup_gms
+            from gpu_memory_service.integrations.trtllm.utils import (
+                configure_gms_lock_mode,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "gpu-memory-service is required for --load-format gms. "
                 "Install or update the package."
             ) from exc
+        if config.gms_shadow_mode:
+            # Shared flag read by both vLLM and TRT-LLM GMS integrations; set
+            # early so downstream code sees shadow mode before engine init.
+            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            configure_gms_lock_mode(model_loader_extra_config)
         setup_gms(model_loader_extra_config)
         logging.info(
             "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config

@@ -177,6 +177,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "(e.g. '{\"gms_read_only\": true}')."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--gms-shadow-mode",
+            env_var="DYN_TRTLLM_GMS_SHADOW_MODE",
+            default=False,
+            help=(
+                "Enable GMS shadow/standby mode. When set, the engine's "
+                "gms_read_only flag is derived from ENGINE_ID (0 → writer, "
+                "others → read-only importers), unlocking shadow-engine "
+                "failover across co-located engines on one GPU. "
+                "Requires --load-format=gms."
+            ),
+        )
         add_argument(
             g,
             flag_name="--disaggregation-mode",
@@ -472,6 +485,7 @@ class DynamoTrtllmConfig(ConfigBase):
     disable_request_abort: bool
     load_format: str
     model_loader_extra_config: str
+    gms_shadow_mode: bool = False
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode

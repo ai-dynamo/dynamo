@@ -39,6 +39,12 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
         # Derive use_kv_events from publish_events_and_metrics
         self.use_kv_events = self.publish_events_and_metrics
 
+        if self.gms_shadow_mode and self.load_format != "gms":
+            raise ValueError(
+                "--gms-shadow-mode requires --load-format gms. "
+                "Shadow mode depends on GMS for VA-stable weight sharing."
+            )
+
         # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
         # while the runtime args accepts a list of connectors
         if self.connector:
