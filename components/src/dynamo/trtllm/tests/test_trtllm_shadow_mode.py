@@ -10,8 +10,12 @@ so they run anywhere.
 
 import pytest
 from gpu_memory_service.integrations.trtllm.utils import (
+    SHADOW_KV_CACHE_FRACTION,
+    SHADOW_KV_CACHE_MAX_BYTES,
     configure_gms_lock_mode,
     is_shadow_mode,
+    is_shadow_standby,
+    shrink_kv_cache_for_shadow,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
@@ -76,3 +80,32 @@ def test_configure_returns_same_dict(monkeypatch, clean_env):
     extra = {}
     returned = configure_gms_lock_mode(extra)
     assert returned is extra
+
+
+def test_is_shadow_standby_only_for_nonzero_shadow(monkeypatch, clean_env):
+    # Shadow mode off: standby is always False
+    monkeypatch.setenv("ENGINE_ID", "1")
+    assert is_shadow_standby() is False
+
+    monkeypatch.setenv("DYN_GMS_SHADOW_MODE", "1")
+    # Engine 0 is the primary, not a standby
+    monkeypatch.setenv("ENGINE_ID", "0")
+    assert is_shadow_standby() is False
+
+    # Engine 1+ in shadow mode is a standby
+    monkeypatch.setenv("ENGINE_ID", "1")
+    assert is_shadow_standby() is True
+
+    monkeypatch.setenv("ENGINE_ID", "3")
+    assert is_shadow_standby() is True
+
+
+def test_shrink_kv_cache_clamps_fraction_and_bytes():
+    class FakeCfg:
+        free_gpu_memory_fraction = 0.9
+        max_gpu_total_bytes = 0
+
+    cfg = FakeCfg()
+    shrink_kv_cache_for_shadow(cfg)
+    assert cfg.free_gpu_memory_fraction == SHADOW_KV_CACHE_FRACTION
+    assert cfg.max_gpu_total_bytes == SHADOW_KV_CACHE_MAX_BYTES

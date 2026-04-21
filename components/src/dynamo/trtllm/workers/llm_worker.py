@@ -209,6 +209,7 @@ async def init_llm_worker(
             from gpu_memory_service.integrations.trtllm import setup_gms
             from gpu_memory_service.integrations.trtllm.utils import (
                 configure_gms_lock_mode,
+                is_shadow_standby,
             )
         except ImportError as exc:
             raise RuntimeError(
@@ -220,6 +221,15 @@ async def init_llm_worker(
             # early so downstream code sees shadow mode before engine init.
             os.environ["DYN_GMS_SHADOW_MODE"] = "1"
             configure_gms_lock_mode(model_loader_extra_config)
+            if is_shadow_standby():
+                # Shadow standby engines cannot share active engine's KV
+                # budget at init. Skip TRT-LLM's estimation run so it never
+                # tries to probe headroom by allocating a large INIT_KV_CACHE.
+                os.environ["TRTLLM_SKIP_KV_CACHE_ESTIMATION"] = "1"
+                logging.info(
+                    "[Shadow] ENGINE_ID=%s set TRTLLM_SKIP_KV_CACHE_ESTIMATION=1",
+                    os.environ.get("ENGINE_ID", "?"),
+                )
         setup_gms(model_loader_extra_config)
         logging.info(
             "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config
@@ -310,6 +320,25 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    # Shadow-standby engines (ENGINE_ID != 0 under gms_shadow_mode) must
+    # downsize the KV cache so their init fits alongside engine-0's active
+    # KV pool. Applied last so it is not overwritten by --extra-engine-args
+    # or --override-engine-args. Operates on both KvCacheConfig and dict
+    # shapes because publish-events path may have flattened it above.
+    if config.load_format == "gms" and config.gms_shadow_mode:
+        from gpu_memory_service.integrations.trtllm.utils import (
+            is_shadow_standby,
+            shrink_kv_cache_for_shadow,
+        )
+        if is_shadow_standby():
+            current_kv = arg_map["kv_cache_config"]
+            if isinstance(current_kv, dict):
+                shim = KvCacheConfig(**current_kv)
+                shrink_kv_cache_for_shadow(shim)
+                arg_map["kv_cache_config"] = shim.model_dump(exclude_none=True)
+            else:
+                shrink_kv_cache_for_shadow(current_kv)
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.

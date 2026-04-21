@@ -8,10 +8,43 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Minimum KV cache footprint for shadow engine init. The shadow can't share an
+# active engine's KV budget at init time, so we shrink the shadow's KV pool
+# until it is quiesced. After failover the shadow serves at this reduced
+# capacity; TRT-LLM has no live-resize API to grow it back.
+SHADOW_KV_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB per GPU
+SHADOW_KV_CACHE_FRACTION = 0.01
+
 
 def is_shadow_mode() -> bool:
     """True when DYN_GMS_SHADOW_MODE=1 (set by llm_worker.py at startup)."""
     return os.environ.get("DYN_GMS_SHADOW_MODE", "0") == "1"
+
+
+def is_shadow_standby() -> bool:
+    """True for engines that should skip full KV init (shadow, ENGINE_ID != 0)."""
+    return is_shadow_mode() and os.environ.get("ENGINE_ID", "0") != "0"
+
+
+def shrink_kv_cache_for_shadow(kv_cache_config) -> None:
+    """Clamp a ``KvCacheConfig`` so shadow init fits alongside an active engine.
+
+    The shadow engine initializes while engine-0 is holding the primary KV
+    pool (~60-75 GiB/GPU on Kimi-scale models). With the default
+    ``free_gpu_memory_fraction``, TRT-LLM's KV estimation run tries to
+    claim another ~60 GiB and OOMs. Clamping both fraction *and*
+    ``max_gpu_total_bytes`` keeps the shadow's pool small enough to fit
+    in the slack, and the values are kept at the same settings after
+    ``materialize_with_tag('kv_cache')`` on wake.
+    """
+    kv_cache_config.free_gpu_memory_fraction = SHADOW_KV_CACHE_FRACTION
+    # Cap hard so the fraction-based estimation can never exceed this.
+    kv_cache_config.max_gpu_total_bytes = SHADOW_KV_CACHE_MAX_BYTES
+    logger.info(
+        "[Shadow] Clamped KV cache to %.2f GiB (fraction=%s) for shadow init",
+        SHADOW_KV_CACHE_MAX_BYTES / (1 << 30),
+        SHADOW_KV_CACHE_FRACTION,
+    )
 
 
 def configure_gms_lock_mode(extra_config: dict) -> dict:
