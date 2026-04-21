@@ -182,7 +182,7 @@ def test_enable_disable_enable_cycle(monkeypatch):
             def _noop_patch(cls, tokenizer, *args, **kwargs):
                 return tokenizer
 
-            monkeypatch.setattr(PreTrainedTokenizerBase, "_patch_mistral_regex", _noop_patch)
+            monkeypatch.setattr(PreTrainedTokenizerBase, "_patch_mistral_regex", _noop_patch, raising=False)
     except ImportError:
         pytest.skip("transformers not installed")
 
