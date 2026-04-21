@@ -184,6 +184,11 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
+      # sglang is the vehicle for frontend-api-surface-compliance-check; the
+      # other framework builds skip these so their test images don't carry
+      # node/bun/codex/claude tooling + NodeSource/npm/github failure modes.
+      test_extra_build_args: |
+        INSTALL_FRONTEND_API_SURFACE_TOOLS=true
     secrets: inherit
 
   sglang-dev-build:

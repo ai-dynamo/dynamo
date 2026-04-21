@@ -349,8 +349,14 @@ def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
     """
     logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
 
+    # Isolate HOME for codex the same way we do for claude below. CODEX_HOME
+    # scopes codex's own state, but the agent still invokes a shell tool under
+    # `--dangerously-bypass-approvals-and-sandbox`, which inherits HOME for
+    # any shell/helper reads and writes. Point it at `codex_home` so nothing
+    # escapes `tmp_path`.
     extra_env = {
         "CODEX_HOME": str(codex_home),
+        "HOME": str(codex_home),
         "LOCAL_API_KEY": "sk-none",
     }
     env = _agent_subprocess_env(extra_env)

@@ -82,6 +82,11 @@ on:
         required: false
         type: string
         default: ''
+      test_extra_build_args:
+        description: 'Extra build args to pass to the test-image docker buildx (newline-separated KEY=VALUE lines)'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -284,6 +289,15 @@ jobs:
             NO_CACHE_ARG="--no-cache"
           fi
 
+          # Fan newline-separated KEY=VALUE lines into repeated `--build-arg` flags.
+          # Lets callers (e.g. sglang-build for the compliance suite) inject test-
+          # image-only args without touching the main image build.
+          EXTRA_BUILD_ARGS=""
+          while IFS= read -r arg; do
+            [ -z "$arg" ] && continue
+            EXTRA_BUILD_ARGS+=" --build-arg $arg"
+          done <<< "${{ inputs.test_extra_build_args }}"
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
@@ -291,6 +305,7 @@ jobs:
             --platform ${{ inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
+            ${EXTRA_BUILD_ARGS} \
             ${CACHE_ARGS} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary

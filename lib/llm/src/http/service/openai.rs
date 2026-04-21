@@ -1836,6 +1836,32 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
+    // Reject fields that deserialize on the request but aren't threaded into
+    // ResponseParams or echoed back with the effective value. Silent accept
+    // would let a caller send `max_tool_calls: 5` and see `max_tool_calls:
+    // null` in the response — worse than a clear 4xx because the client
+    // assumes their limit was honored. When any of these gain real plumbing,
+    // remove the corresponding branch here and start echoing the value.
+    if inner.max_tool_calls.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
+        ));
+    }
+    if inner.prompt_cache_key.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`prompt_cache_key` is not supported.",
+        ));
+    }
+    if inner.prompt_cache_retention.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`prompt_cache_retention` is not supported.",
+        ));
+    }
+    if inner.safety_identifier.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`safety_identifier` is not supported.",
+        ));
+    }
     None
 }
 
@@ -2719,6 +2745,25 @@ mod tests {
                         variables: None,
                     })
                 }),
+            ),
+            (
+                "max_tool_calls",
+                Box::new(|r| r.max_tool_calls = Some(5)),
+            ),
+            (
+                "prompt_cache_key",
+                Box::new(|r| r.prompt_cache_key = Some("ck-1".into())),
+            ),
+            (
+                "prompt_cache_retention",
+                Box::new(|r| {
+                    r.prompt_cache_retention =
+                        Some(dynamo_protocols::types::responses::PromptCacheRetention::InMemory)
+                }),
+            ),
+            (
+                "safety_identifier",
+                Box::new(|r| r.safety_identifier = Some("user-hash".into())),
             ),
         ];
 
