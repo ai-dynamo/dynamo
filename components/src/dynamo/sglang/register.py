@@ -194,10 +194,12 @@ async def _get_runtime_config(
                     f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
                 )
         else:
+            unpublished = "total_kv_blocks"
+            if not max_prefill_tokens:
+                unpublished += " and max_num_batched_tokens"
             logging.warning(
-                "Could not access scheduler info from SGLang engine. "
-                "total_kv_blocks and max_num_batched_tokens will not be published; "
-                "SGLang will use its internal defaults."
+                f"Could not access scheduler info from SGLang engine. "
+                f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
         return runtime_config
