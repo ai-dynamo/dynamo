@@ -221,15 +221,13 @@ pub fn monitor_for_disconnects(
                         Some(Err(err)) => {
                             // Mark error as internal since it's a streaming error
                             inflight_guard.mark_error(ErrorType::Internal);
-                            // DIS-1768: this is needed because bare SSE was emitting
-                            // `event: error\n: <comment>\n\n` with no `data: [DONE]`,
-                            // which violates the OpenAI SSE contract — naive
-                            // `data:`-line parsers silently skip the frame and
-                            // never see a stream terminator, so clients get
-                            // no actionable detail and no clean end-of-stream.
-                            // The fix is to emit a structured OpenAI-style
-                            // `data: {"error":{...}}` frame followed by
-                            // `data: [DONE]`, and it is here:
+                            // We're terminating the stream intentionally here with a
+                            // structured error + [DONE]; disarm so the stream handle
+                            // doesn't later record this as ClosedUnexpectedly (which
+                            // would mis-attribute the fault as a client disconnect).
+                            stream_handle.disarm();
+                            // DIS-1768: emit structured OpenAI-style error frame + `data: [DONE]`
+                            // so naive `data:`-line parsers see both the error and a stream terminator.
                             let err_json = serde_json::json!({
                                 "error": {
                                     "message": err.to_string(),
@@ -552,25 +550,56 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("utf8 body")
     }
 
-    /// Assert the post-fix SSE fault contract: structured error frame + `[DONE]` + no bare trailer.
-    fn assert_fault_contract(case: &str, text: &str) {
-        assert!(
-            text.contains("data: [DONE]"),
-            "[{case}] body does not terminate with `data: [DONE]`. Body:\n{text}"
-        );
-        let has_structured_error = text.lines().any(|line| {
-            line.starts_with("data: ")
-                && line.contains("\"error\"")
-                && line.contains("\"message\"")
-                && (line.contains("\"type\"") || line.contains("\"code\""))
+    /// Assert the post-fix SSE fault contract: parsed structured error frame with exact
+    /// message/type/code, positioned before `[DONE]`, and no bare `event: error` trailer.
+    fn assert_fault_contract(case: &str, text: &str, expected_message: &str) {
+        let done_pos = text.find("data: [DONE]").unwrap_or_else(|| {
+            panic!("[{case}] body does not terminate with `data: [DONE]`. Body:\n{text}")
         });
+
+        let (error_line, error_frame) = text
+            .lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .filter(|v| v.get("error").is_some())
+                    .map(|v| (line, v))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "[{case}] body missing structured JSON `data: {{\"error\":{{...}}}}` frame. Body:\n{text}"
+                )
+            });
+
+        let error_pos = text.find(error_line).unwrap_or_default();
         assert!(
-            has_structured_error,
-            "[{case}] body missing structured `data: {{\"error\":{{...}}}}` frame with message and type/code. Body:\n{text}"
+            error_pos < done_pos,
+            "[{case}] structured error frame must precede `data: [DONE]`. Body:\n{text}"
+        );
+
+        let error = error_frame
+            .get("error")
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some(expected_message),
+            "[{case}] structured error `message` mismatch. Body:\n{text}"
+        );
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("internal_server_error"),
+            "[{case}] structured error `type` mismatch. Body:\n{text}"
+        );
+        assert_eq!(
+            error.get("code").and_then(|v| v.as_i64()),
+            Some(500),
+            "[{case}] structured error `code` mismatch. Body:\n{text}"
         );
         assert!(
             !text.contains("event: error\n: "),
-            "[{case}] body contains bare `event: error\\n: <comment>` trailer (no actionable detail — the pre-fix bug). Body:\n{text}"
+            "[{case}] body contains bare `event: error\\n: <comment>` trailer (pre-fix bug). Body:\n{text}"
         );
     }
 
@@ -580,12 +609,12 @@ mod tests {
     #[serial]
     async fn test_simulate_worker_kill_emits_structured_error_and_done() {
         let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk", "0");
-        let stream =
-            simulate_mid_stream_error(3, "Disconnected: Stream ended before generation completed");
+        let expected_message = "Disconnected: Stream ended before generation completed";
+        let stream = simulate_mid_stream_error(3, expected_message);
         let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
         let body = collect_sse_body(monitored).await;
         cleanup_env();
-        assert_fault_contract("worker_kill", &body);
+        assert_fault_contract("worker_kill", &body, expected_message);
     }
 
     /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with
@@ -594,10 +623,11 @@ mod tests {
     #[serial]
     async fn test_simulate_python_consumer_drop_emits_structured_error_and_done() {
         let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py", "0");
-        let stream = simulate_mid_stream_error(3, "Failed to send response: SendError { .. }");
+        let expected_message = "Failed to send response: SendError { .. }";
+        let stream = simulate_mid_stream_error(3, expected_message);
         let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
         let body = collect_sse_body(monitored).await;
         cleanup_env();
-        assert_fault_contract("python_consumer_drop", &body);
+        assert_fault_contract("python_consumer_drop", &body, expected_message);
     }
 }
