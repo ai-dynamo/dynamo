@@ -1435,27 +1435,27 @@ impl
                         }
 
                         if let Some(ref mut usage) = data.inner.usage
-                            && *accumulated_reasoning_tokens > 0 {
-                                if let Some(ref mut completion_tokens_details) =
-                                    usage.completion_tokens_details
-                                {
-                                    completion_tokens_details.reasoning_tokens = Some(
-                                        completion_tokens_details.reasoning_tokens.unwrap_or(0)
-                                            + *accumulated_reasoning_tokens,
-                                    );
-                                } else {
-                                    usage.completion_tokens_details =
-                                        Some(CompletionTokensDetails {
-                                            reasoning_tokens: Some(*accumulated_reasoning_tokens),
-                                            accepted_prediction_tokens: None,
-                                            audio_tokens: None,
-                                            rejected_prediction_tokens: None,
-                                        });
-                                }
-                                *accumulated_reasoning_tokens = 0;
-                        }
-                        Ok(data)
-                    });
+                            && *accumulated_reasoning_tokens > 0
+                        {
+                            if let Some(ref mut completion_tokens_details) =
+                                usage.completion_tokens_details
+                            {
+                                completion_tokens_details.reasoning_tokens = Some(
+                                    completion_tokens_details.reasoning_tokens.unwrap_or(0)
+                                        + *accumulated_reasoning_tokens,
+                                );
+                            } else {
+                                usage.completion_tokens_details = Some(CompletionTokensDetails {
+                                    reasoning_tokens: Some(*accumulated_reasoning_tokens),
+                                    accepted_prediction_tokens: None,
+                                    audio_tokens: None,
+                                    rejected_prediction_tokens: None,
+                                });
+                            }
+                            *accumulated_reasoning_tokens = 0;
+                         }
+                         Ok(data)
+                     });
                     std::future::ready(Some(result))
                 },
             ))
