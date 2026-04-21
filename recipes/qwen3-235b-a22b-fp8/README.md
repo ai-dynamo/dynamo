@@ -12,7 +12,7 @@ Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
-2. **GPU cluster** with H100/H200 GPUs (high memory recommended)
+2. **GPU cluster** with Blackwell GPUs (B100/B200; SM100+) — see [Hardware Requirements](#hardware-requirements)
 3. **HuggingFace token** with access to Qwen models
 
 ## Quick Start
@@ -62,12 +62,16 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Hardware Requirements
 
-This is a large MoE model requiring significant GPU resources:
+This recipe uses `moe_config.backend: DEEPGEMM`, which requires **Blackwell GPUs (SM100+, e.g. B100/B200)**.
+DeepGEMM's FP8 grouped-GEMM kernels are designed for SM100/SM103 only and will crash on Hopper (SM90).
+
+> **Note:** To run on Hopper (H100/H200, SM90), remove the `moe_config` block from the ConfigMaps in
+> `trtllm/agg/deploy.yaml` and `trtllm/disagg/deploy.yaml`. This falls back to the default MoE backend at a modest throughput reduction.
 
 | Configuration | GPUs | Min GPU VRAM (Total) |
 |--------------|------|----------------------|
-| Aggregated | 16x H100/H200 | ~1.3TB |
-| Disaggregated | 16x H100/H200 | ~1.3TB |
+| Aggregated | 16x B100/B200 | ~1.3TB |
+| Disaggregated | 16x B100/B200 | ~1.3TB |
 
 ## Notes
 

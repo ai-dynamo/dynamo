@@ -257,7 +257,14 @@ impl AggRuntime {
         &mut self,
         admissions: Vec<WorkerAdmission>,
     ) -> anyhow::Result<()> {
-        for WorkerAdmission { uuid, worker_idx } in admissions {
+        for WorkerAdmission {
+            uuid,
+            worker_idx,
+            overlap_blocks,
+            isl_blocks,
+        } in admissions
+        {
+            self.traffic.on_admission(overlap_blocks, isl_blocks);
             let request = self
                 .requests
                 .get_mut(&uuid)

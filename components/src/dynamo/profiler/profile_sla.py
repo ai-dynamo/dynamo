@@ -32,7 +32,10 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 )
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.defaults import SearchStrategy
-from dynamo.profiler.utils.dgd_generation import assemble_final_config
+from dynamo.profiler.utils.dgd_generation import (
+    assemble_final_config,
+    build_aic_interpolation_spec,
+)
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
     DynamoGraphDeploymentRequestSpec,
@@ -371,11 +374,25 @@ async def run_profile(
             )
 
         # ---------------------------------------------------------------
-        # Interpolation curves — only needed when something consumes
-        # the per-engine performance data (throughput scaling or mocker).
+        # Interpolation curves — only needed when something consumes the
+        # per-engine performance data on disk (thorough-mode planner or
+        # mocker). Rapid-mode planner bootstraps AIC in-process at
+        # startup, so the profiler skips the NPZ sweep for that case.
         # ---------------------------------------------------------------
         chosen_exp = pick_result.get("chosen_exp", "")
         is_disagg_config = chosen_exp not in ("agg",) and bool(chosen_exp)
+
+        # Compute max context length unconditionally — both the NPZ sweep
+        # (thorough, mocker) and the planner's rapid-mode AIC spec need it.
+        try:
+            model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
+            sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
+        except Exception:
+            logger.warning("Could not fetch model max context length.")
+            sweep_max_context_length = 0
+        if not sweep_max_context_length:
+            sweep_max_context_length = isl * 2 if isl > 0 else 8192
+
         if not ops.dry_run and dgd_config and needs_profile_data(dgdr):
             ops.current_phase = ProfilingPhase.BuildingCurves
             write_profiler_status(
@@ -391,19 +408,6 @@ async def run_profile(
                     chosen_exp,
                 )
             else:
-                try:
-                    model_cfg = get_model_config_from_model_path(
-                        resolve_model_path(dgdr)
-                    )
-                    sweep_max_context_length = model_cfg.get(
-                        "max_position_embeddings", 0
-                    )
-                except Exception:
-                    logger.warning("Could not fetch model max context length.")
-                    sweep_max_context_length = 0
-                if not sweep_max_context_length:
-                    sweep_max_context_length = isl * 2 if isl > 0 else 8192
-
                 await run_interpolation(
                     dgdr,
                     ops,
@@ -430,8 +434,30 @@ async def run_profile(
             message="Packaging data and generating final DGD YAML",
             phase=ops.current_phase,
         )
+        aic_spec = (
+            build_aic_interpolation_spec(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                isl=isl,
+                osl=osl,
+                sweep_max_context_length=sweep_max_context_length,
+                resolved_backend=resolved_backend,
+                system=system,
+                prefill_interpolation_granularity=ops.prefill_interpolation_granularity,
+                decode_interpolation_granularity=ops.decode_interpolation_granularity,
+            )
+            if is_disagg_config and not ops.dry_run
+            else None
+        )
         final_config = assemble_final_config(
-            dgdr, ops, dgd_config, best_prefill_config, best_decode_config
+            dgdr,
+            ops,
+            dgd_config,
+            best_prefill_config,
+            best_decode_config,
+            aic_spec=aic_spec,
+            resolved_backend=resolved_backend,
         )
 
         # --- Apply DGD overrides (user-supplied partial DGD) ---
