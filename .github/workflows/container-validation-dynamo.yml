@@ -9,7 +9,6 @@ on:
     - main
     - release/*.*.*
     - "pull-request/[0-9]+"
-    - ci/update-runners
 
 concurrency:
     # The group name is a ternary operation. If the ref_name is 'main',
@@ -245,7 +244,7 @@ jobs:
   test-parallel:
     needs: [changed-files, build, mypy]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
-    runs-on: prod-tester-amd-v1
+    runs-on: prod-builder-amd-v1
     name: Pytest (parallel)
     timeout-minutes: 30
     env:
@@ -277,7 +276,7 @@ jobs:
   test-sequential:
     needs: [changed-files, build, mypy]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
-    runs-on: prod-tester-amd-v1
+    runs-on: prod-builder-amd-v1
     name: Pytest (sequential)
     timeout-minutes: 30
     env:
