@@ -12,6 +12,7 @@ import pytest
 import tests.hf_cache as hf_cache
 from tests.hf_cache import (
     _MODELS_DIR_ENV_KEYS,
+    _TRANSFORMERS_CACHE_OVERRIDE_KEYS,
     _apply_models_dir_env,
     _disable_offline_with_mistral_patch,
     _enable_offline_with_mistral_patch,
@@ -34,7 +35,8 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
-        assert "TRANSFORMERS_CACHE" not in os.environ
+        for k in _TRANSFORMERS_CACHE_OVERRIDE_KEYS:
+            assert k not in os.environ
     finally:
         _restore_models_dir_env(orig)
 
@@ -54,7 +56,8 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
-        assert "TRANSFORMERS_CACHE" not in os.environ
+        for k in _TRANSFORMERS_CACHE_OVERRIDE_KEYS:
+            assert k not in os.environ
     finally:
         _restore_models_dir_env(orig)
 

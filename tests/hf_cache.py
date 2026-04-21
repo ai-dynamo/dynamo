@@ -123,9 +123,16 @@ def _disable_offline_with_mistral_patch():
 # Keys managed by _apply_models_dir_env / _restore_models_dir_env.
 # PYTHONPATH is intentionally excluded: _disable_offline_with_mistral_patch()
 # removes its entry by exact-match list filtering (idempotent, needs no snapshot).
+_TRANSFORMERS_CACHE_OVERRIDE_KEYS = (
+    "TRANSFORMERS_CACHE",
+    "PYTORCH_TRANSFORMERS_CACHE",
+    "PYTORCH_PRETRAINED_BERT_CACHE",
+)
+
 _MODELS_DIR_ENV_KEYS = (
     "HF_HUB_CACHE",
     "HF_HOME",
+    *_TRANSFORMERS_CACHE_OVERRIDE_KEYS,
     "HF_HUB_OFFLINE",
     "TRANSFORMERS_OFFLINE",
     "DYNAMO_MODELS_DIR",
@@ -147,6 +154,8 @@ def _apply_models_dir_env(models_dir: str) -> dict:
         logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
         os.environ.pop("HF_HOME", None)  # clear for consistency
         os.environ["HF_HUB_CACHE"] = models_dir
+    for key in _TRANSFORMERS_CACHE_OVERRIDE_KEYS:
+        os.environ.pop(key, None)
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
