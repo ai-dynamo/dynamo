@@ -14,12 +14,14 @@ try:
     )
     from dynamo.profiler.utils.dgd_generation import (
         _build_planner_config,
+        _inject_mocker_aic_args,
         build_aic_interpolation_spec,
         enable_vllm_benchmark_mode,
     )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
+        MockerSpec,
     )
 except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
@@ -34,8 +36,14 @@ pytestmark = [
 def _dgdr(
     planner: PlannerConfig | None = None,
     model: str = "Qwen/Qwen3-32B",
+    mocker_enabled: bool = False,
 ) -> DynamoGraphDeploymentRequestSpec:
-    features = FeaturesSpec(planner=planner) if planner else None
+    features = None
+    if planner is not None or mocker_enabled:
+        features = FeaturesSpec(
+            planner=planner,
+            mocker=MockerSpec(enabled=True) if mocker_enabled else None,
+        )
     return DynamoGraphDeploymentRequestSpec(model=model, features=features)
 
 
@@ -165,6 +173,74 @@ class TestBuildAICInterpolationSpec:
         )
         assert got is None
 
+    def test_mocker_rapid_without_throughput_scaling_produces_spec(self):
+        """Mocker-only consumer still gets an AIC spec so --aic-* flags can be
+        injected on its worker args."""
+        planner = PlannerConfig(
+            enable_throughput_scaling=False,
+            enable_load_scaling=True,
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _dgdr(planner=planner, mocker_enabled=True)
+        pick = PickedParallelConfig(tp=1, dp=8, moe_ep=8)
+        spec = build_aic_interpolation_spec(
+            dgdr,
+            best_prefill_pick=pick,
+            best_decode_pick=pick,
+            isl=1000,
+            osl=100,
+            sweep_max_context_length=4096,
+            resolved_backend="trtllm",
+            system="h200_sxm",
+            prefill_interpolation_granularity=8,
+            decode_interpolation_granularity=4,
+        )
+        assert isinstance(spec, AICInterpolationSpec)
+        assert spec.backend == "trtllm"
+
+
+class TestInjectMockerAicArgs:
+    def _spec(self, backend: str = "trtllm") -> AICInterpolationSpec:
+        pick = PickedParallelConfig(tp=1, dp=8, moe_tp=1, moe_ep=8)
+        return AICInterpolationSpec(
+            hf_id="Qwen/Qwen3-235B",
+            system="h200_sxm",
+            backend=backend,
+            isl=1000,
+            osl=100,
+            sweep_max_context_length=4096,
+            prefill_interpolation_granularity=8,
+            decode_interpolation_granularity=4,
+            prefill_pick=pick,
+            decode_pick=pick,
+        )
+
+    def test_injects_all_required_flags(self):
+        spec = self._spec("trtllm")
+        args = ["--model-path", "Qwen/Qwen3-235B", "--disaggregation-mode", "prefill"]
+        out = _inject_mocker_aic_args(args, spec, spec.prefill_pick)
+        assert "--aic-perf-model" in out
+        assert out[out.index("--aic-backend") + 1] == "trtllm"
+        assert out[out.index("--aic-system") + 1] == "h200_sxm"
+        assert out[out.index("--aic-tp-size") + 1] == "1"
+        assert out[out.index("--aic-moe-tp-size") + 1] == "1"
+        assert out[out.index("--aic-moe-ep-size") + 1] == "8"
+        assert out[out.index("--aic-attention-dp-size") + 1] == "8"
+        # trtllm is not a mocker engine_type; leave --engine-type alone.
+        assert "--engine-type" not in out
+
+    def test_matches_engine_type_for_vllm(self):
+        spec = self._spec("vllm")
+        out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
+        assert out[out.index("--engine-type") + 1] == "vllm"
+        assert out[out.index("--aic-backend") + 1] == "vllm"
+
+    def test_matches_engine_type_for_sglang(self):
+        spec = self._spec("sglang")
+        out = _inject_mocker_aic_args([], spec, spec.decode_pick)
+        assert out[out.index("--engine-type") + 1] == "sglang"
+        assert out[out.index("--aic-backend") + 1] == "sglang"
+
 
 class TestBuildPlannerConfigEmbedsAicSpec:
     def test_spec_threads_into_planner_config(self):
@@ -230,6 +306,32 @@ class TestNeedsProfileDataRapid:
             pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Thorough,
         )
         dgdr = _dgdr(planner=planner)
+        assert needs_profile_data(dgdr) is True
+
+    def test_mocker_rapid_returns_false(self):
+        """Mocker + rapid: mocker pulls AIC perf data at runtime; no NPZ files."""
+        from dynamo.profiler.utils.profile_common import needs_profile_data
+
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _dgdr(planner=planner, mocker_enabled=True)
+        assert needs_profile_data(dgdr) is False
+
+    def test_mocker_thorough_returns_true(self):
+        """Mocker + thorough: mocker consumes real-GPU NPZ."""
+        from dynamo.profiler.utils.profile_common import needs_profile_data
+
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Thorough,
+        )
+        dgdr = _dgdr(planner=planner, mocker_enabled=True)
         assert needs_profile_data(dgdr) is True
 
 
