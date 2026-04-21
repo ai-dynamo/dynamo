@@ -5,6 +5,11 @@
 """
 KVBM (KV Block Manager) integration tests for vLLM.
 
+Each test runs twice — once for KVBM v1 (``kvbm.vllm_integration.connector``)
+and once for KVBM v2 (``kvbm.v2.vllm.connector`` with the NIXL UCX backend),
+selected via the indirect ``llm_server_kvbm`` fixture parametrize. If v1 and
+v2 diverge in expected behavior, split these back into separate files.
+
 These tests validate core KVBM functionality:
 1. Offload/Onboard: Request offloads to CPU, cache reset, re-request triggers onboarding
 2. Eviction: GPU cache fills, blocks evicted, later retrieved without corruption
@@ -113,7 +118,14 @@ def tester(llm_server_kvbm):  # noqa: F811
 
 
 # Tests
-@pytest.mark.parametrize("llm_server_kvbm", [{"model": KVBM_TEST_MODEL}], indirect=True)
+@pytest.mark.parametrize(
+    "llm_server_kvbm",
+    [
+        pytest.param({"model": KVBM_TEST_MODEL}, id="v1"),
+        pytest.param({"model": KVBM_TEST_MODEL, "v2": True}, id="v2"),
+    ],
+    indirect=True,
+)
 @pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
@@ -178,7 +190,15 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
 @pytest.mark.parametrize(
     "llm_server_kvbm",
-    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    [
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}, id="v1"
+        ),
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL, "v2": True},
+            id="v2",
+        ),
+    ],
     indirect=True,
 )
 @pytest.mark.timeout(170)  # 4x measured (~42s), rounded up
@@ -253,7 +273,15 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
 @pytest.mark.parametrize(
     "llm_server_kvbm",
-    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    [
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}, id="v1"
+        ),
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL, "v2": True},
+            id="v2",
+        ),
+    ],
     indirect=True,
 )
 @pytest.mark.timeout(160)  # 4x measured (~39s), rounded up
