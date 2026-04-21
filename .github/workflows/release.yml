@@ -181,8 +181,6 @@ jobs:
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
-          ARCHITECTURES=("amd64" "arm64")
-
           echo "========================================"
           echo "Copying images from ECR to NGC (registry-to-registry)"
           echo "Source commit SHA: ${COMMIT_SHA}"
@@ -190,14 +188,11 @@ jobs:
           echo "========================================"
 
           copy_image() {
-            local SRC="$1" DST="$2" LABEL="$3" PLATFORM="${4:-}"
-            local PLATFORM_ARG=""
-            if [ -n "${PLATFORM}" ]; then
-              PLATFORM_ARG="--platform ${PLATFORM}"
-            fi
+            local SRC="$1" DST="$2" LABEL="$3"
             echo "----------------------------------------"
             echo "Copying: ${LABEL}"
-            if crane copy ${PLATFORM_ARG} "${SRC}" "${DST}"; then
+            # crane copy preserves multi-arch manifest lists by default (no --platform needed)
+            if crane copy "${SRC}" "${DST}"; then
               echo "  Copied: ${LABEL}"
               SUCCESSFUL_COPIES+=("${LABEL}")
               return 0
@@ -208,36 +203,15 @@ jobs:
             fi
           }
 
-          create_manifest() {
-            local MANIFEST="$1" AMD64_IMG="$2" ARM64_IMG="$3" LABEL="$4"
-            echo "Creating manifest: ${MANIFEST}"
-            docker manifest create "${MANIFEST}" "${AMD64_IMG}" "${ARM64_IMG}" || true
-            if docker manifest push "${MANIFEST}"; then
-              echo "  Created multi-arch: ${LABEL}"
-              SUCCESSFUL_COPIES+=("${LABEL} (multi-arch)")
-            else
-              echo "  Failed to create multi-arch: ${LABEL}"
-              FAILED_COPIES+=("${LABEL} (multi-arch)")
-            fi
-          }
-
           # ---- CUDA 12 runtime images (vllm and sglang) ----
           echo ""
           echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
           CUDA12_FRAMEWORKS=("vllm" "sglang")
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
-            for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
-              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
-              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}" "linux/${ARCH}"
-            done
-
-            create_manifest \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}" \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-amd64" \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-arm64" \
-              "${NGC_NAME}:${NGC_VERSION_TAG}"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
           done
 
           # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
@@ -251,17 +225,9 @@ jobs:
               NGC_NAME="${FRAMEWORK}-runtime"
             fi
 
-            for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
-              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
-              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}" "linux/${ARCH}"
-            done
-
-            create_manifest \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13" \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-amd64" \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-arm64" \
-              "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
           done
 
           # ---- EFA runtime images (amd64 only, no multi-arch manifest needed) ----
@@ -392,13 +358,13 @@ jobs:
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY

@@ -173,25 +173,27 @@ async def _get_runtime_config(
         # Try to check if the engine has a scheduler attribute with the computed values
         if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
             # Get max_total_num_tokens from scheduler_info
-            if "max_total_num_tokens" in engine.scheduler_info:
-                max_total_tokens = engine.scheduler_info["max_total_num_tokens"]
-                if max_total_tokens and hasattr(
-                    engine.tokenizer_manager, "server_args"
-                ):
-                    page_size = engine.tokenizer_manager.server_args.page_size
-                    if page_size:
-                        runtime_config.total_kv_blocks = (
-                            max_total_tokens + page_size - 1
-                        ) // page_size
-                        logging.info(
-                            f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
-                            f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
-                        )
+            max_total_tokens = engine.scheduler_info.get("max_total_num_tokens")
+            if max_total_tokens and hasattr(engine.tokenizer_manager, "server_args"):
+                page_size = engine.tokenizer_manager.server_args.page_size
+                if page_size:
+                    runtime_config.total_kv_blocks = (
+                        max_total_tokens + page_size - 1
+                    ) // page_size
+                    logging.info(
+                        f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
+                        f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                    )
 
-            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info.
-            # SGLang separates configuration (server_args) from runtime stats (scheduler_info).
-            # In contrast, vLLM exposes both config and runtime values through engine config.
-            # These are config parameters, so they must be retrieved from server_args only.
+            # When max_prefill_tokens is not explicitly set by the user, fall back
+            # to max_total_num_tokens from the scheduler. This ensures the planner
+            # always has a prefill load signal for aggregated scaling decisions.
+            if not max_prefill_tokens and max_total_tokens:
+                runtime_config.max_num_batched_tokens = max_total_tokens
+                logging.info(
+                    f"max_prefill_tokens not set, using max_total_num_tokens "
+                    f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
+                )
 
             return runtime_config
 

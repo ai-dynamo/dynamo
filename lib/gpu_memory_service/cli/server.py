@@ -4,8 +4,8 @@
 """GMS server entry point.
 
 Launches two GMS server processes per GPU (one for weights, one for kv_cache).
-Writes a ready file once all expected UDS sockets are present. Monitors an
-optional checkpoint stop file and shuts down cleanly when it appears.
+Writes a ready file once all expected UDS sockets are present. Runs until
+SIGTERM (pod termination kills it).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path
 
 logging.basicConfig(
@@ -30,36 +31,11 @@ _TAGS = ("weights", "kv_cache")
 _READY_FILE = "gms-ready"
 
 
-def _ready_file_path() -> Path:
-    return Path(os.environ.get("GMS_SOCKET_DIR", "/tmp")) / _READY_FILE
-
-
-def _list_devices() -> list[int]:
-    import pynvml
-
-    pynvml.nvmlInit()
-    try:
-        count = pynvml.nvmlDeviceGetCount()
-    finally:
-        pynvml.nvmlShutdown()
-
-    if count == 0:
-        raise SystemExit("no nvidia devices found")
-    return list(range(count))
-
-
-def _optional_checkpoint_stop_file() -> Path | None:
-    control_dir = os.environ.get("GMS_CONTROL_DIR")
-    if not control_dir:
-        return None
-    return Path(control_dir) / "checkpoint-done"
-
-
 def main() -> None:
-    ready_file = _ready_file_path()
+    ready_file = Path(os.environ.get("GMS_SOCKET_DIR", "/tmp")) / _READY_FILE
     ready_file.unlink(missing_ok=True)
 
-    devices = _list_devices()
+    devices = list_devices()
     processes = []
     for device in devices:
         for tag in _TAGS:
@@ -89,14 +65,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
 
-    stop_file = _optional_checkpoint_stop_file()
     ready_written = False
     while True:
-        stop_requested = stop_file is not None and stop_file.exists()
-        if stop_requested:
-            logger.info("checkpoint stop requested; shutting down GMS servers")
-            shutdown()
-
         if not ready_written:
             sockets_ready = all(
                 os.path.exists(get_socket_path(device, tag))
@@ -112,8 +82,6 @@ def main() -> None:
             exit_code = process.poll()
             if exit_code is None:
                 running = True
-                continue
-            if stop_requested:
                 continue
             shutdown()
             raise SystemExit(exit_code)

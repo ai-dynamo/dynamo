@@ -5,6 +5,8 @@
 //!
 //! Useful for profiling replay itself without the Python CLI wrapper. This keeps
 //! the default mocker perf model unless CLI overrides are provided.
+//!
+//! Run with: cargo bench --package dynamo-bench --bench offline_replay_bench -- --help
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -28,6 +30,11 @@ impl From<RouterModeArg> for ReplayRouterMode {
             RouterModeArg::KvRouter => ReplayRouterMode::KvRouter,
         }
     }
+}
+
+fn is_bench_harness_invocation() -> bool {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    args.is_empty() || args.iter().all(|arg| arg == "--bench")
 }
 
 #[derive(Parser, Debug)]
@@ -84,6 +91,10 @@ struct Args {
     /// Number of times to rerun the same replay in-process
     #[arg(long, default_value_t = 1)]
     iterations: usize,
+
+    /// Ignored -- passed by cargo bench
+    #[arg(long, hide = true)]
+    bench: bool,
 }
 
 fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
@@ -111,6 +122,11 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
 }
 
 fn main() -> Result<()> {
+    if is_bench_harness_invocation() {
+        eprintln!("offline_replay_bench: skipping no-arg harness invocation");
+        return Ok(());
+    }
+
     let args = Args::parse();
     let engine_args = build_engine_args(&args)?;
     let started_at = Instant::now();

@@ -473,9 +473,11 @@ impl VllmCore {
         batch_total_prefix: &mut usize,
         preempted_any: &mut bool,
     ) -> ScheduleOutcome {
-        let Some(request) = self.state.requests.get(&uuid) else {
-            return ScheduleOutcome::Blocked;
-        };
+        let request = self
+            .state
+            .requests
+            .get(&uuid)
+            .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
         debug_assert_vllm_request_invariants(uuid, request);
         let prefill_cost = self.kv_manager.get_prefill_cost(&request.sequence);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
@@ -508,9 +510,9 @@ impl VllmCore {
 
         loop {
             let allocation = {
-                let Some(request) = self.state.requests.get_mut(&uuid) else {
-                    return ScheduleOutcome::Blocked;
-                };
+                let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
+                    panic!("schedule_request: {uuid} removed mid-pass (alloc prep)")
+                });
                 let allocation_target = desired_computed_after;
                 let prev_allocated_tokens = request.sequence.num_allocated_tokens();
                 if allocation_target <= prev_allocated_tokens {
@@ -525,9 +527,9 @@ impl VllmCore {
                 break;
             };
             let Some(signal) = maybe_signal else {
-                let Some(request) = self.state.requests.get_mut(&uuid) else {
-                    return ScheduleOutcome::Blocked;
-                };
+                let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
+                    panic!("schedule_request: {uuid} removed mid-pass (commit no-signal)")
+                });
                 request.sequence.commit_allocation(allocation_target);
                 request.num_computed_tokens = actual_computed_after;
                 break;
@@ -539,9 +541,9 @@ impl VllmCore {
             };
             let allocated = self.kv_manager.process(&signal);
             let (_committed_tokens, current_computed_tokens) = {
-                let Some(request) = self.state.requests.get_mut(&uuid) else {
-                    return ScheduleOutcome::Blocked;
-                };
+                let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
+                    panic!("schedule_request: {uuid} removed mid-pass (post-process commit)")
+                });
                 let committed_tokens = if allocated == expected {
                     allocation_target
                 } else {
@@ -759,9 +761,11 @@ fn request_sequence_len(requests: &FxHashMap<Uuid, VllmRequestState>, uuid: Uuid
         .unwrap_or_default()
 }
 
-fn debug_assert_vllm_request_invariants(uuid: Uuid, request: &VllmRequestState) {
+fn debug_assert_vllm_request_invariants(_uuid: Uuid, _request: &VllmRequestState) {
     #[cfg(debug_assertions)]
     {
+        let uuid = _uuid;
+        let request = _request;
         let seq_len = request.sequence.len();
         let allocated = request.sequence.num_allocated_tokens();
         debug_assert!(
@@ -776,9 +780,11 @@ fn debug_assert_vllm_request_invariants(uuid: Uuid, request: &VllmRequestState) 
     }
 }
 
-fn debug_assert_vllm_request_progress(uuid: Uuid, request: &VllmRequestState) {
+fn debug_assert_vllm_request_progress(_uuid: Uuid, _request: &VllmRequestState) {
     #[cfg(debug_assertions)]
     {
+        let uuid = _uuid;
+        let request = _request;
         debug_assert_vllm_request_invariants(uuid, request);
         let allocated = request.sequence.num_allocated_tokens();
         debug_assert!(
@@ -789,9 +795,11 @@ fn debug_assert_vllm_request_progress(uuid: Uuid, request: &VllmRequestState) {
     }
 }
 
-fn debug_assert_vllm_ready_to_decode(requests: &FxHashMap<Uuid, VllmRequestState>, uuid: Uuid) {
+fn debug_assert_vllm_ready_to_decode(_requests: &FxHashMap<Uuid, VllmRequestState>, _uuid: Uuid) {
     #[cfg(debug_assertions)]
     {
+        let requests = _requests;
+        let uuid = _uuid;
         let Some(request) = requests.get(&uuid) else {
             return;
         };
@@ -807,9 +815,10 @@ fn debug_assert_vllm_ready_to_decode(requests: &FxHashMap<Uuid, VllmRequestState
     }
 }
 
-fn debug_assert_vllm_scheduler_state(state: &SchedulerState) {
+fn debug_assert_vllm_scheduler_state(_state: &SchedulerState) {
     #[cfg(debug_assertions)]
     {
+        let state = _state;
         let mut seen = std::collections::HashSet::new();
         for uuid in &state.waiting_members {
             debug_assert!(

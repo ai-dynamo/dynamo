@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.cuda_utils import list_devices
+from gpu_memory_service.common.utils import get_socket_path, wait_for_weights_socket
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 
 logging.basicConfig(
@@ -24,32 +27,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_WEIGHTS_TAG = "weights"
-_DEFAULT_MAX_WORKERS = 8
-
-
-def _list_devices() -> list[int]:
-    import pynvml
-
-    pynvml.nvmlInit()
-    try:
-        count = pynvml.nvmlDeviceGetCount()
-    finally:
-        pynvml.nvmlShutdown()
-
-    if count == 0:
-        raise SystemExit("no nvidia devices found")
-    return list(range(count))
-
-
-def _wait_for_weights_socket(device: int) -> None:
-    socket_path = get_socket_path(device, _WEIGHTS_TAG)
-    while not os.path.exists(socket_path):
-        time.sleep(1)
-
 
 def _load_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
-    _wait_for_weights_socket(device)
+    wait_for_weights_socket(device)
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info("Loading GMS checkpoint: device=%d input_dir=%s", device, input_dir)
     t0 = time.monotonic()
@@ -68,8 +48,8 @@ def _load_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
 
 def main() -> None:
     checkpoint_dir = os.environ["GMS_CHECKPOINT_DIR"]
-    max_workers = int(os.environ.get("GMS_LOAD_WORKERS", str(_DEFAULT_MAX_WORKERS)))
-    devices = _list_devices()
+    max_workers = int(os.environ.get("GMS_LOAD_WORKERS", "8"))
+    devices = list_devices()
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
@@ -83,6 +63,7 @@ def main() -> None:
             logger.info("Device %d load complete", dev)
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     while True:
         time.sleep(3600)

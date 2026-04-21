@@ -8,7 +8,7 @@
 //! first token) and total request latency per turn, with configurable inter-turn
 //! exponential delay.
 //!
-//! Run with: cargo run --package dynamo-bench --bin multiturn_bench -- --help
+//! Run with: cargo bench --package dynamo-bench --bench multiturn_bench -- --help
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -113,6 +113,11 @@ struct NvExtBody {
 #[derive(Debug, Serialize)]
 struct AgentHintsBody {
     speculative_prefill: bool,
+}
+
+fn is_bench_harness_invocation() -> bool {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    args.is_empty() || args.iter().all(|arg| arg == "--bench")
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +538,11 @@ fn print_per_turn_table(label: &str, stats: &[PerTurnStats]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if is_bench_harness_invocation() {
+        eprintln!("multiturn_bench: skipping no-arg harness invocation");
+        return Ok(());
+    }
+
     let mut args = Args::parse();
 
     if args.ping {
