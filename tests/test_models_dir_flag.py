@@ -20,7 +20,6 @@ from tests.hf_cache import (
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
 
-
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -154,6 +153,7 @@ def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
 def test_disable_removes_patch_dir(monkeypatch):
     """_disable_offline_with_mistral_patch cleans up the sitecustomize patch directory."""
     import tempfile
+
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
@@ -193,7 +193,9 @@ def test_enable_normalizes_pythonpath_empty_components(monkeypatch):
 
     _enable_offline_with_mistral_patch()
     pythonpath = os.environ.get("PYTHONPATH", "")
-    assert "" not in pythonpath.split(":"), f"Empty component in PYTHONPATH: {pythonpath!r}"
+    assert "" not in pythonpath.split(
+        ":"
+    ), f"Empty component in PYTHONPATH: {pythonpath!r}"
 
     _disable_offline_with_mistral_patch()
 
@@ -232,7 +234,12 @@ def test_enable_disable_enable_cycle(monkeypatch):
             def _noop_patch(cls, tokenizer, *args, **kwargs):
                 return tokenizer
 
-            monkeypatch.setattr(PreTrainedTokenizerBase, "_patch_mistral_regex", _noop_patch, raising=False)
+            monkeypatch.setattr(
+                PreTrainedTokenizerBase,
+                "_patch_mistral_regex",
+                _noop_patch,
+                raising=False,
+            )
     except ImportError:
         pytest.skip("transformers not installed")
 
