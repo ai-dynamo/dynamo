@@ -311,8 +311,13 @@ where
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
+        let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
+            let is_error = resp.err().is_some();
+            if is_error {
+                saw_error_response = true;
+            }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,
@@ -347,8 +352,9 @@ where
                         .inc();
                 }
                 break;
-            } else {
-                // Notify the health check manager on each successfully streamed chunk
+            } else if !is_error {
+                // Only notify on non-error chunks — error responses don't prove
+                // the engine is healthy and should not reset the canary timer.
                 if let Some(notifier) = self.endpoint_health_check_notifier.get() {
                     notifier.notify_one();
                 }
@@ -375,8 +381,11 @@ where
                         .inc();
                 }
             }
-            // Notify the health check manager that the stream has finished.
-            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+            // Only notify on stream completion if no error responses were seen
+            if let (false, Some(notifier)) = (
+                saw_error_response,
+                self.endpoint_health_check_notifier.get(),
+            ) {
                 notifier.notify_one();
             }
         }

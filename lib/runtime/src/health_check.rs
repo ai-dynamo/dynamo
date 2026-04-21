@@ -374,11 +374,36 @@ mod push_handler_notify_tests {
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
 
-    /// A mock engine that streams `num_chunks` response chunks.
+    /// A mock engine that streams a configurable sequence of success/error chunks.
     /// Used both as the push_handler pipeline engine and registered in
     /// the local endpoint registry for health check requests.
     struct MockStreamingEngine {
         num_chunks: usize,
+        /// If set, chunks at these indices will be error responses.
+        error_indices: Vec<usize>,
+    }
+
+    impl MockStreamingEngine {
+        fn success(num_chunks: usize) -> Arc<Self> {
+            Arc::new(Self {
+                num_chunks,
+                error_indices: vec![],
+            })
+        }
+
+        fn all_errors(num_chunks: usize) -> Arc<Self> {
+            Arc::new(Self {
+                num_chunks,
+                error_indices: (0..num_chunks).collect(),
+            })
+        }
+
+        fn with_error_at(num_chunks: usize, error_indices: Vec<usize>) -> Arc<Self> {
+            Arc::new(Self {
+                num_chunks,
+                error_indices,
+            })
+        }
     }
 
     #[async_trait]
@@ -391,7 +416,13 @@ mod push_handler_notify_tests {
         ) -> anyhow::Result<ManyOut<TestResponse>> {
             let (_data, ctx) = input.into_parts();
             let chunks: Vec<TestResponse> = (0..self.num_chunks)
-                .map(|i| Annotated::from_data(serde_json::json!({"token": i})))
+                .map(|i| {
+                    if self.error_indices.contains(&i) {
+                        Annotated::from_error(format!("mock error at chunk {i}"))
+                    } else {
+                        Annotated::from_data(serde_json::json!({"token": i}))
+                    }
+                })
                 .collect();
             Ok(ResponseStream::new(
                 Box::pin(stream::iter(chunks)),
@@ -468,7 +499,7 @@ mod push_handler_notify_tests {
 
         // Register a mock engine in local registry so send_health_check_request
         // can call engine.generate() when the canary fires.
-        let mock_engine: LocalAsyncEngine = Arc::new(MockStreamingEngine { num_chunks: 1 });
+        let mock_engine: LocalAsyncEngine = MockStreamingEngine::success(1);
         drt.local_endpoint_registry()
             .register(endpoint_name.to_string(), mock_engine);
 
@@ -489,7 +520,7 @@ mod push_handler_notify_tests {
 
         let notifier = register_endpoint(&drt, endpoint_name);
 
-        let engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine { num_chunks: 5 });
+        let engine: Arc<MockStreamingEngine> = MockStreamingEngine::success(5);
         let ingress =
             Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
         ingress
@@ -627,6 +658,119 @@ mod push_handler_notify_tests {
             Some(HealthStatus::Ready),
             "Status should be Ready — the canary should have fired and \
              send_health_check_request should have succeeded with the mock engine"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Push handler notification tests (error-gating behavior)
+    // These test the push_handler directly via handle_payload to verify
+    // that notifications are only sent for non-error response chunks.
+    // ----------------------------------------------------------------
+
+    /// Helper: send a request through the given ingress pipeline and count
+    /// the notifications that arrive on the notifier.
+    async fn send_and_count_notifications(
+        ingress: &Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>,
+        notifier: &Arc<tokio::sync::Notify>,
+    ) -> u32 {
+        let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = notify_count.clone();
+        let notifier_clone = notifier.clone();
+        let counter_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = notifier_clone.notified() => {
+                        count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
+        let payload = encode_request(
+            &request_id,
+            connection_info,
+            &serde_json::json!({"prompt": "test"}),
+        );
+        let result = ingress.handle_payload(payload, Some(request_id)).await;
+        assert!(
+            result.is_ok(),
+            "handle_payload should succeed: {:?}",
+            result.err()
+        );
+
+        counter_task.await.unwrap();
+        notify_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Successful request: notified on each chunk and on stream completion.
+    #[tokio::test]
+    async fn test_successful_request_notifies_on_chunks_and_completion() {
+        let engine = MockStreamingEngine::success(5);
+        let ingress =
+            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let count = send_and_count_notifications(&ingress, &notifier).await;
+
+        // 5 chunks + 1 stream completion = 6 notify_one() calls.
+        // Coalescing means we get fewer wakeups, but at least 2.
+        assert!(
+            count >= 2,
+            "Expected at least 2 notification wakeups for 5 successful chunks + completion, got {count}"
+        );
+    }
+
+    /// All-error request: no notifications since every chunk is an error.
+    #[tokio::test]
+    async fn test_error_response_does_not_notify() {
+        let engine = MockStreamingEngine::all_errors(3);
+        let ingress =
+            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let count = send_and_count_notifications(&ingress, &notifier).await;
+
+        assert_eq!(
+            count, 0,
+            "Expected 0 notifications for all-error response, got {count}"
+        );
+    }
+
+    /// Mixed response: successful chunks followed by an error chunk at the end.
+    /// Only the successful chunks should notify; the error chunk and stream
+    /// completion should not.
+    #[tokio::test]
+    async fn test_mixed_response_only_notifies_on_success_chunks() {
+        // 5 chunks total, last one (index 4) is an error
+        let engine = MockStreamingEngine::with_error_at(5, vec![4]);
+        let ingress =
+            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let count = send_and_count_notifications(&ingress, &notifier).await;
+
+        // 4 successful chunks should notify, error chunk + completion should not.
+        // Coalescing means fewer wakeups, but at least 1.
+        assert!(
+            count >= 1,
+            "Expected at least 1 notification for 4 successful chunks, got {count}"
         );
     }
 }
