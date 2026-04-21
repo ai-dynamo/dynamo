@@ -60,7 +60,7 @@ impl NvCreateCompletionRequest {
                 .as_ref()
                 .map(|opts| opts.continuous_usage_stats)
                 .unwrap_or(false),
-            enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
+            enable_logprobs: self.inner.logprobs.is_some(),
             response_fields,
             return_tokens_as_token_ids: self.return_tokens_as_token_ids.unwrap_or(false),
         };
