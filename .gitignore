@@ -117,7 +117,6 @@ core.*
 /.cursor
 /.claude/*
 !/.claude/skills/
-/CLAUDE.md
 /CLAUDE.md.bak
 
 # AI generated worklogs

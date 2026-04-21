@@ -21,13 +21,19 @@ Quick index of the failures users most commonly hit, with the fix and a pointer 
 
 Symptom: `ImagePullBackOff` / `ErrImagePull` on a Dynamo pod.
 
-Cause: the image tag doesn't exist in NGC, or the cluster lacks a pull secret for NGC.
+Cause: the image tag doesn't exist, or the cluster lacks credentials for the registry hosting the image.
 
 Fix:
 
-1. Confirm the pinned tag exists — [release-artifacts.md](reference/release-artifacts.md) lists the canonical `:1.0.1` tag.
-2. If using a top-of-tree Kimi-k2.5 recipe, you must build and push your own image. See [`recipes/kimi-k2.5/README.md`](../recipes/kimi-k2.5/README.md).
-3. NGC pull secret: `kubectl create secret docker-registry ngc-cred --docker-server=nvcr.io --docker-username=\$oauthtoken --docker-password=$NGC_API_KEY`.
+1. **First check the tag.** All canonical Dynamo images are public on NGC at `nvcr.io/nvidia/ai-dynamo/{vllm-runtime,sglang-runtime,tensorrtllm-runtime,mocker-runtime}` and **do not require an `imagePullSecrets`**. Confirm the pinned tag exists — [release-artifacts.md](reference/release-artifacts.md) lists the canonical `:1.0.1` tag.
+2. If you're running a top-of-tree recipe (e.g. Kimi-k2.5), you must build and push your own image. See [`recipes/kimi-k2.5/README.md`](../recipes/kimi-k2.5/README.md) and the "Build a local image" workflow in [`SKILLS.md`](../SKILLS.md).
+3. **Only if** you're pulling from a private registry mirror or a non-public third-party image, create a registry pull secret and reference it via `imagePullSecrets` on the pod spec:
+   ```bash
+   kubectl create secret docker-registry <name> \
+     --docker-server=<registry> \
+     --docker-username='$oauthtoken' \
+     --docker-password=$NGC_API_KEY
+   ```
 
 ## Dynamo CRDs missing
 
@@ -53,7 +59,7 @@ RuntimeError: The NVIDIA driver on your system is too old (found version 570). P
 
 Cause: the container's CUDA version needs a newer driver than the host ships.
 
-Fix: check the minimum driver for your tag in the [TRT-LLM container/driver matrix](backends/trtllm/README.md#container--driver-matrix) and upgrade, or pull a lower-CUDA variant. The validation error message itself is being improved as a separate engineering follow-up.
+Fix: check the minimum-driver guidance for your tag in the [TRT-LLM Feature Support Matrix](backends/trtllm/README.md#feature-support-matrix) and upgrade, or pull a lower-CUDA variant. The validation error message itself is being improved as a separate engineering follow-up.
 
 ## `/v1/health/ready` returns 404
 
