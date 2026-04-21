@@ -208,6 +208,7 @@ jobs:
 
       # FIX 9: PR body template via env var, not Actions expression interpolation.
       - name: Open PR
+        id: open_pr
         if: steps.commit.outputs.no_changes != 'true'
         env:
           GH_TOKEN: ${{ secrets.github_token }}
@@ -217,6 +218,58 @@ jobs:
           PR_BODY: ${{ inputs.pr_body }}
         run: |
           set -euo pipefail
-          gh pr create --base "$BASE" --head "$BRANCH" \
+          PR_URL=$(gh pr create --base "$BASE" --head "$BRANCH" \
             --title "$PR_TITLE" --body "$PR_BODY" \
-            --label release --label chore
+            --label release --label chore)
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      # Dispatch a Devin session to push the three reference-doc updates
+      # (release-artifacts.md, support-matrix.md, feature-matrix.md) to the
+      # same PR branch, pre-merge and pre-tag. Fire-and-forget: Devin's
+      # commits arrive as normal pushes and re-trigger CI. If DEVIN_API_KEY
+      # isn't configured the step no-ops and the release manager can amend
+      # the docs by hand.
+      - name: Dispatch Devin docs sync
+        if: steps.open_pr.conclusion == 'success'
+        env:
+          DEVIN_API_KEY: ${{ secrets.devin_api_key }}
+          BRANCH:        ${{ inputs.pr_branch }}
+          PR_URL:        ${{ steps.open_pr.outputs.url }}
+          VERSION:       ${{ inputs.version }}
+          VLLM:          ${{ inputs.vllm_version }}
+          SGLANG:        ${{ inputs.sglang_version }}
+          TRTLLM:        ${{ inputs.trtllm_version }}
+          NIXL:          ${{ inputs.nixl_version }}
+          RELEASE_DATE:  ${{ inputs.release_date }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEVIN_API_KEY:-}" ]; then
+            echo "::warning::DEVIN_API_KEY not configured; skipping reference-doc sync. Release manager must amend the docs manually before merge."
+            exit 0
+          fi
+
+          # Build the prompt in a file to keep the curl payload readable and
+          # safe from shell quoting gotchas.
+          PROMPT_FILE="$(mktemp)"
+          cat >"$PROMPT_FILE" <<PROMPT
+          Push reference-doc updates to ai-dynamo/dynamo branch ${BRANCH} (PR ${PR_URL}) for v${VERSION}. Update three files:
+
+          1. docs/reference/release-artifacts.md -- add a new row to the GitHub Releases table matching the existing row format; link to https://github.com/ai-dynamo/dynamo/releases/tag/v${VERSION}; release date ${RELEASE_DATE}. Bump the "Current Release" header and the GitHub + Docs links at the top of the file to v${VERSION} (canonical docs host is docs.dynamo.nvidia.com/dynamo).
+
+          2. docs/reference/support-matrix.md -- add a backend-version row for v${VERSION} (SGLang ${SGLANG}, TRT-LLM ${TRTLLM}, vLLM ${VLLM}, NIXL ${NIXL}) right after the main (ToT) row. Demote any "(in progress)" marker on the prior version's row. Refresh the "Latest stable release" at-a-glance line to v${VERSION} with the same backend triple.
+
+          3. docs/reference/feature-matrix.md -- bump the "*Updated for Dynamo vX.Y.Z*" stamp to v${VERSION}. Do NOT rewrite historical version mentions in prose.
+
+          Commit with DCO sign-off (-s) and push to ${BRANCH}. Do NOT open a new PR -- the bump PR is already open at ${PR_URL}. If any of the files already contain a row for v${VERSION}, no-op on that file.
+          PROMPT
+
+          # jq builds a valid JSON body with the prompt string properly escaped.
+          BODY="$(jq -Rs --arg key "docs-sync-${BRANCH}-${VERSION}" \
+            '{prompt: ., idempotent_key: $key}' <"$PROMPT_FILE")"
+
+          curl -fsS -X POST https://api.devin.ai/v1/sessions \
+            -H "Authorization: Bearer ${DEVIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"
+
+          rm -f "$PROMPT_FILE"
