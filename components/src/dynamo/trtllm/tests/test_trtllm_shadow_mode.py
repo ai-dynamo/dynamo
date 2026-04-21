@@ -10,7 +10,9 @@ so they run anywhere.
 
 import pytest
 from gpu_memory_service.integrations.trtllm.utils import (
+    SHADOW_ALLREDUCE_STRATEGY,
     configure_gms_lock_mode,
+    force_nccl_allreduce_for_shadow,
     is_shadow_mode,
 )
 
@@ -76,3 +78,21 @@ def test_configure_returns_same_dict(monkeypatch, clean_env):
     extra = {}
     returned = configure_gms_lock_mode(extra)
     assert returned is extra
+
+
+def test_force_nccl_allreduce_overrides_mnnvl():
+    arg_map = {"allreduce_strategy": "MNNVL"}
+    force_nccl_allreduce_for_shadow(arg_map)
+    assert arg_map["allreduce_strategy"] == SHADOW_ALLREDUCE_STRATEGY
+
+
+def test_force_nccl_allreduce_sets_when_unset():
+    arg_map = {}
+    force_nccl_allreduce_for_shadow(arg_map)
+    assert arg_map["allreduce_strategy"] == SHADOW_ALLREDUCE_STRATEGY
+
+
+def test_force_nccl_allreduce_is_idempotent():
+    arg_map = {"allreduce_strategy": SHADOW_ALLREDUCE_STRATEGY}
+    force_nccl_allreduce_for_shadow(arg_map)
+    assert arg_map["allreduce_strategy"] == SHADOW_ALLREDUCE_STRATEGY

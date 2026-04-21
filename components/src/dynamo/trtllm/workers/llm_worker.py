@@ -339,6 +339,16 @@ async def init_llm_worker(
 
     _apply_autotuner_gate(arg_map, config.load_format)
 
+    # Force allreduce_strategy=NCCL on BOTH engines when shadow mode is on.
+    # MNNVL's 180 GiB symmetric VA window cannot coexist with a second
+    # co-located engine on the same GPU set. Applied last so it is not
+    # overwritten by --extra-engine-args or --override-engine-args.
+    if config.load_format == "gms" and config.gms_shadow_mode:
+        from gpu_memory_service.integrations.trtllm.utils import (
+            force_nccl_allreduce_for_shadow,
+        )
+        force_nccl_allreduce_for_shadow(arg_map)
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
