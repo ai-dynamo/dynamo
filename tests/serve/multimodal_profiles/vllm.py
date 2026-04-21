@@ -87,7 +87,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[
                     pytest.mark.skip(
                         reason="vLLM engine core init fails on amd64 post-merge. "
-                        "TODO(<LINEAR-ID>)"
+                        "OPS-4445"
                     ),
                     pytest.mark.post_merge,
                 ],
