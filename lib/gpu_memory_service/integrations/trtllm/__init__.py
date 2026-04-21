@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from gpu_memory_service.integrations.common import patch_empty_cache
@@ -27,6 +28,10 @@ from gpu_memory_service.integrations.trtllm.model_loader import (
     patch_model_loader,
     set_gms_enabled,
     set_gms_lock_mode,
+)
+from gpu_memory_service.integrations.trtllm.mpi_bootstrap import (
+    install_mpi_worker_bootstrap,
+    set_extra_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,5 +49,12 @@ def setup_gms(model_loader_extra_config: dict[str, Any] | None = None) -> None:
 
     patch_empty_cache()
     patch_model_loader()
+
+    # Mark GMS enabled in env so MPI worker children can detect it, and stash the
+    # extra config so they get the same lock mode. Both must happen before the
+    # MPI session bootstrap is installed — the child hook reads them back.
+    os.environ["DYN_GMS_TRTLLM_ENABLED"] = "1"
+    set_extra_config(extra)
+    install_mpi_worker_bootstrap()
 
     logger.info("[GMS] TensorRT-LLM integration enabled (mode=%s)", lock_mode)
