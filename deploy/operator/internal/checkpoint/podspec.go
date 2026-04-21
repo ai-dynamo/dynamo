@@ -21,13 +21,16 @@ import (
 	"context"
 	"fmt"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
+// ApplyRestorePodMetadata writes restore-target labels and annotations for a
+// restore pod, including the container-name list the snapshot agent must act
+// on. When checkpoint is disabled or not yet ready, per-container status
+// annotations and the container list are cleared.
+func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo, containerNames []string) {
 	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
 	hash := ""
 	artifactVersion := ""
@@ -36,30 +39,29 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
-}
-
-// resolveMainContainer finds the container named "main" in the pod spec.
-// ExtraPodSpec.PodSpec.Containers can inject user containers before the main
-// container (mergo merge happens before main is appended), so index 0 is
-// not guaranteed to be the main container here.
-func resolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
+	if enabled {
+		annotations[snapshotprotocol.CheckpointContainersAnnotation] = snapshotprotocol.FormatCheckpointContainers(containerNames)
+	} else {
+		delete(annotations, snapshotprotocol.CheckpointContainersAnnotation)
 	}
-	return nil
 }
 
+// InjectCheckpointIntoPodSpec shapes podSpec for the listed workload
+// containers as a restore target when checkpoint is enabled. In PR 1 callers
+// always pass []string{"main"}; PR 2 will vary this for failover pods.
 func InjectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
 	namespace string,
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
+	containerNames []string,
 ) error {
 	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
+	}
+	if len(containerNames) == 0 {
+		return fmt.Errorf("checkpoint inject requires at least one container name")
 	}
 
 	info := checkpointInfo
@@ -75,10 +77,6 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	mainContainer := resolveMainContainer(podSpec)
-	if mainContainer == nil {
-		return fmt.Errorf("no container named %q found in pod spec", commonconsts.MainContainerName)
-	}
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
@@ -87,7 +85,7 @@ func InjectCheckpointIntoPodSpec(
 		reader,
 		namespace,
 		podSpec,
-		mainContainer,
+		containerNames,
 		info.Hash,
 		info.ArtifactVersion,
 		snapshotprotocol.DefaultSeccompLocalhostProfile,
@@ -97,20 +95,35 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	EnsurePodInfoVolume(podSpec)
-	EnsurePodInfoMount(mainContainer)
-	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
-			ctx,
-			reader,
-			namespace,
-			info.Hash,
-			info.ArtifactVersion,
-		)
-		if err != nil {
-			return err
+	for _, name := range containerNames {
+		container := findContainer(podSpec.Containers, name)
+		if container == nil {
+			return fmt.Errorf("no container named %q found in pod spec", name)
 		}
-		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
+		EnsurePodInfoMount(container)
+		if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+			storage, err := snapshotprotocol.DiscoverAndResolveStorage(
+				ctx,
+				reader,
+				namespace,
+				info.Hash,
+				info.ArtifactVersion,
+			)
+			if err != nil {
+				return err
+			}
+			EnsureGMSRestoreSidecars(podSpec, container, storage)
+		}
 	}
 
+	return nil
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
 	return nil
 }

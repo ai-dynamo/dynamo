@@ -1086,6 +1086,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			opt.dynamoComponentDeployment.Namespace,
 			podSpec,
 			checkpointInfo,
+			[]string{commonconsts.MainContainerName},
 		); err != nil {
 			return nil, errors.Wrap(err, "failed to inject checkpoint config")
 		}
@@ -1122,7 +1123,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 	// Restore labels are operator-controlled state. Clear stale values after
 	// metadata merge and only reapply them when checkpoint material is ready.
-	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
+	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo, []string{commonconsts.MainContainerName})
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart

@@ -6881,7 +6881,7 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 		Enabled: true,
 		Ready:   false,
 		Hash:    "resolved-hash",
-	})
+	}, []string{commonconsts.MainContainerName})
 	assert.Equal(t, "keep", labels["user-label"])
 	assert.Equal(t, "keep-too", labels["extra-label"])
 	_, hasRestoreTarget := labels[snapshotprotocol.RestoreTargetLabel]
@@ -6916,9 +6916,10 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 		Enabled: true,
 		Ready:   true,
 		Hash:    "resolved-hash",
-	})
+	}, []string{commonconsts.MainContainerName})
 	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[snapshotprotocol.RestoreTargetLabel])
 	assert.Equal(t, "resolved-hash", labels[snapshotprotocol.CheckpointIDLabel])
+	assert.Equal(t, commonconsts.MainContainerName, annotations[snapshotprotocol.CheckpointContainersAnnotation])
 }
 
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {

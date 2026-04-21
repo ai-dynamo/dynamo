@@ -188,7 +188,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, []string{consts.MainContainerName}))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
@@ -229,7 +229,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, []string{consts.MainContainerName}))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
@@ -242,10 +242,10 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		gmsServer := findContainer(podSpec, gms.ServerContainerName)
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, []string{consts.MainContainerName}))
+		gmsServer := findContainerAcrossInits(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
-		loader := findContainer(podSpec, GMSLoaderContainer)
+		loader := findContainerAcrossInits(podSpec, GMSLoaderContainer)
 		require.NotNil(t, loader)
 
 		// Restore: server and loader are init sidecars (restartPolicy=Always)
@@ -284,7 +284,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info)
+				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info, []string{consts.MainContainerName})
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.errMsg)
 			})
@@ -453,9 +453,9 @@ func TestResolveCheckpointForService(t *testing.T) {
 	})
 }
 
-// findContainer is a test helper that locates a container by name across both
-// regular containers and init containers.
-func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
+// findContainerAcrossInits is a test helper that locates a container by name
+// across both regular containers and init containers.
+func findContainerAcrossInits(podSpec *corev1.PodSpec, name string) *corev1.Container {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name == name {
 			return &podSpec.Containers[i]

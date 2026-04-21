@@ -1376,6 +1376,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
 		}
+		if got := podTemplateSpec.Annotations[snapshotprotocol.CheckpointContainersAnnotation]; got != commonconsts.MainContainerName {
+			t.Fatalf("expected %s annotation to be %q, got %q", snapshotprotocol.CheckpointContainersAnnotation, commonconsts.MainContainerName, got)
+		}
 	})
 
 	t.Run("ready gms checkpoint injects gms restore sidecars", func(t *testing.T) {

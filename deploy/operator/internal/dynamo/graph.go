@@ -1453,6 +1453,7 @@ func GenerateGrovePodCliqueSet(
 					dynamoDeployment.Namespace,
 					podSpec,
 					checkpointInfo,
+					[]string{commonconsts.MainContainerName},
 				); err != nil {
 					return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", r.Name, err)
 				}
@@ -1488,7 +1489,10 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
-			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
+			if annotations == nil {
+				annotations = map[string]string{}
+			}
+			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo, []string{commonconsts.MainContainerName})
 
 			// Apply restart annotation if this service should be restarted.
 			// For services not in the current restart order, preserve their existing annotation

@@ -580,7 +580,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,
 				Namespace:   testNamespace,
-				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
+				Annotations: map[string]string{snapshotprotocol.CheckpointJobStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -672,7 +672,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "job-agent-failed",
 				Namespace:   testNamespace,
-				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
+				Annotations: map[string]string{snapshotprotocol.CheckpointJobStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -698,7 +698,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "job-running-agent-failed",
 				Namespace:   testNamespace,
-				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
+				Annotations: map[string]string{snapshotprotocol.CheckpointJobStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
 			},
 			Status: batchv1.JobStatus{Active: 1},
 		}
@@ -736,7 +736,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,
 				Namespace:   testNamespace,
-				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
+				Annotations: map[string]string{snapshotprotocol.CheckpointJobStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
