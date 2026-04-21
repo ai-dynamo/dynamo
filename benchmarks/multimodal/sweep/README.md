@@ -29,7 +29,10 @@ python -m benchmarks.multimodal.sweep \
 model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
 concurrencies: [16, 32, 64, 128, 256]
 osl: 150                    # output sequence length
-request_count: 1000         # requests per concurrency level
+conversation_num: 10        # sessions per sweep value (optional; derived from
+                            # input JSONL's unique session_id count if unset)
+request_count: 200          # OPTIONAL hard cap on total credits; rejected if
+                            # set alone without conversation_num
 warmup_count: 5
 port: 8000
 timeout: 900                # seconds to wait for server readiness
@@ -64,9 +67,49 @@ python -m benchmarks.multimodal.sweep \
   --config experiments/embedding_cache/vllm_serve.yaml \
   --concurrencies 1,2,4 \
   --osl 200 \
-  --request-count 50 \
+  --conversation-num 10 \
   --skip-plots
 ```
+
+## Grouped Single-Turn Semantics (aiperf 0.7.0+)
+
+`aiperf==0.7.0` (via [PR 824](https://github.com/ai-dynamo/aiperf/pull/824))
+groups single_turn rows by JSONL `session_id`. A JSONL with 10 users × 10 turns
+each dispatches 10 causal-ordered chains (turn-(k+1) for user A only after
+turn-k for user A returns).
+
+Control the session count via `conversation_num`. **`request_count` alone is
+rejected at config-load** because it triggers SequentialSampler wrap (extra
+turn-0 sessions, incomplete chains) — the exact DIS-1807 bug. Use
+`conversation_num` as the primary control; add `request_count` only as a safety
+cap when you need one.
+
+### Upgrading aiperf in an existing container
+
+The benchmark image currently pins `aiperf==0.6.0`. Until the pin is bumped
+(tracked separately), any new cloud-session container starts pre-824 and
+must be upgraded before running the sweep. Install aiperf 0.7.0 from the
+pre-staged wheel:
+
+```bash
+pip install --no-deps --force-reinstall \
+  /home/scratch.qiwa_ent/workspace/aiperf-wheels/aiperf-0.7.0-py3-none-any.whl
+```
+
+Works on air-gapped nodes (scratch NFS is visible inside the Pyxis overlay).
+Sentinel that PR 824 is active:
+
+```bash
+python -c "from aiperf.dataset.loader.single_turn import SingleTurnDatasetLoader; import inspect; assert 'single_turn_data.session_id or' in inspect.getsource(SingleTurnDatasetLoader.load_dataset)"
+```
+
+### Warmup semantics
+
+`warmup_count: N` is a credit budget, NOT a session budget. aiperf's
+continuation-turn priority means the first `N` warmup credits feed `user_0`
+turns `0..N-1` (then sampler advances). Profiling then starts at `user_1` and
+wraps to a fresh `user_0` instance after `user_9`. `warmup_count > turns per
+session` consumes multiple sessions — keep it small.
 
 ## Output Directory Structure
 

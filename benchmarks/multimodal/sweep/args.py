@@ -59,10 +59,23 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Override output sequence length.",
     )
     parser.add_argument(
+        "--conversation-num",
+        type=int,
+        default=None,
+        help=(
+            "Override number of grouped conversations (sessions) per sweep value. "
+            "Primary control for grouped single_turn dispatch. If unset, derived "
+            "from the input JSONL's unique session_id count."
+        ),
+    )
+    parser.add_argument(
         "--request-count",
         type=int,
         default=None,
-        help="Override request count per sweep value.",
+        help=(
+            "Optional hard cap on total credits per sweep value. Must be set "
+            "alongside --conversation-num; a cap alone is rejected at config-load."
+        ),
     )
     parser.add_argument(
         "--skip-plots",

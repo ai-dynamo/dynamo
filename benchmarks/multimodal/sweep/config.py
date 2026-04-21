@@ -32,7 +32,8 @@ class SweepConfig:
     request_rates: Optional[List[int]] = None
     concurrencies: Optional[List[int]] = None
     osl: int = 150
-    request_count: int = 1000
+    conversation_num: Optional[int] = None
+    request_count: Optional[int] = None
     warmup_count: int = 5
     port: int = 8000
     timeout: int = 600
@@ -86,6 +87,15 @@ class SweepConfig:
                 "At least one of request_rates or concurrencies is required."
             )
 
+        if self.request_count is not None and self.conversation_num is None:
+            raise ValueError(
+                "'request_count' alone is no longer supported. Set "
+                "'conversation_num: N' (derived from your JSONL's unique "
+                "session_id count, typically N users). 'request_count' is "
+                "accepted only as an optional hard-cap alongside "
+                "'conversation_num'."
+            )
+
 
 _DEFAULT_REQUEST_RATES: List[int] = [4, 8, 16, 32, 64]
 
@@ -127,7 +137,8 @@ def load_config(
         request_rates=yaml_request_rates,
         concurrencies=yaml_concurrencies,
         osl=raw.get("osl", 150),
-        request_count=raw.get("request_count", 1000),
+        conversation_num=raw.get("conversation_num"),
+        request_count=raw.get("request_count"),
         warmup_count=raw.get("warmup_count", 5),
         port=raw.get("port", 8000),
         timeout=raw.get("timeout", 600),

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 def _build_aiperf_cmd(
@@ -13,7 +13,8 @@ def _build_aiperf_cmd(
     port: int,
     sweep_mode: str,
     sweep_value: int,
-    request_count: int,
+    conversation_num: int,
+    request_count: Optional[int],
     warmup_count: int,
     input_file: str,
     osl: int,
@@ -24,7 +25,7 @@ def _build_aiperf_cmd(
     else:
         sweep_flag = "--request-rate"
 
-    return [
+    cmd = [
         "aiperf",
         "profile",
         "-m",
@@ -33,8 +34,8 @@ def _build_aiperf_cmd(
         f"http://localhost:{port}",
         sweep_flag,
         str(sweep_value),
-        "--request-count",
-        str(request_count),
+        "--conversation-num",
+        str(conversation_num),
         "--warmup-request-count",
         str(warmup_count),
         "--input-file",
@@ -56,6 +57,9 @@ def _build_aiperf_cmd(
         "none",
         "--no-server-metrics",
     ]
+    if request_count is not None:
+        cmd += ["--request-count", str(request_count)]
+    return cmd
 
 
 def run_aiperf_single(
@@ -63,7 +67,8 @@ def run_aiperf_single(
     port: int,
     sweep_mode: str,
     sweep_value: int,
-    request_count: int,
+    conversation_num: int,
+    request_count: Optional[int],
     warmup_count: int,
     input_file: str,
     osl: int,
@@ -76,6 +81,7 @@ def run_aiperf_single(
         port=port,
         sweep_mode=sweep_mode,
         sweep_value=sweep_value,
+        conversation_num=conversation_num,
         request_count=request_count,
         warmup_count=warmup_count,
         input_file=input_file,
@@ -104,7 +110,8 @@ def run_sweep(
     port: int,
     sweep_mode: str,
     sweep_values: List[int],
-    request_count: int,
+    conversation_num: int,
+    request_count: Optional[int],
     warmup_count: int,
     input_file: str,
     osl: int,
@@ -119,6 +126,7 @@ def run_sweep(
             port=port,
             sweep_mode=sweep_mode,
             sweep_value=value,
+            conversation_num=conversation_num,
             request_count=request_count,
             warmup_count=warmup_count,
             input_file=input_file,
