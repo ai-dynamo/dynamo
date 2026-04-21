@@ -149,6 +149,10 @@ def profile_decode_aiconfigurator(
     attention_dp_size: int,
     **model_config_kwargs: Any,
 ) -> None:
+    # Ensure attention_dp_size is forwarded to AIC ModelConfig for MoE models
+    # where tp_size * attention_dp_size must equal moe_tp_size * moe_ep_size.
+    model_config_kwargs.setdefault("attention_dp_size", attention_dp_size)
+
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         perf_dict = ai_configurator_perf_estimator.estimate_perf(
             isl,

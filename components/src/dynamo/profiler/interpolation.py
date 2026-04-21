@@ -104,13 +104,19 @@ async def run_interpolation(
             system=system.lower(),
             backend=backend,
         )
+        # TODO: profile_prefill_aiconfigurator does not forward
+        # attention_dp_size to _profile_prefill_helper, so
+        # prefill_thpt_per_gpu in the saved NPZ will be undercounted for
+        # MoE DEP configs where dp > 1.  The TTFT estimate is unaffected.
         profile_prefill_aiconfigurator(
             work_dir,
             best_prefill_gpus,
             sweep_max_context_length,
             ops.prefill_interpolation_granularity,
             estimator,
-            tp_size=best_prefill_config.tp_size,
+            tp_size=best_prefill_config.tp,
+            moe_tp_size=best_prefill_config.moe_tp,
+            moe_ep_size=best_prefill_config.moe_ep,
         )
     elif sweep_mode == PlannerPreDeploymentSweepMode.Thorough:
         logger.info("Using real GPUs for prefill interpolation.")
@@ -172,7 +178,10 @@ async def run_interpolation(
         max_kv_tokens = estimator.get_max_kv_tokens(
             isl,
             osl,
-            tp_size=best_decode_config.tp_size,
+            tp_size=best_decode_config.tp,
+            attention_dp_size=best_decode_config.dp,
+            moe_tp_size=best_decode_config.moe_tp,
+            moe_ep_size=best_decode_config.moe_ep,
         )
         profile_decode_aiconfigurator(
             work_dir,
@@ -182,7 +191,9 @@ async def run_interpolation(
             ops.decode_interpolation_granularity,
             estimator,
             attention_dp_size,
-            tp_size=best_decode_config.tp_size,
+            tp_size=best_decode_config.tp,
+            moe_tp_size=best_decode_config.moe_tp,
+            moe_ep_size=best_decode_config.moe_ep,
         )
     elif sweep_mode == PlannerPreDeploymentSweepMode.Thorough:
         logger.info("Using real GPUs for decode interpolation.")
