@@ -46,6 +46,7 @@ func runCheckpoint(args []string) error {
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	checkpointID := flags.String("checkpoint-id", "", "Explicit checkpoint ID; defaults to a generated value")
+	containers := flags.String("containers", "", "Comma-separated, ordered list of workload container names to snapshot. Overrides the manifest's nvidia.com/snapshot-containers annotation.")
 	disableCudaCheckpointJobFile := flags.Bool("disable-cuda-checkpoint-job-file", false, "Preserve the manifest command instead of wrapping it with cuda-checkpoint --launch-job")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
@@ -65,6 +66,7 @@ func runCheckpoint(args []string) error {
 		Namespace:                    *namespace,
 		KubeContext:                  *kubeContext,
 		CheckpointID:                 *checkpointID,
+		ContainersFlag:               *containers,
 		DisableCudaCheckpointJobFile: *disableCudaCheckpointJobFile,
 		Timeout:                      *timeout,
 	})
@@ -91,6 +93,7 @@ func runRestore(args []string) error {
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	checkpointID := flags.String("checkpoint-id", "", "Checkpoint ID to restore")
+	containers := flags.String("containers", "", "Comma-separated, ordered list of workload container names to restore. Overrides the manifest's nvidia.com/snapshot-containers annotation.")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
 
 	if err := flags.Parse(args); err != nil {
@@ -105,12 +108,13 @@ func runRestore(args []string) error {
 
 	snapshotctlLog.Info("Running restore", "manifest", *manifest, "pod", *podName, "namespace", *namespace, "checkpoint_id", *checkpointID)
 	result, err := runRestoreFlow(context.Background(), restoreOptions{
-		ManifestPath: *manifest,
-		PodName:      *podName,
-		Namespace:    *namespace,
-		KubeContext:  *kubeContext,
-		CheckpointID: *checkpointID,
-		Timeout:      *timeout,
+		ManifestPath:   *manifest,
+		PodName:        *podName,
+		Namespace:      *namespace,
+		KubeContext:    *kubeContext,
+		CheckpointID:   *checkpointID,
+		ContainersFlag: *containers,
+		Timeout:        *timeout,
 	})
 	if err != nil {
 		return err

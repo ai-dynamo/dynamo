@@ -48,15 +48,6 @@ func podFromInformerObj(obj interface{}) (*corev1.Pod, bool) {
 	return pod, ok
 }
 
-// resolveMainContainerName returns the name of the workload container, which
-// is always Containers[0]. GMS sidecars are appended after the workload.
-func resolveMainContainerName(pod *corev1.Pod) string {
-	if len(pod.Spec.Containers) == 0 {
-		return ""
-	}
-	return pod.Spec.Containers[0].Name
-}
-
 func isPodReady(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning {
 		return false

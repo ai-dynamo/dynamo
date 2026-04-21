@@ -23,11 +23,15 @@ import (
 )
 
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
+// CheckpointLocation is the per-container target directory; PodCheckpointRoot
+// is the pod-scoped root (<base>/<id>/versions/<v>/) under which staging
+// (tmp/<uuid>/) is created so multiple containers share one staging root.
 type CheckpointRequest struct {
 	ContainerID        string
 	ContainerName      string
 	CheckpointID       string
 	CheckpointLocation string
+	PodCheckpointRoot  string
 	StartedAt          time.Time
 	NodeName           string
 	PodName            string
@@ -62,8 +66,12 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 		return fmt.Errorf("checkpoint location is required")
 	}
 
+	if strings.TrimSpace(req.PodCheckpointRoot) == "" {
+		return fmt.Errorf("pod checkpoint root is required")
+	}
+
 	finalDir := req.CheckpointLocation
-	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
+	tmpRoot := filepath.Join(req.PodCheckpointRoot, "tmp")
 	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
 		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
 	}
@@ -72,6 +80,10 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
+
+	if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
+		return fmt.Errorf("failed to create container checkpoint parent directory: %w", err)
+	}
 
 	// Phase 1: Inspect container state
 	state, err := inspectContainer(ctx, ctrd, log, req)

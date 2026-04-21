@@ -125,9 +125,9 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
 
-	containerName := req.ContainerName
+	containerName := strings.TrimSpace(req.ContainerName)
 	if containerName == "" {
-		containerName = "main"
+		return nil, fmt.Errorf("restore: container name is required")
 	}
 
 	placeholderPID, _, err := snapshotruntime.ResolveContainerByPod(ctx, ctrd, req.PodName, req.PodNamespace, containerName)

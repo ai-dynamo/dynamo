@@ -70,6 +70,12 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			Status: corev1.ConditionTrue,
 		})
 	}
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	if _, has := annotations[snapshotprotocol.CheckpointContainersAnnotation]; !has {
+		annotations[snapshotprotocol.CheckpointContainersAnnotation] = "main"
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
@@ -207,7 +213,7 @@ func TestReconcileCheckpointPod(t *testing.T) {
 			}
 			if tc.annotation != "" {
 				job.Annotations = map[string]string{
-					snapshotprotocol.CheckpointStatusAnnotation: tc.annotation,
+					snapshotprotocol.CheckpointJobStatusAnnotation: tc.annotation,
 				}
 			}
 
@@ -412,8 +418,8 @@ func TestReconcileRestorePod(t *testing.T) {
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
+					snapshotprotocol.RestoreStatusAnnotationPrefix + "main":      tc.annotationStatus,
+					snapshotprotocol.RestoreContainerIDAnnotationPrefix + "main": tc.annotationContainerID,
 				}
 			}
 
@@ -425,7 +431,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			}}
 
 			if tc.createDir && tc.hash != "" {
-				dir := filepath.Join(w.config.Storage.BasePath, tc.hash, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+				dir := filepath.Join(w.config.Storage.BasePath, tc.hash, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion, "containers", "main")
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatalf("failed to create checkpoint dir: %v", err)
 				}
@@ -498,7 +504,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), []string{"main"}, "default/test-pod", time.Now())
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}

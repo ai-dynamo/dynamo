@@ -25,6 +25,7 @@ type checkpointOptions struct {
 	Namespace                    string
 	KubeContext                  string
 	CheckpointID                 string
+	ContainersFlag               string
 	DisableCudaCheckpointJobFile bool
 	Timeout                      time.Duration
 }
@@ -50,6 +51,9 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	pod, clientset, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace, opts.KubeContext)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := resolveContainerNames(pod, opts.ContainersFlag); err != nil {
+		return nil, fmt.Errorf("resolve checkpoint containers: %w", err)
 	}
 
 	checkpointID := strings.TrimSpace(opts.CheckpointID)
@@ -130,7 +134,7 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, name
 				return false, fmt.Errorf("unexpected checkpoint watch object %T", event.Object)
 			}
 
-			status = strings.TrimSpace(job.Annotations[snapshotprotocol.CheckpointStatusAnnotation])
+			status = strings.TrimSpace(job.Annotations[snapshotprotocol.CheckpointJobStatusAnnotation])
 			if status == snapshotprotocol.CheckpointStatusCompleted {
 				return true, nil
 			}
