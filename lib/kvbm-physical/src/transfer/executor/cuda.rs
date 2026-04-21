@@ -148,7 +148,7 @@ pub fn execute_cuda_transfer(
             | TransferStrategy::CudaAsyncD2D
     ) {
         let event = stream.record_event(None)?;
-        Ok(ctx.register_cuda_event(event))
+        ctx.register_cuda_event(event)
     } else {
         // Blocking transfers are already synchronized
         Ok(TransferCompleteNotification::completed())

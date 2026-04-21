@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use core::ffi::c_char;
 use nix::fcntl::{FallocateFlags, fallocate};
 use nix::unistd::{ftruncate, unlink};
-use std::fs::File;
 use std::ffi::CString;
+use std::fs::File;
 use std::io::Write;
 use std::os::fd::{BorrowedFd, RawFd};
 

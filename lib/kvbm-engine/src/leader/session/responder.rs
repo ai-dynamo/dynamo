@@ -33,6 +33,7 @@ pub struct ResponderSession {
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     parallel_worker: Option<Arc<dyn ParallelWorkers>>,
+    stage_chunk_size: usize,
     transport: Arc<MessageTransport>,
     // Held blocks using BlockHolder for RAII semantics
     // Blocks are automatically released when the session drops
@@ -49,6 +50,7 @@ impl ResponderSession {
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
         parallel_worker: Option<Arc<dyn ParallelWorkers>>,
+        stage_chunk_size: usize,
         transport: Arc<MessageTransport>,
     ) -> Self {
         Self {
@@ -58,6 +60,7 @@ impl ResponderSession {
             g2_manager,
             g3_manager,
             parallel_worker,
+            stage_chunk_size,
             transport,
             held_g2_blocks: BlockHolder::empty(),
             held_g3_blocks: BlockHolder::empty(),
@@ -252,6 +255,7 @@ impl ResponderSession {
             &self.held_g3_blocks,
             &self.g2_manager,
             &**parallel_worker,
+            self.stage_chunk_size,
         )
         .await?;
 

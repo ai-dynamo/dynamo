@@ -167,6 +167,9 @@ pub struct ServerSession {
     /// Parallel worker for G3→G2 staging.
     parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 
+    /// Number of blocks per G3->G2 staging transfer request.
+    stage_chunk_size: usize,
+
     /// Channel for receiving local commands.
     cmd_rx: mpsc::Receiver<ServerSessionCommand>,
 
@@ -215,6 +218,7 @@ impl ServerSession {
             g3_blocks: BlockHolder::empty(),
             g2_manager: None,
             parallel_worker: None,
+            stage_chunk_size: 16,
             cmd_rx,
             options: ServerSessionOptions { auto_stage: false },
             staging_started: false,
@@ -231,6 +235,7 @@ impl ServerSession {
         worker_handles: Vec<LayoutHandle>,
         g2_manager: Arc<BlockManager<G2>>,
         parallel_worker: Option<Arc<dyn ParallelWorkers>>,
+        stage_chunk_size: usize,
         cmd_rx: mpsc::Receiver<ServerSessionCommand>,
         options: ServerSessionOptions,
     ) -> Self {
@@ -241,6 +246,7 @@ impl ServerSession {
             g3_blocks,
             g2_manager: Some(g2_manager),
             parallel_worker,
+            stage_chunk_size,
             cmd_rx,
             options,
             staging_started: false,
@@ -520,8 +526,13 @@ impl ServerSession {
             return Ok(Vec::new());
         }
 
-        let result =
-            staging::stage_g3_to_g2(&self.g3_blocks, g2_manager, &**parallel_worker).await?;
+        let result = staging::stage_g3_to_g2(
+            &self.g3_blocks,
+            g2_manager,
+            &**parallel_worker,
+            self.stage_chunk_size,
+        )
+        .await?;
 
         // Build BlockInfo for newly staged blocks
         let starting_index = self.g2_blocks.count();

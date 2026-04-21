@@ -18,21 +18,6 @@ use kvbm_physical::transfer::TransferOptions;
 
 use super::blocks::BlockHolder;
 
-/// Default number of blocks per NIXL transfer request for G3→G2 staging.
-///
-/// Bounding request size prevents io_uring SQ ring exhaustion when staging
-/// large sequences. Chunks are processed sequentially to avoid overflowing
-/// the background NIXL notification channel when many sessions run concurrently.
-const DEFAULT_STAGE_CHUNK_SIZE: usize = 16;
-
-fn stage_chunk_size() -> usize {
-    std::env::var("KVBM_STAGE_CHUNK_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_STAGE_CHUNK_SIZE)
-}
-
 /// Result of staging G3 blocks to G2.
 pub struct StagingResult {
     /// Newly created G2 blocks (registered with the G2 manager).
@@ -58,6 +43,7 @@ pub async fn stage_g3_to_g2(
     g3_blocks: &BlockHolder<G3>,
     g2_manager: &BlockManager<G2>,
     parallel_worker: &dyn ParallelWorkers,
+    stage_chunk_size: usize,
 ) -> Result<StagingResult> {
     if g3_blocks.is_empty() {
         return Ok(StagingResult {
@@ -66,7 +52,7 @@ pub async fn stage_g3_to_g2(
     }
 
     let src_ids: Vec<BlockId> = g3_blocks.blocks().iter().map(|b| b.block_id()).collect();
-    let chunk_size = stage_chunk_size();
+    let chunk_size = stage_chunk_size.max(1);
 
     // Allocate all destination G2 blocks upfront
     let dst_blocks = g2_manager

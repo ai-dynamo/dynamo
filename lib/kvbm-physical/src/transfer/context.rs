@@ -38,6 +38,20 @@ fn notification_channel_capacity() -> usize {
         .unwrap_or(DEFAULT_NOTIFICATION_CHANNEL_CAPACITY)
 }
 
+fn enqueue_notification<T>(
+    tx: &mpsc::Sender<T>,
+    notification: T,
+    channel_name: &'static str,
+) -> Result<()> {
+    tx.try_send(notification).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to enqueue {} notification: channel full or closed: {}",
+            channel_name,
+            err
+        )
+    })
+}
+
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"), public)]
 #[allow(dead_code)] // Fields are used in build() but derive macros confuse dead code analysis
@@ -419,7 +433,7 @@ impl TransferContext {
     pub(crate) fn register_nixl_status(
         &self,
         xfer_req: XferRequest,
-    ) -> TransferCompleteNotification {
+    ) -> Result<TransferCompleteNotification> {
         let event = self
             .event_system
             .new_event()
@@ -439,22 +453,19 @@ impl TransferContext {
             event_handle: handle,
         };
 
-        // Send to background handler — log error if channel is full or closed
-        if let Err(e) = self.tx_nixl_status.try_send(notification) {
-            tracing::error!(
-                "Failed to enqueue NIXL status notification: channel full or closed: {}",
-                e
-            );
-        }
+        enqueue_notification(&self.tx_nixl_status, notification, "NIXL status")?;
 
-        TransferCompleteNotification::from_awaiter(awaiter)
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
     /// Register a CUDA event for polling completion.
     ///
     /// This method enqueues the CUDA event to be polled for completion.
     /// Returns a notification object that can be awaited for completion.
-    pub(crate) fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification {
+    pub(crate) fn register_cuda_event(
+        &self,
+        event: CudaEvent,
+    ) -> Result<TransferCompleteNotification> {
         let new_event = self
             .event_system
             .new_event()
@@ -471,15 +482,9 @@ impl TransferContext {
             event_handle: handle,
         };
 
-        // Send to background handler — log error if channel is full or closed
-        if let Err(e) = self.tx_cuda_event.try_send(notification) {
-            tracing::error!(
-                "Failed to enqueue CUDA event notification: channel full or closed: {}",
-                e
-            );
-        }
+        enqueue_notification(&self.tx_cuda_event, notification, "CUDA event")?;
 
-        TransferCompleteNotification::from_awaiter(awaiter)
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
     /// Register a NIXL transfer request for notification-based completion.
@@ -491,7 +496,7 @@ impl TransferContext {
     pub(crate) fn register_nixl_event(
         &self,
         xfer_req: XferRequest,
-    ) -> TransferCompleteNotification {
+    ) -> Result<TransferCompleteNotification> {
         let event = self
             .event_system
             .new_event()
@@ -508,19 +513,41 @@ impl TransferContext {
             event_handle: handle,
         };
 
-        // Send to background handler — log error if channel is full or closed
-        if let Err(e) = self.tx_nixl_events.try_send(notification) {
-            tracing::error!(
-                "Failed to enqueue NIXL event notification: channel full or closed: {}",
-                e
-            );
-        }
+        enqueue_notification(&self.tx_nixl_events, notification, "NIXL event")?;
 
-        TransferCompleteNotification::from_awaiter(awaiter)
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
     /// Get the worker ID for this context.
     pub(crate) fn worker_id(&self) -> u64 {
         self.worker_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::enqueue_notification;
+
+    #[test]
+    fn enqueue_notification_returns_error_when_channel_is_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(1usize).unwrap();
+
+        let err = enqueue_notification(&tx, 2usize, "test").unwrap_err();
+
+        assert!(err.to_string().contains("channel full or closed"));
+        assert_eq!(rx.try_recv().unwrap(), 1usize);
+    }
+
+    #[test]
+    fn enqueue_notification_returns_error_when_channel_is_closed() {
+        let (tx, rx) = mpsc::channel::<usize>(1);
+        drop(rx);
+
+        let err = enqueue_notification(&tx, 1usize, "test").unwrap_err();
+
+        assert!(err.to_string().contains("channel full or closed"));
     }
 }
