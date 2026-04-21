@@ -1434,8 +1434,8 @@ impl
                             }
                         }
 
-                        if let Some(ref mut usage) = data.inner.usage {
-                            if *accumulated_reasoning_tokens > 0 {
+                        if let Some(ref mut usage) = data.inner.usage
+                            && *accumulated_reasoning_tokens > 0 {
                                 if let Some(ref mut completion_tokens_details) =
                                     usage.completion_tokens_details
                                 {
@@ -1453,7 +1453,6 @@ impl
                                         });
                                 }
                                 *accumulated_reasoning_tokens = 0;
-                            }
                         }
                         Ok(data)
                     });
