@@ -263,12 +263,29 @@ async def init_llm_worker(
     arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
+    # unmap/remap. SleepConfig's default restore_modes is a defaultdict whose
+    # default_factory is a lambda defined inside
+    # SleepConfig._make_defaulted_restore_modes; mpi4py cannot pickle local
+    # lambdas, which breaks the TP>1 MPI worker bootstrap. py_executor_creator
+    # later indexes `sleep_config.restore_modes[MODEL_ENGINE_MAIN]` so a plain
+    # dict is not enough — we must keep the defaultdict behaviour but swap the
+    # lambda for a picklable `functools.partial` callable.
     if config.load_format == "gms":
-        from tensorrt_llm.llmapi.llm_args import SleepConfig
+        from collections import defaultdict
+        from functools import partial
 
-        arg_map["sleep_config"] = SleepConfig()
+        from tensorrt_llm._torch.virtual_memory import RestoreMode
+        from tensorrt_llm.llmapi.llm_args import SleepConfig, prefer_pinned
+
+        sleep_config = SleepConfig()
+        default_mode = (
+            RestoreMode.PINNED if prefer_pinned() else RestoreMode.CPU
+        )
+        sleep_config.restore_modes = defaultdict(
+            partial(RestoreMode, default_mode.value),
+            dict(sleep_config.restore_modes),
+        )
+        arg_map["sleep_config"] = sleep_config
 
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:
