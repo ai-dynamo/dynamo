@@ -11,6 +11,7 @@ class PlannerSharedState:
     last_metrics: Metrics = field(default_factory=Metrics)
     num_p_workers: int = 0
     num_d_workers: int = 0
+    num_e_workers: int = 0
     cumulative_gpu_hours: float = 0.0
     last_adjustment_time: float = 0.0
     # Lower bounds from throughput-based scaling (used when both modes enabled)

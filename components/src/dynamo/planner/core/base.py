@@ -17,17 +17,20 @@ from dynamo.planner.connectors.virtual import VirtualConnector
 from dynamo.planner.core.budget import (
     _apply_component_gpu_budget,
     _initialize_gpu_counts,
+    _initialize_single_component_gpu_count,
 )
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.state import PlannerSharedState
 from dynamo.planner.core.throughput.interpolation import (
     DecodeInterpolator,
+    EncodeInterpolator,
     PrefillInterpolator,
 )
 from dynamo.planner.core.throughput.pre_swept_results import PreSweptResultsHelper
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
+from dynamo.planner.monitoring.worker_info import resolve_single_worker_info
 from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
 
 if TYPE_CHECKING:
@@ -153,7 +156,20 @@ class BasePlanner:
         # Only create interpolators when throughput-based scaling is enabled
         # (they require profiling data that isn't needed for load-based-only mode)
         if self.enable_throughput:
-            if "use-pre-swept-results" in config.profile_results_dir:
+            if (
+                self.component_type == SubComponentType.ENCODE
+                and "use-pre-swept-results" in config.profile_results_dir
+            ):
+                raise ValueError(
+                    "Encode mode does not support "
+                    "profile_results_dir='use-pre-swept-results:...' yet. "
+                    "Please provide encode profiling outputs via "
+                    "--profile-results-dir."
+                )
+            if (
+                "use-pre-swept-results" in config.profile_results_dir
+                and self.component_type != SubComponentType.ENCODE
+            ):
                 config_list = config.profile_results_dir.split(":")
                 configs = {
                     "gpu_type": config_list[1],
@@ -180,22 +196,29 @@ class BasePlanner:
                         "Cannot set profile_results_dir to 'use-pre-swept-results' in non-dryrun mode"
                     )
             else:
-                self.prefill_interpolator = PrefillInterpolator(
-                    config.profile_results_dir
-                )
-                self.decode_interpolator = DecodeInterpolator(
-                    config.profile_results_dir
-                )
+                if self.component_type == SubComponentType.ENCODE:
+                    self.encode_interpolator = EncodeInterpolator(
+                        config.profile_results_dir
+                    )
+                else:
+                    self.prefill_interpolator = PrefillInterpolator(
+                        config.profile_results_dir
+                    )
+                    self.decode_interpolator = DecodeInterpolator(
+                        config.profile_results_dir
+                    )
 
         # WorkerInfo: finalized by _init_worker_info() at the start of run().
         # Empty placeholders until then.
         self.prefill_worker_info = WorkerInfo()
         self.decode_worker_info = WorkerInfo()
+        self.encode_worker_info = WorkerInfo()
 
         self.prometheus_metrics: PlannerPrometheusMetrics | None = None
         if not self.dryrun:
             self.prefill_client = None
             self.workers_client = None
+            self.encode_client = None
 
             self.prometheus_port = config.metric_reporting_prometheus_port
 
@@ -225,6 +248,10 @@ class BasePlanner:
             self.no_correction = config.no_correction
 
         if self.enable_load:
+            if self.component_type == SubComponentType.ENCODE:
+                raise ValueError(
+                    "Encode mode does not support load-based scaling in Phase 1."
+                )
             from dynamo.planner.core.load.fpm_regression import (
                 DecodeRegressionModel,
                 PrefillRegressionModel,
@@ -256,18 +283,28 @@ class BasePlanner:
     ) -> None:
         """Initialize WorkerInfo and model name in a single step."""
         connector = getattr(self, "connector", None)
-        self.prefill_worker_info, self.decode_worker_info = resolve_worker_info(
-            backend=self.config.backend,
-            require_prefill=require_prefill,
-            require_decode=require_decode,
-            connector=connector,
-            config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation,
-        )
-        # model_name is resolved and written into both WorkerInfo objects
-        self.model_name = (
-            self.decode_worker_info.model_name or self.prefill_worker_info.model_name
-        )
+        if self.component_type == SubComponentType.ENCODE:
+            self.encode_worker_info = resolve_single_worker_info(
+                backend=self.config.backend,
+                sub_component_type=SubComponentType.ENCODE,
+                connector=connector,
+                config_model_name=getattr(self.config, "model_name", ""),
+                no_operation=self.config.no_operation,
+            )
+            self.model_name = self.encode_worker_info.model_name
+        else:
+            self.prefill_worker_info, self.decode_worker_info = resolve_worker_info(
+                backend=self.config.backend,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+                connector=connector,
+                config_model_name=getattr(self.config, "model_name", ""),
+                no_operation=self.config.no_operation,
+            )
+            # model_name is resolved and written into both WorkerInfo objects
+            self.model_name = (
+                self.decode_worker_info.model_name or self.prefill_worker_info.model_name
+            )
 
     async def _async_init(self):
         """Async initialization: connector init, deployment validation, WorkerInfo."""
@@ -280,33 +317,52 @@ class BasePlanner:
 
         require_prefill = self.component_type == SubComponentType.PREFILL
         require_decode = self.component_type == SubComponentType.DECODE
+        require_encode = self.component_type == SubComponentType.ENCODE
 
         if not self.dryrun and not self.config.no_operation:
             defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
 
             logger.info("Validating deployment...")
-            await self.connector.validate_deployment(
-                prefill_component_name=(
-                    defaults.prefill_worker_k8s_name
-                    if require_prefill and defaults
-                    else None
-                ),
-                decode_component_name=(
-                    defaults.decode_worker_k8s_name
-                    if require_decode and defaults
-                    else None
-                ),
-                require_prefill=require_prefill,
-                require_decode=require_decode,
-            )
+            # Phase 1 encode-specific deployment introspection only exists for the
+            # local Kubernetes connector; delegating connectors use generic validation.
+            if require_encode and isinstance(self.connector, KubernetesConnector):
+                await self.connector.validate_single_component_deployment(
+                    SubComponentType.ENCODE,
+                    component_name=(
+                        defaults.encode_worker_k8s_name if defaults else None
+                    ),
+                )
+            else:
+                await self.connector.validate_deployment(
+                    prefill_component_name=(
+                        defaults.prefill_worker_k8s_name
+                        if require_prefill and defaults
+                        else None
+                    ),
+                    decode_component_name=(
+                        defaults.decode_worker_k8s_name
+                        if require_decode and defaults
+                        else None
+                    ),
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                )
             logger.info("Successfully validated the deployment")
 
-            _initialize_gpu_counts(
-                self.config,
-                self.connector,
-                require_prefill=require_prefill,
-                require_decode=require_decode,
-            )
+            if require_encode:
+                _initialize_single_component_gpu_count(
+                    self.config,
+                    self.connector,
+                    SubComponentType.ENCODE,
+                    component_name=defaults.encode_worker_k8s_name if defaults else None,
+                )
+            else:
+                _initialize_gpu_counts(
+                    self.config,
+                    self.connector,
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                )
 
             await self.connector.wait_for_deployment_ready(include_planner=False)
 
@@ -327,7 +383,11 @@ class BasePlanner:
         worker_info = (
             self.prefill_worker_info
             if self.component_type == SubComponentType.PREFILL
-            else self.decode_worker_info
+            else (
+                self.decode_worker_info
+                if self.component_type == SubComponentType.DECODE
+                else self.encode_worker_info
+            )
         )
         if not worker_info.component_name or not worker_info.endpoint:
             logger.warning(
@@ -438,26 +498,69 @@ class BasePlanner:
 
         return num_p_workers, num_d_workers, True  # Always stable for non-K8s
 
+    async def get_single_component_workers(
+        self, sub_component_type: SubComponentType
+    ) -> tuple[int, bool]:
+        if hasattr(self, "connector") and isinstance(self.connector, KubernetesConnector):
+            worker_info = self.encode_worker_info
+            count, is_stable = self.connector.get_single_component_worker_count(
+                sub_component_type,
+                component_name=worker_info.k8s_name,
+            )
+            return count, is_stable
+
+        if self.runtime is None:
+            raise RuntimeError("Runtime is not initialized")
+
+        worker_info = self.encode_worker_info
+        try:
+            if self.encode_client is None:
+                assert worker_info.component_name is not None
+                assert worker_info.endpoint is not None
+                self.encode_client = await self._get_or_create_client(
+                    worker_info.component_name,
+                    worker_info.endpoint,
+                )
+            return len(self.encode_client.instance_ids()), True  # type: ignore[union-attr]
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get {sub_component_type.value} worker endpoints: {e}"
+            ) from e
+
     async def observe_traffic_stats(
-        self, require_prefill: bool = True, require_decode: bool = True
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        require_encode: bool = False,
     ) -> None:
         """
         Observe metrics from Prometheus and update shared state.
         """
-        num_p_workers, num_d_workers, _ = await self.get_workers_info(
-            require_prefill=require_prefill, require_decode=require_decode
-        )
+        num_p_workers = 0
+        num_d_workers = 0
+        num_e_workers = 0
+        if require_encode:
+            num_e_workers, _ = await self.get_single_component_workers(
+                SubComponentType.ENCODE
+            )
+            self.shared_state.num_e_workers = num_e_workers
+            logger.debug(f"Number of encode workers: {num_e_workers}")
+        else:
+            num_p_workers, num_d_workers, _ = await self.get_workers_info(
+                require_prefill=require_prefill, require_decode=require_decode
+            )
 
-        self.shared_state.num_p_workers = num_p_workers
-        self.shared_state.num_d_workers = num_d_workers
-        logger.debug(
-            f"Number of prefill workers: {num_p_workers}, number of decode workers: {num_d_workers}"
-        )
+            self.shared_state.num_p_workers = num_p_workers
+            self.shared_state.num_d_workers = num_d_workers
+            logger.debug(
+                f"Number of prefill workers: {num_p_workers}, number of decode workers: {num_d_workers}"
+            )
 
         # Update Prometheus metrics if server is running
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
             self.prometheus_metrics.num_p_workers.set(num_p_workers)
             self.prometheus_metrics.num_d_workers.set(num_d_workers)
+            self.prometheus_metrics.num_e_workers.set(num_e_workers)
 
             # Calculate and accumulate GPU hours for this interval
             # TODO: track startup and shutdown times to get more accurate GPU hours
@@ -465,6 +568,7 @@ class BasePlanner:
                 (
                     num_p_workers * (self.config.prefill_engine_num_gpu or 0)
                     + num_d_workers * (self.config.decode_engine_num_gpu or 0)
+                    + num_e_workers * (self.config.encode_engine_num_gpu or 0)
                 )
                 * self.config.throughput_adjustment_interval
                 / 3600
@@ -569,8 +673,19 @@ class BasePlanner:
         self.isl_predictor.add_data_point(isl_avg)
         self.osl_predictor.add_data_point(osl_avg)
 
+    def _has_required_metrics_for_adjustment(self) -> bool:
+        return self.last_metrics.is_valid()
+
+    def _predicted_load_is_complete(
+        self,
+        next_num_req: Optional[float],
+        next_isl: Optional[float],
+        next_osl: Optional[float],
+    ) -> bool:
+        return next_num_req is not None and next_isl is not None and next_osl is not None
+
     def plan_adjustment(self) -> Optional[int]:
-        if not self.last_metrics.is_valid():
+        if not self._has_required_metrics_for_adjustment():
             logger.info(
                 "Metrics contain None or NaN values (no active requests), skipping adjustment"
             )
@@ -585,7 +700,7 @@ class BasePlanner:
                 return None
 
         next_num_req, next_isl, next_osl = self.predict_load()
-        if next_num_req is None or next_isl is None or next_osl is None:
+        if not self._predicted_load_is_complete(next_num_req, next_isl, next_osl):
             return None
 
         # Update predicted load metrics in Prometheus
@@ -617,15 +732,24 @@ class BasePlanner:
         if self.component_type == SubComponentType.PREFILL:
             assert self.prefill_worker_info.k8s_name is not None
             return self.prefill_worker_info.k8s_name
-        assert self.decode_worker_info.k8s_name is not None
-        return self.decode_worker_info.k8s_name
+        if self.component_type == SubComponentType.DECODE:
+            assert self.decode_worker_info.k8s_name is not None
+            return self.decode_worker_info.k8s_name
+        assert self.encode_worker_info.k8s_name is not None
+        return self.encode_worker_info.k8s_name
 
     def _engine_num_gpu(self) -> int:
         if self.component_type == SubComponentType.PREFILL:
-            assert self.config.prefill_engine_num_gpu is not None
+            if self.config.prefill_engine_num_gpu is None:
+                raise ValueError("Missing prefill_engine_num_gpu in config")
             return self.config.prefill_engine_num_gpu
-        assert self.config.decode_engine_num_gpu is not None
-        return self.config.decode_engine_num_gpu
+        if self.component_type == SubComponentType.DECODE:
+            if self.config.decode_engine_num_gpu is None:
+                raise ValueError("Missing decode_engine_num_gpu in config")
+            return self.config.decode_engine_num_gpu
+        if self.config.encode_engine_num_gpu is None:
+            raise ValueError("Missing encode_engine_num_gpu in config")
+        return self.config.encode_engine_num_gpu
 
     def apply_component_budget(self, desired_replicas: int) -> int:
         return _apply_component_gpu_budget(
@@ -827,7 +951,9 @@ class BasePlanner:
                 logger.info("New throughput adjustment interval started!")
 
                 await self.observe_traffic_stats(
-                    require_prefill=require_prefill, require_decode=require_decode
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                    require_encode=self.component_type == SubComponentType.ENCODE,
                 )
                 desired_replicas = self.plan_adjustment()
                 if desired_replicas is not None:
@@ -837,7 +963,7 @@ class BasePlanner:
                             self.shared_state.throughput_lower_bound_p = (
                                 desired_replicas
                             )
-                        else:
+                        elif self.component_type == SubComponentType.DECODE:
                             self.shared_state.throughput_lower_bound_d = (
                                 desired_replicas
                             )

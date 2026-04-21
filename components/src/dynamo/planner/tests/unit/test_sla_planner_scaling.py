@@ -447,3 +447,12 @@ class TestDryrunGpuDefaults:
 
         assert config.prefill_engine_num_gpu == 2
         assert config.decode_engine_num_gpu == 4
+
+    def test_dryrun_rejects_encode_mode(self):
+        config = self._build_dryrun_config(mode="encode", encode_engine_num_gpu=1)
+
+        with pytest.raises(
+            ValueError,
+            match="Encode mode is not supported in dryrun mode in Phase 1",
+        ):
+            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")

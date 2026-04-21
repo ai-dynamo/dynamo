@@ -53,7 +53,9 @@ class PlannerConfig(BaseModel):
         default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo")
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
-    mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
+    mode: Literal["disagg", "prefill", "decode", "encode", "agg"] = (
+        SLAPlannerDefaults.mode
+    )
 
     no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
@@ -65,6 +67,7 @@ class PlannerConfig(BaseModel):
 
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
+    encode_engine_num_gpu: Optional[int] = None
 
     profile_results_dir: str = SLAPlannerDefaults.profile_results_dir
 
@@ -125,6 +128,40 @@ class PlannerConfig(BaseModel):
                 "Please specify the namespace where GlobalPlanner is running."
             )
 
+        if self.environment == "global-planner" and self.mode == "encode":
+            if self.encode_engine_num_gpu is None:
+                raise ValueError(
+                    "encode_engine_num_gpu is required when mode='encode' and "
+                    "environment='global-planner'. Encode GPU count cannot be "
+                    "discovered locally in delegating mode."
+                )
+            if not self.model_name:
+                raise ValueError(
+                    "model_name is required when mode='encode' and "
+                    "environment='global-planner'. Model name cannot be "
+                    "discovered locally in delegating mode."
+                )
+
+        if self.environment == "virtual" and self.mode == "encode":
+            raise ValueError(
+                "mode='encode' is not supported when environment='virtual' in Phase 1."
+            )
+
+        if self.mode == "encode" and self.backend == "mocker":
+            raise ValueError(
+                "backend='mocker' does not support mode='encode' in Phase 1."
+            )
+
+        # Engine GPU counts must be positive when provided
+        for attr in (
+            "prefill_engine_num_gpu",
+            "decode_engine_num_gpu",
+            "encode_engine_num_gpu",
+        ):
+            val = getattr(self, attr)
+            if val is not None and val <= 0:
+                raise ValueError(f"{attr} must be a positive integer, got {val}")
+
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:
             raise ValueError(
@@ -143,8 +180,22 @@ class PlannerConfig(BaseModel):
                     "enable_throughput_scaling is True. Throughput-based scaling "
                     "requires pre-deployment sweeping to profile engine performance."
                 )
+            if (
+                self.mode == "encode"
+                and "use-pre-swept-results" in self.profile_results_dir
+            ):
+                raise ValueError(
+                    "mode='encode' does not support "
+                    "profile_results_dir='use-pre-swept-results:...' yet. "
+                    "Please provide encode profiling outputs via "
+                    "--profile-results-dir."
+                )
 
         if self.enable_load_scaling:
+            if self.mode == "encode":
+                raise ValueError(
+                    "mode='encode' does not support enable_load_scaling=True in Phase 1."
+                )
             # Load-based interval must be shorter than throughput interval
             if self.enable_throughput_scaling:
                 if self.load_adjustment_interval >= self.throughput_adjustment_interval:

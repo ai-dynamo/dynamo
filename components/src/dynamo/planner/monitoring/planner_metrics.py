@@ -15,6 +15,9 @@ class PlannerPrometheusMetrics:
         self.num_d_workers = Gauge(
             f"{prefix}:num_d_workers", "Number of decode workers"
         )
+        self.num_e_workers = Gauge(
+            f"{prefix}:num_e_workers", "Number of encode workers"
+        )
 
         # Observed metrics
         self.observed_ttft = Gauge(
@@ -59,6 +62,9 @@ class PlannerPrometheusMetrics:
         )
         self.predicted_num_d = Gauge(
             f"{prefix}:predicted_num_d", "Predicted number of decode replicas"
+        )
+        self.predicted_num_e = Gauge(
+            f"{prefix}:predicted_num_e", "Predicted number of encode replicas"
         )
 
         # Cumulative GPU usage

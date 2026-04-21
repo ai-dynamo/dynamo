@@ -24,6 +24,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.agg import AggPlanner
 from dynamo.planner.core.decode import DecodePlanner
 from dynamo.planner.core.disagg import DisaggPlanner
+from dynamo.planner.core.encode import EncodePlanner
 from dynamo.planner.core.prefill import PrefillPlanner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -36,13 +37,15 @@ class RequestType(BaseModel):
 
 async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
     mode = config.mode
-    planner: Union[DisaggPlanner, PrefillPlanner, DecodePlanner, AggPlanner]
+    planner: Union[DisaggPlanner, PrefillPlanner, DecodePlanner, EncodePlanner, AggPlanner]
     if mode == "disagg":
         planner = DisaggPlanner(runtime, config)
     elif mode == "prefill":
         planner = PrefillPlanner(runtime, config)
     elif mode == "decode":
         planner = DecodePlanner(runtime, config)
+    elif mode == "encode":
+        planner = EncodePlanner(runtime, config)
     elif mode == "agg":
         planner = AggPlanner(runtime, config)
     else:

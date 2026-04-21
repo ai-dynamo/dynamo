@@ -4,6 +4,7 @@
 import logging
 import math
 
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.errors import DeploymentValidationError
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -137,4 +138,47 @@ def _initialize_gpu_counts(
     logger.info(
         f"Using GPU counts from CLI: prefill={config.prefill_engine_num_gpu}, "
         f"decode={config.decode_engine_num_gpu}"
+    )
+
+
+def _engine_num_gpu_attr(sub_component_type: SubComponentType) -> str:
+    if sub_component_type == SubComponentType.PREFILL:
+        return "prefill_engine_num_gpu"
+    if sub_component_type == SubComponentType.DECODE:
+        return "decode_engine_num_gpu"
+    return "encode_engine_num_gpu"
+
+
+def _initialize_single_component_gpu_count(
+    config: PlannerConfig,
+    connector,
+    sub_component_type: SubComponentType,
+    component_name: str | None = None,
+) -> None:
+    attr_name = _engine_num_gpu_attr(sub_component_type)
+
+    if hasattr(connector, "get_single_component_gpu_count"):
+        try:
+            detected_gpu_count = connector.get_single_component_gpu_count(
+                sub_component_type,
+                component_name=component_name,
+            )
+            setattr(config, attr_name, detected_gpu_count)
+            logger.info(
+                f"Detected GPU count from DGD for {sub_component_type.value}: {detected_gpu_count}"
+            )
+            return
+        except Exception as e:
+            logger.warning(
+                f"Could not read GPU count for {sub_component_type.value} from DGD ({e}), "
+                "falling back to CLI flags"
+            )
+
+    configured_gpu_count = getattr(config, attr_name)
+    if configured_gpu_count is None:
+        raise DeploymentValidationError(
+            [f"Missing {attr_name} in config for {sub_component_type.value} mode"]
+        )
+    logger.info(
+        f"Using GPU count from CLI for {sub_component_type.value}: {configured_gpu_count}"
     )

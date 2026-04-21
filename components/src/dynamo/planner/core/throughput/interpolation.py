@@ -248,6 +248,72 @@ class DecodeInterpolator:
         return self.thpt_interpolator[iy, 0], self.itl_interpolator[iy, 0], self.xi[0]
 
 
+class EncodeInterpolator:
+    """
+    Takes request-based encode profiling results to interpolate sustainable
+    requests/s/gpu for a given predicted request rate.
+    """
+
+    def __init__(
+        self,
+        profile_results_dir: Optional[str] = None,
+        raw_data: Optional[dict] = None,
+    ):
+        if profile_results_dir:
+            encode_npz_fn = (
+                f"{profile_results_dir}/selected_encode_interpolation/raw_data.npz"
+            )
+            try:
+                with np.load(encode_npz_fn) as loaded_data:
+                    self.encode_request_rate = loaded_data["encode_request_rate"]
+                    self.encode_thpt_per_gpu = loaded_data["encode_thpt_per_gpu"]
+            except FileNotFoundError:
+                json_fn = os.path.join(profile_results_dir, "encode_raw_data.json")
+                try:
+                    with open(json_fn, "r") as f:
+                        data = json.load(f)
+                        self.encode_request_rate = np.array(data["encode_request_rate"])  # type: ignore[index]
+                        self.encode_thpt_per_gpu = np.array(data["encode_thpt_per_gpu"])  # type: ignore[index]
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Encode interpolation files not found: {encode_npz_fn} and {json_fn}\n"
+                        f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
+                    )
+        elif raw_data:
+            self.encode_request_rate = np.asarray(raw_data["encode_request_rate"])
+            self.encode_thpt_per_gpu = np.asarray(raw_data["encode_thpt_per_gpu"])
+        else:
+            raise ValueError("Either profile_results_dir or raw_data must be provided")
+
+        self._validate_inputs()
+        self.min_request_rate = float(np.min(self.encode_request_rate))
+        self.max_request_rate = float(np.max(self.encode_request_rate))
+
+    def _validate_inputs(self) -> None:
+        if self.encode_request_rate.ndim != 1 or self.encode_thpt_per_gpu.ndim != 1:
+            raise ValueError("Encode profiling data must be 1-dimensional")
+        if len(self.encode_request_rate) == 0 or len(self.encode_thpt_per_gpu) == 0:
+            raise ValueError("Encode profiling data cannot be empty")
+        if len(self.encode_request_rate) != len(self.encode_thpt_per_gpu):
+            raise ValueError("Encode profiling arrays must have the same length")
+        if len(self.encode_request_rate) < 2:
+            raise ValueError("Encode profiling data must contain at least two samples")
+        if np.any(self.encode_request_rate < 0):
+            raise ValueError("Encode request rate samples must be non-negative")
+        if np.any(self.encode_thpt_per_gpu <= 0):
+            raise ValueError("Encode throughput per GPU samples must be positive")
+
+    def interpolate_thpt_per_gpu(self, request_rate: float) -> float:
+        request_rate = max(self.min_request_rate, min(request_rate, self.max_request_rate))
+        return float(
+            np.interp(
+                request_rate,
+                self.encode_request_rate,
+                self.encode_thpt_per_gpu,
+            )
+        )
+
+
 if __name__ == "__main__":
     import argparse
 

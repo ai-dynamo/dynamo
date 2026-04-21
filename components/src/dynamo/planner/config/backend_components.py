@@ -23,6 +23,9 @@ class ComponentName:
     decode_worker_k8s_name: str = ""
     decode_worker_component_name: str = ""
     decode_worker_endpoint: str = ""
+    encode_worker_k8s_name: str = ""
+    encode_worker_component_name: str = ""
+    encode_worker_endpoint: str = ""
 
 
 class VllmComponentName(ComponentName):
@@ -32,6 +35,9 @@ class VllmComponentName(ComponentName):
     decode_worker_k8s_name = "VllmDecodeWorker"
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
+    encode_worker_k8s_name = "VllmEncodeWorker"
+    encode_worker_component_name = "encode"
+    encode_worker_endpoint = "generate"
 
 
 class SGLangComponentName(ComponentName):
@@ -45,6 +51,11 @@ class SGLangComponentName(ComponentName):
     )
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
+    encode_worker_k8s_name = (
+        "encode"  # use short name to stay within k8s limits with grove
+    )
+    encode_worker_component_name = "encoder"
+    encode_worker_endpoint = "generate"
 
 
 class TrtllmComponentName(ComponentName):
@@ -57,6 +68,9 @@ class TrtllmComponentName(ComponentName):
     decode_worker_k8s_name = "TRTLLMDecodeWorker"
     decode_worker_component_name = "tensorrt_llm"
     decode_worker_endpoint = "generate"
+    encode_worker_k8s_name = "TRTLLMEncodeWorker"
+    encode_worker_component_name = "tensorrt_llm_encode"
+    encode_worker_endpoint = "generate"
 
 
 class MockerComponentName(ComponentName):

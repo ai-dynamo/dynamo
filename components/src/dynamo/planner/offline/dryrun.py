@@ -27,6 +27,11 @@ def run_sla_planner_dryrun(
             "Load-based scaling is not supported in dryrun mode. "
             "Set enable_load_scaling to false in the config."
         )
+    if config.mode == "encode":
+        raise ValueError(
+            "Encode mode is not supported in dryrun mode in Phase 1. "
+            "Current dryrun only supports prefill/decode SLA analysis."
+        )
 
     if config.prefill_engine_num_gpu is None:
         config.prefill_engine_num_gpu = 1

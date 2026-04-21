@@ -135,7 +135,8 @@ class GlobalPlannerConnector(PlannerConnector):
             f"Delegating scale request to GlobalPlanner: "
             f"DGD={graph_deployment_name}, "
             f"prefill={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.PREFILL]}, "
-            f"decode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
+            f"decode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.DECODE]}, "
+            f"encode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.ENCODE]}"
         )
 
         # Send request to GlobalPlanner

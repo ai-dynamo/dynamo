@@ -165,6 +165,35 @@ class KubernetesConnector(PlannerConnector):
         if errors:
             raise DeploymentValidationError(errors)
 
+    async def validate_single_component_deployment(
+        self,
+        sub_component_type: SubComponentType,
+        component_name: Optional[str] = None,
+    ):
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        errors = []
+        try:
+            get_service_from_sub_component_type_or_name(
+                deployment,
+                sub_component_type,
+                component_name=component_name,
+            )
+        except PlannerError as e:
+            errors.append(str(e))
+
+        try:
+            self.get_single_component_model_name(
+                sub_component_type,
+                deployment=deployment,
+                component_name=component_name,
+            )
+        except PlannerError as e:
+            errors.append(str(e))
+
+        if errors:
+            raise DeploymentValidationError(errors)
+
     def get_model_name(
         self,
         deployment: Optional[dict] = None,
@@ -231,6 +260,42 @@ class KubernetesConnector(PlannerConnector):
 
         return model_name
 
+    def get_single_component_model_name(
+        self,
+        sub_component_type: SubComponentType,
+        deployment: Optional[dict] = None,
+        component_name: Optional[str] = None,
+    ) -> str:
+        try:
+            if deployment is None:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
+                )
+
+            service = get_service_from_sub_component_type_or_name(
+                deployment,
+                sub_component_type,
+                component_name=component_name,
+            )
+            model_name = service.get_model_name()
+            if model_name is None:
+                raise ModelNameNotFoundError()
+        except PlannerError as e:
+            if self.user_provided_model_name:
+                logger.warning(
+                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.user_provided_model_name}"
+                )
+                model_name = self.user_provided_model_name
+            else:
+                raise e
+
+        if self.user_provided_model_name and model_name != self.user_provided_model_name:
+            raise UserProvidedModelNameMismatchError(
+                model_name, self.user_provided_model_name
+            )
+
+        return model_name
+
     def get_gpu_counts(
         self,
         deployment: Optional[dict] = None,
@@ -281,6 +346,27 @@ class KubernetesConnector(PlannerConnector):
             raise DeploymentValidationError(errors)
 
         return prefill_gpu_count, decode_gpu_count
+
+    def get_single_component_gpu_count(
+        self,
+        sub_component_type: SubComponentType,
+        deployment: Optional[dict] = None,
+        component_name: Optional[str] = None,
+    ) -> int:
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        service = get_service_from_sub_component_type_or_name(
+            deployment,
+            sub_component_type,
+            component_name=component_name,
+        )
+        try:
+            return service.get_gpu_count()
+        except (PlannerError, ValueError) as e:
+            raise DeploymentValidationError(
+                [f"Failed to get {sub_component_type.value} GPU count: {e}"]
+            ) from e
 
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
         """Auto-discover the Frontend service's metrics URL from the DGD.
@@ -390,6 +476,13 @@ class KubernetesConnector(PlannerConnector):
             model_type = model_type.get("bits", 0)
         return bool(model_type & 0x10)
 
+    @staticmethod
+    def _mdc_entry_is_encode(entry: dict) -> bool:
+        component = str(entry.get("component", "")).lower()
+        return component in {"encode", "encoder"} or component.endswith(
+            (".encode", ".encoder")
+        )
+
     def _build_worker_info_from_mdc(
         self,
         entry: dict,
@@ -433,7 +526,9 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name
                 )
                 service = get_service_from_sub_component_type_or_name(
-                    deployment, sub_component_type
+                    deployment,
+                    sub_component_type,
+                    component_name=defaults.k8s_name,
                 )
                 model_name = service.get_model_name()
                 if model_name:
@@ -466,7 +561,9 @@ class KubernetesConnector(PlannerConnector):
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
+                deployment,
+                sub_component_type,
+                component_name=defaults.k8s_name,
             )
             k8s_name = service.name
         except PlannerError:
@@ -496,7 +593,7 @@ class KubernetesConnector(PlannerConnector):
         """Get WorkerInfo for a sub-component, trying MDC first, then fallbacks.
 
         Args:
-            sub_component_type: PREFILL or DECODE
+            sub_component_type: PREFILL, DECODE, or ENCODE
             backend: Backend framework name (for default fallback)
         """
         self._backend_hint = backend
@@ -519,9 +616,14 @@ class KubernetesConnector(PlannerConnector):
 
         for entry in entries:
             is_prefill = self._mdc_entry_is_prefill(entry)
+            is_encode = self._mdc_entry_is_encode(entry)
             if sub_component_type == SubComponentType.PREFILL and not is_prefill:
                 continue
-            if sub_component_type == SubComponentType.DECODE and is_prefill:
+            if sub_component_type == SubComponentType.DECODE and (
+                is_prefill or is_encode
+            ):
+                continue
+            if sub_component_type == SubComponentType.ENCODE and not is_encode:
                 continue
 
             entry_component = entry.get("component")
@@ -554,7 +656,9 @@ class KubernetesConnector(PlannerConnector):
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
+                deployment,
+                sub_component_type,
+                component_name=info.k8s_name,
             )
             info.k8s_name = service.name
             arg_model = service.get_model_name()
@@ -619,6 +723,22 @@ class KubernetesConnector(PlannerConnector):
             decode_count = ready_replicas
 
         return prefill_count, decode_count, all_stable
+
+    def get_single_component_worker_count(
+        self,
+        sub_component_type: SubComponentType,
+        component_name: Optional[str] = None,
+    ) -> tuple[int, bool]:
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        service = get_service_from_sub_component_type_or_name(
+            deployment,
+            sub_component_type,
+            component_name=component_name,
+        )
+        ready_replicas, is_stable = self.kube_api.get_service_replica_status(
+            deployment, service.name
+        )
+        return ready_replicas, is_stable
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True

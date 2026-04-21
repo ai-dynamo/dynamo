@@ -80,12 +80,19 @@ def build_worker_info_from_defaults(
             component_name=names.prefill_worker_component_name,
             endpoint=names.prefill_worker_endpoint,
         )
-    else:
+    if sub_component_type == SubComponentType.DECODE:
         return WorkerInfo(
             k8s_name=names.decode_worker_k8s_name,
             component_name=names.decode_worker_component_name,
             endpoint=names.decode_worker_endpoint,
         )
+    if sub_component_type == SubComponentType.ENCODE:
+        return WorkerInfo(
+            k8s_name=names.encode_worker_k8s_name,
+            component_name=names.encode_worker_component_name,
+            endpoint=names.encode_worker_endpoint,
+        )
+    raise ValueError(f"Unknown sub_component_type: {sub_component_type}")
 
 
 def resolve_worker_info(
@@ -182,3 +189,55 @@ def resolve_worker_info(
     decode_info.model_name = model_name
 
     return prefill_info, decode_info
+
+
+def resolve_single_worker_info(
+    backend: str,
+    sub_component_type: SubComponentType,
+    connector: Any = None,
+    config_model_name: str = "",
+    no_operation: bool = False,
+) -> WorkerInfo:
+    """Build WorkerInfo for a single component and resolve model name."""
+    can_query_mdc = connector is not None and hasattr(connector, "get_worker_info")
+
+    if can_query_mdc:
+        worker_info = connector.get_worker_info(sub_component_type, backend)
+    else:
+        worker_info = build_worker_info_from_defaults(backend, sub_component_type)
+
+    logger.info(f"{sub_component_type.value.capitalize()} WorkerInfo: {worker_info.summary()}")
+
+    if no_operation:
+        if not config_model_name:
+            raise ValueError(
+                "Model name is required in no-operation mode. "
+                "Please set model_name in the config."
+            )
+        model_name = config_model_name
+    else:
+        if worker_info.model_name:
+            model_name = worker_info.model_name
+            logger.info(f"Using model name from MDC: {model_name}")
+        elif can_query_mdc and hasattr(connector, "get_single_component_model_name"):
+            model_name = connector.get_single_component_model_name(
+                sub_component_type,
+                component_name=worker_info.k8s_name,
+            )
+            logger.info(f"Detected model name from DGD container args: {model_name}")
+        elif can_query_mdc:
+            model_name = connector.get_model_name(
+                require_prefill=sub_component_type == SubComponentType.PREFILL,
+                require_decode=sub_component_type == SubComponentType.DECODE,
+            )
+            logger.info(f"Detected model name from DGD container args: {model_name}")
+        elif config_model_name:
+            model_name = config_model_name
+            logger.info(f"Using model name from config: {model_name}")
+        else:
+            raise ValueError(
+                "Could not determine model name. Please set model_name in the config."
+            )
+
+    worker_info.model_name = model_name
+    return worker_info

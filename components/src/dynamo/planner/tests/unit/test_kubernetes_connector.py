@@ -33,6 +33,11 @@ from dynamo.planner.monitoring.dgd_services import (
     Service,
     get_service_from_sub_component_type_or_name,
 )
+from dynamo.planner.monitoring.worker_info import (
+    WorkerInfo,
+    build_worker_info_from_defaults,
+    resolve_single_worker_info,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -579,6 +584,82 @@ async def test_validate_deployment_fail(kubernetes_connector, mock_kube_api):
     }
 
 
+@pytest.mark.asyncio
+async def test_validate_single_component_deployment_encode(
+    kubernetes_connector, mock_kube_api
+):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode-component": {
+                    "replicas": 1,
+                    "subComponentType": "encode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": ["--served-model-name", "encode-model"]
+                        }
+                    },
+                }
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    await kubernetes_connector.validate_single_component_deployment(
+        SubComponentType.ENCODE,
+        component_name="encode-component",
+    )
+
+
+@pytest.mark.asyncio
+async def test_validate_single_component_deployment_encode_fallback_name(
+    kubernetes_connector, mock_kube_api
+):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode": {
+                    "replicas": 1,
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": ["--served-model-name", "encode-model"]
+                        }
+                    },
+                }
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    await kubernetes_connector.validate_single_component_deployment(
+        SubComponentType.ENCODE,
+        component_name="encode",
+    )
+
+
+def test_sglang_encode_defaults_use_encoder_component():
+    worker_info = build_worker_info_from_defaults("sglang", SubComponentType.ENCODE)
+
+    assert worker_info.k8s_name == "encode"
+    assert worker_info.component_name == "encoder"
+    assert worker_info.endpoint == "generate"
+
+
+def test_trtllm_encode_defaults_use_runtime_component_name():
+    worker_info = build_worker_info_from_defaults("trtllm", SubComponentType.ENCODE)
+
+    assert worker_info.k8s_name == "TRTLLMEncodeWorker"
+    assert worker_info.component_name == "tensorrt_llm_encode"
+    assert worker_info.endpoint == "generate"
+
+
+@pytest.mark.parametrize("component", ["encode", "ns.encode", "encoder", "ns.encoder"])
+def test_mdc_entry_is_encode_accepts_encoder_alias(component):
+    assert KubernetesConnector._mdc_entry_is_encode({"component": component}) is True
+
+
 def test_get_model_name_both_none_raises_error(kubernetes_connector, mock_kube_api):
     # Arrange
     mock_deployment = {
@@ -690,6 +771,60 @@ def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube
 
     # Assert
     assert result == "agreed-model"
+
+
+def test_get_single_component_model_name_encode(kubernetes_connector, mock_kube_api):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode-component": {
+                    "replicas": 1,
+                    "subComponentType": "encode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": ["--served-model-name", "encode-model"]
+                        }
+                    },
+                }
+            }
+        },
+    }
+
+    result = kubernetes_connector.get_single_component_model_name(
+        SubComponentType.ENCODE,
+        deployment=mock_deployment,
+    )
+
+    assert result == "encode-model"
+
+
+def test_get_single_component_model_name_encode_uses_fallback_name(
+    kubernetes_connector, mock_kube_api
+):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode": {
+                    "replicas": 1,
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": ["--served-model-name", "encode-model"]
+                        }
+                    },
+                }
+            }
+        },
+    }
+
+    result = kubernetes_connector.get_single_component_model_name(
+        SubComponentType.ENCODE,
+        deployment=mock_deployment,
+        component_name="encode",
+    )
+
+    assert result == "encode-model"
 
 
 # Tests for Service.get_gpu_count()
@@ -873,6 +1008,52 @@ def test_get_gpu_counts_missing_gpu_raises_error(kubernetes_connector, mock_kube
     assert "prefill GPU count" in str(exc_info.value)
 
 
+def test_get_single_component_gpu_count_encode(kubernetes_connector, mock_kube_api):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode-worker": {
+                    "replicas": 1,
+                    "subComponentType": "encode",
+                    "resources": {"limits": {"gpu": "3"}},
+                }
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    encode_gpu = kubernetes_connector.get_single_component_gpu_count(
+        SubComponentType.ENCODE
+    )
+
+    assert encode_gpu == 3
+
+
+def test_get_single_component_gpu_count_encode_uses_fallback_name(
+    kubernetes_connector, mock_kube_api
+):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode": {
+                    "replicas": 1,
+                    "resources": {"limits": {"gpu": "3"}},
+                }
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    encode_gpu = kubernetes_connector.get_single_component_gpu_count(
+        SubComponentType.ENCODE,
+        component_name="encode",
+    )
+
+    assert encode_gpu == 3
+
+
 def test_get_gpu_counts_service_not_found_raises_error(
     kubernetes_connector, mock_kube_api
 ):
@@ -1040,3 +1221,76 @@ def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_
     assert prefill_count == 0
     assert decode_count == 0
     assert is_stable is True
+
+
+def test_get_single_component_worker_count_encode(kubernetes_connector, mock_kube_api):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode-component": {
+                    "replicas": 2,
+                    "subComponentType": "encode",
+                }
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.return_value = (2, True)
+
+    encode_count, is_stable = kubernetes_connector.get_single_component_worker_count(
+        SubComponentType.ENCODE,
+        component_name="encode-component",
+    )
+
+    assert encode_count == 2
+    assert is_stable is True
+
+
+def test_resolve_single_worker_info_passes_k8s_name_to_model_lookup():
+    connector = Mock()
+    connector.get_worker_info.return_value = WorkerInfo(
+        k8s_name="encode",
+        component_name="encode",
+        endpoint="generate",
+    )
+    connector.get_single_component_model_name.return_value = "encode-model"
+
+    worker_info = resolve_single_worker_info(
+        backend="vllm",
+        sub_component_type=SubComponentType.ENCODE,
+        connector=connector,
+    )
+
+    connector.get_single_component_model_name.assert_called_once_with(
+        SubComponentType.ENCODE,
+        component_name="encode",
+    )
+    assert worker_info.model_name == "encode-model"
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_updates_encode_target(
+    kubernetes_connector, mock_kube_api
+):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "encode-component": {
+                    "replicas": 1,
+                    "subComponentType": "encode",
+                }
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+
+    await kubernetes_connector.set_component_replicas(
+        [TargetReplica(sub_component_type=SubComponentType.ENCODE, desired_replicas=3)]
+    )
+
+    mock_kube_api.update_graph_replicas.assert_called_once_with(
+        "test-graph", "encode-component", 3
+    )

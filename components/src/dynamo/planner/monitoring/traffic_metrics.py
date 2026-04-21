@@ -43,17 +43,24 @@ class Metrics:
     p_load: Optional[float] = None
     d_load: Optional[float] = None
 
+    @staticmethod
+    def _values_are_present(*values: Optional[float]) -> bool:
+        return all(v is not None and not math.isnan(v) for v in values)
+
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
-        required = [
+        return self._values_are_present(
             self.ttft,
             self.itl,
             self.isl,
             self.osl,
             self.num_req,
             self.request_duration,
-        ]
-        return all(v is not None and not math.isnan(v) for v in required)
+        )
+
+    def is_valid_for_request_based_throughput(self) -> bool:
+        """Phase-1 encode mode only requires a valid request count."""
+        return self._values_are_present(self.num_req)
 
 
 @dataclass

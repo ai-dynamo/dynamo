@@ -32,6 +32,7 @@ class BasePlannerDefaults:
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
+    encode_engine_num_gpu = 1
     # Port for exposing planner's own metrics (0 means disabled)
     metric_reporting_prometheus_port = int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
 
@@ -59,7 +60,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     kalman_min_points = 5
 
     no_correction = True
-    mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
+    mode: Literal["disagg", "prefill", "decode", "encode", "agg"] = "disagg"
 
     throughput_metrics_source: Literal["frontend", "router"] = "frontend"
 
@@ -78,6 +79,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 class SubComponentType(str, Enum):
     PREFILL = "prefill"
     DECODE = "decode"
+    ENCODE = "encode"
 
 
 class TargetReplica(BaseModel):

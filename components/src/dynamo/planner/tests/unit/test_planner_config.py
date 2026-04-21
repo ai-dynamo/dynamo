@@ -87,3 +87,116 @@ def test_throughput_metrics_source_invalid():
     """throughput_metrics_source rejects invalid values."""
     with pytest.raises(ValidationError):
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
+
+
+def test_encode_mode_accepts_config():
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="encode",
+        encode_engine_num_gpu=2,
+        model_name="test-model",
+    )
+    assert config.mode == "encode"
+    assert config.encode_engine_num_gpu == 2
+
+
+def test_encode_global_planner_requires_encode_engine_num_gpu():
+    with pytest.raises(
+        ValidationError,
+        match="encode_engine_num_gpu is required when mode='encode' and environment='global-planner'",
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            environment="global-planner",
+            global_planner_namespace="global-ns",
+            mode="encode",
+            model_name="test-model",
+        )
+
+
+def test_encode_global_planner_requires_model_name():
+    with pytest.raises(
+        ValidationError,
+        match="model_name is required when mode='encode' and environment='global-planner'",
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            environment="global-planner",
+            global_planner_namespace="global-ns",
+            mode="encode",
+            encode_engine_num_gpu=1,
+        )
+
+
+def test_encode_global_planner_accepts_required_fields():
+    config = PlannerConfig(
+        namespace="test-ns",
+        environment="global-planner",
+        global_planner_namespace="global-ns",
+        mode="encode",
+        model_name="test-model",
+        encode_engine_num_gpu=1,
+    )
+    assert config.environment == "global-planner"
+    assert config.mode == "encode"
+
+
+def test_encode_mode_rejects_load_scaling():
+    with pytest.raises(
+        ValidationError, match="mode='encode' does not support enable_load_scaling=True"
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            mode="encode",
+            model_name="test-model",
+            encode_engine_num_gpu=1,
+            enable_load_scaling=True,
+        )
+
+
+def test_encode_mode_rejects_virtual_environment():
+    with pytest.raises(
+        ValidationError,
+        match="mode='encode' is not supported when environment='virtual' in Phase 1",
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            environment="virtual",
+            mode="encode",
+            model_name="test-model",
+            encode_engine_num_gpu=1,
+        )
+
+
+def test_encode_mode_rejects_mocker_backend():
+    with pytest.raises(
+        ValidationError,
+        match="backend='mocker' does not support mode='encode' in Phase 1",
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            backend="mocker",
+            mode="encode",
+            model_name="test-model",
+            encode_engine_num_gpu=1,
+        )
+
+
+def test_encode_mode_rejects_pre_swept_results():
+    with pytest.raises(
+        ValidationError,
+        match="mode='encode' does not support .*use-pre-swept-results",
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            mode="encode",
+            model_name="test-model",
+            encode_engine_num_gpu=1,
+            profile_results_dir="use-pre-swept-results:H200:model:vllm:1.0:1:1:1:16:1",
+        )
+
+
+@pytest.mark.parametrize("mode", ["disagg", "prefill", "decode", "agg"])
+def test_existing_modes_still_validate(mode: str):
+    config = PlannerConfig(namespace="test-ns", mode=mode)
+    assert config.mode == mode

@@ -79,6 +79,12 @@ class VirtualConnector(PlannerConnector):
             )
         elif sub_component_type == SubComponentType.DECODE:
             await self._update_scaling_decision(num_decode=state.num_decode_workers + 1)
+        elif sub_component_type == SubComponentType.ENCODE:
+            raise NotImplementedError(
+                "VirtualConnector does not support encode mode. "
+                "This requires extending the Rust VirtualConnectorCoordinator "
+                "and PlannerDecision to include num_encode_workers."
+            )
 
         if blocking:
             await self._wait_for_scaling_completion()
@@ -95,6 +101,12 @@ class VirtualConnector(PlannerConnector):
         elif sub_component_type == SubComponentType.DECODE:
             new_count = max(0, state.num_decode_workers - 1)
             await self._update_scaling_decision(num_decode=new_count)
+        elif sub_component_type == SubComponentType.ENCODE:
+            raise NotImplementedError(
+                "VirtualConnector does not support encode mode. "
+                "This requires extending the Rust VirtualConnectorCoordinator "
+                "and PlannerDecision to include num_encode_workers."
+            )
 
         if blocking:
             await self._wait_for_scaling_completion()
@@ -114,6 +126,12 @@ class VirtualConnector(PlannerConnector):
                 num_prefill = target_replica.desired_replicas
             elif target_replica.sub_component_type == SubComponentType.DECODE:
                 num_decode = target_replica.desired_replicas
+            elif target_replica.sub_component_type == SubComponentType.ENCODE:
+                raise NotImplementedError(
+                    "VirtualConnector does not support encode mode. "
+                    "This requires extending the Rust VirtualConnectorCoordinator "
+                    "and PlannerDecision to include num_encode_workers."
+                )
 
         if num_prefill is None and num_decode is None:
             return
