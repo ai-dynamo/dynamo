@@ -131,6 +131,41 @@ kubectl get storageclass
 #   storageClassName: "your-actual-storage-class"
 ```
 
+### Pre-flight: confirm Dynamo CRDs are installed
+
+```bash
+kubectl get crd | grep dynamo
+```
+
+Expected output (at least these three):
+
+```
+dynamocomponentdeployments.nvidia.com
+dynamographdeployments.nvidia.com
+dynamographdeploymentrequests.nvidia.com
+```
+
+If the list is empty, the Dynamo operator is not installed. Install it first — see [Dynamo Operator](../docs/kubernetes/dynamo-operator.md).
+
+### Storage class
+
+Recipes default to `storageClassName: standard` which does not exist on every cluster. Pick the class for your environment before applying:
+
+| Environment | Typical class |
+|---|---|
+| AWS EKS | `gp3` (or `gp2` on older clusters) |
+| GKE | `standard-rwo` |
+| AKS | `managed-csi` |
+| On-prem / bare-metal | `nfs-csi`, `local-path`, or your in-house class |
+
+Check what's available:
+
+```bash
+kubectl get storageclass
+```
+
+If a PVC is stuck `Pending`, `kubectl describe pvc <name>` will show the provisioner error.
+
 ### Deploy a Recipe
 
 **Step 1: Download Model**
@@ -149,7 +184,19 @@ kubectl logs -f job/model-download -n ${NAMESPACE}
 
 **Step 2: Deploy Service**
 
-All recipes pin to the current release tag (see [release-artifacts.md](../docs/reference/release-artifacts.md)). To override, use `yq -i '.spec.services.[].extraPodSpec.mainContainer.image = ":<tag>"' deploy.yaml`.
+All recipes ship pinned to the current Dynamo release tag (**`:1.0.1`** — see [release-artifacts.md](../docs/reference/release-artifacts.md) for the full container/PyPI/Helm/crate alignment). To override, use `yq`:
+
+```bash
+yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.1", ":<your-tag>")' deploy.yaml
+```
+
+`sed` fallback if `yq` is not installed:
+
+```bash
+sed -i.bak 's|:1\.0\.1|:<your-tag>|g' deploy.yaml
+```
+
+The Kimi-k2.5 recipes are the one exception — see [`recipes/kimi-k2.5/README.md`](kimi-k2.5/README.md) for the top-of-tree image requirement.
 
 ```bash
 kubectl apply -f <model>/<framework>/<mode>/deploy.yaml -n ${NAMESPACE}
@@ -196,6 +243,27 @@ kubectl logs -f job/<benchmark-job-name> -n ${NAMESPACE}
 kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
 ```
 
+
+### GPU memory fraction
+
+`free_gpu_memory_fraction` controls how much GPU memory the engine reserves. Defaults in these recipes:
+
+- Aggregated: `0.85`.
+- Disaggregated decode workers: `0.7–0.8` (leave headroom for KV traffic).
+
+Setting `0.95` reliably OOMs Llama-3.3-70B during warm-up. Raise only after confirming steady-state memory use with `nvidia-smi`.
+
+### Probe strategy
+
+Different engines take very different times to come ready. Three patterns, pick the one matching your engine:
+
+| Engine / scenario | `failureThreshold` | `periodSeconds` | `timeoutSeconds` |
+|---|---|---|---|
+| TRT-LLM first-time engine compile | `600` | `10` | default |
+| Mid-weight engines (Qwen3-32B-FP8, Nemotron-3-Super-FP8) | `60` | `60` | default |
+| vLLM / SGLang large models (Llama-3.3-70B, Qwen3-235B-A22B-FP8) | `60` | `60` | `1800` |
+
+Premature probe failures restart the pod mid-load and burn you back to step 1.
 
 ## Example Deployments
 
