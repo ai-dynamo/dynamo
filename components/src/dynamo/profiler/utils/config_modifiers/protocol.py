@@ -547,28 +547,13 @@ class BaseConfigModifier:
             pvc_path = ""
             if effective_model_path and effective_model_path.startswith(pvc_mount_path):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
-            if pvc_path:
-                # Model path points inside the PVC — use the full PVC-based path
-                result = cls.update_model_from_pvc(
-                    cfg.model_dump(),
-                    model_name=model_name,
-                    pvc_name=pvc_name,
-                    pvc_mount_path=pvc_mount_path,
-                    pvc_path=pvc_path,
-                )
-            else:
-                # Model is an HF ID (not a PVC path) — mount the PVC for HF cache
-                # but keep model name as the HF ID so HuggingFace resolves it
-                cfg_dict = cfg.model_dump()
-                cfg2 = Config.model_validate(cfg_dict)
-                cls._ensure_spec_pvc(cfg2, pvc_name)
-                for svc_name, svc in cfg2.spec.services.items():
-                    cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
-                result = cls.update_model(
-                    cfg2.model_dump(),
-                    model_name=model_name,
-                    model_path=effective_model_path,
-                )
+            result = cls.update_model_from_pvc(
+                cfg.model_dump(),
+                model_name=model_name,
+                pvc_name=pvc_name,
+                pvc_mount_path=pvc_mount_path,
+                pvc_path=pvc_path,
+            )
         else:
             result = cls.update_model(
                 cfg.model_dump(),
