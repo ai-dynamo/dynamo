@@ -248,7 +248,7 @@ def test_request_migration_sglang_aggregated(
     ):
         pytest.skip(
             "Flaky on NATS transport: first-token delay > 6s threshold. "
-            "TODO(<LINEAR-ID>)"
+            "OPS-4446"
         )
 
     # Step 1: Start the frontend
