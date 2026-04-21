@@ -512,177 +512,8 @@ mod push_handler_notify_tests {
             .expect("Notifier should exist for registered endpoint")
     }
 
-    /// Tests the full notification → timer reset → status Ready path.
-    ///
-    /// The local registry engine returns errors, so if the canary fires,
-    /// send_health_check_request will set NotReady. This proves that a
-    /// Ready status can only come from the notification path.
-    #[tokio::test]
-    async fn test_notifier_resets_canary_timer() {
-        let drt = create_test_drt_async().await;
-        let endpoint_name = "test.push_handler.timer_reset";
-
-        // Register with an error engine — if the canary fires, status stays NotReady.
-        let notifier = register_endpoint(&drt, endpoint_name, MockStreamingEngine::all_errors(1));
-
-        // Endpoint starts NotReady
-        let status = drt
-            .system_health()
-            .lock()
-            .get_endpoint_health_status(endpoint_name);
-        assert_eq!(status, Some(HealthStatus::NotReady));
-
-        // Set up the push_handler pipeline
-        let engine = MockStreamingEngine::success(5);
-        let ingress =
-            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
-        ingress
-            .set_endpoint_health_check_notifier(notifier.clone())
-            .unwrap();
-
-        // Pre-create request before starting HealthCheckManager
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
-        let payload = encode_request(
-            &request_id,
-            connection_info,
-            &serde_json::json!({"prompt": "test"}),
-        );
-
-        // Phase 1: count notifications (no HealthCheckManager competing)
-        let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let count_clone = notify_count.clone();
-        let notifier_for_counter = notifier.clone();
-        let counter_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = notifier_for_counter.notified() => {
-                        count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        break;
-                    }
-                }
-            }
-        });
-
-        let result = ingress
-            .handle_payload(payload, Some(request_id.clone()))
-            .await;
-        assert!(result.is_ok(), "handle_payload should succeed");
-
-        counter_task.await.unwrap();
-        let count = notify_count.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            count >= 2,
-            "Expected at least 2 wakeups (chunks + completion), got {count}"
-        );
-
-        // Phase 2: start HealthCheckManager, send another request to reset timer
-        let config = HealthCheckConfig {
-            canary_wait_time: Duration::from_millis(500),
-            request_timeout: Duration::from_secs(1),
-        };
-        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
-        manager.clone().start().await.unwrap();
-
-        let request_id2 = uuid::Uuid::new_v4().to_string();
-        let (_server2, connection_info2) = setup_tcp_receiver(&request_id2).await;
-        let payload2 = encode_request(
-            &request_id2,
-            connection_info2,
-            &serde_json::json!({"prompt": "test2"}),
-        );
-        let result2 = ingress.handle_payload(payload2, Some(request_id2)).await;
-        assert!(result2.is_ok(), "second handle_payload should succeed");
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Ready can only come from the notification path (the canary would set
-        // NotReady because the local registry engine returns errors).
-        let status = drt
-            .system_health()
-            .lock()
-            .get_endpoint_health_status(endpoint_name);
-        assert_eq!(
-            status,
-            Some(HealthStatus::Ready),
-            "Status should be Ready from notification path (canary engine returns errors)"
-        );
-    }
-
-    /// Tests that without any requests flowing through push_handler, the real
-    /// HealthCheckManager's canary timer expires, fires send_health_check_request,
-    /// and transitions the endpoint status from NotReady to Ready (proving the
-    /// canary executed the full health check path).
-    #[tokio::test]
-    async fn test_canary_fires_without_activity() {
-        let drt = create_test_drt_async().await;
-        let endpoint_name = "test.push_handler.canary_fires";
-
-        let _notifier = register_endpoint(&drt, endpoint_name, MockStreamingEngine::success(1));
-
-        // Start the real HealthCheckManager with a very short canary wait
-        let config = HealthCheckConfig {
-            canary_wait_time: Duration::from_millis(50),
-            request_timeout: Duration::from_secs(1),
-        };
-        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
-        manager.clone().start().await.unwrap();
-
-        // Verify initial status is NotReady
-        let status = drt
-            .system_health()
-            .lock()
-            .get_endpoint_health_status(endpoint_name);
-        assert_eq!(status, Some(HealthStatus::NotReady));
-
-        // Don't send any requests — let the canary fire.
-        // The canary will call send_health_check_request, which finds the mock
-        // engine in local_endpoint_registry, calls generate(), gets a successful
-        // response, and sets status to Ready.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let status = drt
-            .system_health()
-            .lock()
-            .get_endpoint_health_status(endpoint_name);
-        assert_eq!(
-            status,
-            Some(HealthStatus::Ready),
-            "Status should be Ready — the canary should have fired and \
-             send_health_check_request should have succeeded with the mock engine"
-        );
-    }
-
-    // ----------------------------------------------------------------
-    // Push handler notification tests (error-gating behavior)
-    // These test the push_handler directly via handle_payload to verify
-    // that notifications are only sent for non-error response chunks.
-    // ----------------------------------------------------------------
-
-    /// Helper: send a request through the given ingress pipeline and count
-    /// the notifications that arrive on the notifier.
-    async fn send_and_count_notifications(
-        ingress: &Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>,
-        notifier: &Arc<tokio::sync::Notify>,
-    ) -> u32 {
-        let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let count_clone = notify_count.clone();
-        let notifier_clone = notifier.clone();
-        let counter_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = notifier_clone.notified() => {
-                        count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        break;
-                    }
-                }
-            }
-        });
-
+    /// Helper: send a request through the ingress pipeline.
+    async fn send_request(ingress: &Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
         let payload = encode_request(
@@ -691,80 +522,172 @@ mod push_handler_notify_tests {
             &serde_json::json!({"prompt": "test"}),
         );
         let result = ingress.handle_payload(payload, Some(request_id)).await;
-        assert!(
-            result.is_ok(),
-            "handle_payload should succeed: {:?}",
-            result.err()
-        );
-
-        counter_task.await.unwrap();
-        notify_count.load(std::sync::atomic::Ordering::SeqCst)
+        assert!(result.is_ok(), "handle_payload should succeed");
     }
 
-    /// Successful request: notified on each chunk and on stream completion.
-    #[tokio::test]
-    async fn test_successful_request_notifies_on_chunks_and_completion() {
-        let engine = MockStreamingEngine::success(5);
+    /// Helper: assert endpoint health status.
+    fn assert_status(
+        drt: &crate::DistributedRuntime,
+        endpoint_name: &str,
+        expected: HealthStatus,
+        msg: &str,
+    ) {
+        let status = drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_status(endpoint_name);
+        assert_eq!(status, Some(expected), "{msg}");
+    }
+
+    /// Helper: create ingress pipeline with given engine and notifier.
+    fn create_ingress(
+        engine: Arc<MockStreamingEngine>,
+        notifier: Arc<tokio::sync::Notify>,
+    ) -> Arc<Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>> {
         let ingress =
             Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
-
-        let notifier = Arc::new(tokio::sync::Notify::new());
         ingress
-            .set_endpoint_health_check_notifier(notifier.clone())
+            .set_endpoint_health_check_notifier(notifier)
             .unwrap();
+        ingress
+    }
 
-        let count = send_and_count_notifications(&ingress, &notifier).await;
+    /// Helper: start HealthCheckManager with given canary wait.
+    async fn start_manager(drt: &crate::DistributedRuntime, canary_wait_ms: u64) {
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(canary_wait_ms),
+            request_timeout: Duration::from_secs(1),
+        };
+        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
+        manager.start().await.unwrap();
+    }
 
-        // 5 chunks + 1 stream completion = 6 notify_one() calls.
-        // Coalescing means we get fewer wakeups, but at least 2.
-        assert!(
-            count >= 2,
-            "Expected at least 2 notification wakeups for 5 successful chunks + completion, got {count}"
+    // =================================================================
+    // Test 1: Successful streaming → notification → Ready
+    // Canary engine returns errors, so Ready can only come from notify.
+    // =================================================================
+    #[tokio::test]
+    async fn test_successful_streaming_sets_ready() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.successful_streaming";
+
+        let notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        let ingress = create_ingress(MockStreamingEngine::success(5), notifier);
+        start_manager(&drt, 500).await;
+
+        send_request(&ingress).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Ready can only come from notification (canary engine errors)
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "successful streaming should set Ready via notification path",
         );
     }
 
-    /// All-error request: no notifications since every chunk is an error.
+    // =================================================================
+    // Test 2: Idle engine → canary fires → successful health check → Ready
+    // =================================================================
     #[tokio::test]
-    async fn test_error_response_does_not_notify() {
-        let engine = MockStreamingEngine::all_errors(3);
-        let ingress =
-            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+    async fn test_canary_fires_on_idle_engine() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.canary_idle";
 
-        let notifier = Arc::new(tokio::sync::Notify::new());
-        ingress
-            .set_endpoint_health_check_notifier(notifier.clone())
-            .unwrap();
+        let _notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::success(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
 
-        let count = send_and_count_notifications(&ingress, &notifier).await;
+        start_manager(&drt, 50).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
-        assert_eq!(
-            count, 0,
-            "Expected 0 notifications for all-error response, got {count}"
+        // No requests sent — canary fired and succeeded
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "canary should fire and set Ready on idle engine",
         );
     }
 
-    /// Mixed response: successful chunks followed by an error chunk at the end.
-    /// Only the successful chunks should notify; the error chunk and stream
-    /// completion should not.
+    // =================================================================
+    // Test 3: Error streaming → no notification → canary errors → NotReady
+    // =================================================================
     #[tokio::test]
-    async fn test_mixed_response_only_notifies_on_success_chunks() {
-        // 5 chunks total, last one (index 4) is an error
-        let engine = MockStreamingEngine::with_error_at(5, vec![4]);
-        let ingress =
-            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+    async fn test_error_streaming_stays_not_ready() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.error_streaming";
 
-        let notifier = Arc::new(tokio::sync::Notify::new());
-        ingress
-            .set_endpoint_health_check_notifier(notifier.clone())
-            .unwrap();
+        let notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
 
-        let count = send_and_count_notifications(&ingress, &notifier).await;
+        // Pipeline streams only errors — no notifications sent
+        let ingress = create_ingress(MockStreamingEngine::all_errors(3), notifier);
+        start_manager(&drt, 500).await;
 
-        // 4 successful chunks should notify, error chunk + completion should not.
-        // Coalescing means fewer wakeups, but at least 1.
-        assert!(
-            count >= 1,
-            "Expected at least 1 notification for 4 successful chunks, got {count}"
+        send_request(&ingress).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // No notification (all errors), canary hasn't fired yet (500ms wait)
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "error streaming should not notify, status stays NotReady",
+        );
+    }
+
+    // =================================================================
+    // Test 4: Idle engine → canary fires → failing health check → NotReady
+    // =================================================================
+    #[tokio::test]
+    async fn test_idle_engine_with_failing_canary() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.canary_fails";
+
+        let _notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        start_manager(&drt, 50).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // No requests sent, canary fired but engine returned error
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "canary fired but engine errored, status stays NotReady",
+        );
+    }
+
+    // =================================================================
+    // Test 5: Mixed streaming (success + trailing error) → Ready
+    // Successful chunks notify before the error, so status becomes Ready.
+    // Canary engine errors, proving Ready came from notification path.
+    // =================================================================
+    #[tokio::test]
+    async fn test_mixed_streaming_sets_ready() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.mixed_streaming";
+
+        let notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        // 5 chunks: 4 success + error at index 4
+        let ingress = create_ingress(MockStreamingEngine::with_error_at(5, vec![4]), notifier);
+        start_manager(&drt, 500).await;
+
+        send_request(&ingress).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Successful chunks notified before the error chunk
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "successful chunks should set Ready despite trailing error",
         );
     }
 }
