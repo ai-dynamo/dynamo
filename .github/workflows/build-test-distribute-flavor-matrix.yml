@@ -42,6 +42,11 @@ on:
         required: false
         type: number
         default: 10
+      cpu_parallel_mode:
+        description: 'pytest-xdist mode for CPU-only tests: auto, none/0, or a worker count'
+        required: false
+        type: string
+        default: 'auto'
       run_single_gpu_tests:
         description: 'Whether to run single GPU tests'
         required: false
@@ -164,6 +169,7 @@ jobs:
       run_cpu_only_tests: ${{ inputs.run_cpu_only_tests }}
       cpu_only_test_markers: ${{ inputs.cpu_only_test_markers }}
       cpu_only_test_timeout_minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+      cpu_parallel_mode: ${{ inputs.cpu_parallel_mode }}
       run_single_gpu_tests: ${{ inputs.run_single_gpu_tests }}
       single_gpu_test_markers: ${{ inputs.single_gpu_test_markers }}
       single_gpu_test_timeout_minutes: ${{ inputs.single_gpu_test_timeout_minutes }}

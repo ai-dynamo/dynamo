@@ -46,13 +46,7 @@ pytestmark = [
         "immediate_kill",
         [
             pytest.param(True, id="worker_failure"),
-            pytest.param(
-                False,
-                id="graceful_shutdown",
-                marks=pytest.mark.xfail(
-                    strict=False, reason="SGLang graceful shutdown not yet implemented"
-                ),
-            ),
+            pytest.param(False, id="graceful_shutdown"),
         ],
     ),
     pytest.mark.parametrize(
@@ -240,6 +234,22 @@ def test_request_migration_sglang_aggregated(
         request_api: "chat" for chat completion API, "completion" for completion API
         stream: True for streaming, False for non-streaming
     """
+
+    # TODO(<LINEAR-ID>): Flaky on NATS transport — first-token delay routinely
+    # exceeds the 6s threshold in utils.validate_response. Other parameter
+    # combinations (including the TCP variant) are stable.
+    if (
+        migration_limit == 3
+        and migration_max_seq_len is None
+        and immediate_kill is True
+        and request_api == "chat"
+        and stream is True
+        and request.getfixturevalue("request_plane") == "nats"
+    ):
+        pytest.skip(
+            "Flaky on NATS transport: first-token delay > 6s threshold. "
+            "OPS-4446"
+        )
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(

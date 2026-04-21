@@ -55,6 +55,7 @@ class TickSnapshot:
     observed_request_duration_seconds: Optional[float] = None
     observed_input_sequence_tokens: Optional[float] = None
     observed_output_sequence_tokens: Optional[float] = None
+    observed_kv_hit_rate: Optional[float] = None
 
     # Diagnostics from state machine
     estimated_ttft_ms: Optional[float] = None
@@ -62,6 +63,7 @@ class TickSnapshot:
     predicted_requests_per_second: Optional[float] = None
     predicted_input_sequence_tokens: Optional[float] = None
     predicted_output_sequence_tokens: Optional[float] = None
+    predicted_kv_hit_rate: Optional[float] = None
     engine_rps_prefill: Optional[float] = None
     engine_rps_decode: Optional[float] = None
     load_decision_reason: Optional[str] = None
@@ -173,6 +175,7 @@ class DiagnosticsRecorder:
             observed_request_duration_seconds=observed.request_duration,
             observed_input_sequence_tokens=observed.isl,
             observed_output_sequence_tokens=observed.osl,
+            observed_kv_hit_rate=observed.kv_hit_rate,
             estimated_ttft_ms=diag.estimated_ttft_ms,
             estimated_itl_ms=diag.estimated_itl_ms,
             predicted_requests_per_second=(
@@ -182,6 +185,7 @@ class DiagnosticsRecorder:
             ),
             predicted_input_sequence_tokens=diag.predicted_isl,
             predicted_output_sequence_tokens=diag.predicted_osl,
+            predicted_kv_hit_rate=diag.predicted_kv_hit_rate,
             engine_rps_prefill=diag.engine_rps_prefill,
             engine_rps_decode=diag.engine_rps_decode,
             load_decision_reason=diag.load_decision_reason,
