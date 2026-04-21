@@ -100,6 +100,32 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                 )
 
 
+def _apply_autotuner_gate(arg_map: dict, load_format: str) -> None:
+    """Disable TRT-LLM autotuner when GMS is active at TP>1.
+
+    At TP>1, TRT-LLM's autotuner warmup routes torch allocations through the
+    virtual_memory pluggable allocator while GMS's pluggable allocator also
+    owns the weights pool. The two collide during tunable_allreduce /
+    flashinfer_rmsnorm, producing an illegal-memory-access (tail lands in
+    KVCacheTransferManager dtor). See trtllm-tp2-kvtransfer-crash.md.
+
+    Reads effective TP from ``arg_map`` (post-merge of extra/override
+    engine args) because production DGDs commonly set TP only via those
+    JSON/YAML surfaces and leave the CLI default at 1.
+    """
+    if load_format != "gms":
+        return
+    effective_tp = arg_map.get("tensor_parallel_size", 1)
+    if effective_tp <= 1:
+        return
+    logging.warning(
+        "[GMS] Disabling autotuner for TP=%d GMS run — dual-pluggable-allocator "
+        "crash workaround (see trtllm-tp2-kvtransfer-crash.md).",
+        effective_tp,
+    )
+    arg_map["enable_autotuner"] = False
+
+
 def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     """Parse --model-loader-extra-config into a dict. Accepts a dict or a JSON string."""
     if raw is None or raw == "":
@@ -262,18 +288,6 @@ async def init_llm_worker(
 
         arg_map["sleep_config"] = SleepConfig()
 
-        # At TP>1, TRT-LLM's autotuner warmup runs inside an allocation_scope
-        # that routes torch allocations through the virtual_memory pluggable
-        # allocator. The same process also hosts the GMS pluggable allocator
-        # for weights. The two allocators collide during the first autotuned
-        # allreduce (tunable_allreduce + flashinfer_rmsnorm), producing an
-        # illegal-memory-access whose tail is a KVCacheTransferManager dtor
-        # crash. Disabling the autotuner skips that warmup forward pass; the
-        # fallback allreduce path is correct. Verified on Qwen3-0.6B TP=2
-        # with GMS RW on branch schwinns/trtllm-gms-mpi-workers (B200).
-        if config.tensor_parallel_size > 1:
-            arg_map["enable_autotuner"] = False
-
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:
         arg_map["guided_decoding_backend"] = config.guided_decoding_backend
@@ -297,6 +311,8 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    _apply_autotuner_gate(arg_map, config.load_format)
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
