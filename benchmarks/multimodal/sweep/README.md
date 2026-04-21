@@ -30,9 +30,8 @@ model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
 concurrencies: [16, 32, 64, 128, 256]
 osl: 150                    # output sequence length
 conversation_num: 10        # sessions per sweep value (optional; derived from
-                            # input JSONL's unique session_id count if unset)
-request_count: 200          # OPTIONAL hard cap on total credits; rejected if
-                            # set alone without conversation_num
+                            # input JSONL's unique session_id count if unset;
+                            # flat JSONLs count each row as a 1-turn conversation)
 warmup_count: 5
 port: 8000
 timeout: 900                # seconds to wait for server readiness
@@ -78,11 +77,11 @@ groups single_turn rows by JSONL `session_id`. A JSONL with 10 users × 10 turns
 each dispatches 10 causal-ordered chains (turn-(k+1) for user A only after
 turn-k for user A returns).
 
-Control the session count via `conversation_num`. **`request_count` alone is
-rejected at config-load** because it triggers SequentialSampler wrap (extra
-turn-0 sessions, incomplete chains) — the exact DIS-1807 bug. Use
-`conversation_num` as the primary control; add `request_count` only as a safety
-cap when you need one.
+Control the session count via `conversation_num`. For flat JSONLs (random
+requests, single_turn without shared `session_id`), `conversation_num` still
+works — each row is treated as a 1-turn conversation, so total requests =
+`conversation_num × 1 = conversation_num`. If unset, it defaults to the
+detected unique session_id count (or row count for flat JSONLs).
 
 ### Upgrading aiperf in an existing container
 

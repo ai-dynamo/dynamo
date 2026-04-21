@@ -69,8 +69,6 @@ def run_sweep(
     print(f"  OSL:           {config.osl}")
     if config.conversation_num is not None:
         print(f"  Conversations: {config.conversation_num} per {sweep_mode}")
-    if config.request_count is not None:
-        print(f"  Request cap:   {config.request_count} per {sweep_mode}")
     print(
         f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}"
     )
@@ -177,7 +175,6 @@ def _run_config(
                     sweep_mode=sweep_mode,
                     sweep_value=value,
                     conversation_num=conversation_num,
-                    request_count=config.request_count,
                     warmup_count=config.warmup_count,
                     input_file=input_file,
                     osl=config.osl,
