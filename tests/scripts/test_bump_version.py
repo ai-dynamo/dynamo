@@ -643,3 +643,85 @@ class TestFeatureMatrix:
         assert "*Updated for Dynamo v1.0.0*" in out
         # Historical version mention in prose must NOT be rewritten.
         assert "historical version v0.5.0" in out
+
+
+# ---------------------------------------------------------------------------
+# Tier-1 regression guards (one test per fragility patch)
+# ---------------------------------------------------------------------------
+
+
+class TestRegressionGuards:
+    def test_release_artifacts_docs_url_uses_canonical_domain(self, bv, tmp_path):
+        # FIX 1 guard: the docs link in release-artifacts.md must use the
+        # canonical host ``docs.dynamo.nvidia.com/dynamo`` and the rule's
+        # regex must match that exact host — not a sibling like
+        # ``docs.nvidia.com/dynamo`` which a previous iteration emitted.
+        doc = (
+            "## Current Release: Dynamo v0.9.0\n\n"
+            "**GitHub Release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0)\n\n"
+            "**Docs:** [v0.9.0](https://docs.dynamo.nvidia.com/dynamo)\n\n"
+            "### GitHub Releases\n\n"
+            "| Version | Release Date | GitHub | Docs | Notes |\n"
+            "|---------|------|---------|------|------|\n"
+            "| `v0.9.0` | Dec 01, 2025 | [Release](x) | [Docs](y) | |\n"
+        )
+        p = tmp_path / "docs" / "reference" / "release-artifacts.md"
+        _write(p, doc)
+        _bump_docs(bv, tmp_path, "1.0.0")
+        out = p.read_text(encoding="utf-8")
+        # Canonical host preserved, version rewritten.
+        assert "[v1.0.0](https://docs.dynamo.nvidia.com/dynamo)" in out
+        # The inserted table row's Docs column must also use the canonical host.
+        assert "[Docs](https://docs.dynamo.nvidia.com/dynamo)" in out
+        # Non-canonical hosts must never appear.
+        assert "docs.nvidia.com/dynamo" not in out
+
+    def test_ver_does_not_strip_rc_suffix(self, bv):
+        # FIX 2 guard: ``_VER`` must refuse to match the numeric portion of
+        # strings that continue with additional release qualifiers — otherwise
+        # rewriting the capture leaves orphaned suffixes like ``1.0.0-rc1``
+        # after a bump that had nothing to say about the rc track.
+        import re as _re
+
+        pattern = _re.compile(bv._VER)
+        # Word-char / dot / dash suffixes must block the match entirely.
+        assert pattern.search("0.9.0-rc1") is None
+        assert pattern.search("0.9.0rc1") is None
+        assert pattern.search("0.9.0.dev2") is None
+        assert pattern.search("0.9.0-alpha") is None
+        # Plain versions and .postN / -postN still match as before.
+        assert pattern.fullmatch("0.9.0") is not None
+        assert pattern.fullmatch("0.9.0.post1") is not None
+        assert pattern.fullmatch("0.9.0-post2") is not None
+
+    def test_change_record_tracks_every_rule_that_fired(self, bv, tmp_path):
+        # FIX 3 guard: when multiple rules rewrite the same file in one pass,
+        # the resulting ``Change`` record must list every rule name — not just
+        # the first or last. The summary table depends on this to attribute
+        # rewrites back to rules.
+        doc = (
+            "## Current Release: Dynamo v0.9.0\n\n"
+            "**GitHub Release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0)\n\n"
+            "**Docs:** [v0.9.0](https://docs.dynamo.nvidia.com/dynamo)\n\n"
+        )
+        p = tmp_path / "docs" / "reference" / "release-artifacts.md"
+        _write(p, doc)
+        changes = bv.apply_rules(
+            tmp_path,
+            bv.Version.parse("1.0.0"),
+            active_scopes={bv.Scope.DOCS},
+            dry_run=True,
+        )
+        # Exactly one Change record for the one rewritten file.
+        matching = [c for c in changes if c.path.name == "release-artifacts.md"]
+        assert len(matching) == 1
+        fired = set(matching[0].rules)
+        # All three DOCS rules that could fire on this content must be tracked.
+        expected = {
+            "release_artifacts_header",
+            "release_artifacts_github_link",
+            "release_artifacts_docs_link",
+        }
+        assert expected.issubset(fired), (
+            f"missing rules in change record: {expected - fired}"
+        )

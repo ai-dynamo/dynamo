@@ -162,8 +162,10 @@ class Scope(Enum):
 # Rule table
 # ---------------------------------------------------------------------------
 
-# Version token: X.Y.Z with optional .postN or -postN suffix.
-_VER = r"\d+\.\d+\.\d+(?:[.-]post\d+)?"
+# Version token: X.Y.Z with optional .postN or -postN, refusing to consume
+# additional release qualifiers (e.g. "-rc1", "-dev2") that would otherwise
+# leave an orphaned suffix when the engine rewrites the captured numbers.
+_VER = r"\d+\.\d+\.\d+(?:[.-]post\d+)?(?![\w.-])"
 
 
 def _always(_: Path) -> bool:
