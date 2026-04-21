@@ -119,9 +119,14 @@ impl HealthCheckManager {
                     }
 
                     _ = notifier.notified() => {
-                        // Activity detected - reset timer for this endpoint only
+                        // Activity detected - reset timer for this endpoint only.
+                        // A notification means push_handler successfully streamed
+                        // a non-error response chunk, proving the engine is healthy.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
-                        // Loop continues, timer resets
+                        manager.drt.system_health().lock().set_endpoint_health_status(
+                            &endpoint_subject,
+                            crate::config::HealthStatus::Ready,
+                        );
                     }
                 }
             }
@@ -602,18 +607,18 @@ mod push_handler_notify_tests {
         // Wait less than canary_wait_time
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // The canary should NOT have fired. Since the endpoint starts as NotReady
-        // and send_health_check_request (which sets Ready on success) was never
-        // called, the status should still be NotReady.
+        // The canary should NOT have fired. The status should be Ready because
+        // the notification from push_handler's successful streaming set it to
+        // Ready (without the canary ever needing to fire).
         let status = drt
             .system_health()
             .lock()
             .get_endpoint_health_status(endpoint_name);
         assert_eq!(
             status,
-            Some(HealthStatus::NotReady),
-            "Status should still be NotReady — the canary should not have fired \
-             because push_handler reset the timer via notify_one()"
+            Some(HealthStatus::Ready),
+            "Status should be Ready — push_handler's successful streaming \
+             should have set it via the notification path"
         );
     }
 
