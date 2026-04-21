@@ -96,10 +96,18 @@ async def main(runtime: DistributedRuntime, args):
         max_total_gpus=args.max_total_gpus,
     )
 
-    # Serve scale_request endpoint
+    # Serve scale_request endpoint.
+    # Passing health_check_payload registers this endpoint as a health-check
+    # target so the runtime's system status server flips to HealthStatus::Ready
+    # once the handler is registered. Without it, the operator-injected HTTP
+    # probes on :system/live and :system/health return 503 forever and the pod
+    # never becomes Ready.
     logger.info("Serving endpoints...")
     scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
-    await scale_endpoint.serve_endpoint(handler.scale_request)
+    await scale_endpoint.serve_endpoint(
+        handler.scale_request,
+        health_check_payload={"text": "ping"},
+    )
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
 
     # Serve health check endpoint
@@ -113,7 +121,10 @@ async def main(runtime: DistributedRuntime, args):
         }
 
     health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
-    await health_endpoint.serve_endpoint(health_check)
+    await health_endpoint.serve_endpoint(
+        health_check,
+        health_check_payload={"text": "ping"},
+    )
     logger.info("  ✓ health - Health check endpoint")
 
     logger.info("=" * 60)
