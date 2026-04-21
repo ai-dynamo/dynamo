@@ -9,7 +9,7 @@
 #
 # Post-releases (vX.Y.Z.postN):
 #   Auto-trigger performs a minimal bump by default (core + helm only — full
-#   image-tag + docs churn is usually not wanted for post-releases). Use
+#   image-tag churn is usually not wanted for post-releases). Use
 #   workflow_dispatch with the component checkboxes for full control.
 #
 # The actual bump steps live in _version-bump-shared.yml. This file only
@@ -42,11 +42,6 @@ on:
         required: false
         type: boolean
         default: true
-      update_docs:
-        description: 'Update reference docs (support-matrix, feature-matrix, release-artifacts)'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: write
@@ -68,7 +63,6 @@ jobs:
       skip_core:       ${{ steps.flags.outputs.skip_core }}
       skip_containers: ${{ steps.flags.outputs.skip_containers }}
       skip_helm:       ${{ steps.flags.outputs.skip_helm }}
-      skip_docs:       ${{ steps.flags.outputs.skip_docs }}
       vllm_version:    ${{ steps.metadata.outputs.vllm_version }}
       sglang_version:  ${{ steps.metadata.outputs.sglang_version }}
       trtllm_version:  ${{ steps.metadata.outputs.trtllm_version }}
@@ -167,43 +161,37 @@ jobs:
           UPDATE_CORE: ${{ inputs.update_core }}
           UPDATE_CONTAINERS: ${{ inputs.update_containers }}
           UPDATE_HELM: ${{ inputs.update_helm }}
-          UPDATE_DOCS: ${{ inputs.update_docs }}
         run: |
           set -euo pipefail
 
           # Default per event type:
           #   workflow_dispatch  -> honour the checkbox inputs
           #   release (full)     -> all scopes enabled
-          #   release (post)     -> minimal: core + helm only (no image-tag/docs churn)
-          CORE=true; CONTAINERS=true; HELM=true; DOCS=true
+          #   release (post)     -> minimal: core + helm only (no image-tag churn)
+          CORE=true; CONTAINERS=true; HELM=true
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             CORE="$UPDATE_CORE"
             CONTAINERS="$UPDATE_CONTAINERS"
             HELM="$UPDATE_HELM"
-            DOCS="$UPDATE_DOCS"
           elif [ "$IS_POST" = "true" ]; then
             CONTAINERS=false
-            DOCS=false
           fi
 
           # Shared workflow takes skip_* booleans (inverse of the update_* inputs).
           SKIP_CORE=true
           SKIP_CONTAINERS=true
           SKIP_HELM=true
-          SKIP_DOCS=true
           if [ "$CORE"       = "true" ]; then SKIP_CORE=false; fi
           if [ "$CONTAINERS" = "true" ]; then SKIP_CONTAINERS=false; fi
           if [ "$HELM"       = "true" ]; then SKIP_HELM=false; fi
-          if [ "$DOCS"       = "true" ]; then SKIP_DOCS=false; fi
 
           {
             echo "skip_core=$SKIP_CORE"
             echo "skip_containers=$SKIP_CONTAINERS"
             echo "skip_helm=$SKIP_HELM"
-            echo "skip_docs=$SKIP_DOCS"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved: skip_core=$SKIP_CORE skip_containers=$SKIP_CONTAINERS skip_helm=$SKIP_HELM skip_docs=$SKIP_DOCS"
+          echo "Resolved: skip_core=$SKIP_CORE skip_containers=$SKIP_CONTAINERS skip_helm=$SKIP_HELM"
 
       - name: Compose PR title and body
         id: body
@@ -217,14 +205,12 @@ jobs:
           SKIP_CORE:       ${{ steps.flags.outputs.skip_core }}
           SKIP_CONTAINERS: ${{ steps.flags.outputs.skip_containers }}
           SKIP_HELM:       ${{ steps.flags.outputs.skip_helm }}
-          SKIP_DOCS:       ${{ steps.flags.outputs.skip_docs }}
         run: |
           set -euo pipefail
           SCOPE_FLAGS=""
           if [ "$SKIP_CORE"       = "true" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-core"; fi
           if [ "$SKIP_CONTAINERS" = "true" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-containers"; fi
           if [ "$SKIP_HELM"       = "true" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-helm"; fi
-          if [ "$SKIP_DOCS"       = "true" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-docs"; fi
 
           if [ "$IS_POST" = "true" ]; then
             TITLE="chore: bump version to ${VERSION} (post-release)"
@@ -273,6 +259,6 @@ jobs:
       skip_core:       ${{ needs.parse.outputs.skip_core == 'true' }}
       skip_containers: ${{ needs.parse.outputs.skip_containers == 'true' }}
       skip_helm:       ${{ needs.parse.outputs.skip_helm == 'true' }}
-      skip_docs:       ${{ needs.parse.outputs.skip_docs == 'true' }}
     secrets:
       github_token: ${{ secrets.GITHUB_TOKEN }}
+      devin_api_key: ${{ secrets.DEVIN_API_KEY }}

@@ -43,11 +43,6 @@ on:
         required: false
         type: boolean
         default: true
-      update_docs:
-        description: 'Update reference docs (support-matrix, feature-matrix, release-artifacts). Only used with version-bump action.'
-        required: false
-        type: boolean
-        default: true
 
 # Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
 # This is enforced in the prepare-release / parse-release-bump jobs via branch validation
@@ -142,14 +137,12 @@ jobs:
           UPDATE_CORE:       ${{ inputs.update_core }}
           UPDATE_CONTAINERS: ${{ inputs.update_containers }}
           UPDATE_HELM:       ${{ inputs.update_helm }}
-          UPDATE_DOCS:       ${{ inputs.update_docs }}
         run: |
           set -euo pipefail
           SCOPE_FLAGS=""
           if [ "$UPDATE_CORE"       = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-core"; fi
           if [ "$UPDATE_CONTAINERS" = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-containers"; fi
           if [ "$UPDATE_HELM"       = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-helm"; fi
-          if [ "$UPDATE_DOCS"       = "false" ]; then SCOPE_FLAGS="$SCOPE_FLAGS --skip-docs"; fi
           {
             echo "pr_title=chore: bump version references to ${VERSION}"
             echo "pr_body<<EOF_BODY"
@@ -193,9 +186,9 @@ jobs:
       skip_core:       ${{ !inputs.update_core }}
       skip_containers: ${{ !inputs.update_containers }}
       skip_helm:       ${{ !inputs.update_helm }}
-      skip_docs:       ${{ !inputs.update_docs }}
     secrets:
       github_token: ${{ secrets.GITHUB_TOKEN }}
+      devin_api_key: ${{ secrets.DEVIN_API_KEY }}
 
   # ============================================================================
   # GATE: Version Extraction

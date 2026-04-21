@@ -36,27 +36,27 @@ on:
         required: true
         type: string
       vllm_version:
-        description: 'vLLM backend version'
+        description: 'vLLM backend version (used only by the Devin docs-sync step)'
         required: false
         type: string
         default: ''
       sglang_version:
-        description: 'SGLang backend version'
+        description: 'SGLang backend version (used only by the Devin docs-sync step)'
         required: false
         type: string
         default: ''
       trtllm_version:
-        description: 'TensorRT-LLM backend version'
+        description: 'TensorRT-LLM backend version (used only by the Devin docs-sync step)'
         required: false
         type: string
         default: ''
       nixl_version:
-        description: 'NIXL backend version'
+        description: 'NIXL backend version (used only by the Devin docs-sync step)'
         required: false
         type: string
         default: ''
       release_date:
-        description: 'Release date (e.g. Apr 20, 2026)'
+        description: 'Release date (used only by the Devin docs-sync step)'
         required: false
         type: string
         default: ''
@@ -75,15 +75,13 @@ on:
         required: false
         type: boolean
         default: false
-      skip_docs:
-        description: 'Skip docs reference updates'
-        required: false
-        type: boolean
-        default: false
     secrets:
       github_token:
         description: 'GitHub token for PR creation'
         required: true
+      devin_api_key:
+        description: 'Devin API key for post-PR reference-doc sync (optional)'
+        required: false
 
 env:
   YQ_VERSION: '4.52.2'
@@ -148,30 +146,18 @@ jobs:
       - name: Run version bump
         env:
           VERSION: ${{ inputs.version }}
-          VLLM: ${{ inputs.vllm_version }}
-          SGLANG: ${{ inputs.sglang_version }}
-          TRTLLM: ${{ inputs.trtllm_version }}
-          NIXL: ${{ inputs.nixl_version }}
-          RELEASE_DATE: ${{ inputs.release_date }}
           SKIP_CORE: ${{ inputs.skip_core }}
           SKIP_CONTAINERS: ${{ inputs.skip_containers }}
           SKIP_HELM: ${{ inputs.skip_helm }}
-          SKIP_DOCS: ${{ inputs.skip_docs }}
         run: |
           set -euo pipefail
           FLAGS=()
           if [ "$SKIP_CORE" = "true" ]; then FLAGS+=(--skip-core); fi
           if [ "$SKIP_CONTAINERS" = "true" ]; then FLAGS+=(--skip-containers); fi
           if [ "$SKIP_HELM" = "true" ]; then FLAGS+=(--skip-helm); fi
-          if [ "$SKIP_DOCS" = "true" ]; then FLAGS+=(--skip-docs); fi
           echo "Skip flags: ${FLAGS[*]:-(none — all scopes enabled)}"
 
           ARGS=(--new-version "$VERSION")
-          if [ -n "$VLLM" ]; then ARGS+=(--vllm-version "$VLLM"); fi
-          if [ -n "$SGLANG" ]; then ARGS+=(--sglang-version "$SGLANG"); fi
-          if [ -n "$TRTLLM" ]; then ARGS+=(--trtllm-version "$TRTLLM"); fi
-          if [ -n "$NIXL" ]; then ARGS+=(--nixl-version "$NIXL"); fi
-          if [ -n "$RELEASE_DATE" ]; then ARGS+=(--release-date "$RELEASE_DATE"); fi
           ARGS+=(--summary-file "$GITHUB_STEP_SUMMARY")
           ARGS+=("${FLAGS[@]}")
 
