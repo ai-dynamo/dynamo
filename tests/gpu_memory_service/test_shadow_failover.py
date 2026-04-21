@@ -320,12 +320,13 @@ def _run_trtllm_weights_only_failover(
       primary SIGKILL
       shadow-a resumes + post-failover inference
 
-    If ``expected_substring`` is given, the pre-failover completions (shadow-a,
-    shadow-b, primary) must contain it — this catches weight/draft binding
-    corruption that would still return syntactically valid but semantically
-    garbled text. The post-failover completion is only required to be a valid
-    non-empty completion: TRT-LLM EAGLE3 spec-dec has a pre-existing quality
-    regression across quiesce/resume that is out of scope for this test.
+    If ``expected_substring`` is given, all four completions (shadow-a, shadow-b,
+    primary, post-failover shadow-a) must contain it. This catches two distinct
+    regressions: (1) weight/draft binding corruption in the RO path, which
+    manifests as garbled but syntactically valid text on any phase; and (2) KV
+    block-reuse staleness after release_with_tag("kv_cache"), which manifests
+    only on the post-failover request as valid-looking text drawn from stale
+    hashes over zeroed pages.
     """
     with GMSProcessManager(request, engine_cls, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
@@ -399,6 +400,7 @@ def _run_trtllm_weights_only_failover(
             failure_message="Shadow after failover failed",
             success_message="Shadow after failover OK",
             retry_timeout=30.0,
+            expected_substring=expected_substring,
         )
 
 
