@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kimi-K2.5 + EAGLE3 draft download for the nscale shadow-failover DGD.
+#
+# Differences from model-download.yaml / eagle-download.yaml:
+#   - Single Job covers both target and draft so one apply bootstraps the
+#     full weight set needed by deploy-specdec-failover-nscale.yaml.
+#   - Targets the nscale shared HF cache PVC (`shared-model-cache`,
+#     RWX 50Ti) instead of `model-cache`. The target weights
+#     (nvidia/Kimi-K2.5-NVFP4) are already cached on this PVC; the Job
+#     will skip them automatically via HF hub's ETag check, so normally
+#     this Job only downloads the ~3.5 GiB draft.
+#   - nscale DRA nodes carry the `dra=true:NoSchedule` taint. This Job
+#     is intentionally CPU-only, but we tolerate the taint so it can
+#     schedule on either of the nscale pool nodes if the non-DRA nodes
+#     are saturated.
+#
+# Usage:
+#   kubectl apply -n schwinns -f recipes/kimi-k2.5/model-cache/nvidia/model-download-nscale.yaml
+#   kubectl wait -n schwinns --for=condition=complete --timeout=1h job/kimi-k25-download-nscale
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kimi-k25-download-nscale
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-download-nscale
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - effect: NoSchedule
+          key: dra
+          operator: Exists
+      containers:
+        - name: download
+          image: python:3.10-slim
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: TARGET_MODEL
+              value: nvidia/Kimi-K2.5-NVFP4
+            - name: DRAFT_MODEL
+              value: nvidia/Kimi-K2.5-Thinking-Eagle3
+            - name: DRAFT_REVISION
+              value: 0b0c6ac039089ad2c2418c91c039553381a302d9
+            - name: HF_HOME
+              value: /model-store
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          resources:
+            requests:
+              memory: 16Gi
+              cpu: "2"
+            limits:
+              memory: 32Gi
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.11.0
+              hf download "$TARGET_MODEL"
+              hf download "$DRAFT_MODEL" --revision "$DRAFT_REVISION"
+              du -sh /model-store/hub/models--nvidia--Kimi-K2.5-NVFP4 \
+                     /model-store/hub/models--nvidia--Kimi-K2.5-Thinking-Eagle3
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-store
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
