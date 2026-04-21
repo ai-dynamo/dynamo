@@ -186,13 +186,14 @@ impl SharedTcpServer {
                         WORK_HANDLER_PERMIT_WAIT_SECONDS
                             .observe(permit_wait_start.elapsed().as_secs_f64());
 
-                        // Spawn task with owned permit (dropped when task completes)
+                        // Increment before spawn so the gauge is never observed negative
+                        // if the spawned task completes on another worker before we return.
+                        WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
                         tokio::spawn(async move {
                             Self::handle_work_item(work_item).await;
                             drop(permit);
                             WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
                         });
-                        WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
                     }
                 }
             }

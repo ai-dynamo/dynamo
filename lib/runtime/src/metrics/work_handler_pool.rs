@@ -3,10 +3,8 @@
 
 //! Worker-pool saturation metrics for the shared TCP server (backend side).
 //!
-//! These metrics make the 250K-concurrency failure mode visible: queue buildup
-//! between `work_tx.send()` and dispatcher pickup, and permit starvation in the
-//! bounded worker pool. See `docs/proposals/observability-gaps-250k-postmortem.md`
-//! (Gaps 1 and 3) for the incident context.
+//! These metrics expose queue buildup between `work_tx.send()` and dispatcher
+//! pickup, and permit starvation in the bounded worker pool.
 
 use once_cell::sync::{Lazy, OnceCell};
 use prometheus::{Histogram, HistogramOpts, IntCounter, IntGauge};
