@@ -7,12 +7,11 @@ from typing import Sequence, Union
 
 import blake3
 import numpy as np
-import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-ImageInput = Union[Image.Image, np.ndarray, torch.Tensor]
+ImageInput = Union[Image.Image, np.ndarray]
 
 # Preimage layout (12 bytes, fixed-length) || pixel bytes.
 #   offset  bytes  field
@@ -52,13 +51,8 @@ def _image_preimage_parts(img: ImageInput) -> tuple[bytes, bytes]:
 
     Raises:
         ValueError: input shape, dtype, or mode violates the RGB uint8 contract.
-        TypeError: input is not a PIL.Image.Image, np.ndarray, or torch.Tensor.
+        TypeError: input is neither a PIL.Image.Image nor an np.ndarray.
     """
-    # torch.Tensor → ndarray (moved to CPU) so it flows through the ndarray
-    # path and gets the same dtype/shape validation + geometry header.
-    if isinstance(img, torch.Tensor):
-        img = img.cpu().numpy()
-
     if isinstance(img, Image.Image):
         if img.mode != "RGB":
             raise ValueError(
@@ -78,8 +72,8 @@ def _image_preimage_parts(img: ImageInput) -> tuple[bytes, bytes]:
         return _header(height, width), contiguous.tobytes()
 
     raise TypeError(
-        "compute_mm_uuids_from_images expected PIL.Image.Image, np.ndarray, "
-        f"or torch.Tensor, got {type(img).__name__}"
+        "compute_mm_uuids_from_images expected PIL.Image.Image or np.ndarray, "
+        f"got {type(img).__name__}"
     )
 
 
