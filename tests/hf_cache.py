@@ -95,8 +95,8 @@ def _enable_offline_with_mistral_patch():
         """
             )
         )
-    pythonpath = os.environ.get("PYTHONPATH", "")
-    os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
+    existing_entries = [e for e in os.environ.get("PYTHONPATH", "").split(":") if e]
+    os.environ["PYTHONPATH"] = ":".join([patch_dir] + existing_entries)
     logging.info(
         "Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround "
         "(see https://github.com/huggingface/transformers/issues/44843)"
@@ -111,11 +111,12 @@ def _disable_offline_with_mistral_patch():
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
     pythonpath = os.environ.get("PYTHONPATH", "")
-    result = ":".join(e for e in pythonpath.split(":") if e != patch_dir)
+    result = ":".join(e for e in pythonpath.split(":") if e and e != patch_dir)
     if result:
         os.environ["PYTHONPATH"] = result
     else:
         os.environ.pop("PYTHONPATH", None)
+    shutil.rmtree(patch_dir, ignore_errors=True)
     _mistral_patch_applied = False
 
 

@@ -151,6 +151,56 @@ def test_download_lora_skips_in_models_dir_mode(tmp_path, monkeypatch):
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.gpu_0
+def test_disable_removes_patch_dir(monkeypatch):
+    """_disable_offline_with_mistral_patch cleans up the sitecustomize patch directory."""
+    import tempfile
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
+
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
+
+    os.makedirs(patch_dir, exist_ok=True)
+    (Path(patch_dir) / "sitecustomize.py").write_text("# stub")
+    monkeypatch.setenv("PYTHONPATH", patch_dir)
+
+    _disable_offline_with_mistral_patch()
+
+    assert not Path(patch_dir).exists()
+    assert "PYTHONPATH" not in os.environ
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_enable_normalizes_pythonpath_empty_components(monkeypatch):
+    """_enable_offline_with_mistral_patch filters empty components from PYTHONPATH."""
+    monkeypatch.setenv("PYTHONPATH", ":some:existing:path:")
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+        monkeypatch.setattr(
+            PreTrainedTokenizerBase,
+            "_patch_mistral_regex",
+            classmethod(lambda cls, t, *a, **kw: t),
+            raising=False,
+        )
+    except ImportError:
+        pytest.skip("transformers not installed")
+
+    _enable_offline_with_mistral_patch()
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    assert "" not in pythonpath.split(":"), f"Empty component in PYTHONPATH: {pythonpath!r}"
+
+    _disable_offline_with_mistral_patch()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
 def test_pythonpath_restored_after_apply_restore(tmp_path, monkeypatch):
     original = "some:existing:path"
     monkeypatch.setenv("PYTHONPATH", original)
