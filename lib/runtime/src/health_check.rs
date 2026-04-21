@@ -625,17 +625,18 @@ mod push_handler_notify_tests {
 
         // Pipeline streams only errors — no notifications sent
         let ingress = create_ingress(MockStreamingEngine::all_errors(3), notifier);
-        start_manager(&drt, 500).await;
+        start_manager(&drt, 50).await;
 
         send_request(&ingress).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for canary to fire (50ms wait + margin)
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // No notification (all errors), canary hasn't fired yet (500ms wait)
+        // Error streaming didn't notify, canary fired but engine also errored
         assert_status(
             &drt,
             endpoint,
             HealthStatus::NotReady,
-            "error streaming should not notify, status stays NotReady",
+            "error streaming should not notify, canary also errors — stays NotReady",
         );
     }
 
