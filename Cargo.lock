@@ -2431,6 +2431,7 @@ dependencies = [
  "image",
  "indicatif 0.18.4",
  "insta",
+ "ipnet",
  "json-five",
  "lazy_static",
  "memfile",

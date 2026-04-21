@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::Result;
+use ipnet::IpNet;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::redirect::Policy;
 
 use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
@@ -15,12 +20,77 @@ use super::rdma::{RdmaMediaDataDescriptor, get_nixl_agent};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_REDIRECTS: usize = 3;
+
+// IP ranges that must never be reachable from a user-controlled URL.
+// Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
+// 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
+// (reserved). Link-local 169.254/16 covers the AWS / OpenStack metadata IP.
+static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
+    [
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "255.255.255.255/32",
+        "::/128",
+        "::1/128",
+        "::ffff:0:0/96",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8",
+    ]
+    .iter()
+    .map(|s| s.parse().expect("invalid CIDR in BLOCKED_IP_NETWORKS"))
+    .collect()
+});
+
+// Hostnames we reject by literal match without any DNS lookup. Defends
+// against /etc/hosts tricks or malicious resolvers that alias metadata /
+// internal-service names to attacker IPs. Match is case-insensitive.
+static BLOCKED_HOSTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "ip6-loopback",
+        "metadata",
+        "metadata.google.internal",
+        "metadata.goog",
+        "kubernetes.default",
+        "kubernetes.default.svc",
+    ]
+    .iter()
+    .copied()
+    .collect()
+});
+
+/// Return `true` if `ip` falls inside any of the blocked ranges.
+pub fn is_blocked_ip(ip: &IpAddr) -> bool {
+    BLOCKED_IP_NETWORKS.iter().any(|net| net.contains(ip))
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaFetcher {
     pub user_agent: String,
     pub allow_direct_ip: bool,
     pub allow_direct_port: bool,
+    /// When `false` (default), reject URLs whose host resolves to a
+    /// blocked IP range (private / loopback / cloud metadata / etc.) and
+    /// reject hostnames in the `BLOCKED_HOSTS` list. Set to `true` for
+    /// on-prem / local-dev deployments where media lives on an internal
+    /// network. **Never** set this on anything public-facing.
+    pub allow_private_ips: bool,
     pub allowed_media_domains: Option<HashSet<String>>,
     pub timeout: Option<Duration>,
 }
@@ -31,6 +101,7 @@ impl Default for MediaFetcher {
             user_agent: DEFAULT_HTTP_USER_AGENT.to_string(),
             allow_direct_ip: false,
             allow_direct_port: false,
+            allow_private_ips: false,
             allowed_media_domains: None,
             timeout: Some(DEFAULT_HTTP_TIMEOUT),
         }
@@ -53,6 +124,35 @@ impl MediaFetcher {
         if !self.allow_direct_port && url.port().is_some() {
             anyhow::bail!("Direct port access is not allowed");
         }
+
+        // Host-level checks: blocked hostnames and IP literals in blocked
+        // ranges. DNS-resolved IPs are checked in `check_if_url_allowed_async`.
+        if !self.allow_private_ips {
+            match url.host() {
+                Some(url::Host::Domain(domain)) => {
+                    let lowered = domain.to_ascii_lowercase();
+                    if BLOCKED_HOSTS.contains(lowered.as_str()) {
+                        anyhow::bail!(
+                            "Host '{domain}' is blocked (resolves to internal service)"
+                        );
+                    }
+                }
+                Some(url::Host::Ipv4(ip)) => {
+                    let addr = IpAddr::V4(ip);
+                    if is_blocked_ip(&addr) {
+                        anyhow::bail!("IP literal '{addr}' is in a blocked range");
+                    }
+                }
+                Some(url::Host::Ipv6(ip)) => {
+                    let addr = IpAddr::V6(ip);
+                    if is_blocked_ip(&addr) {
+                        anyhow::bail!("IP literal '{addr}' is in a blocked range");
+                    }
+                }
+                None => anyhow::bail!("URL has no host component"),
+            }
+        }
+
         if let Some(allowed_domains) = &self.allowed_media_domains
             && let Some(host) = url.host_str()
             && !allowed_domains.contains(host)
@@ -61,6 +161,72 @@ impl MediaFetcher {
         }
 
         Ok(())
+    }
+
+    /// Full policy check: runs `check_if_url_allowed` and, for hostname
+    /// URLs, resolves DNS and checks each resulting IP against the blocked
+    /// ranges. Catches static DNS attacks where a domain's A record points
+    /// at a blocked IP.
+    ///
+    /// This is best-effort against DNS rebinding: reqwest re-resolves at
+    /// connect time, so an attacker who changes their DNS answer between
+    /// this call and the TCP connect can still slip through. Full
+    /// protection comes from IP pinning in the request path.
+    pub async fn check_if_url_allowed_with_dns(&self, url: &url::Url) -> Result<()> {
+        self.check_if_url_allowed(url)?;
+
+        // Only hostnames need DNS resolution; IP-literal hosts were already
+        // checked against the blocklist above.
+        if self.allow_private_ips || url.scheme() == "data" {
+            return Ok(());
+        }
+        let Some(url::Host::Domain(host)) = url.host() else {
+            return Ok(());
+        };
+
+        let port = url.port_or_known_default().unwrap_or(0);
+        let iter = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| anyhow::anyhow!("Could not resolve host '{host}': {e}"))?;
+        for sock_addr in iter {
+            let ip = sock_addr.ip();
+            if is_blocked_ip(&ip) {
+                anyhow::bail!("Host '{host}' resolves to blocked IP '{ip}'");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// DNS resolver that filters out blocked IP ranges before reqwest sees them.
+///
+/// Attached to the shared `reqwest::Client` via `ClientBuilder::dns_resolver`.
+/// reqwest calls this for every hostname it needs to resolve — including
+/// redirect targets — so DNS rebinding can't slip a blocked IP past us:
+/// reqwest literally never learns about the blocked addresses.
+struct BlocklistResolver {
+    allow_private_ips: bool,
+}
+
+impl Resolve for BlocklistResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        let allow_private = self.allow_private_ips;
+        Box::pin(async move {
+            let iter = tokio::net::lookup_host((host.as_str(), 0_u16)).await?;
+            let addrs: Vec<SocketAddr> = if allow_private {
+                iter.collect()
+            } else {
+                iter.filter(|sa| !is_blocked_ip(&sa.ip())).collect()
+            };
+            if addrs.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    format!("no non-blocked addresses for host '{host}'"),
+                )) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
     }
 }
 
@@ -77,8 +243,30 @@ pub struct MediaLoader {
 impl MediaLoader {
     pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
         let media_fetcher = media_fetcher.unwrap_or_default();
-        let mut http_client_builder: reqwest::ClientBuilder =
-            reqwest::Client::builder().user_agent(&media_fetcher.user_agent);
+
+        // Redirect policy: revalidate the policy-visible part of the URL
+        // (scheme, IP literals, hostname blocklist, direct-IP / direct-port
+        // rules) on every hop. DNS-based attacks on redirect targets are
+        // handled by the custom resolver below.
+        let fetcher_for_redirects = media_fetcher.clone();
+        let redirect_policy = Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error(anyhow::anyhow!(
+                    "too many redirects (max={MAX_REDIRECTS})"
+                ));
+            }
+            match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        });
+
+        let mut http_client_builder = reqwest::Client::builder()
+            .user_agent(&media_fetcher.user_agent)
+            .redirect(redirect_policy)
+            .dns_resolver(Arc::new(BlocklistResolver {
+                allow_private_ips: media_fetcher.allow_private_ips,
+            }));
 
         if let Some(timeout) = media_fetcher.timeout {
             http_client_builder = http_client_builder.timeout(timeout);
@@ -111,7 +299,7 @@ impl MediaLoader {
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
                 let url = &image_part.image_url.url;
-                self.media_fetcher.check_if_url_allowed(url)?;
+                self.media_fetcher.check_if_url_allowed_with_dns(url).await?;
                 let data = EncodedMediaData::from_url(url, &self.http_client).await?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
@@ -132,7 +320,7 @@ impl MediaLoader {
                         })?;
 
                     let url = &video_part.video_url.url;
-                    self.media_fetcher.check_if_url_allowed(url)?;
+                    self.media_fetcher.check_if_url_allowed_with_dns(url).await?;
                     let data = EncodedMediaData::from_url(url, &self.http_client).await?;
 
                     // Use runtime decoder if provided, with MDC limits enforced
@@ -309,5 +497,127 @@ mod tests_non_nixl {
                 .to_string()
                 .contains("not in allowed list")
         );
+    }
+
+    #[test]
+    fn test_is_blocked_ip_ranges() {
+        // A sampling of each RFC range.
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.5.5",
+            "192.168.1.1",
+            "169.254.169.254", // AWS metadata
+            "100.64.0.1",      // CGNAT
+            "::1",
+            "fe80::1",
+            "fc00::1",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(is_blocked_ip(&addr), "{ip} should be blocked");
+        }
+
+        // Public IPs should pass.
+        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(!is_blocked_ip(&addr), "{ip} should not be blocked");
+        }
+    }
+
+    #[test]
+    fn test_blocked_ip_literal_rejected_even_when_direct_ip_allowed() {
+        // allow_direct_ip=true lets IP-literal URLs through the early check,
+        // but the RFC-range blocklist must still reject cloud-metadata IPs.
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            ..Default::default()
+        };
+
+        let url = url::Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
+        let result = fetcher.check_if_url_allowed(&url);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("is in a blocked range")
+        );
+    }
+
+    #[test]
+    fn test_blocked_hostname_rejected() {
+        let fetcher = MediaFetcher::default();
+        for host in [
+            "localhost",
+            "metadata.google.internal",
+            "kubernetes.default.svc",
+        ] {
+            let url = url::Url::parse(&format!("https://{host}/x")).unwrap();
+            let result = fetcher.check_if_url_allowed(&url);
+            assert!(result.is_err(), "{host} should be blocked");
+            assert!(
+                result.unwrap_err().to_string().contains("blocked"),
+                "{host} error should mention 'blocked'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_allow_private_ips_bypasses_blocklist() {
+        // allow_private_ips=true is the escape hatch for on-prem / dev envs.
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        // Both an IP literal in a blocked range and a blocked hostname
+        // should pass when the opt-in flag is set.
+        assert!(
+            fetcher
+                .check_if_url_allowed(&url::Url::parse("http://10.0.0.5/x").unwrap())
+                .is_ok()
+        );
+        assert!(
+            fetcher
+                .check_if_url_allowed(&url::Url::parse("https://localhost/x").unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_hostname_blocklist_case_insensitive() {
+        let fetcher = MediaFetcher::default();
+        let url = url::Url::parse("https://Metadata.Google.Internal/x").unwrap();
+        let result = fetcher.check_if_url_allowed(&url);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_check_with_dns_data_url_skips_resolution() {
+        // data: URLs never touch the network, so the async path must early-return.
+        let fetcher = MediaFetcher::default();
+        let url = url::Url::parse("data:image/png;base64,iVBORw0KGgoAAAA=").unwrap();
+        fetcher.check_if_url_allowed_with_dns(&url).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_check_with_dns_public_ip_literal_passes() {
+        // IP literals were already checked by the sync pass; async path is a no-op.
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            ..Default::default()
+        };
+        let url = url::Url::parse("https://8.8.8.8/x").unwrap();
+        fetcher.check_if_url_allowed_with_dns(&url).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_check_with_dns_blocked_hostname_fails_before_resolution() {
+        // The sync hostname-blocklist check fires before we attempt any DNS.
+        let fetcher = MediaFetcher::default();
+        let url = url::Url::parse("https://localhost/x").unwrap();
+        let result = fetcher.check_if_url_allowed_with_dns(&url).await;
+        assert!(result.is_err());
     }
 }
