@@ -105,7 +105,7 @@ spec:
           - name: planner-profile-data
             configMap:
               name: planner-profile-data
-    TRTLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -145,7 +145,7 @@ spec:
             - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
             - --disaggregation-mode
             - decode
-    TRTLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
