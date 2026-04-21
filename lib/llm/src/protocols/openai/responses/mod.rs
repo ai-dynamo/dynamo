@@ -1046,7 +1046,7 @@ pub fn chat_completion_to_response(
         previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
         prompt: None,
         prompt_cache_key: params.prompt_cache_key.clone(),
-        prompt_cache_retention: params.prompt_cache_retention.clone(),
+        prompt_cache_retention: params.prompt_cache_retention,
         reasoning: params.reasoning.clone(),
         safety_identifier: params.safety_identifier.clone(),
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
