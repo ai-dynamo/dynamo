@@ -20,11 +20,13 @@ const (
 	ServerContainerName = "gms-server"
 
 	// SharedVolumeName is the emptyDir volume shared between the GMS server
-	// sidecar and the main workload container for UDS sockets.
-	SharedVolumeName = "gms-shared"
+	// sidecar and the main workload container for UDS sockets. The name
+	// disambiguates it from the snapshot-control volume, which carries
+	// checkpoint/restore lifecycle sentinels written by the snapshot agent.
+	SharedVolumeName = "gms-intrapod-control"
 
-	// SharedMountPath is the mount path for the shared GMS socket directory.
-	SharedMountPath = "/shared"
+	// SharedMountPath is the mount path for the GMS intra-pod IPC directory.
+	SharedMountPath = "/gms-intrapod-control"
 
 	// EnvSocketDir is the environment variable name for the GMS UDS socket directory.
 	EnvSocketDir = "GMS_SOCKET_DIR"
