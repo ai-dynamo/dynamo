@@ -203,21 +203,23 @@ class FeaturesSpec(BaseModel):
 
 
 class HardwareSpec(BaseModel):
-    """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
+    """HardwareSpec describes the GPU hardware for profiling and deployment. All fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). gpuSku is a selector (restricts which nodes are considered); the other fields are pure overrides passed to the profiler. If all four fields are set, discovery is skipped."""
 
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
     )
     vramMb: Optional[float] = Field(
-        default=None, description="VRAMMB is the VRAM per GPU in MiB."
+        default=None,
+        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the total number of GPUs available in the cluster.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
     )
     numGpusPerNode: Optional[int] = Field(
-        default=None, description="NumGPUsPerNode is the number of GPUs per node."
+        default=None,
+        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
     )
     interconnect: Optional[str] = Field(
         default=None,
