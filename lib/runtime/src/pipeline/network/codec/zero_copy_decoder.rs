@@ -12,19 +12,25 @@
 use crate::pipeline::network::get_tcp_max_message_size;
 use bytes::{Buf, Bytes, BytesMut};
 use std::io;
+use std::sync::OnceLock;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 const INITIAL_BUFFER_SIZE: usize = 262144; // 256KB
-const SHRINK_SIZE_DEFAULT: usize = 4 * 1024 * 1024; // 4MB
+const DEFAULT_SHRINK_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
+static SHRINK_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
+
+/// Get the shrink message size threshold.
+/// Cached per-process via OnceLock to avoid repeated env lookups.
 fn get_shrink_message_size() -> usize {
-    // Clamp the shrink threshold to the configured max message size so the
-    // threshold never exceeds the largest allocation this decoder will allow.
-    std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(SHRINK_SIZE_DEFAULT)
-        .min(get_tcp_max_message_size())
+    *SHRINK_MESSAGE_SIZE.get_or_init(|| {
+        let max_size = get_tcp_max_message_size();
+        std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_SHRINK_SIZE)
+            .min(max_size)
+    })
 }
 
 /// Zero-copy streaming decoder that reuses buffers
@@ -38,6 +44,8 @@ pub struct ZeroCopyTcpDecoder {
     read_buffer: BytesMut,
     /// Maximum allowed message size
     max_message_size: usize,
+    /// Threshold for shrinking buffer back to initial size (0 = use default)
+    shrink_threshold: usize,
 }
 
 impl ZeroCopyTcpDecoder {
@@ -51,6 +59,7 @@ impl ZeroCopyTcpDecoder {
         Self {
             read_buffer: BytesMut::with_capacity(capacity),
             max_message_size: get_tcp_max_message_size(),
+            shrink_threshold: get_shrink_message_size(),
         }
     }
 
@@ -173,7 +182,7 @@ impl ZeroCopyTcpDecoder {
         let message_bytes = self.read_buffer.split_to(total_len).freeze();
 
         // Shrink buffer if it grew too large and is now empty
-        if self.read_buffer.is_empty() && self.read_buffer.capacity() >= get_shrink_message_size() {
+        if self.read_buffer.is_empty() && self.read_buffer.capacity() >= self.shrink_threshold {
             self.read_buffer = BytesMut::with_capacity(INITIAL_BUFFER_SIZE);
         }
 
@@ -513,10 +522,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_copy_decoder_buffer_shrinking() {
-        // Test that buffer shrinks back after reading a large message
+        // Test that buffer shrinks back after reading a large message.
+        // Uses small sizes to avoid env var dependencies and keep test fast.
         let endpoint = "test/endpoint";
         let small_payload = b"small";
-        let large_payload = vec![0x42u8; 10 * 1024 * 1024]; // 10MB
+        // Use 1MB payload with 512KB shrink threshold
+        let large_payload = vec![0x42u8; 1024 * 1024]; // 1MB
 
         fn make_message(endpoint: &str, payload: &[u8]) -> Vec<u8> {
             let mut message = Vec::new();
@@ -528,14 +539,21 @@ mod tests {
             message
         }
 
-        let mut decoder = ZeroCopyTcpDecoder::new();
+        // Create decoder with explicit settings to avoid env var dependencies
+        let mut decoder = ZeroCopyTcpDecoder::with_capacity(INITIAL_BUFFER_SIZE);
+        decoder.max_message_size = 2 * 1024 * 1024; // 2MB max
+        decoder.shrink_threshold = 512 * 1024; // 512KB shrink threshold
+
         assert!(decoder.buffer_capacity() <= INITIAL_BUFFER_SIZE);
 
         // Read large message - buffer grows during read, then shrinks after split_to()
         let large_message = make_message(endpoint, &large_payload);
         let mut reader = &large_message[..];
         decoder.read_message(&mut reader).await.unwrap();
-        // After reading, buffer is empty and should have shrunk back
+
+        // After reading, buffer should have shrunk back because:
+        // - The buffer grew to ~1MB to hold the message
+        // - 1MB >= 512KB shrink threshold, so it triggers the shrink
         assert!(
             decoder.buffer_capacity() <= INITIAL_BUFFER_SIZE,
             "buffer should shrink after large message, got capacity {}",
