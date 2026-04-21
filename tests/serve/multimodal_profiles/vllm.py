@@ -32,7 +32,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[
                     pytest.mark.skip(
                         reason="vLLM engine core init fails on disagg e_pd. "
-                        "TODO(<LINEAR-ID>)"
+                        "https://linear.app/nvidia/issue/OPS-4445"
                     ),
                     pytest.mark.pre_merge,
                 ],
@@ -43,7 +43,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[
                     pytest.mark.skip(
                         reason="vLLM engine core init fails on disagg epd. "
-                        "TODO(<LINEAR-ID>)"
+                        "https://linear.app/nvidia/issue/OPS-4445"
                     ),
                     pytest.mark.pre_merge,
                 ],
@@ -71,7 +71,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[
                     pytest.mark.skip(
                         reason="vLLM engine core init fails on disagg epd. "
-                        "TODO(<LINEAR-ID>)"
+                        "https://linear.app/nvidia/issue/OPS-4445"
                     ),
                     pytest.mark.pre_merge,
                 ],
