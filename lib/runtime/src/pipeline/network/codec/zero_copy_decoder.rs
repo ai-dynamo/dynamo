@@ -16,22 +16,54 @@ use std::sync::OnceLock;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 const INITIAL_BUFFER_SIZE: usize = 262144; // 256KB
-const DEFAULT_SHRINK_SIZE: usize = 4 * 1024 * 1024; // 4MB
+const DEFAULT_SHRINK_SIZE: usize = 8 * 1024 * 1024; // 8MB
 
 static SHRINK_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 
 /// Get the shrink message size threshold.
-/// Cached per-process via OnceLock to avoid repeated env lookups.
 fn get_shrink_message_size() -> usize {
     *SHRINK_MESSAGE_SIZE.get_or_init(|| {
         let max_size = get_tcp_max_message_size();
-        std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_SHRINK_SIZE)
-            .min(max_size)
-            .max(INITIAL_BUFFER_SIZE)
+        // Check for environment variable override
+        let env_result = std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE");
+        let env_shrink_size = env_result.as_ref().ok().and_then(|s| {
+            s.parse::<usize>().ok().or_else(|| {
+                tracing::warn!(
+                    env_var = "DYN_TCP_SHRINK_MESSAGE_SIZE",
+                    value = %s,
+                    "Invalid value for DYN_TCP_SHRINK_MESSAGE_SIZE, using default"
+                );
+                None
+            })
+        });
+
+        let resolved = resolve_shrink_message_size(max_size, env_shrink_size);
+
+        // Warn if the configured value was clamped
+        if let Some(configured) = env_shrink_size
+            && configured != resolved {
+                tracing::warn!(
+                    configured_size = configured,
+                    resolved_size = resolved,
+                    max_size = max_size,
+                    initial_buffer_size = INITIAL_BUFFER_SIZE,
+                    "DYN_TCP_SHRINK_MESSAGE_SIZE was clamped to valid range. Note the size is in bytes."
+                );
+            }
+
+        resolved
     })
+}
+
+/// Resolve the shrink message size threshold based on configuration and constraints.
+///
+fn resolve_shrink_message_size(max_size: usize, env_shrink_size: Option<usize>) -> usize {
+    let configured_size = env_shrink_size.unwrap_or(DEFAULT_SHRINK_SIZE);
+
+    // Clamp to valid range: [INITIAL_BUFFER_SIZE, max_size]
+    configured_size
+        .min(max_size) // Don't exceed max message size
+        .max(INITIAL_BUFFER_SIZE) // Don't go below initial buffer size
 }
 
 /// Zero-copy streaming decoder that reuses buffers
@@ -45,7 +77,7 @@ pub struct ZeroCopyTcpDecoder {
     read_buffer: BytesMut,
     /// Maximum allowed message size
     max_message_size: usize,
-    /// Threshold for shrinking buffer back to initial size (0 = use default)
+    /// Threshold for shrinking buffer back to initial size when empty
     shrink_threshold: usize,
 }
 
@@ -182,8 +214,8 @@ impl ZeroCopyTcpDecoder {
         // split_to() just advances the internal pointer, doesn't allocate or copy
         let message_bytes = self.read_buffer.split_to(total_len).freeze();
 
-        // Shrink buffer if it grew too large and is now empty
-        if self.read_buffer.is_empty() && self.read_buffer.capacity() >= self.shrink_threshold {
+        // Shrink buffer if it grew too large and is now empty, could be optimized with lock-free buffer pool in the future.
+        if self.read_buffer.is_empty() && self.read_buffer.capacity() > self.shrink_threshold {
             self.read_buffer = BytesMut::with_capacity(INITIAL_BUFFER_SIZE);
         }
 
@@ -322,6 +354,64 @@ impl std::fmt::Debug for TcpRequestMessageZeroCopy {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn test_resolve_shrink_message_size_edge_cases() {
+        // Test case: max_size = 10MB (larger than DEFAULT_SHRINK_SIZE)
+        // Should return DEFAULT_SHRINK_SIZE (8MB) since env is None
+        let max_size_10mb = 10 * 1024 * 1024;
+        let result = resolve_shrink_message_size(max_size_10mb, None);
+        assert_eq!(
+            result, DEFAULT_SHRINK_SIZE,
+            "10MB max should return default 8MB"
+        );
+
+        // Test case: max_size < DEFAULT_SHRINK_SIZE
+        // Should return max_size (capped by .min())
+        let max_size_1mb = 1 * 1024 * 1024;
+        let result = resolve_shrink_message_size(max_size_1mb, None);
+        assert_eq!(result, max_size_1mb, "1MB max should be capped to 1MB");
+
+        // Test case: max_size = DEFAULT_SHRINK_SIZE
+        // Should return DEFAULT_SHRINK_SIZE (exact match)
+        let result = resolve_shrink_message_size(DEFAULT_SHRINK_SIZE, None);
+        assert_eq!(
+            result, DEFAULT_SHRINK_SIZE,
+            "exact match should return default"
+        );
+
+        // Test case: env_shrink_size provided and within bounds
+        let env_size = 2 * 1024 * 1024; // 2MB
+        let result = resolve_shrink_message_size(max_size_10mb, Some(env_size));
+        assert_eq!(
+            result, env_size,
+            "env var should be used when within bounds"
+        );
+
+        // Test case: env_shrink_size exceeds max_size
+        let env_size_large = 20 * 1024 * 1024; // 20MB
+        let result = resolve_shrink_message_size(max_size_10mb, Some(env_size_large));
+        assert_eq!(
+            result, max_size_10mb,
+            "env var should be capped to max_size"
+        );
+
+        // Test case: env_shrink_size below INITIAL_BUFFER_SIZE
+        let env_size_small = 100 * 1024; // 100KB < 256KB
+        let result = resolve_shrink_message_size(max_size_10mb, Some(env_size_small));
+        assert_eq!(
+            result, INITIAL_BUFFER_SIZE,
+            "env var should be clamped to INITIAL_BUFFER_SIZE"
+        );
+
+        // Test case: max_size below INITIAL_BUFFER_SIZE
+        let max_size_small = 100 * 1024; // 100KB < 256KB
+        let result = resolve_shrink_message_size(max_size_small, None);
+        assert_eq!(
+            result, INITIAL_BUFFER_SIZE,
+            "result should be clamped to INITIAL_BUFFER_SIZE"
+        );
+    }
 
     #[tokio::test]
     async fn test_zero_copy_decoder_basic() {
