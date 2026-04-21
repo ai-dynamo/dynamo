@@ -9,8 +9,11 @@
 //! The replay format is one `NvCreateChatCompletionStreamResponse` per line
 //! — the exact shape that an upstream engine (vLLM, sglang, TRT-LLM) would
 //! emit. Test fixtures are handwritten JSONL under `tests/data/replays/harness/`.
-
-#![allow(dead_code)]
+//!
+//! This intentionally stays as a small Rust `AsyncEngine` instead of reusing
+//! `python -m dynamo.replay`: these tests exercise the Rust HTTP service
+//! in-process, need direct access to the engine cancellation context, and should
+//! not depend on a separate Python process or replay deployment.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -68,19 +71,6 @@ impl ReplayEngine {
             interval,
             observed_cancels: Arc::new(Mutex::new(0)),
         })
-    }
-
-    /// Build an engine from an in-memory slice of chunks (useful when a test
-    /// wants to skip the filesystem).
-    pub fn from_chunks(
-        chunks: Vec<NvCreateChatCompletionStreamResponse>,
-        interval: Duration,
-    ) -> Self {
-        Self {
-            chunks,
-            interval,
-            observed_cancels: Arc::new(Mutex::new(0)),
-        }
     }
 
     /// Number of times a streaming generation observed the client cancelling

@@ -3,8 +3,6 @@
 //
 //! Shared helpers for the Anthropic and Responses replay tests.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,10 +27,9 @@ pub fn harness_fixture(name: &str) -> PathBuf {
 
 /// A running HTTP service wired to a `ReplayEngine`.
 ///
-/// The service is started on an ephemeral port; `port` is the bound port,
-/// `base_url` is `http://127.0.0.1:<port>`.
+/// The service is started on an ephemeral port; `base_url` is
+/// `http://127.0.0.1:<port>`.
 pub struct HarnessService {
-    pub port: u16,
     pub base_url: String,
     pub cancel: CancellationToken,
     pub engine: Arc<ReplayEngine>,
@@ -75,7 +72,6 @@ impl HarnessService {
         wait_for_health(port).await;
 
         Self {
-            port,
             base_url: format!("http://127.0.0.1:{}", port),
             cancel,
             engine,
