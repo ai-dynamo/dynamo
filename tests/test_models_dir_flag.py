@@ -20,6 +20,7 @@ from tests.hf_cache import (
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 
 
+
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -169,6 +170,21 @@ def test_enable_disable_enable_cycle(monkeypatch):
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
+
+    # Inject a no-op _patch_mistral_regex so the test always exercises the full
+    # patching code path, regardless of the installed transformers version.
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+        if not hasattr(PreTrainedTokenizerBase, "_patch_mistral_regex"):
+
+            @classmethod  # type: ignore[misc]
+            def _noop_patch(cls, tokenizer, *args, **kwargs):
+                return tokenizer
+
+            monkeypatch.setattr(PreTrainedTokenizerBase, "_patch_mistral_regex", _noop_patch)
+    except ImportError:
+        pytest.skip("transformers not installed")
 
     _enable_offline_with_mistral_patch()
     assert os.environ.get("HF_HUB_OFFLINE") == "1"
