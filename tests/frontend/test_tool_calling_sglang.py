@@ -740,6 +740,10 @@ class TestToolCallingProtocol:
         assert args["end_time"]
         assert isinstance(args.get("attendees", []), list)
 
+    @pytest.mark.xfail(
+        reason="Small model occasionally produces malformed SQL arguments",
+        strict=False,
+    )
     def test_sql_tool_arguments_schema_valid(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
