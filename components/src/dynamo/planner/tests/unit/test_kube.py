@@ -68,6 +68,67 @@ def test_kubernetes_api_init_without_namespace(mock_custom_api, mock_config):
     assert api.current_namespace == "default"
 
 
+def test_watch_graph_deployments_yields_events(k8s_api_with_namespace, mock_custom_api):
+    """Test watch_graph_deployments yields (event_type, deployment) for each watch event."""
+    events = [
+        {"type": "ADDED", "object": {"metadata": {"name": "dgd-a"}, "spec": {}}},
+        {
+            "type": "MODIFIED",
+            "object": {"metadata": {"name": "dgd-a"}, "spec": {"replicas": 2}},
+        },
+        {"type": "DELETED", "object": {"metadata": {"name": "dgd-a"}}},
+    ]
+
+    with patch("dynamo.planner.connectors.kubernetes_api.Watch") as mock_watch_cls:
+        mock_watch = MagicMock()
+        mock_watch_cls.return_value = mock_watch
+        mock_watch.stream.return_value = iter(events)
+
+        out = list(k8s_api_with_namespace.watch_graph_deployments())
+
+    assert len(out) == 3
+    assert out[0] == ("ADDED", {"metadata": {"name": "dgd-a"}, "spec": {}})
+    assert out[1] == (
+        "MODIFIED",
+        {"metadata": {"name": "dgd-a"}, "spec": {"replicas": 2}},
+    )
+    assert out[2] == ("DELETED", {"metadata": {"name": "dgd-a"}})
+    mock_watch.stream.assert_called_once()
+    call_kw = mock_watch.stream.call_args[1]
+    assert call_kw["group"] == "nvidia.com"
+    assert call_kw["version"] == "v1alpha1"
+    assert call_kw["namespace"] == "test-namespace"
+    assert call_kw["plural"] == "dynamographdeployments"
+
+
+def test_watch_graph_deployments_reraises_410(k8s_api_with_namespace, mock_custom_api):
+    """Test watch_graph_deployments logs and re-raises ApiException on 410 Gone."""
+    with patch("dynamo.planner.connectors.kubernetes_api.Watch") as mock_watch_cls:
+        mock_watch = MagicMock()
+        mock_watch_cls.return_value = mock_watch
+        mock_watch.stream.side_effect = client.ApiException(status=410)
+
+        with pytest.raises(client.ApiException) as exc_info:
+            list(k8s_api_with_namespace.watch_graph_deployments())
+
+        assert exc_info.value.status == 410
+
+
+def test_watch_graph_deployments_reraises_other_api_errors(
+    k8s_api_with_namespace, mock_custom_api
+):
+    """Test watch_graph_deployments re-raises non-410 ApiException."""
+    with patch("dynamo.planner.connectors.kubernetes_api.Watch") as mock_watch_cls:
+        mock_watch = MagicMock()
+        mock_watch_cls.return_value = mock_watch
+        mock_watch.stream.side_effect = client.ApiException(status=500)
+
+        with pytest.raises(client.ApiException) as exc_info:
+            list(k8s_api_with_namespace.watch_graph_deployments())
+
+        assert exc_info.value.status == 500
+
+
 def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
     """Test _get_graph_deployment_from_name method"""
     mock_deployment = {"metadata": {"name": "test-deployment"}}

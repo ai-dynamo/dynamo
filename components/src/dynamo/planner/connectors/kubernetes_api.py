@@ -15,10 +15,11 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Iterator, Optional
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
+from kubernetes.watch import Watch
 
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -67,6 +68,30 @@ class KubernetesAPI:
             plural="dynamographdeployments",
         )
         return result.get("items", [])
+
+    def watch_graph_deployments(self) -> Iterator[tuple[str, dict]]:
+        """Watch DynamoGraphDeployments via Kubernetes List+Watch.
+
+        Yields (event_type, deployment) where event_type is 'ADDED', 'MODIFIED',
+        or 'DELETED', and deployment is the DynamoGraphDeployment object (for
+        DELETED, object may have only metadata). Follows K8s controller best
+        practice for consistent view across replicas.
+        """
+        w = Watch()
+        try:
+            for event in w.stream(
+                self.custom_api.list_namespaced_custom_object,
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.current_namespace,
+                plural="dynamographdeployments",
+            ):
+                yield event["type"], event.get("object", {})
+        except client.ApiException as e:
+            if e.status == 410:
+                # Resource version too old; caller should re-list and restart watch
+                logger.warning("DGD watch expired (410), restart required")
+            raise
 
     def get_graph_deployment(self, graph_deployment_name: str) -> dict:
         """

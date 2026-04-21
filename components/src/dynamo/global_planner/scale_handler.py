@@ -5,6 +5,11 @@
 
 import asyncio
 import logging
+import threading
+import time
+from typing import Optional
+
+from kubernetes import client
 
 from dynamo.planner import KubernetesConnector
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
@@ -59,9 +64,15 @@ class ScaleRequestHandler:
         self.no_operation = no_operation
         self.max_total_gpus = max_total_gpus
         self.connectors: dict[str, KubernetesConnector] = {}  # Cache per DGD
+        self._dgd_cache: dict[str, dict] = {}  # DGD objects maintained by watch thread
+        self._dgd_cache_lock = threading.Lock()
         # Serializes budget-check + scale-execution so concurrent requests from
         # different pools cannot both pass against the same pre-scale state.
         self._scale_lock = asyncio.Lock()
+        # DGD watch thread (when GPU budget enabled); health checked by main loop.
+        self._dgd_watch_thread: Optional[threading.Thread] = None
+        # Set when _run_dgd_watch exits unexpectedly; GPU budget cache may be stale.
+        self._dgd_watch_exited_unexpectedly: bool = False
 
         if self.managed_namespaces:
             logger.info(
@@ -81,6 +92,13 @@ class ScaleRequestHandler:
                 f"GPU budget enforcement ENABLED: max {self.max_total_gpus} total GPUs"
             )
             self._populate_k8s_connectors()
+            self._dgd_watch_thread = threading.Thread(
+                target=self._run_dgd_watch,
+                daemon=True,
+                name="global-planner-dgd-watch",
+            )
+            self._dgd_watch_thread.start()
+            logger.info("DGD list+watch started for GPU budget cache")
         else:
             logger.info("GPU budget enforcement DISABLED (unlimited)")
 
@@ -109,15 +127,12 @@ class ScaleRequestHandler:
                 )
         return names
 
-    def _populate_k8s_connectors(self):
-        """Pre-populate connectors for DGDs managed by this GlobalPlanner.
+    def _populate_k8s_connectors(self) -> None:
+        """Populate connectors from a single list call.
 
-        This ensures the GPU budget calculation accounts for DGDs that already
-        exist at startup, even if they haven't sent a scale request yet.
-
-        In explicit mode (--managed-namespaces set), only DGDs whose names
-        match the managed Dynamo namespaces are discovered.
-        In implicit mode, all DGDs in the k8s namespace are discovered.
+        Ensures GPU budget and connectors have data before watch events.
+        In explicit mode only managed DGDs are included; in implicit mode all
+        DGDs in the k8s namespace are discovered.
         """
         try:
             kube_api = KubernetesAPI(self.k8s_namespace)
@@ -128,27 +143,129 @@ class ScaleRequestHandler:
                 name = dgd.get("metadata", {}).get("name", "")
                 if not name:
                     continue
-                # In explicit mode, skip DGDs not in the managed set
                 if managed_names is not None and name not in managed_names:
                     continue
-                connector_key = f"{self.k8s_namespace}/{name}"
-                if connector_key not in self.connectors:
-                    connector = KubernetesConnector(
+                key = f"{self.k8s_namespace}/{name}"
+                if key not in self.connectors:
+                    self.connectors[key] = KubernetesConnector(
                         dynamo_namespace="discovered",
                         k8s_namespace=self.k8s_namespace,
                         parent_dgd_name=name,
                     )
-                    self.connectors[connector_key] = connector
+                with self._dgd_cache_lock:
+                    self._dgd_cache[key] = dgd
                 discovered.append(name)
             logger.info(f"Discovered {len(discovered)} existing DGDs: {discovered}")
         except Exception as e:
             logger.warning(f"Failed to discover existing DGDs: {e}")
 
+    def _run_dgd_watch(self) -> None:
+        """Background thread: list+watch DGDs and keep _dgd_cache updated."""
+        _BACKOFF_BASE_SEC = 5
+        _BACKOFF_MAX_SEC = 60
+        _ERROR_LOG_THRESHOLD = (
+            3  # escalate to ERROR after this many consecutive failures
+        )
+        try:
+            kube_api = KubernetesAPI(self.k8s_namespace)
+            managed_names = self._managed_dgd_names()
+            consecutive_failures = 0
+            while True:
+                try:
+                    for event_type, dgd in kube_api.watch_graph_deployments():
+                        name = dgd.get("metadata", {}).get("name", "")
+                        if not name:
+                            continue
+                        if managed_names is not None and name not in managed_names:
+                            continue
+                        key = f"{self.k8s_namespace}/{name}"
+                        logger.debug(f"DGD watch event: {event_type} {key}")
+                        with self._dgd_cache_lock:
+                            if event_type == "DELETED":
+                                self._dgd_cache.pop(key, None)
+                            else:
+                                self._dgd_cache[key] = dgd
+                    # watch_graph_deployments exhausted without error → reset counter
+                    consecutive_failures = 0
+                except client.ApiException as e:
+                    consecutive_failures += 1
+                    backoff = min(
+                        _BACKOFF_BASE_SEC * (2 ** (consecutive_failures - 1)),
+                        _BACKOFF_MAX_SEC,
+                    )
+                    if e.status == 403:
+                        # RBAC misconfiguration: backing off but flagging loudly.
+                        logger.error(
+                            f"DGD watch RBAC error (403 Forbidden, attempt {consecutive_failures}, "
+                            f"retry in {backoff}s). Check planner ClusterRole/Role for 'watch' verb "
+                            f"on dynamographdeployments: {e}"
+                        )
+                    elif e.status == 410:
+                        # Normal expiry: re-list will happen on next iteration.
+                        consecutive_failures = 0
+                        backoff = 0
+                        logger.debug(
+                            "DGD watch resource version expired (410), restarting immediately"
+                        )
+                    else:
+                        log_fn = (
+                            logger.error
+                            if consecutive_failures > _ERROR_LOG_THRESHOLD
+                            else logger.warning
+                        )
+                        log_fn(
+                            f"DGD watch ApiException (status={e.status}, attempt {consecutive_failures}, "
+                            f"retry in {backoff}s): {e}"
+                        )
+                    if backoff:
+                        time.sleep(backoff)
+                except Exception as e:
+                    consecutive_failures += 1
+                    backoff = min(
+                        _BACKOFF_BASE_SEC * (2 ** (consecutive_failures - 1)),
+                        _BACKOFF_MAX_SEC,
+                    )
+                    log_fn = (
+                        logger.error
+                        if consecutive_failures > _ERROR_LOG_THRESHOLD
+                        else logger.warning
+                    )
+                    log_fn(
+                        f"DGD watch error (attempt {consecutive_failures}, retry in {backoff}s): {e}"
+                    )
+                    time.sleep(backoff)
+        except BaseException:
+            self._dgd_watch_exited_unexpectedly = True
+            logger.critical(
+                "DGD watch thread exited unexpectedly. GPU budget cache is stale; "
+                "scaling decisions may use outdated data.",
+                exc_info=True,
+            )
+
+    def is_dgd_watch_healthy(self) -> bool:
+        """Return True if the DGD watch thread is alive."""
+        if self._dgd_watch_thread is None:
+            return False
+        if self._dgd_watch_exited_unexpectedly:
+            return False
+        return self._dgd_watch_thread.is_alive()
+
+    def get_dgd_watch_health_status(self) -> dict:
+        """Return health status for the DGD watch thread (for health endpoint)."""
+        enabled = self.max_total_gpus >= 0
+        return {
+            "dgd_watch_enabled": enabled,
+            "dgd_watch_alive": self.is_dgd_watch_healthy(),
+            "dgd_watch_exited_unexpectedly": self._dgd_watch_exited_unexpectedly,
+            "gpu_budget_enabled": enabled,
+        }
+
     def _calculate_total_gpus_after_request(self, request: ScaleRequest) -> int:
         """Calculate total GPUs across all managed DGDs if this request is granted.
 
-        For the requesting DGD, uses the desired replica counts from the request.
-        For all other known DGDs, uses their current replica counts.
+        Uses the list+watch DGD cache when GPU budget is enabled to avoid
+        per-request API calls. For the requesting DGD, uses the desired replica
+        counts from the request; for others, current spec.
 
         NOTE: GPU count is read from spec.services[].resources.limits.gpu only.
         GPUs specified via resources.requests.gpu or extraPodSpec resource
@@ -156,16 +273,28 @@ class ScaleRequestHandler:
         """
         total_gpus = 0
         requesting_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
+        deployments: list = []
 
-        for key, connector in self.connectors.items():
-            try:
-                deployment = connector.kube_api.get_graph_deployment(
-                    connector.parent_dgd_name
-                )
-            except Exception as e:
-                logger.warning(f"Failed to read DGD for {key}: {e}")
+        if self.max_total_gpus >= 0:
+            with self._dgd_cache_lock:
+                deployments = list(self._dgd_cache.items())
+                need_get = requesting_key not in self._dgd_cache
+            if need_get:
+                try:
+                    kube_api = KubernetesAPI(self.k8s_namespace)
+                    deployment = kube_api.get_graph_deployment(
+                        request.graph_deployment_name
+                    )
+                    with self._dgd_cache_lock:
+                        self._dgd_cache[requesting_key] = deployment
+                    deployments.append((requesting_key, deployment))
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to read requesting DGD for {requesting_key}: {e}"
+                    )
+        for key, deployment in deployments:
+            if not deployment:
                 continue
-
             services = deployment.get("spec", {}).get("services", {})
 
             for svc_spec in services.values():
@@ -241,7 +370,8 @@ class ScaleRequestHandler:
 
             # Get or create connector for this DGD
             connector_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
-            if connector_key not in self.connectors:
+            connector = self.connectors.get(connector_key)
+            if connector is None:
                 connector = KubernetesConnector(
                     dynamo_namespace=request.caller_namespace,
                     k8s_namespace=request.k8s_namespace,
@@ -250,7 +380,6 @@ class ScaleRequestHandler:
                 self.connectors[connector_key] = connector
                 logger.debug(f"Created new connector for {connector_key}")
             else:
-                connector = self.connectors[connector_key]
                 logger.debug(f"Reusing cached connector for {connector_key}")
 
             # Lock ensures the budget check and scale execution are atomic
@@ -283,15 +412,19 @@ class ScaleRequestHandler:
                     request.target_replicas, blocking=request.blocking
                 )
 
-            # Get current replica counts
-            current_replicas = {}
+            # Read DGD from API for current_replicas and refresh cache.
             deployment = connector.kube_api.get_graph_deployment(
                 connector.parent_dgd_name
             )
-            for service_name, service_spec in deployment["spec"]["services"].items():
+            current_replicas = {}
+            for _service_name, service_spec in (
+                deployment.get("spec", {}).get("services", {}).items()
+            ):
                 sub_type = service_spec.get("subComponentType", "")
                 if sub_type:
                     current_replicas[sub_type] = service_spec.get("replicas", 0)
+            with self._dgd_cache_lock:
+                self._dgd_cache[connector_key] = deployment
 
             logger.info(
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"
