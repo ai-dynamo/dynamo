@@ -1211,15 +1211,12 @@ class HandlerBase(BaseGenerativeHandler):
                                 # Record KV transfer latency/bytes/speed from timing_metrics
                                 tm = output.request_perf_metrics.timing_metrics
                                 if tm is not None:
-                                    recorded = (
-                                        metrics_collector.record_kv_transfer_perf(tm)
-                                    )
-                                    # Only count success if a transfer actually occurred
-                                    if (
-                                        recorded
-                                        and self.disaggregation_mode
-                                        == DisaggregationMode.PREFILL
-                                    ):
+                                    # record_kv_transfer_perf() only returns True on the
+                                    # decode worker (the receiver), which observes non-zero
+                                    # kv_cache_transfer_{start,end} in timing_metrics. Count
+                                    # the success counter on the same signal so it stays in
+                                    # lock-step with the sibling histograms' _count. DYN-2781.
+                                    if metrics_collector.record_kv_transfer_perf(tm):
                                         metrics_collector.record_kv_transfer_success()
                         except Exception as e:
                             logging.warning(
