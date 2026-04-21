@@ -302,7 +302,7 @@ def _trtllm_quiesce(
     return ws
 
 
-@pytest.mark.skip(reason="Nightly CI failure: TODO(<LINEAR-ID>)")
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450")
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
