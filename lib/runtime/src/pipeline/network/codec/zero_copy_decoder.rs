@@ -173,8 +173,7 @@ impl ZeroCopyTcpDecoder {
         let message_bytes = self.read_buffer.split_to(total_len).freeze();
 
         // Shrink buffer if it grew too large and is now empty
-        if self.read_buffer.is_empty() && self.read_buffer.capacity() > get_shrink_message_size() {
-            // b10: michaelfeil to try contribute this upstream.
+        if self.read_buffer.is_empty() && self.read_buffer.capacity() >= get_shrink_message_size() {
             self.read_buffer = BytesMut::with_capacity(INITIAL_BUFFER_SIZE);
         }
 
