@@ -155,10 +155,10 @@ impl ResponseStreamConverter {
                 .as_ref()
                 .and_then(|ctx| ctx.previous_response_id.clone()),
             prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+            prompt_cache_key: self.params.prompt_cache_key.clone(),
+            prompt_cache_retention: self.params.prompt_cache_retention,
             reasoning: self.params.reasoning.clone(),
-            safety_identifier: None,
+            safety_identifier: self.params.safety_identifier.clone(),
             service_tier: Some(self.params.service_tier.unwrap_or(ServiceTier::Auto)),
             top_logprobs: Some(0),
             usage: self.usage.clone(),
@@ -694,24 +694,7 @@ mod tests {
     };
 
     fn default_params() -> ResponseParams {
-        ResponseParams {
-            model: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens: None,
-            parallel_tool_calls: None,
-            store: None,
-            tools: None,
-            tool_choice: None,
-            instructions: None,
-            reasoning: None,
-            text: None,
-            service_tier: None,
-            include: None,
-            truncation: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-        }
+        ResponseParams::default()
     }
 
     fn tool_call_chunk(

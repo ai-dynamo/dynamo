@@ -1601,6 +1601,12 @@ async fn responses(
         // from the request becomes a one-line change here.
         presence_penalty: None,
         frequency_penalty: None,
+        // Pass-through metadata — accepted on the request, echoed back on the
+        // response so the caller can confirm receipt. Dynamo doesn't act on
+        // these; see `validate_response_unsupported_fields` for rationale.
+        prompt_cache_key: request.inner.prompt_cache_key.clone(),
+        prompt_cache_retention: request.inner.prompt_cache_retention,
+        safety_identifier: request.inner.safety_identifier.clone(),
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -1836,30 +1842,22 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
-    // Reject fields that deserialize on the request but aren't threaded into
-    // ResponseParams or echoed back with the effective value. Silent accept
-    // would let a caller send `max_tool_calls: 5` and see `max_tool_calls:
-    // null` in the response — worse than a clear 4xx because the client
-    // assumes their limit was honored. When any of these gain real plumbing,
-    // remove the corresponding branch here and start echoing the value.
+    // Reject directive fields that change semantics if silently dropped.
+    // `max_tool_calls` is a hard cap on tool invocations — accepting it
+    // without enforcement would let a caller send `max_tool_calls: 5` and
+    // see `max_tool_calls: null` in the response, assuming their limit was
+    // honored. Fail loud until real enforcement lands.
+    //
+    // Pass-through metadata fields (`prompt_cache_key`,
+    // `prompt_cache_retention`, `safety_identifier`) are deliberately
+    // accepted and echoed back on the response instead. They're hints for
+    // OpenAI's caching/moderation backends, not directives — Codex sends
+    // `prompt_cache_key` on every request — and the OpenResponses spec
+    // includes them on the response body, so echoing the caller's value
+    // makes receipt observable without needing a real backend.
     if inner.max_tool_calls.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
-        ));
-    }
-    if inner.prompt_cache_key.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`prompt_cache_key` is not supported.",
-        ));
-    }
-    if inner.prompt_cache_retention.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`prompt_cache_retention` is not supported.",
-        ));
-    }
-    if inner.safety_identifier.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`safety_identifier` is not supported.",
         ));
     }
     None
@@ -2747,6 +2745,25 @@ mod tests {
                 }),
             ),
             ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(5))),
+        ];
+
+        for (field, set_field) in unsupported_cases {
+            let mut req = make_base_request();
+            (set_field)(&mut req.inner);
+            let result = validate_response_unsupported_fields(&req);
+            assert!(result.is_some(), "Expected rejection for `{field}`");
+        }
+    }
+
+    /// Pass-through metadata fields (`prompt_cache_key`,
+    /// `prompt_cache_retention`, `safety_identifier`) are accepted at the
+    /// validation layer; the response serializer echoes them back so the
+    /// caller can confirm receipt. Codex sends `prompt_cache_key` on every
+    /// request — rejecting it broke `codex exec` end-to-end.
+    #[test]
+    fn test_validate_unsupported_fields_accepts_passthrough_metadata() {
+        #[allow(clippy::type_complexity)]
+        let passthrough_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             (
                 "prompt_cache_key",
                 Box::new(|r| r.prompt_cache_key = Some("ck-1".into())),
@@ -2764,11 +2781,14 @@ mod tests {
             ),
         ];
 
-        for (field, set_field) in unsupported_cases {
+        for (field, set_field) in passthrough_cases {
             let mut req = make_base_request();
             (set_field)(&mut req.inner);
             let result = validate_response_unsupported_fields(&req);
-            assert!(result.is_some(), "Expected rejection for `{field}`");
+            assert!(
+                result.is_none(),
+                "Expected `{field}` to be accepted as pass-through metadata"
+            );
         }
     }
 

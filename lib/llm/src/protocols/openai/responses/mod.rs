@@ -9,8 +9,8 @@ use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
     InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
     MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
-    Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
+    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, Response, ResponseTextParam,
+    ResponseUsage, Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
     TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
@@ -840,6 +840,14 @@ pub struct ResponseParams {
     /// real value becomes a one-line change at the request-extraction site.
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
+    /// Pass-through metadata fields. Codex and other clients send these as
+    /// hints for OpenAI's caching/moderation backends; Dynamo doesn't act on
+    /// them, but the spec includes them on the response body so we echo back
+    /// what the caller sent rather than silently dropping. Echoing makes
+    /// receipt observable to the client without needing a real backend.
+    pub prompt_cache_key: Option<String>,
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    pub safety_identifier: Option<String>,
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -1036,10 +1044,10 @@ pub fn chat_completion_to_response(
         max_output_tokens: params.max_output_tokens,
         previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
         prompt: None,
-        prompt_cache_key: None,
-        prompt_cache_retention: None,
+        prompt_cache_key: params.prompt_cache_key.clone(),
+        prompt_cache_retention: params.prompt_cache_retention.clone(),
         reasoning: params.reasoning.clone(),
-        safety_identifier: None,
+        safety_identifier: params.safety_identifier.clone(),
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
         top_logprobs: Some(0),
         usage: chat_resp.usage.map(|u| ResponseUsage {
@@ -2648,6 +2656,32 @@ thinking
         let params = ResponseParams::default();
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
+    }
+
+    /// Pass-through metadata fields the OpenResponses spec includes on the
+    /// response body. Codex sends `prompt_cache_key` on every request; we
+    /// echo it back so the caller can confirm receipt without enforcing any
+    /// caching semantics. Same pattern for `prompt_cache_retention` and
+    /// `safety_identifier`.
+    #[test]
+    fn test_response_echoes_passthrough_metadata() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams {
+            prompt_cache_key: Some("cache-key-codex-1".into()),
+            prompt_cache_retention: Some(PromptCacheRetention::InMemory),
+            safety_identifier: Some("user-abc".into()),
+            ..Default::default()
+        };
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        assert_eq!(
+            resp.inner.prompt_cache_key.as_deref(),
+            Some("cache-key-codex-1")
+        );
+        assert_eq!(
+            resp.inner.prompt_cache_retention,
+            Some(PromptCacheRetention::InMemory)
+        );
+        assert_eq!(resp.inner.safety_identifier.as_deref(), Some("user-abc"));
     }
 
     /// Validate the JSON wire shape of NvResponse matches the OpenResponses
