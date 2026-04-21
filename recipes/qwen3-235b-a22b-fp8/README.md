@@ -65,8 +65,8 @@ curl http://localhost:8000/v1/chat/completions \
 This recipe uses `moe_config.backend: DEEPGEMM`, which requires **Blackwell GPUs (SM100+, e.g. B100/B200)**.
 DeepGEMM's FP8 grouped-GEMM kernels are designed for SM100/SM103 only and will crash on Hopper (SM90).
 
-> **Note:** To run on Hopper (H100/H200), remove the `moe_config` block from the ConfigMaps in
-> `deploy.yaml`. This falls back to the default MoE backend at a modest throughput reduction.
+> **Note:** To run on Hopper (H100/H200, SM90), remove the `moe_config` block from the ConfigMaps in
+> `trtllm/agg/deploy.yaml` and `trtllm/disagg/deploy.yaml`. This falls back to the default MoE backend at a modest throughput reduction.
 
 | Configuration | GPUs | Min GPU VRAM (Total) |
 |--------------|------|----------------------|
