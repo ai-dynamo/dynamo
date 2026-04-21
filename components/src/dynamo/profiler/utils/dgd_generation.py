@@ -514,7 +514,8 @@ def build_aic_interpolation_spec(
     the mocker (via ``--aic-perf-model`` flags injected into worker args).
     Returns ``None`` when any of the following hold:
 
-    * neither planner nor mocker is enabled
+    * no AIC consumer needs it — planner is disabled or has
+      ``enable_throughput_scaling=False``, **and** mocker is disabled
     * ``pre_deployment_sweeping_mode`` is not ``Rapid``
     * picks are missing
     * ``resolved_backend`` is not one AIC supports
