@@ -30,6 +30,7 @@ fn get_shrink_message_size() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_SHRINK_SIZE)
             .min(max_size)
+            .max(INITIAL_BUFFER_SIZE)
     })
 }
 
