@@ -262,6 +262,18 @@ async def init_llm_worker(
 
         arg_map["sleep_config"] = SleepConfig()
 
+        # At TP>1, TRT-LLM's autotuner warmup runs inside an allocation_scope
+        # that routes torch allocations through the virtual_memory pluggable
+        # allocator. The same process also hosts the GMS pluggable allocator
+        # for weights. The two allocators collide during the first autotuned
+        # allreduce (tunable_allreduce + flashinfer_rmsnorm), producing an
+        # illegal-memory-access whose tail is a KVCacheTransferManager dtor
+        # crash. Disabling the autotuner skips that warmup forward pass; the
+        # fallback allreduce path is correct. Verified on Qwen3-0.6B TP=2
+        # with GMS RW on branch schwinns/trtllm-gms-mpi-workers (B200).
+        if config.tensor_parallel_size > 1:
+            arg_map["enable_autotuner"] = False
+
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:
         arg_map["guided_decoding_backend"] = config.guided_decoding_backend
