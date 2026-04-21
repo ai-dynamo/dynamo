@@ -1685,6 +1685,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = prefill_result.get("disaggregated_params", {}).get(
                 "embedding_params"
             )
+            # Normalize embedding_params to None if it is an empty dict
+            if not embedding_params:
+                embedding_params = None
         else:
             kv_params = None
             embedding_params = None
@@ -1723,6 +1726,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.error("Request %s: %s", request_id, msg)
                     yield {"status": "error", "message": msg}
                     return
+            else:
+                # Non-qwen model, assume the multi_modal_data has been consumed
+                # in prefill, so we can use the expanded prompt token ids
+                # without multimodal data
+                if embedding_params and "expanded_prompt_token_ids" in embedding_params:
+                    request["token_ids"] = embedding_params["expanded_prompt_token_ids"]
+                    has_mm_data = False
             # TODO(DIS-1661): video/audio re-downloaded on decode.
             # TODO(DIS-1664): mixed image+video in disagg decode is not
             # supported — synthetic image data would be overwritten.
@@ -1967,7 +1977,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context,
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -2049,10 +2058,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                # For prefill worker, only one res will be generated,
+                # so we can always build embedding params here without conditionals
+                embedding_params = self._build_embedding_params(
+                    multi_modal_data or {}, res.prompt_token_ids
+                )
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params, embedding_params
+                        res.kv_transfer_params,
+                        embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -2073,18 +2088,36 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 yield output
 
-    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+    def _build_disaggregated_params(
+        self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None
+    ):
         disaggregated_params = {}
         if kv_transfer_params is not None:
             disaggregated_params["kv_transfer_params"] = kv_transfer_params
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
+        if expanded_prompt_token_ids is not None:
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 
     def _build_embedding_params(
-        self, multi_modal_data: dict[str, Any]
+        self, multi_modal_data: dict[str, Any], prompt_token_ids: list[int]
     ) -> Dict[str, Any] | None:
+        # [gluo NOTE] there could be different model architectures that
+        # need different embedding params, will add more logic if needed
         if not is_qwen_vl_model(self.config.model):
-            return None
-        return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+            # For non-qwen models, vLLM doesn't trigger mm preprocess so
+            # decode worker only needs expanded prompt to properly fetch KV blocks
+            # from prefill.
+            if multi_modal_data:
+                return {"expanded_prompt_token_ids": prompt_token_ids}
+        else:
+            # For qwen models, vLLM triggers mm preprocess so decode worker will
+            # perform token expansion unconditionally, so we need to pass
+            # original prompt and sufficient metadata to reconstruct mm embedding
+            # as request input.
+            return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+        return None

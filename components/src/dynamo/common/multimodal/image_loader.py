@@ -20,6 +20,11 @@ from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
 from .http_client import get_http_client
+from .url_validator import (
+    UrlValidationPolicy,
+    fetch_with_revalidation,
+    validate_media_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,7 @@ class ImageLoader:
         cache_size: int = CACHE_SIZE_MAXIMUM,
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
+        url_policy: UrlValidationPolicy | None = None,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -49,12 +55,14 @@ class ImageLoader:
             enable_frontend_decoding: If True, enables NIXL RDMA for transferring
                 decoded images directly from frontend memory, bypassing standard
                 network transport. Defaults to False.
+            url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
         self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
         self._enable_frontend_decoding = enable_frontend_decoding
+        self._url_policy = url_policy or UrlValidationPolicy.from_env()
         # Lazy-init NIXL connector only when frontend decoding is enabled
         self._nixl_connector = None
         if self._enable_frontend_decoding:
@@ -94,7 +102,9 @@ class ImageLoader:
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 http_client = get_http_client(self._http_timeout)
-                response = await http_client.get(image_url)
+                response = await fetch_with_revalidation(
+                    http_client, image_url, self._url_policy
+                )
                 response.raise_for_status()
                 if not response.content:
                     raise ValueError("Empty response content from image URL")
@@ -134,26 +144,25 @@ class ImageLoader:
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
+        normalized_url = await validate_media_url(image_url, self._url_policy)
+        parsed_url = urlparse(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
-            key = image_url.lower()
+            key = normalized_url.lower()
 
-            # Check cache (sync — no await, no interleaving possible)
             if key in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
                 self._image_cache.move_to_end(key)
                 return self._image_cache[key]
 
-            # Join existing in-flight task, or start a new one
             if key not in self._inflight:
-                task = asyncio.create_task(self._fetch_and_cache(key, image_url))
+                task = asyncio.create_task(self._fetch_and_cache(key, normalized_url))
                 # Suppress "exception was never retrieved" if all waiters cancel
                 task.add_done_callback(
                     lambda t: t.exception() if not t.cancelled() else None
                 )
                 self._inflight[key] = task
 
-            # shield so cancelling THIS caller doesn't cancel the shared task
             return await asyncio.shield(self._inflight[key])
 
         if parsed_url.scheme == "data":

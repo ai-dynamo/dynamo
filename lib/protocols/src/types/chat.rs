@@ -574,7 +574,9 @@ pub enum ServiceTierResponse {
 /// - `reasoning_content`: model reasoning output (DeepSeek-R1, QwQ)
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionResponseMessage {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always serialized (as `null` when None) so clients can rely on the
+    /// `content` key being present alongside `reasoning_content` or
+    /// `tool_calls`. Matches the upstream OpenAI API shape (DGH-651).
     pub content: Option<ChatCompletionMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
