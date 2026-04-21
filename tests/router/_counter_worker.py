@@ -6,15 +6,16 @@ Subprocess helper for test_router_per_worker_config.py.
 
 Usage:
     python _counter_worker.py <count_file> <device_type> <endpoint_path>
+                              [--discovery-backend BACKEND] [--request-plane PLANE]
 
     count_file:    path to file where the request count is written after each request
     device_type:   "cpu" sets CUDA_VISIBLE_DEVICES=""; "gpu" sets CUDA_VISIBLE_DEVICES="0"
     endpoint_path: dotted endpoint path, e.g. "test.counter.generate"
 """
 
+import argparse
 import asyncio
 import os
-import sys
 
 request_count = 0
 
@@ -27,15 +28,31 @@ async def generate(request, context):
     request_count += 1
     with open(count_file, "w") as f:
         f.write(str(request_count))
-    yield {"ok": True}
+    yield {"token_ids": [1, 2, 3]}
 
 
 async def main():
     global count_file
 
-    count_file = sys.argv[1]
-    device_type = sys.argv[2]
-    endpoint_path = sys.argv[3]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("count_file")
+    parser.add_argument("device_type")
+    parser.add_argument("endpoint_path")
+    parser.add_argument(
+        "--discovery-backend",
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend (default: etcd)",
+    )
+    parser.add_argument(
+        "--request-plane",
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
+        help="Request plane (default: tcp)",
+    )
+    args = parser.parse_args()
+
+    count_file = args.count_file
+    device_type = args.device_type
+    endpoint_path = args.endpoint_path
 
     # Set device type BEFORE importing dynamo so the Rust side sees the correct env var
     # when the endpoint instance registers itself with the discovery system.
@@ -56,11 +73,11 @@ async def main():
     from dynamo.runtime import DistributedRuntime
 
     loop = asyncio.get_event_loop()
-    runtime = DistributedRuntime(loop, "file", "nats")
+    runtime = DistributedRuntime(loop, args.discovery_backend, args.request_plane)
     endpoint = runtime.endpoint(endpoint_path)
 
     await register_model(
-        ModelInput.Text,
+        ModelInput.Tokens,
         ModelType.Chat,
         endpoint,
         HF_MODEL_NAME,

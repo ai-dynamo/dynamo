@@ -704,13 +704,17 @@ class CounterWorkerProcess:
     global router mode is overridden by the per-worker config.
     """
 
-    def __init__(self, request):
+    def __init__(
+        self, request, store_backend: str = "etcd", request_plane: str = "nats"
+    ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "counter"
+        self.endpoint_path = f"{self.namespace}.{self.component_name}.generate"
         self.num_workers = 2
         self._request = request
-        self._endpoint_path = f"{self.namespace}.{self.component_name}.generate"
+        self._store_backend = store_backend
+        self._request_plane = request_plane
         self._cpu_count_file: Optional[str] = None
         self._gpu_count_file: Optional[str] = None
         self._cpu_proc: Optional[ManagedProcess] = None
@@ -739,7 +743,11 @@ class CounterWorkerProcess:
                 _COUNTER_WORKER_SCRIPT,
                 self._cpu_count_file,
                 "cpu",
-                self._endpoint_path,
+                self.endpoint_path,
+                "--discovery-backend",
+                self._store_backend,
+                "--request-plane",
+                self._request_plane,
             ],
             env=env,
             timeout=60,
@@ -756,7 +764,11 @@ class CounterWorkerProcess:
                 _COUNTER_WORKER_SCRIPT,
                 self._gpu_count_file,
                 "gpu",
-                self._endpoint_path,
+                self.endpoint_path,
+                "--discovery-backend",
+                self._store_backend,
+                "--request-plane",
+                self._request_plane,
             ],
             env=env,
             timeout=60,
@@ -770,7 +782,7 @@ class CounterWorkerProcess:
         self._cpu_proc.__enter__()
         self._gpu_proc.__enter__()
         logger.info(
-            f"Started CPU and GPU counter workers, endpoint: {self._endpoint_path}"
+            f"Started CPU and GPU counter workers, endpoint: {self.endpoint_path}"
         )
         return self
 
@@ -1702,6 +1714,7 @@ def test_router_per_worker_config(
     with CounterWorkerProcess(request) as workers:
         frontend_port = get_unique_ports(request, num_ports=1)[0]
         _test_router_override_router_config(
+            endpoint=workers.endpoint_path,
             engine_workers=workers,
             request=request,
             frontend_port=frontend_port,
