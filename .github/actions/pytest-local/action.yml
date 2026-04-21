@@ -1,0 +1,221 @@
+name: 'Pytest (local)'
+description: 'Run pytest directly on the runner (no docker-in-docker). Assumes the job already runs inside the test container image.'
+inputs:
+  pytest_marks:
+    description: 'Pytest marks'
+    required: true
+    default: 'e2e and vllm and gpu_1 and not slow'
+  test_suite_name:
+    description: 'Test suite name for test metrics'
+    required: false
+    default: 'unknown'
+  test_type:
+    description: 'Test type (unit, e2e, integration)'
+    required: false
+    default: 'e2e'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
+  dry_run:
+    description: 'Run pytest in dry-run mode (collect tests only, do not execute)'
+    required: false
+    default: 'false'
+  hf_token:
+    description: 'Hugging Face access token passed through as HF_TOKEN for model downloads.'
+    required: false
+  parallel_mode:
+    description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
+    required: false
+    default: 'auto'
+  framework:
+    description: 'Framework label exported as DYNAMO_TEST_FRAMEWORK'
+    required: false
+    default: ''
+  container_workspace:
+    description: 'Path inside the container to run pytest from. The image ships the dynamo source/tests here; kept separate from the GitHub Actions checkout at $GITHUB_WORKSPACE.'
+    required: false
+    default: '/workspace'
+  verify_gpu:
+    description: 'Whether to verify GPU visibility via torch before running tests'
+    required: false
+    default: 'false'
+
+runs:
+  using: "composite"
+  steps:
+    - name: verify minio
+      if: inputs.verify_gpu == 'true' # only gpu tests require minio
+      shell: bash
+      run: |
+        # Wait for MinIO to be ready
+        echo "⏳ Waiting for MinIO to be ready..."
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+            echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
+            break
+          fi
+          ATTEMPT=$((ATTEMPT + 1))
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
+            exit 1
+          fi
+          sleep 1
+        done
+    - name: Verify GPU visibility
+      if: inputs.verify_gpu == 'true'
+      shell: python
+      run: |
+        import sys
+        import torch
+        available = torch.cuda.is_available()
+        count = torch.cuda.device_count() if available else 0
+        name = torch.cuda.get_device_name(0) if available else "None"
+        print(f"Python version: {sys.version}")
+        print(f"Is CUDA available? {available}")
+        print(f"GPU count: {count}")
+        print(f"GPU Name: {name}")
+        if not available:
+            sys.exit("GPU tests requested but torch.cuda.is_available() is False")
+
+    - name: Run pytest
+      shell: bash
+      env:
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_TOKEN: ${{ inputs.hf_token }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+      run: |
+        set +e
+
+        # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
+        TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
+        mkdir -p "${TEST_RESULTS_DIR}"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        # HF cache: use HOME (/__w/dynamo/dynamo, set by the workflow container config)
+        # which is on the EBS work volume and writable by the runner uid (1001).
+        # Mirrors DinD behavior where the test container used its own writable cache.
+        # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
+        # to set HOME=/ by default regardless of the workflow container env. Pin HOME
+        # to GITHUB_WORKSPACE (the EBS work volume, writable by uid 1001) so that all
+        # downstream code that reads HOME (Python huggingface_hub, Rust dynamo_llm::hub,
+        # flashinfer JIT) gets a writable path.
+        export HOME="${GITHUB_WORKSPACE}"
+
+        # Seed from the image's baked-in cache (built as uid 1000/dynamo) so models
+        # pre-cached in the image are available without re-downloading.
+        export HF_HOME="${HOME}/.cache/huggingface"
+        mkdir -p "${HF_HOME}"
+        for IMG_CACHE in /home/dynamo/.cache/huggingface /root/.cache/huggingface; do
+          if [ -d "${IMG_CACHE}" ]; then
+            echo "📦 Seeding HF cache: ${IMG_CACHE} → ${HF_HOME}"
+            cp -rn "${IMG_CACHE}/." "${HF_HOME}/" 2>/dev/null || true
+            break
+          fi
+        done
+        echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
+
+        # XDG cache: flashinfer and other XDG-aware tools need a writable cache.
+        # Use HOME/.cache (EBS-backed) rather than /tmp (memory-backed, small in K8s).
+        export XDG_CACHE_HOME="${HOME}/.cache"
+        mkdir -p "${XDG_CACHE_HOME}"
+        echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
+
+        CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
+        if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
+          echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
+          exit 1
+        fi
+        echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
+
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+        else
+          echo "🚀 Running pytest in normal mode"
+          case "${{ inputs.parallel_mode }}" in
+            "auto")
+              PARALLEL_OPTS="-n auto"
+              echo "📊 Parallelization: auto (use all available cores)"
+              ;;
+            "none"|"0")
+              PARALLEL_OPTS="-n 0"
+              echo "📊 Parallelization: disabled (sequential execution)"
+              ;;
+            *)
+              PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
+              echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
+              ;;
+          esac
+
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
+        umask 0022
+        cd "${CONTAINER_WORKSPACE}"
+        bash -c "${PYTEST_CMD}"
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          if [[ -f "${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}" ]]; then
+            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+          else
+            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+          fi
+        fi
+
+        exit 0
+
+    - name: Process Test Results
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+
+        if [[ -f "$JUNIT_FILE" ]]; then
+          echo "✅ JUnit XML generated successfully"
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
+          echo "📝 Renamed XML file to: $JUNIT_NAME"
+        else
+          echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+          TOTAL_TESTS=0
+          FAILED_TESTS=1
+          ERROR_TESTS=0
+        fi
+
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always()
+      with:
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always()
+      with:
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore
