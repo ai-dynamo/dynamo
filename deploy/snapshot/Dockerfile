@@ -232,4 +232,4 @@ COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 RUN chmod +x /usr/local/bin/nsrestore
 
 # Create directories
-RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+RUN mkdir -p /checkpoints /var/run/criu /var/criu-work /opt/patched-driver
