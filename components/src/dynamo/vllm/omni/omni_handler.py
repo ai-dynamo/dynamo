@@ -268,10 +268,15 @@ class OmniHandler(BaseOmniHandler):
         # This is in sync with how vllm-omni builds sampling params currently.
         defaults = list(self.engine_client.default_sampling_params_list or [])
         result = []
+        engine = getattr(self.engine_client, "engine", None)
         for i, default in enumerate(defaults):
-            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
-                "stage_type", "llm"
-            )
+            stage_type = "llm"
+            if engine is not None and hasattr(engine, "get_stage_metadata"):
+                stage_type = engine.get_stage_metadata(i).get("stage_type", "llm")
+            elif isinstance(default, OmniDiffusionSamplingParams):
+                # AsyncOmni no longer exposes .engine in some versions. When
+                # metadata is unavailable, infer diffusion stages from defaults.
+                stage_type = "diffusion"
             if stage_type == "diffusion":
                 result.append(diffusion_sp)
             else:

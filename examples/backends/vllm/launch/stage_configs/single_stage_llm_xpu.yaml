@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Single-stage LLM configuration for XPU text-to-text generation
+#
+# XPU-specific notes:
+# - Use worker_type=ar so vLLM-Omni selects XPUARWorker automatically.
+# - Keep a conservative batch/memory profile for single-device bring-up.
+
+stage_args:
+  - stage_id: 0
+    # stage_type defaults to "llm" when not specified
+    runtime:
+      devices: "0"  # Single XPU
+      max_batch_size: 32
+    engine_args:
+      # Model stage identifier (required by vLLM-Omni)
+      # For Qwen2.5-Omni: thinker (comprehension), talker (enhanced gen), code2wav (audio)
+      # For single-stage text generation, use "thinker"
+      model_stage: thinker
+      model_arch: Qwen2_5OmniForConditionalGeneration
+      worker_cls: vllm_omni.platforms.xpu.worker.xpu_ar_worker.XPUARWorker
+      # worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      # Engine configuration
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      trust_remote_code: true
+      enforce_eager: true
+      # Leave more room for KV cache on limited-memory XPU cards.
+      gpu_memory_utilization: 0.8
+      enable_prefix_caching: false
+      # Constrain KV-cache footprint for single-device bring-up.
+      max_model_len: 8192
+      max_num_batched_tokens: 2048
+      engine_output_type: latent
+      # Keep process-based executor for single-host setup.
+      distributed_executor_backend: "mp"
+    is_comprehension: true
+    final_output: true
+    final_output_type: text
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 20
+      repetition_penalty: 1.1
+      seed: 42
+      detokenize: true
