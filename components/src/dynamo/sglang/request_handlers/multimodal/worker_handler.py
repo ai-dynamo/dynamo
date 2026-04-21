@@ -117,7 +117,10 @@ class EmbeddingsProcessor:
 
     @staticmethod
     def create_multimodal_item(
-        embeddings: torch.Tensor, grid_values, modality: str = "IMAGE"
+        embeddings: torch.Tensor,
+        grid_values=None,
+        modality: str = "IMAGE",
+        model_specific_data: dict[str, Any] | None = None,
     ) -> dict:
         """Create processor_output mm_item for SGLang async_generate."""
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
@@ -128,9 +131,21 @@ class EmbeddingsProcessor:
                 f"Unsupported modality for precomputed mm_item: {modality}"
             )
         grid_key = GRID_KEYS[modality]
-        grid_payload = torch.tensor(grid_values)
+        mm_item: dict[str, Any] = {}
+        model_specific_data = dict(model_specific_data or {})
+        if grid_key not in model_specific_data:
+            if grid_values is None:
+                raise ValueError(f"{grid_key} is required")
+            model_specific_data[grid_key] = grid_values
 
-        mm_item: dict[str, Any] = {grid_key: grid_payload}
+        for key, value in model_specific_data.items():
+            if key in GRID_KEYS.values():
+                mm_item[key] = torch.tensor(value)
+            elif key == "second_per_grid_ts":
+                mm_item[key] = torch.tensor(value, dtype=torch.float32)
+            else:
+                mm_item[key] = value
+
         mm_item.update(
             {
                 "format": "processor_output",
@@ -260,17 +275,46 @@ async def _build_mm_items(
     image_mm_items: list[dict] = []
     video_data_items: list[dict] = []
 
-    encoded_groups: list[tuple[str, Any, int]] = []
+    encoded_groups: list[tuple[str, Any, int, dict[str, Any]]] = []
 
     for group in request.multimodal_inputs:
         if group.num_mm_tokens is not None and group.num_mm_tokens > 0:
-            if group.image_grid_thw is not None:
+            group_model_data = dict(group.model_specific_data)
+            if (
+                group.image_grid_thw is not None
+                and "image_grid_thw" not in group_model_data
+            ):
+                group_model_data["image_grid_thw"] = group.image_grid_thw
+            if (
+                group.video_grid_thw is not None
+                and "video_grid_thw" not in group_model_data
+            ):
+                group_model_data["video_grid_thw"] = group.video_grid_thw
+
+            group_modality = group.modality
+            if group_modality is None:
+                if "image_grid_thw" in group_model_data:
+                    group_modality = "IMAGE"
+                elif "video_grid_thw" in group_model_data:
+                    group_modality = "VIDEO"
+
+            if group_modality == "IMAGE":
                 encoded_groups.append(
-                    ("IMAGE", group.image_grid_thw, group.num_mm_tokens)
+                    (
+                        "IMAGE",
+                        group_model_data["image_grid_thw"],
+                        group.num_mm_tokens,
+                        group_model_data,
+                    )
                 )
-            elif group.video_grid_thw is not None:
+            elif group_modality == "VIDEO":
                 encoded_groups.append(
-                    ("VIDEO", group.video_grid_thw, group.num_mm_tokens)
+                    (
+                        "VIDEO",
+                        group_model_data["video_grid_thw"],
+                        group.num_mm_tokens,
+                        group_model_data,
+                    )
                 )
             else:
                 raise ValueError("Encoded multimodal group missing grid metadata")
@@ -283,14 +327,17 @@ async def _build_mm_items(
 
         grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
         grouped_embeds: dict[str, list[torch.Tensor]] = {"IMAGE": [], "VIDEO": []}
+        grouped_model_data: dict[str, dict[str, list[Any]]] = {"IMAGE": {}, "VIDEO": {}}
 
         offset = 0
-        for modality, grid_item, token_count in encoded_groups:
+        for modality, grid_item, token_count, group_model_data in encoded_groups:
             next_offset = offset + int(token_count)
             if next_offset > embeddings.shape[0]:
                 raise ValueError("Encoded token counts exceed received embedding rows")
             grouped_grids[modality].append(grid_item)
             grouped_embeds[modality].append(embeddings[offset:next_offset])
+            for key, value in group_model_data.items():
+                grouped_model_data[modality].setdefault(key, []).append(value)
             offset = next_offset
 
         if offset != embeddings.shape[0]:
@@ -302,6 +349,7 @@ async def _build_mm_items(
                     torch.cat(grouped_embeds["IMAGE"], dim=0),
                     grouped_grids["IMAGE"],
                     modality="IMAGE",
+                    model_specific_data=grouped_model_data["IMAGE"],
                 )
             )
         if grouped_embeds["VIDEO"]:
@@ -310,6 +358,7 @@ async def _build_mm_items(
                     torch.cat(grouped_embeds["VIDEO"], dim=0),
                     grouped_grids["VIDEO"],
                     modality="VIDEO",
+                    model_specific_data=grouped_model_data["VIDEO"],
                 )
             )
 

@@ -34,6 +34,7 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor)
         assert retrieved.image_grid_thw is None
+        assert retrieved.model_specific_data is None
 
     def test_set_and_get_with_grid(self):
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
@@ -251,20 +252,29 @@ class TestCachedEmbeddingNamedTuple:
     def test_fields(self):
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
-        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
+        metadata = {"image_grid_thw": grid}
+        entry = CachedEmbedding(
+            tensor=tensor, image_grid_thw=grid, model_specific_data=metadata
+        )
 
         assert torch.equal(entry.tensor, tensor)
         assert entry.image_grid_thw == grid
+        assert entry.model_specific_data == metadata
 
     def test_none_grid(self):
         tensor = torch.randn(4, 4)
         entry = CachedEmbedding(tensor=tensor, image_grid_thw=None)
         assert entry.image_grid_thw is None
+        assert entry.model_specific_data is None
 
     def test_unpacking(self):
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
-        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
-        t, g = entry
+        metadata = {"image_grid_thw": grid}
+        entry = CachedEmbedding(
+            tensor=tensor, image_grid_thw=grid, model_specific_data=metadata
+        )
+        t, g, m = entry
         assert torch.equal(t, tensor)
         assert g == grid
+        assert m == metadata

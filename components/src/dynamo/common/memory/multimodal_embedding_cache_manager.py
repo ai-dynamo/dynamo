@@ -19,7 +19,7 @@ Usage:
 
 import logging
 from collections import OrderedDict
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 import torch
 
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 class CachedEmbedding(NamedTuple):
     tensor: torch.Tensor
     image_grid_thw: list | None = None
+    model_specific_data: dict[str, Any] | None = None
 
 
 class MultimodalEmbeddingCacheManager:
