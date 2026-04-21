@@ -129,13 +129,13 @@ def _apply_models_dir_env(models_dir: str) -> dict:
             "If this is wrong (e.g. you have a model named hub/), rename hub/ "
             "or pass a bare HF_HUB_CACHE directory instead."
         )
+        os.environ.pop("HF_HUB_CACHE", None)  # clear so HF_HOME takes effect
         os.environ["HF_HOME"] = models_dir
     else:
         logging.info("--models-dir: detected bare HF_HUB_CACHE layout")
+        os.environ.pop("HF_HOME", None)  # clear for consistency
         os.environ["HF_HUB_CACHE"] = models_dir
-    os.environ[
-        "HF_HUB_OFFLINE"
-    ] = "1"  # set before _enable so orig snapshot reflects pre-existing state
+    os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
     _enable_offline_with_mistral_patch()  # activates sitecustomize for Mistral tokenizer workaround

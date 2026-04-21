@@ -92,6 +92,7 @@ def test_restore_preserves_preexisting_values(tmp_path, monkeypatch, use_hf_home
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.gpu_0
+@pytest.mark.timeout(60)
 def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
     missing = tmp_path / "no_such_dir"
     # Run from the project root so conftest.py is discovered and --models-dir
@@ -111,6 +112,7 @@ def test_models_dir_nonexistent_exits_with_code_2(tmp_path):
         capture_output=True,
         text=True,
         cwd=str(project_root),
+        timeout=30,
     )
     assert result.returncode == 2
     assert "does not exist" in result.stderr + result.stdout
@@ -166,14 +168,18 @@ def test_enable_disable_enable_cycle(monkeypatch):
 
     _enable_offline_with_mistral_patch()
     assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    assert hf_cache._mistral_patch_applied is True
     pythonpath_after_enable = os.environ.get("PYTHONPATH")
 
     _disable_offline_with_mistral_patch()
     assert "HF_HUB_OFFLINE" not in os.environ
+    assert hf_cache._mistral_patch_applied is False
     assert os.environ.get("PYTHONPATH") is None
 
     _enable_offline_with_mistral_patch()
     assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    assert hf_cache._mistral_patch_applied is True
     assert os.environ.get("PYTHONPATH") == pythonpath_after_enable
 
     _disable_offline_with_mistral_patch()
+    assert hf_cache._mistral_patch_applied is False

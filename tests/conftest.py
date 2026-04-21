@@ -253,6 +253,9 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
         val = config.getoption(opt_name, default=None)
         if val is not None:
             extra_args.extend([cli_flag, str(val)])
+    models_dir = config.getoption("--models-dir", default=None)
+    if models_dir is not None:
+        extra_args.extend(["--models-dir", str(models_dir)])
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
@@ -362,7 +365,7 @@ def download_models(model_list=None, ignore_weights=False):
 _download_lock_path = os.path.join(tempfile.gettempdir(), "pytest_model_download.lock")
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def _models_dir_env(pytestconfig):
     """Set up HF env vars for --models-dir mode. No-op when flag is absent.
 
