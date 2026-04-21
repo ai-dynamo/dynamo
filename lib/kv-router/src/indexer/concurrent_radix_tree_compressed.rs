@@ -1191,6 +1191,7 @@ impl ConcurrentRadixTreeCompressed {
                             event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
+                                start_position: None,
                                 blocks: full_blocks.clone(),
                             }),
                             dp_rank: worker.dp_rank,
@@ -1205,6 +1206,7 @@ impl ConcurrentRadixTreeCompressed {
                             event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
+                                start_position: None,
                                 blocks: full_blocks[..k].to_vec(),
                             }),
                             dp_rank: worker.dp_rank,

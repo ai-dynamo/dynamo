@@ -608,6 +608,7 @@ impl ConcurrentRadixTree {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
                             parent_hash,
+                            start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash,
                                 mm_extra_info: None,

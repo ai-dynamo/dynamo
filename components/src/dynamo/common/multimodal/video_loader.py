@@ -16,13 +16,18 @@
 import asyncio
 import logging
 import os
-from pathlib import Path
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
 import numpy as np
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.multimodal.http_client import get_http_client
+from dynamo.common.multimodal.url_validator import (
+    UrlValidationPolicy,
+    fetch_with_revalidation,
+    validate_media_url,
+)
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
@@ -53,33 +58,27 @@ class VideoLoader:
         http_timeout: float = 60.0,
         num_frames: int = NUM_FRAMES_DEFAULT,
         enable_frontend_decoding: bool = False,
+        url_policy: UrlValidationPolicy | None = None,
     ) -> None:
         self._http_timeout = int(http_timeout)
         self._num_frames = num_frames
         self._enable_frontend_decoding = enable_frontend_decoding
+        self._url_policy = url_policy or UrlValidationPolicy.from_env()
         self._nixl_connector = None
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = nixl_connect.Connector()
             run_async(self._nixl_connector.initialize)
 
-    @staticmethod
-    def _normalize_video_url(video_url: str) -> str:
-        parsed_url = urlparse(video_url)
-        if parsed_url.scheme or not video_url:
-            return video_url
-
-        file_path = Path(video_url).expanduser()
-        if not file_path.exists():
-            raise FileNotFoundError(f"Error reading file: {file_path}")
-
-        return file_path.resolve().as_uri()
-
     def _get_vllm_media_connector(self) -> Any:
         if self._vllm_media_connector is None:
             MediaConnector, _, _ = _require_vllm_video_media()
-            # Match the previous backend behavior and allow direct local file paths.
-            self._vllm_media_connector = MediaConnector(allowed_local_media_path="/")
+            # Confine vLLM's own local-path access to the same prefix we enforce.
+            # Empty string matches vLLM's secure default (no local access).
+            allowed = self._url_policy.allowed_local_path or ""
+            self._vllm_media_connector = MediaConnector(
+                allowed_local_media_path=allowed
+            )
 
         return self._vllm_media_connector
 
@@ -93,14 +92,23 @@ class VideoLoader:
     async def _load_video_with_vllm(
         self, video_url: str
     ) -> tuple[np.ndarray, Dict[str, Any]]:
+        normalized_url = await validate_media_url(video_url, self._url_policy)
+        media_io = self._create_vllm_video_io()
+
+        # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
+        # revalidated; vLLM's own fetcher honors redirects without re-checking.
+        # data: and file:// never touch the network, so vLLM can handle them.
+        if urlparse(normalized_url).scheme in ("http", "https"):
+            http_client = get_http_client(self._http_timeout)
+            response = await fetch_with_revalidation(
+                http_client, normalized_url, self._url_policy
+            )
+            response.raise_for_status()
+            return await asyncio.to_thread(media_io.load_bytes, response.content)
+
         connector = self._get_vllm_media_connector()
-        normalized_url = self._normalize_video_url(video_url)
-        # TODO: Add caching for repeated remote `video_url` downloads to avoid
-        # refetching the same asset across requests.
         return await connector.load_from_url_async(
-            normalized_url,
-            self._create_vllm_video_io(),
-            fetch_timeout=self._http_timeout,
+            normalized_url, media_io, fetch_timeout=self._http_timeout
         )
 
     async def load_video(self, video_url: str) -> tuple[np.ndarray, Dict[str, Any]]:
