@@ -62,7 +62,7 @@ spec:
         # Deploy seccomp profile to host before starting the agent
         # This profile blocks io_uring syscalls that CRIU doesn't support
         - name: deploy-seccomp
-          image: busybox:latest
+          image: {{ .Values.daemonset.initContainer.image | default "busybox:latest" }}
           command:
             - sh
             - -c

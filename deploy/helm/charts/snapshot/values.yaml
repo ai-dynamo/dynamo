@@ -93,6 +93,11 @@ daemonset:
   # Affinity rules
   affinity: {}
 
+  # Init container configuration
+  initContainer:
+    # Busybox image for seccomp profile deployment
+    image: busybox:latest
+
 # Seccomp profile configuration
 seccomp:
   # Deploy seccomp profile for blocking io_uring (required for CRIU)
