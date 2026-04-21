@@ -11,11 +11,7 @@ from sglang.srt.server_args import ServerArgs
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
-from dynamo.sglang._compat import (
-    NetworkAddress,
-    get_local_ip_auto,
-    get_scheduler_info,
-)
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
 
