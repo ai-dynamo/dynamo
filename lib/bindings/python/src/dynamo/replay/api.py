@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
+from dynamo._core import (
+    estimate_mocker_request_bounds as _estimate_mocker_request_bounds,
+)
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
@@ -86,4 +91,46 @@ def run_synthetic_trace_replay(
         shared_prefix_ratio=shared_prefix_ratio,
         num_prefix_groups=num_prefix_groups,
         inter_turn_delay_ms=inter_turn_delay_ms,
+    )
+
+
+def estimate_request_bounds(
+    requests,
+    *,
+    extra_engine_args=None,
+    router_config=None,
+    aic_perf_config=None,
+    num_workers=1,
+    arrival_speedup_ratio=1.0,
+):
+    requests_json = requests if isinstance(requests, str) else json.dumps(requests)
+    return _estimate_mocker_request_bounds(
+        requests_json,
+        extra_engine_args=extra_engine_args,
+        router_config=router_config,
+        aic_perf_config=aic_perf_config,
+        num_workers=num_workers,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+    )
+
+
+def estimate_request_bounds_from_jsonl(
+    request_trace_jsonl,
+    *,
+    extra_engine_args=None,
+    router_config=None,
+    aic_perf_config=None,
+    num_workers=1,
+    arrival_speedup_ratio=1.0,
+):
+    with open(request_trace_jsonl, encoding="utf-8") as handle:
+        requests = [json.loads(line) for line in handle if line.strip()]
+
+    return estimate_request_bounds(
+        requests,
+        extra_engine_args=extra_engine_args,
+        router_config=router_config,
+        aic_perf_config=aic_perf_config,
+        num_workers=num_workers,
+        arrival_speedup_ratio=arrival_speedup_ratio,
     )

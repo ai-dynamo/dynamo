@@ -905,6 +905,47 @@ pub fn run_mocker_synthetic_trace_replay(
         .map(|obj| obj.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (requests_json, extra_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, arrival_speedup_ratio=1.0))]
+pub fn estimate_mocker_request_bounds(
+    py: Python<'_>,
+    requests_json: &str,
+    extra_engine_args: Option<MockEngineArgs>,
+    router_config: Option<KvRouterConfig>,
+    aic_perf_config: Option<&AicPerfConfig>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+) -> PyResult<PyObject> {
+    let requests = parse_requests_json(requests_json)?;
+    let args = materialize_replay_mocker_args(
+        py,
+        load_optional_replay_mocker_args(py, extra_engine_args)?.unwrap_or_default(),
+    )?;
+    let router_mode = dynamo_mocker::replay::ReplayRouterMode::KvRouter;
+    let prefill_load_estimator = load_replay_prefill_load_estimator(
+        py,
+        router_mode,
+        router_config.as_ref(),
+        aic_perf_config,
+    )?;
+    let router_config = load_replay_router_config(router_config);
+
+    let report = py.allow_threads(move || {
+        dynamo_mocker::replay::estimate_request_bounds_with_router_mode(
+            args,
+            router_config,
+            prefill_load_estimator,
+            requests,
+            num_workers,
+            arrival_speedup_ratio,
+        )
+    });
+    let report = report.map_err(to_pyerr)?;
+    pythonize(py, &report)
+        .map_err(to_pyerr)
+        .map(|obj| obj.unbind())
+}
+
 enum ReplayArgsSelection {
     Aggregated(Box<RsMockEngineArgs>),
     Disagg(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
@@ -946,6 +987,11 @@ fn load_replay_args_selection(
             },
         ))),
     }
+}
+
+fn parse_requests_json(requests_json: &str) -> PyResult<Vec<DirectRequest>> {
+    serde_json::from_str(requests_json)
+        .map_err(|e| PyException::new_err(format!("Failed to parse requests_json: {e}")))
 }
 
 fn load_optional_replay_mocker_args(

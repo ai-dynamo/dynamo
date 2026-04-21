@@ -3,6 +3,7 @@
 
 # flake8: noqa
 
+import json
 import logging
 
 from dynamo._core import AicPerfConfig as AicPerfConfig
@@ -38,6 +39,7 @@ from dynamo._core import fetch_model as fetch_model
 from dynamo._core import lora_name_to_id as lora_name_to_id
 from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
+from dynamo._core import estimate_mocker_request_bounds as _estimate_mocker_request_bounds
 from dynamo._core import run_input
 from dynamo._core import run_kv_indexer as run_kv_indexer
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
@@ -71,4 +73,23 @@ def run_mocker_trace_replay(
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
         trace_block_size=trace_block_size,
+    )
+
+
+def estimate_mocker_request_bounds(
+    requests,
+    extra_engine_args=None,
+    router_config=None,
+    aic_perf_config=None,
+    num_workers=1,
+    arrival_speedup_ratio=1.0,
+):
+    requests_json = requests if isinstance(requests, str) else json.dumps(requests)
+    return _estimate_mocker_request_bounds(
+        requests_json,
+        extra_engine_args=extra_engine_args,
+        router_config=router_config,
+        aic_perf_config=aic_perf_config,
+        num_workers=num_workers,
+        arrival_speedup_ratio=arrival_speedup_ratio,
     )

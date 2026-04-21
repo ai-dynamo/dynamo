@@ -1587,6 +1587,17 @@ def run_mocker_synthetic_trace_replay(
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
 
+def estimate_mocker_request_bounds(
+    requests_json: str,
+    extra_engine_args: Optional[MockEngineArgs] = None,
+    router_config: Optional[KvRouterConfig] = None,
+    aic_perf_config: Optional[AicPerfConfig] = None,
+    num_workers: int = 1,
+    arrival_speedup_ratio: float = 1.0,
+) -> Dict[str, Any]:
+    """Estimate lower/upper mocker bounds for serialized DirectRequest JSON."""
+    ...
+
 class PlannerReplayBridge:
     """Step-based bridge for driving an offline replay with a Python planner."""
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod artifacts;
+mod bounds;
 mod collector;
 mod entrypoints;
 pub(crate) mod offline;
@@ -18,6 +19,9 @@ use dynamo_kv_router::PrefillLoadEstimator;
 
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
+};
+pub use bounds::{
+    ReplayBoundsReport, ReplayUpperBoundSource, estimate_request_bounds_with_router_mode,
 };
 pub(crate) use collector::TraceCollector;
 #[cfg(test)]
