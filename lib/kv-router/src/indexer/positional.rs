@@ -237,30 +237,37 @@ impl PositionalIndexer {
         store_data: KvCacheStoreData,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
+        let KvCacheStoreData {
+            parent_hash,
+            start_position,
+            blocks,
+        } = store_data;
         let worker_map = worker_blocks.entry(worker).or_default();
-        // Determine starting position based on parent_hash
-        let start_pos = match store_data.parent_hash {
-            Some(parent_hash) => {
-                let Some(entry) = worker_map.get(&parent_hash) else {
-                    tracing::warn!(
-                        worker_id = worker.worker_id.to_string(),
-                        dp_rank = worker.dp_rank,
-                        event_id,
-                        parent_hash = ?parent_hash,
-                    );
-                    return Err(KvCacheEventError::ParentBlockNotFound);
-                };
+        let start_pos = match start_position {
+            Some(start_position) => start_position as usize,
+            None => match parent_hash {
+                Some(parent_hash) => {
+                    let Some(entry) = worker_map.get(&parent_hash) else {
+                        tracing::warn!(
+                            worker_id = worker.worker_id.to_string(),
+                            dp_rank = worker.dp_rank,
+                            event_id,
+                            parent_hash = ?parent_hash,
+                        );
+                        return Err(KvCacheEventError::ParentBlockNotFound);
+                    };
 
-                entry.0 + 1 // parent position + 1
-            }
-            None => 0, // Start from position 0
+                    entry.0 + 1 // parent position + 1
+                }
+                None => 0, // Start from position 0
+            },
         };
 
         let worker_blocks_entry = worker_blocks.entry(worker).or_default();
 
-        let num_stored_blocks = store_data.blocks.len();
+        let num_stored_blocks = blocks.len();
 
-        for (i, block_data) in store_data.blocks.into_iter().enumerate() {
+        for (i, block_data) in blocks.into_iter().enumerate() {
             let position = start_pos + i;
             let local_hash = block_data.tokens_hash;
             let seq_hash = block_data.block_hash;
@@ -411,47 +418,22 @@ impl PositionalIndexer {
         let mut event_id = 0u64;
 
         for (worker, worker_map) in worker_blocks.iter() {
-            // Collect (position, local_hash, seq_hash) and sort by position
-            // so parents are emitted before children during replay.
+            // Collect (position, local_hash, seq_hash) and sort by position.
             let mut blocks: Vec<_> = worker_map
                 .iter()
                 .map(|(seq_hash, (pos, local_hash))| (*pos, *local_hash, *seq_hash))
                 .collect();
             blocks.sort_unstable_by_key(|(pos, _, _)| *pos);
 
-            // Track one valid seq_hash per position for parent_hash synthesis.
-            // Note: The synthesized parent_hash doesn't need to be the true logical
-            // parent — during replay it's only used to derive `start_pos = parent.position + 1`,
-            // so any seq_hash at the previous position is sufficient. The PositionalIndexer
-            // is position-based, not tree-topology-based.
-            let mut last_at_position: FxHashMap<usize, ExternalSequenceBlockHash> =
-                FxHashMap::default();
-
             for (pos, local_hash, seq_hash) in blocks {
-                let parent_hash = if pos == 0 {
-                    None
-                } else {
-                    match last_at_position.get(&(pos - 1)) {
-                        Some(&parent) => Some(parent),
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                position = pos,
-                                "Orphaned block at position with no parent; skipping in dump"
-                            );
-                            continue;
-                        }
-                    }
-                };
-
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
                     storage_tier: crate::protocols::StorageTier::Device,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
+                            parent_hash: None,
+                            start_position: Some(pos as u32),
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash: seq_hash,
                                 tokens_hash: local_hash,
@@ -462,7 +444,6 @@ impl PositionalIndexer {
                     },
                 });
                 event_id += 1;
-                last_at_position.insert(pos, seq_hash);
             }
         }
 

@@ -422,6 +422,7 @@ vllm_configs = {
         ],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=360,
         request_payloads=[
@@ -471,6 +472,7 @@ vllm_configs = {
             "--dyn-tool-call-parser",
             "hermes",
         ],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=600,
         request_payloads=[

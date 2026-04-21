@@ -36,6 +36,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: '2'
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
       copy_to_acr: false
@@ -452,7 +453,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
-    runs-on: prod-builder-amd-v1
+    runs-on: ubuntu-slim
     if: always() && failure()
     needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:

@@ -68,7 +68,7 @@ func testScheme() *runtime.Scheme {
 }
 
 func testInfo() *CheckpointInfo {
-	return &CheckpointInfo{Enabled: true, Hash: testHash}
+	return &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 }
 
 func testSnapshotAgentDaemonSet() *appsv1.DaemonSet {
@@ -184,6 +184,27 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 // --- InjectCheckpointIntoPodSpec tests ---
 
 func TestInjectCheckpointIntoPodSpec(t *testing.T) {
+	t.Run("not ready checkpoint leaves pod spec untouched", func(t *testing.T) {
+		podSpec := testPodSpec()
+		originalCmd := append([]string(nil), podSpec.Containers[0].Command...)
+		originalArgs := append([]string(nil), podSpec.Containers[0].Args...)
+		info := &CheckpointInfo{Enabled: true, Ready: false, Hash: testHash}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+
+		assert.Equal(t, originalCmd, podSpec.Containers[0].Command)
+		assert.Equal(t, originalArgs, podSpec.Containers[0].Args)
+		for _, volume := range podSpec.Volumes {
+			assert.NotEqual(t, snapshotprotocol.SnapshotControlVolumeName, volume.Name)
+			assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, volume.Name)
+			assert.NotEqual(t, consts.PodInfoVolumeName, volume.Name)
+		}
+		for _, env := range podSpec.Containers[0].Env {
+			assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
+		}
+	})
+
 	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
@@ -279,7 +300,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			reader  client.Reader
 			errMsg  string
 		}{
-			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
+			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true, Ready: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
 			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container named"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {

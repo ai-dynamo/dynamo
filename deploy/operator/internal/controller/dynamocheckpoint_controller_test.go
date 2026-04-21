@@ -78,8 +78,7 @@ func checkpointTestScheme() *runtime.Scheme {
 func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
 	return &configv1alpha1.OperatorConfiguration{
 		Checkpoint: configv1alpha1.CheckpointConfiguration{
-			Enabled:                    true,
-			ReadyForCheckpointFilePath: "/tmp/ready-for-checkpoint",
+			Enabled: true,
 		},
 	}
 }
@@ -168,7 +167,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	for _, e := range main.Env {
 		envMap[e.Name] = e.Value
 	}
-	assert.Equal(t, "/tmp/ready-for-checkpoint", envMap[consts.EnvReadyForCheckpointFile])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, envMap[snapshotprotocol.SnapshotControlDirEnv])
 	assert.Equal(t, "manual-checkpoint", envMap[consts.DynamoNamespaceEnvVar])
 	assert.Equal(t, consts.ComponentTypeWorker, envMap[consts.DynamoComponentEnvVar])
 	assert.Equal(t, "worker-1234", envMap[consts.DynamoNamespaceWorkerSuffixEnvVar])
@@ -201,7 +200,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 
 	// Probes: readiness set, liveness/startup cleared
 	require.NotNil(t, main.ReadinessProbe)
-	assert.Equal(t, []string{"cat", "/tmp/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
@@ -212,6 +211,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 	assert.False(t, volNames[snapshotprotocol.CheckpointVolumeName])
 	assert.True(t, volNames[consts.PodInfoVolumeName])
+	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
 	mountPaths := make(map[string]string)
 	for _, m := range main.VolumeMounts {
@@ -221,6 +221,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.False(t, hasCheckpointMount)
 	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mountPaths[snapshotprotocol.SnapshotControlVolumeName])
 
 	foundSharedMemoryVolume := false
 	for _, v := range podSpec.Volumes {
@@ -301,7 +302,7 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
 	require.NotNil(t, main.ReadinessProbe)
-	assert.Equal(t, []string{"cat", "/tmp/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
@@ -309,7 +310,7 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	for _, env := range main.Env {
 		mainEnv[env.Name] = env.Value
 	}
-	assert.Equal(t, "/tmp/ready-for-checkpoint", mainEnv[consts.EnvReadyForCheckpointFile])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mainEnv[snapshotprotocol.SnapshotControlDirEnv])
 	assert.Equal(t, "secret", mainEnv["HF_TOKEN"])
 
 	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
@@ -319,7 +320,7 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	assert.Nil(t, sidecar.LivenessProbe)
 	assert.Nil(t, sidecar.StartupProbe)
 	for _, env := range sidecar.Env {
-		assert.NotEqual(t, consts.EnvReadyForCheckpointFile, env.Name)
+		assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
 	}
 }
 
@@ -374,7 +375,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	}
 	assert.True(t, volNames[gms.SharedVolumeName])
 	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
-	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
+	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
 	mainMounts := map[string]string{}
 	for _, m := range main.VolumeMounts {

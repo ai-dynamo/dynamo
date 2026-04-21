@@ -132,6 +132,8 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        super::warn_on_unit_block_size("single", kv_block_size);
+
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
@@ -253,6 +255,7 @@ impl KvIndexer {
                             let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
                             let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash: None,
+                                start_position: None,
                                 blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
                                     tokens_hash: *local_hash,
                                     block_hash: ExternalSequenceBlockHash(*sequence_hash),
