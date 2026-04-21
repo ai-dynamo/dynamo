@@ -261,14 +261,6 @@ where
             PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
         })?;
 
-        // Notify the health check manager that a new request has arrived.
-        // This resets the canary timer during the prefill phase, preventing
-        // false health check triggers on long-context requests that may take
-        // tens of seconds before producing the first token.
-        if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-            notifier.notify_one();
-        }
-
         tracing::trace!("calling generate");
         let stream = self
             .segment
@@ -356,11 +348,7 @@ where
                 }
                 break;
             } else {
-                // Notify the health check manager on each successfully streamed
-                // chunk. Each chunk proves the engine is alive and producing
-                // output, preventing the canary from firing during long streaming
-                // responses. tokio::sync::Notify coalesces multiple calls into a
-                // single wakeup, so the overhead is one atomic store per chunk.
+                // Notify the health check manager on each successfully streamed chunk
                 if let Some(notifier) = self.endpoint_health_check_notifier.get() {
                     notifier.notify_one();
                 }
@@ -388,8 +376,6 @@ where
                 }
             }
             // Notify the health check manager that the stream has finished.
-            // This complements the per-chunk and request-arrival notifications
-            // above, ensuring the timer is also reset on stream completion.
             if let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }

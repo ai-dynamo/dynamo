@@ -512,8 +512,7 @@ mod push_handler_notify_tests {
             .unwrap();
 
         // Send a request through push_handler — this will call notify_one()
-        // on request arrival and on each of the 5 streaming chunks, resetting
-        // the canary timer each time.
+        // on each of the 5 streaming chunks, resetting the canary timer each time.
         let request_id = uuid::Uuid::new_v4().to_string();
         let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
         let payload = encode_request(
