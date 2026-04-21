@@ -586,7 +586,24 @@ mod push_handler_notify_tests {
         let drt = create_test_drt_async().await;
         let endpoint_name = "test.push_handler.canary_fires";
 
-        let _notifier = register_endpoint(&drt, endpoint_name);
+        let notifier = register_endpoint(&drt, endpoint_name);
+
+        // Spawn a counter task to confirm zero notifications arrive
+        let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = notify_count.clone();
+        let notifier_for_counter = notifier.clone();
+        let counter_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = notifier_for_counter.notified() => {
+                        count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        break;
+                    }
+                }
+            }
+        });
 
         // Start the real HealthCheckManager with a very short canary wait
         let config = HealthCheckConfig {
@@ -607,7 +624,14 @@ mod push_handler_notify_tests {
         // The canary will call send_health_check_request, which finds the mock
         // engine in local_endpoint_registry, calls generate(), gets a successful
         // response, and sets status to Ready.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        counter_task.await.unwrap();
+
+        // No requests were sent through push_handler, so no notifications
+        let count = notify_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            count, 0,
+            "Expected 0 notification wakeups since no requests were processed, got {count}"
+        );
 
         let status = drt
             .system_health()
