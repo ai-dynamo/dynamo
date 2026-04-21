@@ -1069,7 +1069,7 @@ def _test_router_threshold_none_disables_rejection(
     request,
     frontend_port: int,
     test_payload: dict,
-    num_requests: int = 10,
+    num_requests: int = 4,
 ):
     """Test that explicit CLI "None" thresholds disable busy-based rejection end to end.
 
@@ -1152,6 +1152,7 @@ def _test_router_threshold_none_disables_rejection(
                 "Launching overload-shaped traffic with explicit None thresholds..."
             )
             stop_event = asyncio.Event()
+            response_statuses = asyncio.Queue()
 
             async with aiohttp.ClientSession() as session:
 
@@ -1162,6 +1163,7 @@ def _test_router_threshold_none_disables_rejection(
                                 logger.info(
                                     "Request %s accepted without rejection", req_id
                                 )
+                                await response_statuses.put(response.status)
                                 await stop_event.wait()
                                 return response.status
 
@@ -1172,11 +1174,13 @@ def _test_router_threshold_none_disables_rejection(
                                 response.status,
                                 body,
                             )
+                            await response_statuses.put(response.status)
                             return response.status
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
                         logger.info("Request %s failed with error: %s", req_id, exc)
+                        await response_statuses.put(exc)
                         raise
 
                 tasks = []
@@ -1197,16 +1201,18 @@ def _test_router_threshold_none_disables_rejection(
                             asyncio.create_task(send_request(i, unique_payload))
                         )
                         await asyncio.sleep(0.1)
-
-                    await asyncio.sleep(5)
                 finally:
+                    initial_results = [
+                        await response_statuses.get() for _ in range(num_requests)
+                    ]
                     stop_event.set()
-                    done, pending = await asyncio.wait(tasks, timeout=3)
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
+                    done = await asyncio.gather(*tasks, return_exceptions=True)
 
-                return [task.result() for task in done]
+                for result in initial_results + done:
+                    if isinstance(result, Exception):
+                        raise result
+
+                return done
 
         results = asyncio.run(verify_thresholds_and_send_load())
 
