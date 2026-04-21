@@ -182,7 +182,7 @@ ARG TRTLLM_FORK_REF
 RUN if [ -n "${TRTLLM_FORK_URL}" ]; then \
         echo "[fork-overlay] cloning ${TRTLLM_FORK_URL}@${TRTLLM_FORK_REF}"; \
         GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch "${TRTLLM_FORK_REF}" "${TRTLLM_FORK_URL}" /tmp/trtllm_fork && \
-        INSTALLED_DIR="$(python -c 'import os, tensorrt_llm; print(os.path.dirname(tensorrt_llm.__file__))')" && \
+        INSTALLED_DIR="$(python -c 'import importlib.util; print(importlib.util.find_spec("tensorrt_llm").submodule_search_locations[0])')" && \
         echo "[fork-overlay] target: ${INSTALLED_DIR}" && \
         FORK_SHA="$(git -C /tmp/trtllm_fork rev-parse HEAD)" && \
         # Replace only .py sources so compiled artifacts in the wheel are preserved.
