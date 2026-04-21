@@ -525,6 +525,13 @@ mod push_handler_notify_tests {
 
         let notifier = register_endpoint(&drt, endpoint_name);
 
+        // Verify initial status is NotReady before any activity
+        let status = drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_status(endpoint_name);
+        assert_eq!(status, Some(HealthStatus::NotReady));
+
         let engine: Arc<MockStreamingEngine> = MockStreamingEngine::success(5);
         let ingress =
             Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
