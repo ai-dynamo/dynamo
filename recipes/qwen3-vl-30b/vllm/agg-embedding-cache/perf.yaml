@@ -19,7 +19,7 @@ spec:
           ulimit -u 65536
 
           apt update && apt install -y tmux curl jq
-          pip install aiperf
+          pip install aiperf==0.6.0
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
           until curl -s "http://${FRONTEND}:8000/v1/models" | jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do

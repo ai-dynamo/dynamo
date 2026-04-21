@@ -516,6 +516,7 @@ impl SyncIndexer for LowerTierIndexer {
                 WorkerTask::DumpEvents(sender) => {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
                 }
+                WorkerTask::CleanupStaleChildren => {}
                 WorkerTask::Terminate => {
                     break;
                 }

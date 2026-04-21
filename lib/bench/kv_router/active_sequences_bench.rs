@@ -7,7 +7,7 @@ use common::*;
 
 use clap::Parser;
 use common::NoopSequencePublisher;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
 use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
@@ -380,19 +380,21 @@ async fn apply_entry(
             output_length,
         } => {
             let _ = multi.potential_blocks_and_tokens(Some(&block_hashes), isl, HashMap::new());
-            let _ = multi
-                .add_request(SequenceRequest {
+            let _ = multi.add_request(
+                SequenceRequest {
                     request_id,
                     token_sequence: Some(block_hashes),
-                    isl,
-                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: Some(output_length as u32),
-                    prefill_load_hint: None,
+                    prefill_load_hint: Some(PrefillLoadHint {
+                        initial_effective_prefill_tokens: isl,
+                        expected_prefill_duration: None,
+                    }),
                     worker,
                     lora_name: None,
-                })
-                .await;
+                },
+                decay_now,
+            );
         }
         SequenceTraceEntry::PrefillComplete { request_id } => {
             let _ = multi.mark_prefill_completed(&request_id, decay_now);

@@ -520,7 +520,6 @@ impl RouterHandles {
                 None,
                 0.0,
                 None,
-                None,
                 allowed_worker_ids,
             )
             .await
@@ -883,12 +882,13 @@ pub unsafe extern "C" fn add_request(
                 }
             };
 
+            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
             decode_router
                 .add_request(
                     request_id_str.clone(),
                     &tokens,
                     None,
-                    overlap_blocks,
+                    cached_tokens,
                     None,
                     worker,
                     None, // lora_name
