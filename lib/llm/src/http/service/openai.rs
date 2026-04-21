@@ -2746,10 +2746,7 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "max_tool_calls",
-                Box::new(|r| r.max_tool_calls = Some(5)),
-            ),
+            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(5))),
             (
                 "prompt_cache_key",
                 Box::new(|r| r.prompt_cache_key = Some("ck-1".into())),
