@@ -448,11 +448,11 @@ impl LowerTierIndexer {
                 );
             }
 
-            if !overflow.is_empty() {
-                if let Some((_, next_buckets)) = breakpoints.get_mut(idx + 1) {
-                    for (hash, workers) in overflow {
-                        next_buckets.entry(hash).or_default().extend(workers);
-                    }
+            if !overflow.is_empty()
+                && let Some((_, next_buckets)) = breakpoints.get_mut(idx + 1)
+            {
+                for (hash, workers) in overflow {
+                    next_buckets.entry(hash).or_default().extend(workers);
                 }
             }
         }

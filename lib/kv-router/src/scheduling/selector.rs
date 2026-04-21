@@ -37,59 +37,49 @@ fn softmax_sample_with_sample(
     temperature: f64,
     sample: f64,
 ) -> (WorkerWithDpRank, f64) {
-    if logits.is_empty() {
-        panic!("Empty logits for softmax sampling");
-    }
+    assert!(!logits.is_empty(), "Empty logits for softmax sampling");
 
-    // Guard: at zero temperature, return a minimum-logit worker directly.
     if temperature == 0.0 {
-        let mut logit_iter = logits.iter();
-        let (first_key, first_logit) = logit_iter.next().unwrap();
-
-        let mut min_logit = first_logit;
-        let mut min_key = first_key;
-        for (key, logit) in logit_iter {
-            if logit < min_logit {
-                min_logit = logit;
-                min_key = key;
-            }
-        }
-
-        return (*min_key, *min_logit);
+        let (worker, logit) = logits
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .expect("logits non-empty");
+        return (*worker, *logit);
     }
 
-    let entries: Vec<_> = logits
-        .iter()
-        .map(|(worker, logit)| (*worker, *logit))
-        .collect();
-    let values: Vec<_> = entries.iter().map(|(_, logit)| *logit).collect();
+    let entries: Vec<(WorkerWithDpRank, f64)> =
+        logits.iter().map(|(w, l)| (*w, *l)).collect();
 
-    let min_val = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_val = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let (min_val, max_val) = entries.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), (_, v)| (lo.min(*v), hi.max(*v)),
+    );
 
-    let probabilities = if min_val == max_val {
+    let mut probs = if min_val == max_val {
         vec![1.0 / entries.len() as f64; entries.len()]
     } else {
-        // Fused normalize -> negate -> scale -> exp, then normalize probabilities
-        let range = max_val - min_val;
-        let scaled: Vec<f64> = values.iter().map(|&v| -(v / range) / temperature).collect();
-        let max_scaled = scaled.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let mut probs: Vec<f64> = scaled.iter().map(|&v| (v - max_scaled).exp()).collect();
-        let sum: f64 = probs.iter().sum();
-        probs.iter_mut().for_each(|p| *p /= sum);
-        probs
+        // Negate logits and rescale to [−1/temperature, 0] for numerical stability
+        // before softmax. Subtracting the max (which maps to min_val) keeps exp() inputs ≤ 0.
+        let scale = -1.0 / ((max_val - min_val) * temperature);
+        let max_scaled = min_val * scale;
+        entries
+            .iter()
+            .map(|(_, v)| (v * scale - max_scaled).exp())
+            .collect::<Vec<f64>>()
     };
 
+    let sum: f64 = probs.iter().sum();
+    probs.iter_mut().for_each(|p| *p /= sum);
+
     let mut cumsum = 0.0;
-    for (i, &prob) in probabilities.iter().enumerate() {
+    for (i, &prob) in probs.iter().enumerate() {
         cumsum += prob;
         if sample <= cumsum {
             return entries[i];
         }
     }
 
-    // Fallback to last key (shouldn't normally reach here)
-    entries[entries.len() - 1]
+    *entries.last().unwrap()
 }
 
 /// Default implementation matching the Python _cost_function.

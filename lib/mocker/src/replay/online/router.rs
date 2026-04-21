@@ -132,7 +132,7 @@ impl KvReplayRouter {
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config);
-        let policy = replay_policy(&config, args);
+        let policy = replay_policy(&config);
         let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
             worker_config_rx,

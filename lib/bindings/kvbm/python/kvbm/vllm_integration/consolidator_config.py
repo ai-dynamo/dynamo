@@ -11,39 +11,11 @@ from typing import Optional, Tuple
 
 from vllm.distributed.kv_events import ZmqEventPublisher
 
+from kvbm.utils import get_consolidator_mode, is_truthy
+
+__all__ = ["get_consolidator_mode", "is_truthy", "should_enable_consolidator", "get_consolidator_endpoints"]
+
 logger = logging.getLogger(__name__)
-
-
-def is_truthy(val: str) -> bool:
-    """
-    Check if a string represents a truthy value.
-    Truthy values: "1", "true", "on", "yes" (case-insensitive)
-
-    Args:
-        val: The string value to check
-
-    Returns:
-        True if the value is truthy, False otherwise
-    """
-    return val.lower() in ("1", "true", "on", "yes")
-
-
-def get_consolidator_mode() -> str:
-    """
-    Get the KV event consolidator mode from the environment.
-
-    Returns:
-        "dedup" or "passthrough". Invalid or unset values fall back to "dedup".
-    """
-    mode = os.getenv("DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE", "dedup").strip().lower()
-    if mode in ("dedup", "passthrough"):
-        return mode
-
-    logger.warning(
-        "Invalid DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE=%r. Falling back to 'dedup'.",
-        mode,
-    )
-    return "dedup"
 
 
 def should_enable_consolidator(vllm_config) -> bool:

@@ -227,7 +227,7 @@ impl OfflineReplayRouter {
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);
-        let policy = replay_policy(&config, args);
+        let policy = replay_policy(&config);
         let queue_threshold = config.router_queue_threshold;
 
         Ok(Self {

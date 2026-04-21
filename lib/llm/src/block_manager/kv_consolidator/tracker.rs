@@ -140,10 +140,6 @@ impl From<RouterStorageTier> for StorageTier {
     }
 }
 
-/// Legacy type alias for backward compatibility
-#[deprecated(note = "Use StorageTier instead")]
-pub type StorageMedium = StorageTier;
-
 /// Minimal metadata for tracking which event sources have a block
 /// All other metadata (tokens, parent, etc.) is stored in the ConsolidatedEvent when queued
 #[derive(Debug, Clone)]

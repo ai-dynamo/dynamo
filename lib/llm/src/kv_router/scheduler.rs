@@ -70,8 +70,7 @@ where
             tracing::info!("skipping discovery-based worker monitoring");
         }
 
-        let policy =
-            RouterSchedulingPolicy::new(kv_router_config.router_queue_policy, block_size as usize);
+        let policy = RouterSchedulingPolicy::new(kv_router_config.router_queue_policy);
         tracing::info!(
             "Router queue policy: {}",
             kv_router_config.router_queue_policy

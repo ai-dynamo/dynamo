@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -34,7 +34,7 @@ mod worker_query;
 pub struct LowerTierIndexers {
     num_threads: usize,
     block_size: u32,
-    indexers: Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
+    indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
 impl LowerTierIndexers {
@@ -46,14 +46,18 @@ impl LowerTierIndexers {
         Self {
             num_threads,
             block_size,
-            indexers: Arc::new(Mutex::new(HashMap::new())),
+            indexers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     fn get_or_create(&self, storage_tier: StorageTier) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
         debug_assert!(!storage_tier.is_gpu());
-        let mut lower_tier_indexers = self.indexers.lock().unwrap();
-        lower_tier_indexers
+        if let Some(indexer) = self.indexers.read().unwrap().get(&storage_tier).cloned() {
+            return indexer;
+        }
+        self.indexers
+            .write()
+            .unwrap()
             .entry(storage_tier)
             .or_insert_with(|| {
                 Arc::new(ThreadPoolIndexer::new(
@@ -66,13 +70,11 @@ impl LowerTierIndexers {
     }
 
     fn all(&self) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
-        let lower_tier_indexers = self.indexers.lock().unwrap();
-        lower_tier_indexers.values().cloned().collect()
+        self.indexers.read().unwrap().values().cloned().collect()
     }
 
     fn get(&self, storage_tier: StorageTier) -> Option<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
-        let lower_tier_indexers = self.indexers.lock().unwrap();
-        lower_tier_indexers.get(&storage_tier).cloned()
+        self.indexers.read().unwrap().get(&storage_tier).cloned()
     }
 }
 
