@@ -49,7 +49,7 @@ python -m dynamo.frontend \
   --enable-anthropic-api \
   --strip-anthropic-preamble
 ```
-If the frontend and worker are missing these harness-facing switches, the deployment can benchmark well in terms of metrics and still feel wrong and clunky. 
+If the frontend and worker are missing these harness-facing switches, the deployment can benchmark well in terms of metrics and still feel wrong and clunky.
 
 On the frontend side, the key settings to watch for are:
 
@@ -381,7 +381,7 @@ The streaming path makes the parser interaction more visible. A streaming reques
 
 The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
 
-The hackability and inspectability of OpenClaw makes it easier to understand the inner workings of how different events and tokens are handled. 
+The hackability and inspectability of OpenClaw makes it easier to understand the inner workings of how different events and tokens are handled.
 
 
 ## What's Next
