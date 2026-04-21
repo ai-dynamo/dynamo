@@ -93,11 +93,11 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_RejectsSGLang(t *testing.T) {
 	ps := failoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "sglang")
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
@@ -195,6 +195,98 @@ func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := failoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		env := envToMap(ps.Containers[i].Env)
+		_, has := env["NNODES"]
+		assert.False(t, has, "engine-%d should not have NNODES for single-node", i)
+	}
+}
+
+// --- TRT-LLM failover ---
+
+func trtllmFailoverPodSpec() corev1.PodSpec {
+	ps := failoverPodSpec()
+	// Swap the entrypoint so the main container looks like a TRT-LLM worker.
+	ps.Containers[0].Command = []string{"python3", "-m", "dynamo.trtllm"}
+	return ps
+}
+
+func TestBuildFailoverPod_TRTLLM_TwoEnginesPlusSidecar(t *testing.T) {
+	ps := trtllmFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+
+	assert.Len(t, ps.Containers, 3)
+	assert.Equal(t, "engine-0", ps.Containers[0].Name)
+	assert.Equal(t, "engine-1", ps.Containers[1].Name)
+	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
+}
+
+func TestBuildFailoverPod_TRTLLM_EngineEnvVars(t *testing.T) {
+	ps := trtllmFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		engine := ps.Containers[i]
+		env := envToMap(engine.Env)
+		assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"], "engine-%d ENGINE_ID", i)
+		assert.Equal(t, fmt.Sprintf("engine-%d", i), env["CONTAINER_NAME"], "engine-%d CONTAINER_NAME", i)
+		assert.Equal(t, failoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
+		assert.Equal(t, "true", env["DYN_TRTLLM_GMS_SHADOW_MODE"], "engine-%d shadow mode", i)
+		assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d starting health", i)
+		assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"], "engine-%d system enabled", i)
+
+		// vLLM-specific env vars must not leak into TRT-LLM engines.
+		_, hasVLLMShadow := env["DYN_VLLM_GMS_SHADOW_MODE"]
+		assert.False(t, hasVLLMShadow, "engine-%d should not have DYN_VLLM_GMS_SHADOW_MODE", i)
+		_, hasNixl := env["VLLM_NIXL_SIDE_CHANNEL_PORT"]
+		assert.False(t, hasNixl, "engine-%d should not have VLLM_NIXL_SIDE_CHANNEL_PORT", i)
+	}
+}
+
+func TestBuildFailoverPod_TRTLLM_StaggeredMasterPort(t *testing.T) {
+	ps := trtllmFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+
+	engine0Env := envToMap(ps.Containers[0].Env)
+	engine1Env := envToMap(ps.Containers[1].Env)
+	assert.Equal(t, "29500", engine0Env["MASTER_PORT"], "engine-0 MASTER_PORT")
+	assert.Equal(t, "29600", engine1Env["MASTER_PORT"], "engine-1 MASTER_PORT")
+}
+
+func TestBuildFailoverPod_TRTLLM_StaggeredSystemPorts(t *testing.T) {
+	ps := trtllmFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		engine := ps.Containers[i]
+		env := envToMap(engine.Env)
+		assert.Equal(t, strconv.Itoa(commonconsts.DynamoSystemPort+i), env["DYN_SYSTEM_PORT"])
+		require.Len(t, engine.Ports, 1)
+		assert.Equal(t, int32(commonconsts.DynamoSystemPort+i), engine.Ports[0].ContainerPort)
+		assert.Equal(t, fmt.Sprintf("system-%d", i), engine.Ports[0].Name)
+	}
+}
+
+func TestBuildFailoverPod_TRTLLM_MultinodeNNODES(t *testing.T) {
+	ps := trtllmFailoverPodSpec()
+	err := buildFailoverPod(&ps, 4, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		env := envToMap(ps.Containers[i].Env)
+		assert.Equal(t, "4", env["NNODES"], "engine-%d should have NNODES=4", i)
+	}
+}
+
+func TestBuildFailoverPod_TRTLLM_SingleNodeNoNNODES(t *testing.T) {
+	ps := trtllmFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
 	require.NoError(t, err)
 
 	for i := range 2 {

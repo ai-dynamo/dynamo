@@ -56,8 +56,10 @@ func buildFailoverPod(
 	switch backendFramework {
 	case BackendFrameworkVLLM:
 		applyVLLMOverrides(podSpec, numberOfNodes)
+	case BackendFrameworkTRTLLM:
+		applyTRTLLMOverrides(podSpec, numberOfNodes)
 	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		return fmt.Errorf("failover is not supported for backend %q (only vllm and trtllm)", backendFramework)
 	}
 
 	return nil
