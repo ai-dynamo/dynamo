@@ -360,6 +360,9 @@ def test_router_decisions_sglang_disagg(
     )
 
 
+@pytest.mark.skip(
+    reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2784"
+)  # Same num_workers=2 / worker #2 startup / KvRouter min_initial_workers hang as test_router_decisions_sglang_multiple_workers.
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(
