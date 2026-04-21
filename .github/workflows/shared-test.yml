@@ -96,7 +96,7 @@ jobs:
     name: ${{ inputs.test_type }} ${{ inputs.cuda_version == '' && 'cpu' || format('cuda{0}', inputs.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'stg-tester-arm-v2' }}
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.test_suite_name }}-runtime-test${{ inputs.container_name_tmp }}-${{ inputs.test_suite_name }}-runtime-test-cuda12 #  d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-trtllm-runtime-test-cuda13
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.container_image_tag }}
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and

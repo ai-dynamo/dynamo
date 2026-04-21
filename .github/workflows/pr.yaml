@@ -266,7 +266,7 @@ jobs:
       test_suite_name: vllm
       test_type: Test
       amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      container_image_tag: ${{ github.sha }}-${{ needs.vllm-build.outputs.target_tag_plain }}-test-cuda${{ matrix.cuda_major }}
+      container_image_tag: ${{ github.sha }}-${{ needs.vllm-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
       cuda_version: ${{ matrix.cuda_version }}
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
