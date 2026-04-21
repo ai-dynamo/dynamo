@@ -73,7 +73,9 @@ echo "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE}"
 echo
 
-trap 'echo; echo "Cleaning up..."; kill 0' EXIT INT TERM
+# Clear the trap inside the handler so `kill 0` (which sends SIGTERM to the
+# script itself) doesn't re-enter this trap and loop forever.
+trap 'trap - EXIT INT TERM; echo; echo "Cleaning up..."; kill 0' EXIT INT TERM
 
 wait_ready() {
     local url="$1"
