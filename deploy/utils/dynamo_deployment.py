@@ -28,26 +28,9 @@ from typing import Any, Dict, List, Optional, Union
 
 import aiofiles
 import httpx  # added for HTTP requests
+import kubernetes_asyncio as kubernetes
 import yaml
-
-# kubernetes_asyncio is imported lazily to avoid hard failures in images that
-# don't ship the package (e.g. the frontend image used for profiling without
-# planner features).  The actual import happens on first use via
-# _ensure_kubernetes_asyncio().
-kubernetes: Any = None
-client: Any = None
-config: Any = None
-
-
-def _ensure_kubernetes_asyncio() -> None:
-    """Lazily import kubernetes_asyncio on first use."""
-    global kubernetes, client, config
-    if kubernetes is None:
-        import kubernetes_asyncio as _kubernetes
-
-        kubernetes = _kubernetes
-        client = _kubernetes.client
-        config = _kubernetes.config
+from kubernetes_asyncio import client, config
 
 
 def find_available_port(start_port: int = 8000) -> int:
@@ -146,7 +129,6 @@ class DynamoDeploymentClient:
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client"""
-        _ensure_kubernetes_asyncio()
         try:
             # Try in-cluster config first (for pods with service accounts)
             config.load_incluster_config()
