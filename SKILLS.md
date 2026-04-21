@@ -53,11 +53,6 @@ nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
 # Cross-check against the Feature Support Matrix in docs/backends/trtllm/README.md
 ```
 
-> **Heads up:** the cookbook entries above are inline procedures, not invocable
-> skill modules. Promoting them to runnable `.claude/skills/<name>/SKILL.md`
-> entries is tracked in [issue #8456](https://github.com/ai-dynamo/dynamo/issues/8456).
-> Until then, agents should follow the inline steps as the source of truth.
-
 ---
 
 ## Contributor skills (for maintainers)

@@ -49,10 +49,8 @@ your help based on which one you're talking to.
 - Backend feature support lives in [docs/backends/](docs/backends/) and the
   [Feature Support Matrix](docs/backends/trtllm/README.md#feature-support-matrix),
   not in individual launch scripts.
-- The user-facing entries in `SKILLS.md` are *inline procedures*, not yet
-  invocable `.claude/skills/` modules. Tracking that gap:
-  [ai-dynamo/dynamo#8456](https://github.com/ai-dynamo/dynamo/issues/8456).
-  Until those skills land, follow the inline cookbook steps as the source of
+- The user-facing entries in `SKILLS.md` are *inline procedures*, not invocable
+  `.claude/skills/` modules. Follow the inline cookbook steps as the source of
   truth.
 
 ## Where not to look
