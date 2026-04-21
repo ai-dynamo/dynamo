@@ -14,6 +14,20 @@ If you're an agent (Claude Code, Cursor, Devin), start at
 > **Audience:** anyone running Dynamo. Copy-pasteable procedures, no Claude
 > Code or `gh` setup required.
 
+### User skills (Claude Code / Cursor)
+
+If you're driving Dynamo through an agent CLI, invoke these skill modules
+instead of the inline procedures below.
+
+| Skill | Purpose |
+|---|---|
+| [`quickstart`](.claude/skills/quickstart/SKILL.md) | Walk a recipe from zero to a smoke-tested deployment -- recipe pick, namespace + HF secret, storage class, model cache, deploy, ready-wait, port-forward, smoke test. |
+| [`verify-cluster`](.claude/skills/verify-cluster/SKILL.md) | Preflight: CRDs, default storage class, GPU driver, image-pull, GPU operator. Returns go/no-go with remediation. |
+| [`inspect-pods`](.claude/skills/inspect-pods/SKILL.md) | Pod status + logs + describe + events + frontend port-forward, with the right Dynamo pod selector. |
+| [`troubleshoot`](.claude/skills/troubleshoot/SKILL.md) | Match a failure symptom to a ranked cause + fix from `docs/troubleshooting.md`, with live cluster evidence. |
+
+The procedures below remain as a fallback for users without an agent CLI.
+
 ### Build a local image for Kimi-k2.5 (or any top-of-tree use case)
 
 ```bash

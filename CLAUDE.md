@@ -19,12 +19,14 @@ your help based on which one you're talking to.
 
 | Goal | Start here |
 |---|---|
-| Stand up a deployment | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) |
+| Deploy a recipe end-to-end | [`.claude/skills/quickstart/SKILL.md`](.claude/skills/quickstart/SKILL.md) (or [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) for the human-facing guide) |
+| Preflight the cluster before deploying | [`.claude/skills/verify-cluster/SKILL.md`](.claude/skills/verify-cluster/SKILL.md) |
+| Inspect a running deployment | [`.claude/skills/inspect-pods/SKILL.md`](.claude/skills/inspect-pods/SKILL.md) |
+| Diagnose a failure | [`.claude/skills/troubleshoot/SKILL.md`](.claude/skills/troubleshoot/SKILL.md) (skill) or [docs/troubleshooting.md](docs/troubleshooting.md) (human-facing) |
 | Pick or compose an example | [examples/README.md](examples/README.md) (use-case index) |
 | Apply a production recipe | [recipes/README.md](recipes/README.md) |
-| Diagnose a failure | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Pick the right backend | [docs/backends/](docs/backends/) |
-| Build a custom image, swap storage class, enable observability | [SKILLS.md](SKILLS.md) "Operations cookbook" |
+| Build a custom image, swap storage class, enable observability | [SKILLS.md](SKILLS.md) "Operations cookbook" (covered inline by `quickstart`) |
 
 ## If you're helping a Dynamo *contributor*
 
@@ -49,9 +51,10 @@ your help based on which one you're talking to.
 - Backend feature support lives in [docs/backends/](docs/backends/) and the
   [Feature Support Matrix](docs/backends/trtllm/README.md#feature-support-matrix),
   not in individual launch scripts.
-- The user-facing entries in `SKILLS.md` are *inline procedures*, not invocable
-  `.claude/skills/` modules. Follow the inline cookbook steps as the source of
-  truth.
+- User-facing skill modules live alongside the contributor ones under
+  `.claude/skills/` (e.g. `quickstart`, `verify-cluster`, `inspect-pods`,
+  `troubleshoot`). The inline procedures in `SKILLS.md` are the same content
+  in narrative form for users without an agent CLI.
 
 ## Where not to look
 
