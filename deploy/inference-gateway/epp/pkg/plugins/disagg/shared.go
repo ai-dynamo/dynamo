@@ -137,10 +137,15 @@ func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger
 		}
 	}
 
-	logger.V(logutil.DEFAULT).Info("[EPP-INJECT] Injected pre-computed tokens into request body nvext.token_data",
-		"tokenCount", len(tokenIDs),
-		"payloadInjected", payloadInjected,
-		"requestId", req.RequestId)
+	if payloadInjected {
+		logger.V(logutil.DEFAULT).Info("[EPP-INJECT] Injected pre-computed tokens into request body nvext.token_data",
+			"tokenCount", len(tokenIDs),
+			"requestId", req.RequestId)
+	} else {
+		logger.V(logutil.DEFAULT).Error(nil, "[EPP-INJECT] Failed to inject nvext.token_data: Payload is not a PayloadMap — sidecar will re-tokenize",
+			"tokenCount", len(tokenIDs),
+			"requestId", req.RequestId)
+	}
 }
 
 func getEnvBoolOrDefault(key string, def bool) bool {
