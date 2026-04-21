@@ -503,6 +503,26 @@ mod push_handler_notify_tests {
         let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
         manager.clone().start().await.unwrap();
 
+        // Spawn a counter task that observes notifications on the same notifier.
+        // Since Notify coalesces, we count wakeups (not individual notify_one calls).
+        // push_handler calls notify_one() on each chunk + stream completion,
+        // so we expect at least 1 wakeup.
+        let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = notify_count.clone();
+        let notifier_for_counter = notifier.clone();
+        let counter_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = notifier_for_counter.notified() => {
+                        count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        break;
+                    }
+                }
+            }
+        });
+
         // Set up the push_handler pipeline with the SAME notifier
         let engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine { num_chunks: 5 });
         let ingress =
@@ -512,7 +532,7 @@ mod push_handler_notify_tests {
             .unwrap();
 
         // Send a request through push_handler — this will call notify_one()
-        // on each of the 5 streaming chunks, resetting the canary timer each time.
+        // on each of the 5 streaming chunks + stream completion.
         let request_id = uuid::Uuid::new_v4().to_string();
         let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
         let payload = encode_request(
@@ -529,8 +549,18 @@ mod push_handler_notify_tests {
             result.err()
         );
 
-        // Wait a bit — but less than the canary wait time
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait for the counter task to finish collecting notifications
+        counter_task.await.unwrap();
+
+        // Verify notifications were received. Notify coalesces multiple calls
+        // into single wakeups, so the exact count depends on scheduling. With
+        // 5 chunks + 1 stream completion = 6 notify_one() calls, we expect
+        // at least 1 wakeup (coalesced) but typically 2-4.
+        let count = notify_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            count >= 1,
+            "Expected at least 1 notification wakeup from push_handler streaming, got {count}"
+        );
 
         // The canary should NOT have fired. Since the endpoint starts as NotReady
         // and send_health_check_request (which sets Ready on success) was never
