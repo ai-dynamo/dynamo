@@ -16,10 +16,12 @@ Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
 - QuantConfig: quantization algorithm and dynamic flags
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 
 from dynamo.common.utils.namespace import get_worker_namespace
+from dynamo.trtllm.args import Config
 
 DYN_NAMESPACE = get_worker_namespace()
 
@@ -117,6 +119,24 @@ class DiffusionConfig:
     # Valid values: "transformer", "vae", "text_encoder", "tokenizer",
     #               "scheduler", "image_encoder", "image_processor"
     skip_components: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_config(
+        cls, config: Config, skip_components: list[str]
+    ) -> "DiffusionConfig":
+        """Build a DiffusionConfig from a worker Config, mapping matching field names automatically.
+
+        Special cases:
+          - model_path  ← config.model  (field name differs)
+          - skip_components ← pre-parsed list (Config holds a raw comma-separated string)
+          - max_height, max_width, default_fps, default_seconds use DiffusionConfig defaults
+            (they are not exposed as CLI args in Config)
+        """
+        field_names = {f.name for f in dataclasses.fields(cls)}
+        kwargs = {k: getattr(config, k) for k in field_names if hasattr(config, k)}
+        kwargs["model_path"] = config.model
+        kwargs["skip_components"] = skip_components
+        return cls(**kwargs)
 
     def __str__(self) -> str:
         return (

@@ -73,16 +73,16 @@ class ImageGenerationPayload(BasePayload):
         assert (
             "data" in result
         ), f"Missing 'data' in response. Keys: {list(result.keys())}"
-        assert len(result["data"]) > 0, "Empty data in video response"
+        assert len(result["data"]) > 0, "Empty data in image response"
         entry = result["data"][0]
         if "url" in entry:
-            assert entry["url"], "Video response url is empty"
+            assert entry["url"], "Image response url is empty"
             return entry["url"]
-        assert entry.get("b64_json"), "Video response b64_json is empty"
-        return "b64_video_returned"
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
 
     def validate(self, response: Any, content: str) -> None:
-        assert content, "Video response content is empty"
+        assert content, "Image response content is empty"
 
 
 @dataclass

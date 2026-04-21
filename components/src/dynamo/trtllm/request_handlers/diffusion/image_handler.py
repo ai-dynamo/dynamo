@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Video generation request handler for TensorRT-LLM backend.
+"""Image generation request handler for TensorRT-LLM backend.
 
-This handler processes video generation requests using diffusion models.
+This handler processes image generation requests using diffusion models.
 It handles MediaOutput from TensorRT-LLM's visual_gen pipelines, which
 can contain video, image, and/or audio tensors depending on the model.
 """
@@ -155,6 +155,10 @@ class ImageGenerationHandler(BaseGenerativeHandler):
 
         # Parse parameters
         width, height = self._parse_size(req.size)
+        if req.n is not None and req.n > 1:
+            raise ValueError(
+                f"Requested {req.n} images, but this handler currently supports n=1 only."
+            )
         num_images_per_prompt = (
             req.n if req.n is not None else self.config.default_num_images_per_prompt
         )

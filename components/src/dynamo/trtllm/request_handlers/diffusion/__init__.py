@@ -13,4 +13,4 @@ from dynamo.trtllm.request_handlers.diffusion.video_handler import (
     VideoGenerationHandler,
 )
 
-__all__ = ["VideoGenerationHandler", "ImageGenerationHandler"]
+__all__ = ["ImageGenerationHandler", "VideoGenerationHandler"]
