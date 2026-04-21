@@ -1795,7 +1795,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
-| `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
 | `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
 
 

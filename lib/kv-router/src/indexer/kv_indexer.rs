@@ -132,6 +132,8 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        super::warn_on_unit_block_size("single", kv_block_size);
+
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);

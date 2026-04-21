@@ -81,6 +81,7 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
     env["DYN_LOG"] = log_level
     env["DYN_NAMESPACE"] = NAMESPACE
     env["DYN_REQUEST_PLANE"] = "tcp"
+    env["DYN_MM_ALLOW_INTERNAL"] = "1"
     env.update(extra)
     return env
 
