@@ -35,13 +35,20 @@ pytestmark = [
 ]
 PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 
-# Shared SGLang configuration for all tests
-# mem_fraction_static limits actual VRAM allocation (required for multi-worker on same GPU)
+# Shared SGLang configuration for all tests.
+#
+# mem_fraction_static limits the KV-cache portion of VRAM, but sglang's actual
+# per-worker footprint also includes CUDA context, library init, PyTorch
+# caching allocator overhead, and model weights. On sglang 0.5.10 two workers
+# on a single GPU at mem_fraction_static=0.4 were OOMing worker #2 with
+# "RuntimeError: Not enough memory. Please try to increase --mem-fraction-static."
+# (DYN-2784). 0.3 leaves enough headroom: 2 * 0.3 = 0.6 for KV cache, and the
+# remaining 0.4 absorbs per-process overhead.
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
-    "mem_fraction_static": 0.4,  # Limit VRAM allocation per worker (equivalent to vLLM's gpu_memory_utilization)
-    "context_length": 1024,  # Limit context length to reduce KV cache size (equivalent to vLLM's max_model_len)
+    "mem_fraction_static": 0.3,  # Limit VRAM per worker (equivalent to vLLM's gpu_memory_utilization)
+    "context_length": 512,  # Smaller KV cache per request to further reduce footprint for 2-worker same-GPU
     "disable_cuda_graph": True,  # Disable CUDA graphs for faster startup & lower memory (equivalent to vLLM's enforce_eager)
 }
 
