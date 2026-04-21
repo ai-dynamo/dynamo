@@ -345,6 +345,254 @@ pub async fn get_health_check_status(
     }))
 }
 
+// ============================================================
+// Full pipeline tests: push_handler → notify → HealthCheckManager
+// These tests use the real HealthCheckManager (spawn_endpoint_health_check_task)
+// and the real push_handler pipeline (TwoPartCodec + TCP + engine.generate()).
+// ============================================================
+#[cfg(all(test, feature = "integration"))]
+mod push_handler_notify_tests {
+    use super::*;
+    use crate::component::{Instance, TransportType};
+    use crate::config::HealthStatus;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
+    use crate::engine::{AsyncEngine, AsyncEngineContextProvider};
+    use crate::local_endpoint_registry::LocalAsyncEngine;
+    use crate::pipeline::network::codec::{TwoPartCodec, TwoPartMessage};
+    use crate::pipeline::network::tcp::server::{ServerOptions, TcpStreamServer};
+    use crate::pipeline::network::{
+        ConnectionInfo, Ingress, PushWorkHandler, ResponseService, StreamOptions,
+    };
+    use crate::pipeline::{ManyOut, ResponseStream, SingleIn};
+    use crate::protocols::annotated::Annotated;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    type TestRequest = serde_json::Value;
+    type TestResponse = Annotated<serde_json::Value>;
+
+    /// A mock engine that streams `num_chunks` response chunks.
+    /// Used both as the push_handler pipeline engine and registered in
+    /// the local endpoint registry for health check requests.
+    struct MockStreamingEngine {
+        num_chunks: usize,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for MockStreamingEngine
+    {
+        async fn generate(
+            &self,
+            input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            let (_data, ctx) = input.into_parts();
+            let chunks: Vec<TestResponse> = (0..self.num_chunks)
+                .map(|i| Annotated::from_data(serde_json::json!({"token": i})))
+                .collect();
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(chunks)),
+                ctx.context(),
+            ))
+        }
+    }
+
+    /// Encodes a request as a TwoPartCodec payload with the given connection info.
+    fn encode_request(
+        request_id: &str,
+        connection_info: ConnectionInfo,
+        request_body: &serde_json::Value,
+    ) -> Bytes {
+        let control = serde_json::json!({
+            "id": request_id,
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "connection_info": connection_info,
+        });
+        let header = serde_json::to_vec(&control).unwrap();
+        let data = serde_json::to_vec(request_body).unwrap();
+        let msg = TwoPartMessage::new(Bytes::from(header), Bytes::from(data));
+        TwoPartCodec::default().encode_message(msg).unwrap()
+    }
+
+    /// Sets up a TCP server and registers a response stream for push_handler
+    /// to connect back to.
+    async fn setup_tcp_receiver(request_id: &str) -> (Arc<TcpStreamServer>, ConnectionInfo) {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new(options).await.unwrap();
+
+        let context = crate::pipeline::Context::with_id((), request_id.to_string());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(stream_options).await;
+        let connection_info = pending
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+
+        (server, connection_info)
+    }
+
+    /// Registers an endpoint in the DRT: health check target + local engine +
+    /// returns the notifier that the real HealthCheckManager will listen on.
+    fn register_endpoint(
+        drt: &crate::DistributedRuntime,
+        endpoint_name: &str,
+    ) -> Arc<tokio::sync::Notify> {
+        let payload = serde_json::json!({
+            "prompt": "health",
+            "_health_check": true
+        });
+        drt.system_health().lock().register_health_check_target(
+            endpoint_name,
+            Instance {
+                component: "test_component".to_string(),
+                endpoint: endpoint_name.to_string(),
+                namespace: "test_namespace".to_string(),
+                instance_id: 0,
+                transport: TransportType::Nats(endpoint_name.to_string()),
+            },
+            payload,
+        );
+
+        // Register a mock engine in local registry so send_health_check_request
+        // can call engine.generate() when the canary fires.
+        let mock_engine: LocalAsyncEngine = Arc::new(MockStreamingEngine { num_chunks: 1 });
+        drt.local_endpoint_registry()
+            .register(endpoint_name.to_string(), mock_engine);
+
+        drt.system_health()
+            .lock()
+            .get_endpoint_health_check_notifier(endpoint_name)
+            .expect("Notifier should exist for registered endpoint")
+    }
+
+    /// Tests that when a request flows through push_handler (streaming 5 chunks),
+    /// the real HealthCheckManager's canary timer is reset via notify_one(),
+    /// preventing the canary from firing and keeping the endpoint in its initial
+    /// NotReady state (i.e., send_health_check_request is never called).
+    ///
+    /// Full path tested:
+    ///   push_handler.handle_payload() → notify_one() (request arrival + per chunk)
+    ///   → HealthCheckManager.spawn_endpoint_health_check_task select! loop resets
+    ///   → canary never fires → send_health_check_request never called
+    #[tokio::test]
+    async fn test_notifier_resets_canary_timer() {
+        let drt = create_test_drt_async().await;
+        let endpoint_name = "test.push_handler.timer_reset";
+
+        let notifier = register_endpoint(&drt, endpoint_name);
+
+        // Start the real HealthCheckManager with a short canary wait.
+        // If the canary fires, it will call send_health_check_request which
+        // succeeds (mock engine registered) and sets status to Ready.
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(200),
+            request_timeout: Duration::from_secs(1),
+        };
+        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
+        manager.clone().start().await.unwrap();
+
+        // Set up the push_handler pipeline with the SAME notifier
+        let engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine { num_chunks: 5 });
+        let ingress =
+            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+        ingress
+            .set_endpoint_health_check_notifier(notifier)
+            .unwrap();
+
+        // Send a request through push_handler — this will call notify_one()
+        // on request arrival and on each of the 5 streaming chunks, resetting
+        // the canary timer each time.
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
+        let payload = encode_request(
+            &request_id,
+            connection_info,
+            &serde_json::json!({"prompt": "test"}),
+        );
+        let result = ingress
+            .handle_payload(payload, Some(request_id.clone()))
+            .await;
+        assert!(
+            result.is_ok(),
+            "handle_payload should succeed: {:?}",
+            result.err()
+        );
+
+        // Wait a bit — but less than the canary wait time
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The canary should NOT have fired. Since the endpoint starts as NotReady
+        // and send_health_check_request (which sets Ready on success) was never
+        // called, the status should still be NotReady.
+        let status = drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_status(endpoint_name);
+        assert_eq!(
+            status,
+            Some(HealthStatus::NotReady),
+            "Status should still be NotReady — the canary should not have fired \
+             because push_handler reset the timer via notify_one()"
+        );
+    }
+
+    /// Tests that without any requests flowing through push_handler, the real
+    /// HealthCheckManager's canary timer expires, fires send_health_check_request,
+    /// and transitions the endpoint status from NotReady to Ready (proving the
+    /// canary executed the full health check path).
+    #[tokio::test]
+    async fn test_canary_fires_without_activity() {
+        let drt = create_test_drt_async().await;
+        let endpoint_name = "test.push_handler.canary_fires";
+
+        let _notifier = register_endpoint(&drt, endpoint_name);
+
+        // Start the real HealthCheckManager with a very short canary wait
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(50),
+            request_timeout: Duration::from_secs(1),
+        };
+        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
+        manager.clone().start().await.unwrap();
+
+        // Verify initial status is NotReady
+        let status = drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_status(endpoint_name);
+        assert_eq!(status, Some(HealthStatus::NotReady));
+
+        // Don't send any requests — let the canary fire.
+        // The canary will call send_health_check_request, which finds the mock
+        // engine in local_endpoint_registry, calls generate(), gets a successful
+        // response, and sets status to Ready.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let status = drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_status(endpoint_name);
+        assert_eq!(
+            status,
+            Some(HealthStatus::Ready),
+            "Status should be Ready — the canary should have fired and \
+             send_health_check_request should have succeeded with the mock engine"
+        );
+    }
+}
+
 // ===============================
 // Integration Tests (require DRT)
 // ===============================
