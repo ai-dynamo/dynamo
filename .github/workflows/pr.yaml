@@ -404,6 +404,21 @@ jobs:
           docker exec "${CONTAINER_NAME}" sh -c 'ps auxf 2>/dev/null || ps -ef' || true
           echo "=== container: pytest/sglang/dynamo pids ==="
           docker exec "${CONTAINER_NAME}" sh -c "pgrep -af 'pytest|sglang|dynamo' 2>/dev/null" || true
+          echo "=== container: per-worker log tails (DYN-2784) ==="
+          docker exec "${CONTAINER_NAME}" sh -c '
+            set +e
+            found=0
+            for f in /tmp/dynamo_tests/*/worker_*/python3.log.txt \
+                     /tmp/dynamo_tests/*/python3.log.txt; do
+              [ -f "$f" ] || continue
+              found=1
+              echo "--- tail -200 $f ---"
+              tail -200 "$f"
+            done
+            if [ "$found" = "0" ]; then
+              echo "(no worker log files under /tmp/dynamo_tests/)"
+            fi
+          ' || true
           echo "=== container: py-spy dumps ==="
           docker exec "${CONTAINER_NAME}" sh -c '
             command -v py-spy >/dev/null 2>&1 || pip install --quiet --disable-pip-version-check py-spy 2>/dev/null || true

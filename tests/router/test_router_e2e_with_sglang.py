@@ -207,7 +207,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
 
             env.update(env_vars)
 
-            # Create managed process for the worker
+            # Create managed process for the worker. Each worker gets its own
+            # log subdir so stdout/stderr don't race into a shared file -- when
+            # a worker dies during startup (e.g. DYN-2784) we need to preserve
+            # its final output to understand why.
             process = ManagedProcess(
                 command=command,
                 env=env,
@@ -215,7 +218,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 display_output=True,
                 health_check_ports=[],
                 health_check_urls=[],
-                log_dir=request.node.name,
+                log_dir=os.path.join(request.node.name, f"worker_{worker_idx}"),
                 terminate_all_matching_process_names=False,
             )
             self.worker_processes.append(process)

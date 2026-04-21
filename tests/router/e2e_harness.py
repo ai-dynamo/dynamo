@@ -53,6 +53,27 @@ class ManagedEngineProcessMixin:
     init_delay_reason = "initialize before starting next worker"
     cleanup_delay_seconds = 2
 
+    def _assert_workers_alive(self, launched_count: int) -> None:
+        """Verify every worker launched so far is still running.
+
+        Sequential worker startup had no death detection: if worker N died
+        during init, we would still launch worker N+1 and later block forever
+        in KvRouter construction waiting for instances that never register.
+        See DYN-2784. Raise as soon as we see a dead subprocess so the test
+        fails with a useful message instead of hanging the whole job.
+        """
+        for j in range(launched_count):
+            proc = self.worker_processes[j].proc
+            if proc is None:
+                continue
+            rc = proc.poll()
+            if rc is not None:
+                log_path = getattr(self.worker_processes[j], "_log_path", "?")
+                raise RuntimeError(
+                    f"{self.process_name} {j} exited during startup with code {rc}. "
+                    f"See log: {log_path}"
+                )
+
     def __enter__(self):
         logger.info(
             "[%s] Starting %d worker processes sequentially...",
@@ -89,6 +110,7 @@ class ManagedEngineProcessMixin:
                     process.proc.pid if process.proc else "unknown",
                 )
                 time.sleep(process.delayed_start)
+                self._assert_workers_alive(i + 1)
 
                 if i < len(self.worker_processes) - 1:
                     logger.info(
@@ -99,6 +121,7 @@ class ManagedEngineProcessMixin:
                         self.init_delay_reason,
                     )
                     time.sleep(self.init_delay_seconds)
+                    self._assert_workers_alive(i + 1)
 
             except Exception:
                 logger.exception(
