@@ -511,13 +511,10 @@ async fn postprocessor_parsing_stream_minimax_named_bypasses_reasoning() {
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].name.as_deref(), Some("get_weather"));
 
-    // Named tool_choice keeps Stop per OpenAI spec.
+    // OpenAI spec: emitting tool_calls always rewrites finish_reason to ToolCalls,
+    // regardless of whether tool_choice was auto, required, or named.
     assert!(
-        finish_reasons.contains(&FinishReason::Stop),
-        "named tool_choice should keep Stop, got: {finish_reasons:?}"
-    );
-    assert!(
-        !finish_reasons.contains(&FinishReason::ToolCalls),
-        "named tool_choice must not be rewritten to ToolCalls"
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "named tool_choice with emitted tool_calls should finish as ToolCalls, got: {finish_reasons:?}"
     );
 }

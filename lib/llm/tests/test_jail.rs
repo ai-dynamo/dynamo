@@ -3343,7 +3343,8 @@ fahrenheit
             }
         }
 
-        // Verify finish_reason is Stop (not ToolCalls) for named tool choice
+        // OpenAI spec: whenever tool_calls are emitted, finish_reason must be
+        // ToolCalls — regardless of whether tool_choice was auto, required, or named.
         let finish_reasons: Vec<_> = results
             .iter()
             .filter_map(|r| {
@@ -3353,10 +3354,10 @@ fahrenheit
             })
             .collect();
 
-        // For tool_choice=named, finish_reason should be Stop (OpenAI spec)
         assert!(
-            finish_reasons.contains(&FinishReason::Stop),
-            "tool_choice=named should have Stop finish reason"
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named with emitted tool_calls should have ToolCalls finish reason, got {:?}",
+            finish_reasons
         );
     }
 
@@ -3531,7 +3532,8 @@ fahrenheit
             Some("get_weather")
         );
 
-        // OpenAI spec: tool_choice=named finishes with Stop, not ToolCalls.
+        // OpenAI spec: whenever tool_calls are emitted, finish_reason must be
+        // ToolCalls — regardless of whether tool_choice was auto, required, or named.
         let finish_reasons: Vec<_> = results
             .iter()
             .filter_map(|r| {
@@ -3541,13 +3543,9 @@ fahrenheit
             })
             .collect();
         assert!(
-            finish_reasons.contains(&FinishReason::Stop),
-            "tool_choice=named should keep Stop finish_reason, got {:?}",
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named with emitted tool_calls should be rewritten to ToolCalls, got {:?}",
             finish_reasons
-        );
-        assert!(
-            !finish_reasons.contains(&FinishReason::ToolCalls),
-            "tool_choice=named must not be rewritten to ToolCalls"
         );
     }
 
