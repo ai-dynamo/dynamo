@@ -133,8 +133,14 @@ impl TcpClient {
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
 
         // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
-
-        let writer_task = tokio::spawn(handle_writer(framed_writer, bytes_rx, alive_rx, context));
+        let writer_context = context.clone();
+        let monitor_context = context.clone();
+        let writer_task = tokio::spawn(handle_writer(
+            framed_writer,
+            bytes_rx,
+            alive_rx,
+            writer_context,
+        ));
 
         let subject = info.subject.clone();
         tokio::spawn(async move {
@@ -153,26 +159,8 @@ impl TcpClient {
                         }
                     };
 
-                    let mut stream = reader.unsplit(writer);
-
-                    // await the tcp server to shutdown the socket connection
-                    // set a timeout for the server shutdown
-                    let mut buf = vec![0u8; 1024];
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    loop {
-                        let n = time::timeout_at(deadline, stream.read(&mut buf))
-                            .await
-                            .inspect_err(|_| {
-                                tracing::debug!("server did not close socket within the deadline");
-                            })?
-                            .inspect_err(|e| {
-                                tracing::debug!("failed to read from stream: {:?}", e);
-                            })?;
-                        if n == 0 {
-                            // Server has closed (FIN)
-                            break;
-                        }
-                    }
+                    let stream = reader.unsplit(writer);
+                    wait_for_server_shutdown(stream, monitor_context).await?;
 
                     Ok(())
                 }
@@ -215,6 +203,37 @@ impl TcpClient {
 
         Ok(stream_sender)
     }
+}
+
+async fn wait_for_server_shutdown(
+    mut stream: TcpStream,
+    context: Arc<dyn AsyncEngineContext>,
+) -> Result<()> {
+    if context.is_killed() {
+        tracing::debug!("stream context killed; skipping server FIN wait");
+        return Ok(());
+    }
+
+    // Await the tcp server to shutdown the socket connection, bounded by a
+    // timeout so normal sentinel shutdown cannot hang indefinitely.
+    let mut buf = vec![0u8; 1024];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let n = time::timeout_at(deadline, stream.read(&mut buf))
+            .await
+            .inspect_err(|_| {
+                tracing::debug!("server did not close socket within the deadline");
+            })?
+            .inspect_err(|e| {
+                tracing::debug!("failed to read from stream: {:?}", e);
+            })?;
+        if n == 0 {
+            // Server has closed (FIN)
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_reader(
@@ -753,6 +772,27 @@ mod tests {
 
         let sentinel = recv_msg(&mut reader).await;
         assert_sentinel_message(sentinel);
+    }
+
+    /// Test that killed contexts do not wait for the server FIN deadline.
+    #[tokio::test]
+    async fn test_wait_for_server_shutdown_skips_killed_context() {
+        let (client, _server) = create_tcp_pair().await;
+        let controller = Arc::new(Controller::default());
+        controller.kill();
+
+        let context: Arc<dyn AsyncEngineContext> = controller;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            wait_for_server_shutdown(client, context),
+        )
+        .await;
+
+        assert!(result.is_ok(), "killed context should not wait for FIN");
+        assert!(
+            result.unwrap().is_ok(),
+            "killed context shutdown should succeed"
+        );
     }
 
     // ==================== handle_reader tests ====================
