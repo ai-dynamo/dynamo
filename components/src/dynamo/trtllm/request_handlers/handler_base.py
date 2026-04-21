@@ -94,6 +94,12 @@ class TRTLLMEngineQuiesceController:
             self._restore_gms_weights()
         if "kv_cache" in tags:
             self._collective_rpc("wakeup", ["kv_cache"])
+            # release_with_tag("kv_cache") zeroes the physical KV pages but leaves
+            # TRT-LLM's block-reuse hash table pointing at them. Post-wake requests
+            # would hit those stale hashes (cached_tokens>0) and read garbage KV —
+            # coherent-looking text but wrong. Drop the reuse state here so the
+            # first post-wake prefill recomputes from scratch.
+            self._reset_prefix_cache()
         return True
 
     def mark_resumed(self) -> None:
@@ -128,6 +134,20 @@ class TRTLLMEngineQuiesceController:
         action = release_with_tag if method == "sleep" else materialize_with_tag
         for tag in rpc_tags:
             action(tag)
+
+    def _reset_prefix_cache(self) -> None:
+        """Invalidate TRT-LLM's KV block-reuse state after a wake."""
+        llm = getattr(self._engine, "llm", None)
+        executor = getattr(llm, "_executor", None) if llm is not None else None
+        py_executor = getattr(executor, "engine", None) if executor is not None else None
+        reset = getattr(py_executor, "reset_prefix_cache", None)
+        if reset is None:
+            logger.debug("TRT-LLM executor has no reset_prefix_cache; skipping")
+            return
+        try:
+            reset()
+        except Exception as exc:  # noqa: BLE001 — best-effort post-wake hygiene
+            logger.warning("reset_prefix_cache failed: %s", exc)
 
     @staticmethod
     def _release_gms_weights() -> None:
