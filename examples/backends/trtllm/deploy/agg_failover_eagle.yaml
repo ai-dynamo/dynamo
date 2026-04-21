@@ -44,7 +44,7 @@ spec:
           - name: ngc-secret
         mainContainer:
           image: REPLACE_WITH_TRTLLM_RUNTIME_TAG
-    TrtllmWorker:
+    TRTLLMWorker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
