@@ -221,7 +221,24 @@ pub fn monitor_for_disconnects(
                         Some(Err(err)) => {
                             // Mark error as internal since it's a streaming error
                             inflight_guard.mark_error(ErrorType::Internal);
-                            yield Event::default().event("error").comment(err.to_string());
+                            // DIS-1768: this is needed because bare SSE was emitting
+                            // `event: error\n: <comment>\n\n` with no `data: [DONE]`,
+                            // which violates the OpenAI SSE contract — naive
+                            // `data:`-line parsers silently skip the frame and
+                            // never see a stream terminator, so clients get
+                            // no actionable detail and no clean end-of-stream.
+                            // The fix is to emit a structured OpenAI-style
+                            // `data: {"error":{...}}` frame followed by
+                            // `data: [DONE]`, and it is here:
+                            let err_json = serde_json::json!({
+                                "error": {
+                                    "message": err.to_string(),
+                                    "type": "internal_server_error",
+                                    "code": 500,
+                                }
+                            });
+                            yield Event::default().data(err_json.to_string());
+                            yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
@@ -490,5 +507,97 @@ mod tests {
             0,
             "inflight gauge leaked in phase 2"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // DIS-1768: mid-stream fault SSE contract
+    //
+    // When the upstream stream yields `Err(_)` mid-stream — e.g. an upstream
+    // worker dies and the mpsc channel reports
+    // `Disconnected: Stream ended before generation completed`, or the Python
+    // chat-processor raises and the Rust→Python `tx.send()` fails with
+    // `Failed to send response: SendError { .. }` — the client MUST receive:
+    //   1. a structured `data: {"error":{"message":..., "type":... or "code":...}}` frame, then
+    //   2. a `data: [DONE]` terminator.
+    // Before the fix, the code emitted the bare SSE trailer
+    // `event: error\n: <comment>\n\n` with no `[DONE]`, which violates the
+    // OpenAI SSE contract and is silently skipped by naive `data:`-line parsers.
+    // The two tests below pin the post-fix contract.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Builds a stream that yields `data_chunks` successful events, then yields an
+    /// `Err` carrying `err_msg`, simulating a mid-stream upstream fault.
+    fn simulate_mid_stream_error(
+        data_chunks: usize,
+        err_msg: &'static str,
+    ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
+        async_stream::try_stream! {
+            for i in 0..data_chunks {
+                yield axum::response::sse::Event::default().data(format!("chunk-{i}"));
+            }
+            Err(axum::Error::new(err_msg))?;
+        }
+    }
+
+    /// Collect the wire-format SSE body from a monitored stream.
+    async fn collect_sse_body(
+        stream: impl Stream<Item = Result<Event, axum::Error>> + Send + 'static,
+    ) -> String {
+        use axum::body::to_bytes;
+        use axum::response::{IntoResponse, Sse};
+        let response = Sse::new(stream).into_response();
+        let body = to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body bytes");
+        String::from_utf8(body.to_vec()).expect("utf8 body")
+    }
+
+    /// Assert the post-fix SSE fault contract: structured error frame + `[DONE]` + no bare trailer.
+    fn assert_fault_contract(case: &str, text: &str) {
+        assert!(
+            text.contains("data: [DONE]"),
+            "[{case}] body does not terminate with `data: [DONE]`. Body:\n{text}"
+        );
+        let has_structured_error = text.lines().any(|line| {
+            line.starts_with("data: ")
+                && line.contains("\"error\"")
+                && line.contains("\"message\"")
+                && (line.contains("\"type\"") || line.contains("\"code\""))
+        });
+        assert!(
+            has_structured_error,
+            "[{case}] body missing structured `data: {{\"error\":{{...}}}}` frame with message and type/code. Body:\n{text}"
+        );
+        assert!(
+            !text.contains("event: error\n: "),
+            "[{case}] body contains bare `event: error\\n: <comment>` trailer (no actionable detail — the pre-fix bug). Body:\n{text}"
+        );
+    }
+
+    /// Upstream worker killed mid-stream → mpsc channel reports `Disconnected` to the
+    /// HTTP layer. Client MUST receive structured error + `[DONE]`.
+    #[tokio::test]
+    #[serial]
+    async fn test_simulate_worker_kill_emits_structured_error_and_done() {
+        let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk", "0");
+        let stream =
+            simulate_mid_stream_error(3, "Disconnected: Stream ended before generation completed");
+        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let body = collect_sse_body(monitored).await;
+        cleanup_env();
+        assert_fault_contract("worker_kill", &body);
+    }
+
+    /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with
+    /// `SendError`. Client MUST receive structured error + `[DONE]`.
+    #[tokio::test]
+    #[serial]
+    async fn test_simulate_python_consumer_drop_emits_structured_error_and_done() {
+        let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py", "0");
+        let stream = simulate_mid_stream_error(3, "Failed to send response: SendError { .. }");
+        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let body = collect_sse_body(monitored).await;
+        cleanup_env();
+        assert_fault_contract("python_consumer_drop", &body);
     }
 }
