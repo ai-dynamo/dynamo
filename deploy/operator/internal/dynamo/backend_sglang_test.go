@@ -93,6 +93,34 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			description:       "Direct python command with simple deployer should append flags",
 		},
 		{
+			// LWS worker returns $(LWS_WORKER_INDEX) with needsShell=false, so
+			// flags are appended directly to Args and the kubelet expands both
+			// $(LWS_LEADER_ADDRESS) and $(LWS_WORKER_INDEX) before the container
+			// starts - no sh -c wrapper.
+			name:              "python command LWS worker - direct append (kubelet expansion)",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang", "--model", "llama"},
+			expectedCommand:   []string{"python3"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--model", "llama", "--dist-init-addr", "$(LWS_LEADER_ADDRESS):29500", "--nnodes", "2", "--node-rank", "$(LWS_WORKER_INDEX)"},
+			description:       "LWS worker with direct python command should append flags without sh -c wrapping",
+		},
+		{
+			// LWS leader uses rank 0 (plain integer literal) so needsShell is
+			// false for both leader and worker roles.
+			name:              "python command LWS leader - direct append",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
+			expectedCommand:   []string{"python3"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "$(LWS_LEADER_ADDRESS):29500", "--nnodes", "2", "--node-rank", "0"},
+			description:       "LWS leader with direct python command should append flags with kubelet-expanded leader hostname",
+		},
+		{
 			name:              "python command shell deployer - shell wrapping",
 			numberOfNodes:     2,
 			role:              RoleWorker,

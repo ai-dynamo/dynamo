@@ -341,12 +341,12 @@ trtllm_configs = {
     ),
     # LLaVA raw-embeddings E/PD test
     # Validates the raw-embeddings code path where pre-computed vision embeddings
-    # (.pt tensor file) are sent via file:// URL instead of a raw image URL.
+    # (.safetensors file) are sent via file:// URL instead of a raw image URL.
     #
     # Flow:
     #   1. Launch script generates embeddings using standalone HF vision encoder
     #   2. Encode + Aggregated PD workers start for LLaVA
-    #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.pt
+    #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.safetensors
     #
     # Uses gpu_2: encode worker on GPU 0, PD worker on GPU 1.
     # The 7B LLaVA model requires two GPUs because both encode and PD workers
@@ -372,7 +372,7 @@ trtllm_configs = {
         delayed_start=180,
         request_payloads=[
             multimodal_payload_default(
-                image_url="file:///tmp/llava_embeddings.pt",
+                image_url="file:///tmp/llava_embeddings.safetensors",
                 text="Describe what this image shows.",
                 expected_response=["bench", "person", "image", "picture"],
             )
@@ -439,6 +439,35 @@ trtllm_configs = {
                 expected_log=[],
             ),
         ],
+    ),
+    # Aggregated multimodal with --frontend-decoding enabled.
+    # Verifies image URL inference works when images are decoded by the Rust
+    # MediaDecoder in the frontend instead of the Python backend.
+    "aggregated_multimodal_frontend_decoding": TRTLLMConfig(
+        name="aggregated_multimodal_frontend_decoding",
+        directory=trtllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(900),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
+            "DYN_TRTLLM_FRONTEND_DECODING": "true",
+        },
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",

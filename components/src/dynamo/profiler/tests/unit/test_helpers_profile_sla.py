@@ -476,9 +476,52 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_no_mocker_returns_config_with_planner_cm(self, tmp_path):
-        """Planner enabled, no mocker: result is [planner_cm, profile_cm, dgd_config]."""
+    def test_rapid_planner_no_mocker_skips_profile_cm(self, tmp_path):
+        """Rapid + planner + no mocker: the profile-data ConfigMap is NOT emitted.
+
+        The planner runs AIC interpolation in-process at bootstrap using the
+        aic_interpolation spec embedded in its config, so no NPZ round-trip
+        is needed.
+        """
         dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+        dgd_config = {"kind": "DGD", "spec": {"services": {}}}
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+
+        with (
+            patch(
+                f"{_DGD_GEN}.add_planner_to_config",
+                return_value=planner_cm,
+            ) as mock_planner,
+            patch(
+                f"{_DGD_GEN}.add_profile_data_to_config",
+            ) as mock_profile,
+        ):
+            result = assemble_final_config(
+                dgdr,
+                ops,
+                dgd_config,
+                PickedParallelConfig(tp=1),
+                PickedParallelConfig(tp=1),
+            )
+
+        mock_planner.assert_called_once()
+        mock_profile.assert_not_called()
+        assert result == [planner_cm, dgd_config]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_thorough_planner_no_mocker_returns_config_with_both_cms(self, tmp_path):
+        """Thorough + planner + no mocker: both planner_cm and profile_cm are emitted."""
+        dgdr = _make_dgdr(
+            searchStrategy="thorough",
+            features=FeaturesSpec(
+                planner=_make_planner(
+                    pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Thorough,
+                )
+            ),
+        )
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD", "spec": {"services": {}}}

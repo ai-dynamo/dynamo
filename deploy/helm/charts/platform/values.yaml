@@ -228,9 +228,6 @@ dynamo-operator:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
 
-    # -- Path written by worker when model is loaded and ready for checkpointing
-    readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
 # Grove component - distributed inference orchestration
 # Installation is controlled by global.grove.install above.
 grove:
