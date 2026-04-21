@@ -828,6 +828,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
     }
