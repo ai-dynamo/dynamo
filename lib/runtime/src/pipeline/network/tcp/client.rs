@@ -144,51 +144,14 @@ impl TcpClient {
 
         let subject = info.subject.clone();
         tokio::spawn(async move {
-            // await both tasks
-            let (reader, writer) = tokio::join!(reader_task, writer_task);
-
-            match (reader, writer) {
-                (Ok(reader), Ok(writer)) => {
-                    let reader = reader.into_inner();
-
-                    let writer = match writer {
-                        Ok(writer) => writer.into_inner(),
-                        Err(e) => {
-                            tracing::error!("failed to join writer task: {:?}", e);
-                            return Err(e);
-                        }
-                    };
-
-                    let stream = reader.unsplit(writer);
-                    wait_for_server_shutdown(stream, monitor_context).await?;
-
-                    Ok(())
-                }
-                (Err(reader_err), Ok(_)) => {
-                    tracing::error!(
-                        "reader task failed to join (peer_port: {peer_port:?}, subject: {subject}): {reader_err:?}"
-                    );
-                    anyhow::bail!(
-                        "reader task failed to join (peer_port: {peer_port:?}, subject: {subject}): {reader_err:?}"
-                    );
-                }
-                (Ok(_), Err(writer_err)) => {
-                    tracing::error!(
-                        "writer task failed to join (peer_port: {peer_port:?}, subject: {subject}): {writer_err:?}"
-                    );
-                    anyhow::bail!(
-                        "writer task failed to join (peer_port: {peer_port:?}, subject: {subject}): {writer_err:?}"
-                    );
-                }
-                (Err(reader_err), Err(writer_err)) => {
-                    tracing::error!(
-                        "both reader and writer tasks failed to join (peer_port: {peer_port:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
-                    );
-                    anyhow::bail!(
-                        "both reader and writer tasks failed to join (peer_port: {peer_port:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
-                    );
-                }
-            }
+            wait_for_connection_tasks(
+                reader_task,
+                writer_task,
+                monitor_context,
+                peer_port,
+                subject,
+            )
+            .await
         });
 
         // set up the prologue for the stream
@@ -202,6 +165,58 @@ impl TcpClient {
         };
 
         Ok(stream_sender)
+    }
+}
+
+async fn wait_for_connection_tasks(
+    reader_task: tokio::task::JoinHandle<FramedRead<ReadHalf<TcpStream>, TwoPartCodec>>,
+    writer_task: tokio::task::JoinHandle<Result<FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>>>,
+    context: Arc<dyn AsyncEngineContext>,
+    peer_port: Option<u16>,
+    subject: String,
+) -> Result<()> {
+    // await both tasks
+    let (reader, writer) = tokio::join!(reader_task, writer_task);
+
+    match (reader, writer) {
+        (Ok(reader), Ok(writer)) => {
+            let reader = reader.into_inner();
+
+            let writer = match writer {
+                Ok(writer) => writer.into_inner(),
+                Err(e) => {
+                    tracing::error!("failed to join writer task: {:?}", e);
+                    return Err(e);
+                }
+            };
+
+            let stream = reader.unsplit(writer);
+            wait_for_server_shutdown(stream, context).await
+        }
+        (Err(reader_err), Ok(_)) => {
+            tracing::error!(
+                "reader task failed to join (peer_port: {peer_port:?}, subject: {subject}): {reader_err:?}"
+            );
+            anyhow::bail!(
+                "reader task failed to join (peer_port: {peer_port:?}, subject: {subject}): {reader_err:?}"
+            );
+        }
+        (Ok(_), Err(writer_err)) => {
+            tracing::error!(
+                "writer task failed to join (peer_port: {peer_port:?}, subject: {subject}): {writer_err:?}"
+            );
+            anyhow::bail!(
+                "writer task failed to join (peer_port: {peer_port:?}, subject: {subject}): {writer_err:?}"
+            );
+        }
+        (Err(reader_err), Err(writer_err)) => {
+            tracing::error!(
+                "both reader and writer tasks failed to join (peer_port: {peer_port:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
+            );
+            anyhow::bail!(
+                "both reader and writer tasks failed to join (peer_port: {peer_port:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
+            );
+        }
     }
 }
 
@@ -792,6 +807,57 @@ mod tests {
         assert!(
             result.unwrap().is_ok(),
             "killed context shutdown should succeed"
+        );
+    }
+
+    /// Test the actual reader/writer monitor path used by create_response_stream:
+    /// a read decode error kills the context, the writer exits without a
+    /// sentinel, and the monitor returns promptly instead of waiting for FIN.
+    #[tokio::test]
+    async fn test_connection_monitor_skips_fin_wait_after_read_error_kills_context() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (read_half, write_half) = tokio::io::split(client);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+        let (_bytes_tx, bytes_rx) = mpsc::channel(64);
+        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        let reader_context = controller.clone();
+        let reader_task = tokio::spawn(async move {
+            handle_reader(framed_reader, reader_context, alive_tx, None).await
+        });
+        let writer_context = controller.clone();
+        let writer_task = tokio::spawn(async move {
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
+
+        // Bypass the codec and write a partial TwoPartCodec header. EOF with
+        // buffered bytes drives the client reader into Some(Err(_)).
+        server.write_all(&[0u8; 8]).await.unwrap();
+        server.shutdown().await.unwrap();
+
+        let monitor_context: Arc<dyn AsyncEngineContext> = controller.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            wait_for_connection_tasks(
+                reader_task,
+                writer_task,
+                monitor_context,
+                None,
+                "test-subject".to_string(),
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "connection monitor should not wait for the FIN deadline after read error"
+        );
+        assert!(result.unwrap().is_ok(), "connection monitor should succeed");
+        assert!(
+            controller.is_killed(),
+            "read error should kill the stream context"
         );
     }
 
