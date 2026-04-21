@@ -39,9 +39,17 @@ def _enable_offline_with_mistral_patch():
     if _mistral_patch_applied:
         return  # class patch and sitecustomize already applied for this cycle
 
-    # Apply the patch in this process
+    # Resolve OfflineModeIsEnabled before touching transformers. If huggingface_hub
+    # predates the .errors module, transformers 4.57.3+ imports OfflineModeIsEnabled
+    # lazily inside _patch_mistral_regex, so that call itself raises ImportError under
+    # offline mode — using ImportError as the fallback catches that exact error.
     try:
         from huggingface_hub.errors import OfflineModeIsEnabled
+    except ImportError:
+        OfflineModeIsEnabled = ImportError  # type: ignore[assignment,misc]
+
+    # Apply the patch in this process
+    try:
         from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
         original = PreTrainedTokenizerBase._patch_mistral_regex
@@ -70,7 +78,10 @@ def _enable_offline_with_mistral_patch():
             if os.environ.get('HF_HUB_OFFLINE') == '1':
                 try:
                     from transformers.tokenization_utils_base import PreTrainedTokenizerBase as _T
-                    from huggingface_hub.errors import OfflineModeIsEnabled as _E
+                    try:
+                        from huggingface_hub.errors import OfflineModeIsEnabled as _E
+                    except ImportError:
+                        _E = ImportError
                     _orig = _T._patch_mistral_regex
                     @classmethod
                     def _safe(cls, tokenizer, *a, **kw):
@@ -100,7 +111,7 @@ def _disable_offline_with_mistral_patch():
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
     patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
     pythonpath = os.environ.get("PYTHONPATH", "")
-    result = pythonpath.replace(f"{patch_dir}:", "").replace(patch_dir, "")
+    result = ":".join(e for e in pythonpath.split(":") if e != patch_dir)
     if result:
         os.environ["PYTHONPATH"] = result
     else:
