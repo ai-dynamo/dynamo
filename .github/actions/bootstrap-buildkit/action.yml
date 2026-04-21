@@ -119,7 +119,7 @@ runs:
           echo "This build is using the **fallback pod** because the preferred remote builders are unavailable. Expected during nightly runs and outside business hours." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
         fi
-        
+
 
 
     - name: Bootstrap buildkit
