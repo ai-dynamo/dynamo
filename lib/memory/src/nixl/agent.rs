@@ -65,11 +65,11 @@ impl NixlAgent {
 
     /// Add a backend to the agent with optional custom parameters.
     ///
-    /// If `custom_params` is non-empty, those parameters are used instead of
-    /// the plugin defaults. If empty, default parameters from the plugin are used.
-    ///
-    /// # Errors
-    /// Returns an error if custom parameters are provided (not yet supported until nixl_sys 0.9).
+    /// Plugin defaults are fetched from NIXL via `get_plugin_params` and then any
+    /// keys in `custom_params` are overlaid on top via `Params::set`, so callers
+    /// only have to specify the fields they want to change (for example the
+    /// POSIX plugin's `use_uring` / `use_aio` / `use_posix_aio` selector). An
+    /// empty `custom_params` uses plugin defaults as before.
     pub fn add_backend_with_params(
         &mut self,
         backend: &str,
@@ -80,24 +80,34 @@ impl NixlAgent {
             return Ok(());
         }
 
-        // TODO(DIS-1310): Custom params require nixl_sys 0.9+ which adds nixl_capi_params_add
-        if !custom_params.is_empty() {
-            anyhow::bail!(
-                "Custom NIXL backend parameters for {} are not yet supported. \
-                 This feature requires nixl_sys 0.9+. Params provided: {:?}",
-                backend_upper,
-                custom_params.keys().collect::<Vec<_>>()
-            );
-        }
-
-        // Get default params from plugin
-        let (_, params) = match self.agent.get_plugin_params(&backend_upper) {
+        // Get default params from plugin, then overlay any caller-provided
+        // overrides on top.
+        let (_, mut params) = match self.agent.get_plugin_params(&backend_upper) {
             Ok(result) => result,
             Err(_) => anyhow::bail!("No {} plugin found", backend_upper),
         };
 
+        for (key, value) in custom_params {
+            params.set(key.as_str(), value.as_str()).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to set NIXL {} param {}={}: {}",
+                    backend_upper,
+                    key,
+                    value,
+                    e
+                )
+            })?;
+        }
+
         match self.agent.create_backend(&backend_upper, &params) {
             Ok(_) => {
+                if !custom_params.is_empty() {
+                    tracing::debug!(
+                        backend = %backend_upper,
+                        overrides = ?custom_params.keys().collect::<Vec<_>>(),
+                        "Created NIXL backend with custom params"
+                    );
+                }
                 self.available_backends.insert(backend_upper);
                 Ok(())
             }
@@ -255,36 +265,31 @@ mod tests {
     }
 
     #[test]
-    fn test_add_backend_with_custom_params_fails() {
+    fn test_add_backend_with_custom_params() {
         let mut agent = NixlAgent::new("test_custom_params").expect("Failed to create agent");
 
-        // Custom params should fail until nixl_sys 0.9
+        // Custom params are merged into plugin defaults. Use a benign override
+        // key/value pair so the test exercises the Rust-side params path
+        // without depending on a specific plugin rejecting or requiring it.
         let mut params = HashMap::new();
         params.insert("some_key".to_string(), "some_value".to_string());
 
         let result = agent.add_backend_with_params("UCX", &params);
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not yet supported"));
-        assert!(err_msg.contains("nixl_sys 0.9"));
-        assert!(err_msg.contains("some_key"));
+        assert!(result.is_ok());
+        assert!(agent.has_backend("UCX"));
     }
 
     #[test]
-    fn test_from_nixl_backend_config_with_custom_params_fails() {
-        // Config with custom params should fail
+    fn test_from_nixl_backend_config_with_custom_params() {
+        // Config with custom params should now succeed.
         let mut params = HashMap::new();
         params.insert("threads".to_string(), "4".to_string());
 
         let config = NixlBackendConfig::default().with_backend_params("UCX", params);
 
         let result = NixlAgent::from_nixl_backend_config("test_config_params", config);
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not yet supported"));
-        assert!(err_msg.contains("threads"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().has_backend("UCX"));
     }
 
     #[test]

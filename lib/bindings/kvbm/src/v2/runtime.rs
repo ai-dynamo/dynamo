@@ -61,15 +61,25 @@ impl PyKvbmRuntime {
             None => KvbmConfig::from_env_for_worker().map_err(to_pyerr)?,
         };
 
-        // Create tokio runtime from config
-        let tokio_rt = config.tokio.build_runtime().map_err(to_pyerr)?;
+        // Create tokio runtime from config.
+        //
+        // IMPORTANT: keep one strong Arc outside the async `block_on` below.
+        // If `build_worker()` returns an error partway through async startup,
+        // the future is unwound inside a Tokio runtime context. Dropping the
+        // *last* Runtime owner there triggers Tokio's
+        // "Cannot drop a runtime in a context where blocking is not allowed"
+        // panic, which masks the real initialization error. By retaining one
+        // owner outside `block_on`, the async future only drops a clone on
+        // error, and the final drop happens safely after `block_on` returns.
+        let tokio_rt = Arc::new(config.tokio.build_runtime().map_err(to_pyerr)?);
         let handle = tokio_rt.handle().clone();
+        let tokio_rt_for_build = tokio_rt.clone();
 
         // Build KvbmRuntime using block_on
         let runtime = handle
-            .block_on(async {
+            .block_on(async move {
                 KvbmRuntimeBuilder::new(config)
-                    .with_runtime(Arc::new(tokio_rt))
+                    .with_runtime(tokio_rt_for_build)
                     .build_worker()
                     .await
             })
@@ -107,15 +117,17 @@ impl PyKvbmRuntime {
             None => KvbmConfig::from_env_for_leader().map_err(to_pyerr)?,
         };
 
-        // Create tokio runtime from config
-        let tokio_rt = config.tokio.build_runtime().map_err(to_pyerr)?;
+        // Mirror the worker-side ownership pattern above so leader init errors
+        // do not drop the final Tokio runtime owner from inside async context.
+        let tokio_rt = Arc::new(config.tokio.build_runtime().map_err(to_pyerr)?);
         let handle = tokio_rt.handle().clone();
+        let tokio_rt_for_build = tokio_rt.clone();
 
         // Build KvbmRuntime using block_on
         let runtime = handle
-            .block_on(async {
+            .block_on(async move {
                 KvbmRuntimeBuilder::new(config)
-                    .with_runtime(Arc::new(tokio_rt))
+                    .with_runtime(tokio_rt_for_build)
                     .build_leader()
                     .await
             })
