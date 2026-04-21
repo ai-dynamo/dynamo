@@ -239,7 +239,10 @@ def _node_bin(_tools_cache) -> Path:
             description=f"download node v{NODE_VERSION} ({arch})",
         )
         with tarfile.open(tar_path) as tf:
-            tf.extractall(install_dir)
+            # `filter="data"` is the safe extraction filter added in 3.12 and
+            # required in 3.14; passing it explicitly silences the pytest
+            # filterwarnings=error escalation of the DeprecationWarning.
+            tf.extractall(install_dir, filter="data")
         extracted = install_dir / f"node-v{NODE_VERSION}-linux-{arch}"
         for item in extracted.iterdir():
             shutil.move(str(item), str(install_dir / item.name))
@@ -452,7 +455,9 @@ def test_frontend_api_surface_compliance(
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
-        _run_codex_exec_smoke(_codex_cli, codex_home, agent_cwd, marker_filename)
+        _run_codex_exec_smoke(
+            _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
+        )
         _wait_for_frontend_healthy(frontend_port)
         _run_claude_exec_smoke(
             _claude_cli,
@@ -608,7 +613,7 @@ env_key = "LOCAL_API_KEY"
 
 
 def _run_codex_exec_smoke(
-    codex_cli: Path, codex_home, cwd, marker_filename: str
+    codex_cli: Path, node_bin: Path, codex_home, cwd, marker_filename: str
 ) -> None:
     """Run `codex exec` against the Dynamo Responses endpoint and assert the
     tool-call path actually fires.
@@ -631,7 +636,10 @@ def _run_codex_exec_smoke(
         "HOME": str(codex_home),
         "LOCAL_API_KEY": "sk-none",
     }
-    env = _agent_subprocess_env(extra_env)
+    # codex is a node script (`#!/usr/bin/env node`); prepend the fixture-
+    # installed node runtime to PATH so the shebang resolves without pulling
+    # in the runner's system node (if any).
+    env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
 
     cmd = [
         str(codex_cli),
