@@ -154,7 +154,7 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="MODEL_EXPRESS_URL",
             default=None,
             help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
-            "Required when using --load-format=mx-source or --load-format=mx-target.",
+            "Required when using --load-format=mx.",
         )
 
         # GMS (GPU Memory Service) shadow mode

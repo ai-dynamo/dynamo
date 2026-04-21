@@ -118,7 +118,7 @@ spec:
 ### How It Works
 
 1. A Model Express server runs in the cluster and caches model weights
-2. Workers use `--load-format=mx-source` or `--load-format=mx-target` to load from the server
+2. Workers use `--load-format=mx` to load from the server (auto-detects whether to receive via RDMA or load from disk)
 3. The K8s operator injects `MODEL_EXPRESS_URL` into all pods automatically
 
 ### Setup
@@ -138,10 +138,10 @@ services:
   VllmWorker:
     envs:
       - name: VLLM_LOAD_FORMAT
-        value: mx-target
+        value: mx
 ```
 
-When `MODEL_EXPRESS_URL` is configured in the operator, it is automatically injected as an environment variable into all component pods. Workers using `mx-source` or `mx-target` load formats will connect to the server for model weight distribution.
+When `MODEL_EXPRESS_URL` is configured in the operator, it is automatically injected as an environment variable into all component pods. Workers using the `mx` load format will connect to the server for model weight distribution.
 
 ### When to Use Model Express
 
