@@ -131,7 +131,10 @@ def test_restore_handles_missing_tmp_cache(tmp_path, monkeypatch, caplog):
         _restore_models_dir_env(orig, nonexistent)  # must not raise
     for k in _MODELS_DIR_ENV_KEYS:
         assert k not in os.environ
-    assert any("already_deleted" in m or "failed" in m.lower() for m in caplog.messages)
+    assert any(
+        "--models-dir: failed to clean temp cache" in m and "already_deleted" in m
+        for m in caplog.messages
+    )
 
 
 @pytest.mark.pre_merge
@@ -152,6 +155,7 @@ def test_pythonpath_restored_after_apply_restore(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", original)
     for k in _MODELS_DIR_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(hf_cache, "_mistral_patch_applied", False)
     orig = _apply_models_dir_env(str(tmp_path))
     _restore_models_dir_env(orig)
     assert os.environ["PYTHONPATH"] == original

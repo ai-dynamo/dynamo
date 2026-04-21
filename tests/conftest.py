@@ -85,6 +85,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     # -------------------------------------------------------------------------
     # Model cache options
     # -------------------------------------------------------------------------
+    # NOTE: if you add a new option here, also add it to the forwarding list
+    # in pytest_runtestloop (search for "opt_name, cli_flag" in this file).
     parser.addoption(
         "--models-dir",
         type=str,
