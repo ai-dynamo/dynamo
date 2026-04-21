@@ -100,10 +100,21 @@ impl SystemHealth {
         self.health_check_enabled
     }
 
-    /// Signal endpoint transport registration. Sets Ready when canary is disabled;
-    /// no-op when canary is enabled (canary will set Ready after verification).
+    /// Signal endpoint transport registration.
+    ///
+    /// Marks the endpoint Ready when canary is disabled globally, OR when the
+    /// endpoint has no registered canary target (i.e. the caller opted out of
+    /// canary by not passing a `health_check_payload` to `serve_endpoint`).
+    /// Endpoints that DID register a canary target stay NotReady until the
+    /// canary verifies them — preserving DIS-1185's "canary is the authoritative
+    /// readiness signal for endpoints that opt in" contract.
     pub fn set_endpoint_registered(&self, endpoint: &str) {
-        if !self.health_check_enabled {
+        let has_target = self
+            .health_check_targets
+            .read()
+            .unwrap()
+            .contains_key(endpoint);
+        if !self.health_check_enabled || !has_target {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
         }
     }
@@ -141,20 +152,26 @@ impl SystemHealth {
                     .get(endpoint)
                     .is_some_and(|status| *status == HealthStatus::Ready)
             })
+        } else if !health_check_targets.is_empty() {
+            // Canary-opt-in endpoints exist: every one must be Ready.
+            health_check_targets
+                .iter()
+                .all(|(endpoint_subject, _target)| {
+                    endpoint_health
+                        .get(endpoint_subject)
+                        .is_some_and(|status| *status == HealthStatus::Ready)
+                })
+        } else if !endpoint_health.is_empty() {
+            // No canary targets, but endpoints have registered. Healthy when
+            // every registered endpoint is Ready. This covers workers that
+            // opt every endpoint out of canary (e.g. disagg decode workers,
+            // secondary operational endpoints).
+            endpoint_health
+                .values()
+                .all(|status| *status == HealthStatus::Ready)
         } else {
-            // If we have registered health check targets, use them to determine health
-            if !health_check_targets.is_empty() {
-                health_check_targets
-                    .iter()
-                    .all(|(endpoint_subject, _target)| {
-                        endpoint_health
-                            .get(endpoint_subject)
-                            .is_some_and(|status| *status == HealthStatus::Ready)
-                    })
-            } else {
-                // No health check targets registered, use simple system health
-                self.system_health == HealthStatus::Ready
-            }
+            // No endpoints registered at all — use simple system health.
+            self.system_health == HealthStatus::Ready
         };
 
         (healthy, endpoints)
@@ -296,5 +313,96 @@ impl SystemHealth {
     /// Get the liveness check path
     pub fn live_path(&self) -> &str {
         &self.live_path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(canary_enabled: bool) -> SystemHealth {
+        SystemHealth::new(
+            HealthStatus::NotReady,
+            vec![],
+            canary_enabled,
+            "/health".into(),
+            "/live".into(),
+        )
+    }
+
+    #[test]
+    fn endpoint_registered_auto_readies_without_target_when_canary_enabled() {
+        // Canary enabled but the endpoint did not register a canary target —
+        // it opted out of canary, so registration alone marks it Ready.
+        let h = sh(true);
+        h.set_endpoint_registered("generate");
+        assert_eq!(
+            h.get_endpoint_health_status("generate"),
+            Some(HealthStatus::Ready),
+            "endpoint with no canary target must auto-Ready"
+        );
+    }
+
+    #[test]
+    fn endpoint_registered_stays_notready_with_target_when_canary_enabled() {
+        // Canary enabled and the endpoint registered a target — registration
+        // does NOT flip Ready; canary verifies first (DIS-1185 contract).
+        let h = sh(true);
+        let instance = component::Instance {
+            component: "test".into(),
+            endpoint: "generate".into(),
+            namespace: "test".into(),
+            instance_id: 0,
+            transport: component::TransportType::Tcp("localhost:0".into()),
+            device_type: None,
+        };
+        h.health_check_targets.write().unwrap().insert(
+            "generate".to_string(),
+            HealthCheckTarget {
+                instance,
+                payload: serde_json::json!({}),
+            },
+        );
+        h.set_endpoint_registered("generate");
+        // With a registered target, set_endpoint_registered must NOT mark
+        // the endpoint Ready — canary is responsible. Either "no entry" or
+        // an explicit NotReady is acceptable (both make /health path #2 report
+        // unhealthy until canary succeeds).
+        assert_ne!(
+            h.get_endpoint_health_status("generate"),
+            Some(HealthStatus::Ready),
+            "endpoint with a canary target must wait for canary, not auto-Ready"
+        );
+    }
+
+    #[test]
+    fn endpoint_registered_readies_when_canary_disabled() {
+        let h = sh(false);
+        h.set_endpoint_registered("generate");
+        assert_eq!(
+            h.get_endpoint_health_status("generate"),
+            Some(HealthStatus::Ready),
+        );
+    }
+
+    #[test]
+    fn get_health_status_uses_endpoint_health_when_no_target() {
+        // No canary targets, no use_endpoint_health_status override.
+        // A single registered endpoint in Ready state should make /health healthy.
+        let h = sh(true);
+        h.set_endpoint_registered("generate");
+        let (healthy, _eps) = h.get_health_status();
+        assert!(
+            healthy,
+            "when no canary target exists and all registered endpoints are Ready, /health is healthy"
+        );
+    }
+
+    #[test]
+    fn get_health_status_notready_when_no_endpoints_and_system_notready() {
+        // No endpoints registered at all — falls back to system_health (NotReady by default).
+        let h = sh(true);
+        let (healthy, _eps) = h.get_health_status();
+        assert!(!healthy);
     }
 }

@@ -54,7 +54,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, get_llm_engine
-from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import build_worker_health_check_payload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -602,19 +602,18 @@ async def init_llm_worker(
                 custom_template_path=config.custom_jinja_template,
             )
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        if config.disaggregation_mode == DisaggregationMode.DECODE:
-            # Decode workers cannot process canary inference requests —
-            # they require disaggregated_params (KV cache state from prefill).
-            # Skip health check payload so canary doesn't target them.
-            health_check_payload = None
+        # Decode workers opt out of canary (the TRT-LLM decode handler strictly
+        # rejects canary probes without disaggregated_params); agg/prefill workers
+        # register the standard TRT-LLM payload. See build_worker_health_check_payload
+        # for the full reasoning.
+        health_check_payload = build_worker_health_check_payload(
+            disaggregation_mode=config.disaggregation_mode,
+            tokenizer=tokenizer,
+        )
+        if health_check_payload is None:
             logging.info(
-                "Decode worker: skipping canary health check payload registration"
+                "Decode worker: canary health check disabled (no payload registered)"
             )
-        else:
-            health_check_payload = TrtllmHealthCheckPayload(
-                tokenizer=tokenizer
-            ).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to

@@ -8,9 +8,10 @@ This module defines the default health check payload for TRT-LLM backends.
 """
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from dynamo.health_check import HealthCheckPayload
+from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
@@ -89,3 +90,24 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             },
         }
         super().__init__()
+
+
+def build_worker_health_check_payload(
+    disaggregation_mode: DisaggregationMode,
+    tokenizer: Any = None,
+) -> Optional[dict]:
+    """
+    Decide the health_check_payload for a TRT-LLM worker based on its disagg role.
+
+    Decode workers opt out of canary: the TRT-LLM decode handler strictly rejects
+    inference requests without `disaggregated_params` (see
+    `trtllm/request_handlers/handler_base.py` — "Disaggregated params are required
+    for decode mode"). A generic canary probe cannot satisfy that contract, so the
+    decode worker registers no payload and opts out of canary verification.
+
+    Aggregated and prefill workers accept generic probes and register the
+    standard canary payload.
+    """
+    if disaggregation_mode == DisaggregationMode.DECODE:
+        return None
+    return TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()

@@ -392,15 +392,13 @@ class WorkerFactory:
             vllm_config,
         )
 
-        if config.disaggregation_mode == DisaggregationMode.DECODE:
-            # Disagg decode workers may need params from prefill (e.g., embedding_params
-            # for multimodal). Skip canary health check to prevent incompatible requests.
-            health_check_payload = None
-            logger.info("Disagg decode worker: skipping canary health check payload")
-        else:
-            health_check_payload = VllmHealthCheckPayload(
-                engine_client, use_text_input=config.use_vllm_tokenizer
-            ).to_dict()
+        # vLLM's DecodeWorkerHandler._generate_token_mode handles requests without
+        # prefill_result by running them agg-style, so the standard canary payload
+        # works for decode workers too — the engine produces one token regardless
+        # of disaggregation mode. Always register a canary target.
+        health_check_payload = VllmHealthCheckPayload(
+            engine_client, use_text_input=config.use_vllm_tokenizer
+        ).to_dict()
 
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
