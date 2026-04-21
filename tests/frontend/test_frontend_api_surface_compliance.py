@@ -15,23 +15,27 @@ sequentially against one server:
 3. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
 
-The OpenResponses suite is pre-cloned and `bun install`ed into
-`/opt/openresponses` by `container/Dockerfile.test` at a pinned SHA;
-bumps go through that file in lockstep.
-
-Non-gating by design: carries the `frontend_api_surface_compliance`
-marker which routes to a dedicated CI job kept out of
-`backend-status-check.needs` until the signal is trustworthy.
+All external tooling (bun, node, the OpenResponses suite, and the codex /
+claude CLIs) is installed lazily at test time by session-scoped fixtures
+into a session-shared cache directory. Versions and the OpenResponses
+SHA are pinned as module-level constants. FileLock coordination makes
+concurrent xdist workers share a single install.
 """
 
 import logging
 import os
+import platform
 import shlex
+import shutil
 import subprocess
+import tarfile
 import time
+import zipfile
+from pathlib import Path
 
 import pytest
 import requests
+from filelock import FileLock
 
 from tests.serve.common import WORKSPACE_DIR
 from tests.utils.engine_process import EngineConfig, EngineProcess
@@ -42,11 +46,22 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
 
-# OpenResponses suite pre-installed here by Dockerfile.test; SHA pin lives
-# with the git clone in that file. This path must stay in sync with it.
-OPENRESPONSES_DIR = "/opt/openresponses"
-
 COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+
+# Pinned external-tool versions. Bun and node are pinned for reproducibility.
+# The agent CLIs (@openai/codex, @anthropic-ai/claude-code) float to @latest
+# so we automatically pick up protocol fixes — they're client-side harnesses,
+# not Dynamo surface.
+BUN_VERSION = "1.3.12"
+NODE_VERSION = "20.19.0"
+OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
+OPENRESPONSES_SHA = "fa29df5"
+
+# Retry budget for network-touching installs. Exponential backoff starting
+# at 2s; 3 attempts caps the worst-case wait at ~6s before we surface a
+# clear "upstream unavailable" error.
+_RETRY_COUNT = 3
+_RETRY_BACKOFF_INITIAL_S = 2.0
 
 # Env keys forwarded into codex/claude subprocesses. These agents run with tool
 # permissions (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`),
@@ -81,14 +96,268 @@ _SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
-def _agent_subprocess_env(extra_env: dict[str, str]) -> dict[str, str]:
+def _agent_subprocess_env(
+    extra_env: dict[str, str], path_prepend: list[Path] | None = None
+) -> dict[str, str]:
     """Build a minimal env for codex/claude subprocesses: allowlist from
-    `os.environ` merged with explicit test-scoped vars."""
+    `os.environ` merged with explicit test-scoped vars. Optional
+    `path_prepend` prepends directories to PATH so the fixture-installed
+    node/codex/claude binaries resolve without contaminating the
+    inherited PATH."""
     base = {
         k: v for k in _SUBPROCESS_ENV_ALLOWLIST if (v := os.environ.get(k)) is not None
     }
+    if path_prepend:
+        existing = base.get("PATH", "")
+        prefix = os.pathsep.join(str(p) for p in path_prepend)
+        base["PATH"] = f"{prefix}{os.pathsep}{existing}" if existing else prefix
     base.update(extra_env)
     return base
+
+
+# ---------------------------------------------------------------------------
+# Tool-install fixtures
+# ---------------------------------------------------------------------------
+
+
+def _retry_network_op(fn, description: str):
+    """Run `fn()` with a small exponential-backoff retry budget so that
+    transient github/npm/nodejs.org blips don't flake the test.
+    Captures subprocess stderr into the final error message so post-mortem
+    doesn't require digging through logs."""
+    last_err: BaseException | None = None
+    for attempt in range(_RETRY_COUNT):
+        try:
+            return fn()
+        except (OSError, requests.RequestException, subprocess.CalledProcessError) as e:
+            last_err = e
+            if attempt + 1 < _RETRY_COUNT:
+                wait = _RETRY_BACKOFF_INITIAL_S * (2**attempt)
+                logger.warning(
+                    "%s failed (attempt %d/%d): %s — retrying in %.1fs",
+                    description,
+                    attempt + 1,
+                    _RETRY_COUNT,
+                    e,
+                    wait,
+                )
+                time.sleep(wait)
+    detail = ""
+    if isinstance(last_err, subprocess.CalledProcessError):
+        detail = f"\nstdout:\n{last_err.stdout or ''}\nstderr:\n{last_err.stderr or ''}"
+    raise RuntimeError(
+        f"{description} failed after {_RETRY_COUNT} attempts: {last_err}{detail}"
+    ) from last_err
+
+
+def _download_url(url: str, dest: Path) -> None:
+    """Stream GET `url` into `dest` atomically via a `.part` sibling."""
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with requests.get(url, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    f.write(chunk)
+    tmp.rename(dest)
+
+
+def _bun_arch() -> str:
+    m = platform.machine()
+    if m == "x86_64":
+        return "x64"
+    if m == "aarch64":
+        return "aarch64"
+    raise RuntimeError(f"Unsupported machine architecture for bun: {m}")
+
+
+def _node_arch() -> str:
+    m = platform.machine()
+    if m == "x86_64":
+        return "x64"
+    if m == "aarch64":
+        return "arm64"
+    raise RuntimeError(f"Unsupported machine architecture for node: {m}")
+
+
+@pytest.fixture(scope="session")
+def _tools_cache(tmp_path_factory) -> Path:
+    """Session-shared cache directory for downloaded compliance tooling.
+    Lives under the pytest basetemp so it's reused across xdist workers
+    in the same session and cleaned up automatically when the session
+    ends."""
+    base = Path(tmp_path_factory.getbasetemp()) / "_frontend_api_surface_tools"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+@pytest.fixture(scope="session")
+def _bun_binary(_tools_cache) -> Path:
+    """Pinned-version bun executable. FileLock-coordinated so concurrent
+    xdist workers share a single download."""
+    install_dir = _tools_cache / f"bun-{BUN_VERSION}"
+    bun_bin = install_dir / "bun"
+    with FileLock(str(_tools_cache / "bun.lock")):
+        if bun_bin.exists():
+            return bun_bin
+        install_dir.mkdir(parents=True, exist_ok=True)
+        arch = _bun_arch()
+        url = (
+            f"https://github.com/oven-sh/bun/releases/download/"
+            f"bun-v{BUN_VERSION}/bun-linux-{arch}.zip"
+        )
+        zip_path = install_dir / "bun.zip"
+        _retry_network_op(
+            lambda: _download_url(url, zip_path),
+            description=f"download bun v{BUN_VERSION} ({arch})",
+        )
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(install_dir)
+        extracted = install_dir / f"bun-linux-{arch}" / "bun"
+        shutil.copy(extracted, bun_bin)
+        bun_bin.chmod(0o755)
+        zip_path.unlink(missing_ok=True)
+    return bun_bin
+
+
+@pytest.fixture(scope="session")
+def _node_bin(_tools_cache) -> Path:
+    """Pinned-version node runtime root `bin/` directory containing
+    `node` and `npm`. FileLock-coordinated."""
+    install_dir = _tools_cache / f"node-v{NODE_VERSION}"
+    bin_dir = install_dir / "bin"
+    with FileLock(str(_tools_cache / "node.lock")):
+        if (bin_dir / "node").exists() and (bin_dir / "npm").exists():
+            return bin_dir
+        install_dir.mkdir(parents=True, exist_ok=True)
+        arch = _node_arch()
+        tarball_name = f"node-v{NODE_VERSION}-linux-{arch}.tar.xz"
+        url = f"https://nodejs.org/dist/v{NODE_VERSION}/{tarball_name}"
+        tar_path = install_dir / tarball_name
+        _retry_network_op(
+            lambda: _download_url(url, tar_path),
+            description=f"download node v{NODE_VERSION} ({arch})",
+        )
+        with tarfile.open(tar_path) as tf:
+            tf.extractall(install_dir)
+        extracted = install_dir / f"node-v{NODE_VERSION}-linux-{arch}"
+        for item in extracted.iterdir():
+            shutil.move(str(item), str(install_dir / item.name))
+        extracted.rmdir()
+        tar_path.unlink(missing_ok=True)
+    return bin_dir
+
+
+@pytest.fixture(scope="session")
+def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
+    """Pinned-SHA clone of the OpenResponses compliance suite with bun
+    deps installed. A `.installed` sentinel file marks a completed setup
+    so an interrupted prior install forces a clean redo."""
+    install_dir = _tools_cache / f"openresponses-{OPENRESPONSES_SHA}"
+    sentinel = install_dir / ".installed"
+    with FileLock(str(_tools_cache / "openresponses.lock")):
+        if sentinel.exists():
+            return install_dir
+        if install_dir.exists():
+            shutil.rmtree(install_dir)
+        _retry_network_op(
+            lambda: subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--filter=blob:none",
+                    OPENRESPONSES_REPO,
+                    str(install_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ),
+            description="clone openresponses",
+        )
+        subprocess.run(
+            ["git", "-C", str(install_dir), "checkout", OPENRESPONSES_SHA],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _retry_network_op(
+            lambda: subprocess.run(
+                [str(_bun_binary), "install", "--frozen-lockfile"],
+                cwd=str(install_dir),
+                check=True,
+                capture_output=True,
+                text=True,
+            ),
+            description="bun install openresponses deps",
+        )
+        sentinel.touch()
+    return install_dir
+
+
+def _install_npm_cli(
+    tools_cache: Path,
+    node_bin: Path,
+    package: str,
+    binary_name: str,
+    slot: str,
+) -> Path:
+    """Install `package` into `{tools_cache}/{slot}` via npm and return
+    the path to the CLI entry point. Shared helper for codex + claude."""
+    install_dir = tools_cache / slot
+    cli_bin = install_dir / "node_modules" / ".bin" / binary_name
+    with FileLock(str(tools_cache / f"{slot}.lock")):
+        if cli_bin.exists():
+            return cli_bin
+        install_dir.mkdir(parents=True, exist_ok=True)
+        env = {
+            **os.environ,
+            "PATH": f"{node_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+        _retry_network_op(
+            lambda: subprocess.run(
+                [
+                    str(node_bin / "npm"),
+                    "install",
+                    "--prefix",
+                    str(install_dir),
+                    package,
+                ],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ),
+            description=f"npm install {package}",
+        )
+    return cli_bin
+
+
+@pytest.fixture(scope="session")
+def _codex_cli(_tools_cache, _node_bin) -> Path:
+    return _install_npm_cli(
+        _tools_cache,
+        _node_bin,
+        package="@openai/codex",
+        binary_name="codex",
+        slot="codex",
+    )
+
+
+@pytest.fixture(scope="session")
+def _claude_cli(_tools_cache, _node_bin) -> Path:
+    return _install_npm_cli(
+        _tools_cache,
+        _node_bin,
+        package="@anthropic-ai/claude-code",
+        binary_name="claude",
+        slot="claude",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.sglang
@@ -97,38 +366,30 @@ def _agent_subprocess_env(extra_env: dict[str, str]) -> dict[str, str]:
 @pytest.mark.model(COMPLIANCE_MODEL)
 @pytest.mark.profiled_vram_gib(6.0)
 @pytest.mark.requested_sglang_kv_tokens(512)
-# Budget: sglang cold start (30-60s) + bun compliance (up to 180s) +
+# Budget: tool-install fixtures (~30-60s first session run, near-zero on
+# cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
 # codex exec (up to 180s) + claude exec (up to 180s) + two inter-suite
-# health checks + teardown. 750s leaves headroom for CI variance
-# without masking real hangs.
+# health checks + teardown. 750s leaves headroom for CI variance without
+# masking real hangs.
 @pytest.mark.timeout(750)
-# Routed to the dedicated `frontend-api-surface-compliance-check` CI job
-# on PRs, deliberately *not* listed in `backend-status-check.needs` —
-# failures surface on the PR but don't block merge. Promote by adding
-# the job to that list once the suite's signal is trustworthy. Marker
-# is outside `pre_merge` so the main sglang gate job's filter doesn't
-# pick it up; `post_merge` satisfies the repo's required Lifecycle
-# marker check and runs the suite on main after merge for trailing
-# signal via post-merge-ci.yml.
 @pytest.mark.frontend_api_surface_compliance
-@pytest.mark.post_merge
+@pytest.mark.pre_merge
 def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
     tmp_path,
+    _bun_binary,
+    _node_bin,
+    _openresponses_suite,
+    _codex_cli,
+    _claude_cli,
 ):
     """Assert the frontend passes the upstream OpenResponses compliance suite."""
 
     frontend_port = int(dynamo_dynamic_ports.frontend_port)
     system_port = int(dynamo_dynamic_ports.system_ports[0])
-
-    if not os.path.isdir(OPENRESPONSES_DIR):
-        pytest.skip(
-            f"OpenResponses suite not pre-installed at {OPENRESPONSES_DIR} "
-            "— rebuild the test image from container/Dockerfile.test"
-        )
 
     config = EngineConfig(
         name="responses_compliance",
@@ -189,11 +450,18 @@ def test_frontend_api_surface_compliance(
     claude_home.mkdir()
 
     with EngineProcess.from_script(config, request, extra_env=merged_env):
-        _run_bun_compliance(frontend_port)
+        _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
-        _run_codex_exec_smoke(codex_home, agent_cwd, marker_filename)
+        _run_codex_exec_smoke(_codex_cli, codex_home, agent_cwd, marker_filename)
         _wait_for_frontend_healthy(frontend_port)
-        _run_claude_exec_smoke(claude_home, agent_cwd, marker_filename, frontend_port)
+        _run_claude_exec_smoke(
+            _claude_cli,
+            _node_bin,
+            claude_home,
+            agent_cwd,
+            marker_filename,
+            frontend_port,
+        )
 
 
 def _attach_subprocess_log(
@@ -275,13 +543,15 @@ def _wait_for_frontend_healthy(
     )
 
 
-def _run_bun_compliance(frontend_port: int) -> None:
+def _run_bun_compliance(
+    bun_binary: Path, openresponses_dir: Path, frontend_port: int
+) -> None:
     """Invoke compliance-test.ts against the running frontend."""
     base_url = f"http://localhost:{frontend_port}/v1"
     logger.info("Running OpenResponses compliance suite against %s", base_url)
 
     cmd = [
-        "bun",
+        str(bun_binary),
         "run",
         "bin/compliance-test.ts",
         "--base-url",
@@ -294,7 +564,7 @@ def _run_bun_compliance(frontend_port: int) -> None:
     ]
     result = subprocess.run(
         cmd,
-        cwd=OPENRESPONSES_DIR,
+        cwd=str(openresponses_dir),
         capture_output=True,
         text=True,
         timeout=180,
@@ -304,7 +574,7 @@ def _run_bun_compliance(frontend_port: int) -> None:
         name="bun_compliance_suite.log",
         cmd=cmd,
         result=result,
-        cwd=OPENRESPONSES_DIR,
+        cwd=str(openresponses_dir),
     )
     if result.stdout:
         logger.info("compliance stdout:\n%s", result.stdout)
@@ -337,7 +607,9 @@ env_key = "LOCAL_API_KEY"
     )
 
 
-def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
+def _run_codex_exec_smoke(
+    codex_cli: Path, codex_home, cwd, marker_filename: str
+) -> None:
     """Run `codex exec` against the Dynamo Responses endpoint and assert the
     tool-call path actually fires.
 
@@ -362,7 +634,7 @@ def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
     env = _agent_subprocess_env(extra_env)
 
     cmd = [
-        "codex",
+        str(codex_cli),
         "-m",
         COMPLIANCE_MODEL,
         "-c",
@@ -407,7 +679,12 @@ def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
 
 
 def _run_claude_exec_smoke(
-    claude_home, cwd, marker_filename: str, frontend_port: int
+    claude_cli: Path,
+    node_bin: Path,
+    claude_home,
+    cwd,
+    marker_filename: str,
+    frontend_port: int,
 ) -> None:
     """Run `claude -p` against the Dynamo Anthropic Messages endpoint and
     assert the Bash tool-call path actually fires.
@@ -430,10 +707,12 @@ def _run_claude_exec_smoke(
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
     }
-    env = _agent_subprocess_env(extra_env)
+    # claude shells out to `node` internally; make sure the fixture-installed
+    # runtime resolves on PATH without inheriting the runner's node.
+    env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
 
     cmd = [
-        "claude",
+        str(claude_cli),
         "--model",
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
