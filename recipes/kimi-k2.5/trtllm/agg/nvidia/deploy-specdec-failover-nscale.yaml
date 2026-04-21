@@ -42,7 +42,12 @@ data:
   config.yaml: |
     backend: pytorch
     trust_remote_code: true
-    allreduce_strategy: MNNVL
+    # allreduce_strategy is intentionally omitted here. The Python worker
+    # forces NCCL when --gms-shadow-mode is set (see
+    # lib/gpu_memory_service/integrations/trtllm/utils.py::
+    # force_nccl_allreduce_for_shadow). MNNVL needs a ~180 GiB symmetric
+    # VA window per process and cannot coexist with a second co-located
+    # engine on the same GPU set.
     max_num_tokens: 8192
     enable_chunked_prefill: false
     enable_attention_dp: false
@@ -167,8 +172,13 @@ spec:
               value: "0"
             - name: OMPI_MCA_pml
               value: ob1
+            # vader (shared-memory BTL) segfaults in
+            # ompi_dpm_connect_accept -> mca_btl_vader_poll_handle_frag on
+            # nscale B200 nodes under co-located engines. Drop it; self+tcp
+            # is enough for the MPI connect/accept handshake between the
+            # two engine containers in this pod.
             - name: OMPI_MCA_btl
-              value: "self,vader,tcp"
+              value: "self,tcp"
           volumeMounts:
             - name: llm-config
               mountPath: /opt/dynamo/configs

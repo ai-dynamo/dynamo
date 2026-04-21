@@ -108,8 +108,12 @@ spec:
               value: "0"
             - name: OMPI_MCA_pml
               value: ob1
+            # vader (shared-memory BTL) segfaults in
+            # ompi_dpm_connect_accept -> mca_btl_vader_poll_handle_frag on
+            # co-located engines. Drop it; self+tcp is enough for the MPI
+            # connect/accept handshake between the two engine containers.
             - name: OMPI_MCA_btl
-              value: "self,vader,tcp"
+              value: "self,tcp"
           volumeMounts:
             - name: hf-cache
               mountPath: /home/dynamo/.cache/huggingface
