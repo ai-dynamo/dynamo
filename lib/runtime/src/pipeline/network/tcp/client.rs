@@ -832,10 +832,10 @@ mod tests {
             handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
         });
 
-        // Bypass the codec and write a partial TwoPartCodec header. EOF with
-        // buffered bytes drives the client reader into Some(Err(_)).
-        server.write_all(&[0u8; 8]).await.unwrap();
-        server.shutdown().await.unwrap();
+        // Bypass the codec and write a complete but invalid TwoPartCodec
+        // header. This drives the client reader into Some(Err(_)) without
+        // closing the server side of the socket.
+        server.write_all(&[0xFF; 24]).await.unwrap();
 
         let monitor_context: Arc<dyn AsyncEngineContext> = controller.clone();
         let result = tokio::time::timeout(
