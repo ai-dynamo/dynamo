@@ -9,6 +9,7 @@ DecodeRegressionModel, AggRegressionModel) without any planner adapter.
 FPM-driven scaling integration tests live in test_state_machine.py.
 """
 
+import os
 from unittest.mock import Mock, patch
 
 import pytest
@@ -671,8 +672,17 @@ class TestRefreshWorkerInfoFromConnector:
 
     def _make_planner(self, require_prefill=False, require_decode=True):
         """Build a minimal NativePlannerBase with no_operation=True."""
-        with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
-            mock_gauge.return_value = Mock()
+        # Bypass Prometheus registration (Gauge+Enum double-register across
+        # tests). KubernetesConnector.__init__ loads ~/.kube/config and reads
+        # DYN_PARENT_DGD_K8S_NAME; stub both so this runs in plain pytest envs.
+        with patch(
+            "dynamo.planner.core.base.PlannerPrometheusMetrics"
+        ) as mock_metrics, patch(
+            "dynamo.planner.connectors.kubernetes.KubernetesAPI"
+        ), patch.dict(
+            os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+        ):
+            mock_metrics.return_value = Mock()
             config = PlannerConfig.model_construct(
                 throughput_adjustment_interval=60,
                 prefill_engine_num_gpu=1,
