@@ -1317,3 +1317,51 @@ def completions_response_handler(response):
 
 def chat_completions_response_handler(response):
     return ChatPayload.extract_content(response)
+
+
+@dataclass
+class ImageGenerationPayload(BasePayload):
+    """Payload for /v1/images/generations endpoint (diffusion image generation)."""
+
+    endpoint: str = "/v1/images/generations"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in image response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Image response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
+
+
+@dataclass
+class VideoGenerationPayload(BasePayload):
+    """Payload for /v1/videos endpoint (diffusion video generation)."""
+
+    endpoint: str = "/v1/videos"
+    timeout: int = 600
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "completed", (
+            f"Video generation not completed. Status: {result.get('status')}, "
+            f"Error: {result.get('error', 'none')}"
+        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"

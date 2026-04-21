@@ -255,6 +255,7 @@ impl KvIndexer {
                             let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
                             let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash: None,
+                                start_position: None,
                                 blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
                                     tokens_hash: *local_hash,
                                     block_hash: ExternalSequenceBlockHash(*sequence_hash),

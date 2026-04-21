@@ -123,8 +123,10 @@ def _compute_mm_uuids(
     """
     Compute multi_modal_uuids from multi_modal_data.
 
-    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
-    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    Each image gets a blake3 hex digest as its UUID (computed by
+    compute_mm_uuids_from_images over a fixed-length header + pixel
+    preimage), ensuring consistent hashing across the MM Router, vLLM
+    handler, and Rust KV publisher.
     """
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
@@ -1379,8 +1381,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "token_ids": [],
                     },
                 )
-        # Normal path: use token IDs
-        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        # Normal path: use token IDs.
+        # In EPD mode multi_modal_data carries pre-computed embeddings from the
+        # encode worker, not raw images — skip UUID production here; raw-image
+        # identity lives upstream at the Router / URL-keyed encoder cache.
+        if self.embedding_loader is None:
+            mm_uuids = _compute_mm_uuids(multi_modal_data)
+        else:
+            mm_uuids = None
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,

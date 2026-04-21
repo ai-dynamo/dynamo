@@ -464,6 +464,7 @@ pub fn convert_event(
                     parent_hash: parent_block_hash
                         .map(BlockHashValue::into_u64)
                         .map(ExternalSequenceBlockHash::from),
+                    start_position: None,
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,
