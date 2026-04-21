@@ -203,6 +203,17 @@ impl V1EnvCompat {
     }
 
     /// Scan `DYN_KVBM_NIXL_BACKEND_*` env vars and build a NixlConfig.
+    ///
+    /// Also synthesizes per-backend parameter maps from adjacent env vars when
+    /// present:
+    ///   - `DYN_KVBM_NIXL_POSIX_API = aio|uring|posix_aio|auto` →
+    ///     sets the POSIX plugin's `use_aio` / `use_uring` / `use_posix_aio`
+    ///     triad (the actual NIXL plugin params; see
+    ///     `nixl/src/plugins/posix/posix_backend.cpp`). Without this, the
+    ///     plugin falls back to POSIXAIO (glibc `aio_*`) regardless of what
+    ///     the operator asked for — this is what hit the 2026-04-21 sweeps
+    ///     where every POSIX backend reported `queue type: POSIXAIO` despite
+    ///     `nixl_posix_api = "uring"` being set in the test toml.
     fn apply_nixl_backends(&self, dict: &mut Dict) -> Result<(), Box<figment::Error>> {
         let prefix = "DYN_KVBM_NIXL_BACKEND_";
         let mut backends: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -219,6 +230,47 @@ impl V1EnvCompat {
             let nixl_config = NixlConfig::new(backends);
             let value = Value::serialize(nixl_config)?;
             merge_nested(dict, "nixl", value);
+        }
+
+        // POSIX queue-type selector. Emitted independently of the
+        // `DYN_KVBM_NIXL_BACKEND_POSIX` env toggle because in production the
+        // POSIX backend is typically enabled via the inbound JSON
+        // `kv_transfer_config` (`worker.nixl.backends.POSIX = {}`) rather than
+        // via this v1_compat env path. Writing the three `use_*` keys via
+        // `merge_nested` as dotted leaves overlays them on top of whatever
+        // `backends.POSIX` dict already exists without disturbing UCX, GDS,
+        // etc. Use `DYN_KVBM_NIXL_POSIX_API=posix_aio` to restore the legacy
+        // glibc-aio default; `aio` picks kernel-AIO; `uring` (default) picks
+        // io_uring.
+        if let Ok(api) = std::env::var("DYN_KVBM_NIXL_POSIX_API") {
+            let api = api.to_ascii_lowercase();
+            let (use_aio, use_uring, use_posix_aio) = match api.as_str() {
+                "uring" | "auto" | "" => ("false", "true", "false"),
+                "aio" => ("true", "false", "false"),
+                "posix_aio" | "posixaio" => ("false", "false", "true"),
+                other => {
+                    tracing::warn!(
+                        value = %other,
+                        "Unknown DYN_KVBM_NIXL_POSIX_API; defaulting to uring"
+                    );
+                    ("false", "true", "false")
+                }
+            };
+            merge_nested(
+                dict,
+                "nixl.backends.POSIX.use_aio",
+                Value::from(use_aio.to_string()),
+            );
+            merge_nested(
+                dict,
+                "nixl.backends.POSIX.use_uring",
+                Value::from(use_uring.to_string()),
+            );
+            merge_nested(
+                dict,
+                "nixl.backends.POSIX.use_posix_aio",
+                Value::from(use_posix_aio.to_string()),
+            );
         }
 
         Ok(())

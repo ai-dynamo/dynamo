@@ -4,6 +4,7 @@
 use kvbm_engine::offload::{TransferHandle, TransferStatus};
 
 use super::*;
+use super::slot::TransactionState;
 
 impl ConnectorLeader {
     /// Mark a request as finished, returning the status.
@@ -31,6 +32,64 @@ impl ConnectorLeader {
             drop(slot);
             self.remove_slot(request_id);
             return FinishedStatus::Finished;
+        }
+
+        // vLLM may call `request_finished` while we are still searching or
+        // loading from external KV cache (client timeout/disconnect, scheduler
+        // preemption, eviction restore). Without this guard the code below
+        // falls through to `txn_take_offloading`, which is only valid from
+        // `Offloading` and returns `InvalidTransition`. We then return
+        // `initial_status` (`Pending`) without cancelling the find session or
+        // releasing its `session_id`, leaving the slot pinned in
+        // `{PreparingToOnboard, Onboarding} + MarkedForDeletion` forever —
+        // which in turn keeps G2/G3 blocks pinned so `/reset/g2` reports
+        // `BlockCountMismatch` indefinitely (observed
+        // 2026-04-21_15-00-13: 8 leaked slots → 60 s client timeout on
+        // `clear` → SLURM SIGTERM).
+        //
+        // Cancel the in-flight onboarding, release the session, drop the
+        // slot, and report `Finished`. Mirrors the cleanup in
+        // `onboard.rs::execute_onboarding` after a successful load.
+        if matches!(
+            slot.txn_state(),
+            TransactionState::PreparingToOnboard(_) | TransactionState::Onboarding(_)
+        ) {
+            match slot.txn_cancel_onboarding() {
+                Ok(onboarding_state) => {
+                    let session_id = onboarding_state.find_session.session_id();
+                    // Defense in depth: drain any queued intra-pass load data
+                    // so we don't leave stale G2/G1 block-id pairs on a slot
+                    // that is about to be dropped. In practice this is always
+                    // `None` here — `process_scheduler_output` drains it at
+                    // the end of the same step that sets it — but consuming
+                    // it explicitly keeps cleanup symmetrical with the happy
+                    // path and guards against future intra-pass schedulers
+                    // that might queue data across multiple steps.
+                    let _ = slot.take_pending_intra_pass();
+                    drop(slot);
+                    if let Some(session_id) = session_id {
+                        if let Some(leader) = self.instance_leader.get() {
+                            leader.release_session(session_id);
+                        }
+                    }
+                    self.remove_slot(request_id);
+                    tracing::debug!(
+                        "cancelled in-flight onboarding on request_finished for {}",
+                        request_id
+                    );
+                    return FinishedStatus::Finished;
+                }
+                Err(e) => {
+                    // Unreachable: state matched above under the slot lock.
+                    // Fall through to the existing error path rather than
+                    // panicking mid-teardown.
+                    tracing::error!(
+                        "Unexpected failure cancelling onboarding for {}: {}",
+                        request_id,
+                        e
+                    );
+                }
+            }
         }
 
         // Try to take the offloading state to check handles

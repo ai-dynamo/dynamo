@@ -285,6 +285,30 @@ impl SlotStateMachine {
         }
     }
 
+    /// Cancel an in-flight onboarding, transitioning to `Inactive`.
+    ///
+    /// Accepts either `PreparingToOnboard` or `Onboarding` (unlike
+    /// `txn_take_onboarding`, which only accepts `Onboarding`). Used by
+    /// `request_finished` when vLLM aborts a request before the find
+    /// session completes (client timeout, preemption, eviction restore).
+    /// Returns the embedded `OnboardingState` so the caller can release
+    /// the `session_id` on `InstanceLeader`.
+    fn txn_cancel_onboarding(&mut self) -> Result<OnboardingState, StateTransitionError> {
+        let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
+        match current {
+            TransactionState::PreparingToOnboard(state)
+            | TransactionState::Onboarding(state) => Ok(state),
+            other => {
+                let from = other.name();
+                self.txn_state = other;
+                Err(StateTransitionError::InvalidTransition {
+                    from,
+                    to: "Inactive (via cancel_onboarding)",
+                })
+            }
+        }
+    }
+
     /// Begin offloading blocks to remote storage.
     ///
     /// Only valid from `Inactive` state. Takes ownership of the offloading state.
@@ -844,6 +868,15 @@ impl RequestSlot {
     /// Returns the `OnboardingState` containing the session ID and find session.
     pub fn txn_take_onboarding(&mut self) -> Result<OnboardingState, StateTransitionError> {
         self.state.txn_take_onboarding()
+    }
+
+    /// Cancel an in-flight onboarding, transitioning to `Inactive`.
+    ///
+    /// Accepts either `PreparingToOnboard` or `Onboarding`. Used by
+    /// `request_finished` to tear down slots whose request was aborted
+    /// mid-onboarding (client timeout, preemption, eviction restore).
+    pub fn txn_cancel_onboarding(&mut self) -> Result<OnboardingState, StateTransitionError> {
+        self.state.txn_cancel_onboarding()
     }
 
     /// Begin offloading blocks to remote storage.

@@ -4,17 +4,95 @@
 //! Disk-backed memory storage using memory-mapped files.
 
 use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use aligned_vec::{AVec, ConstAlign};
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
 use core::ffi::c_char;
 use nix::fcntl::{FallocateFlags, fallocate};
-use nix::unistd::unlink;
+use nix::unistd::{ftruncate, unlink};
 use std::ffi::CString;
-use std::os::fd::BorrowedFd;
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::{BorrowedFd, RawFd};
 
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
 const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
+const DISK_ZEROFILL_FALLBACK_KEY: &str = "DYN_KVBM_DISK_ZEROFILL_FALLBACK";
+const ZERO_BUF_SIZE: usize = 16 * 1024 * 1024;
+const PAGE_SIZE: usize = 4096;
+type Align4096 = ConstAlign<4096>;
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn create_aligned_buffer(size: usize) -> anyhow::Result<AVec<u8, Align4096>> {
+    let aligned_size = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let mut buf = AVec::<u8, Align4096>::new(PAGE_SIZE);
+    buf.resize(aligned_size, 0u8);
+    Ok(buf)
+}
+
+fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    match fallocate(borrowed_fd, FallocateFlags::empty(), 0, size as i64) {
+        Ok(_) => Ok(()),
+        Err(err) => match err {
+            nix::errno::Errno::EOPNOTSUPP => {
+                if env_truthy(DISK_ZEROFILL_FALLBACK_KEY) {
+                    tracing::warn!(
+                        "fallocate() not supported; using zero-fill fallback via {}",
+                        DISK_ZEROFILL_FALLBACK_KEY
+                    );
+                    let buf = create_aligned_buffer(ZERO_BUF_SIZE)?;
+                    let dup_fd = nix::unistd::dup(borrowed_fd)?;
+                    let mut file = File::from(dup_fd);
+                    let mut written: u64 = 0;
+                    while written < size {
+                        let remaining = size - written;
+                        let to_write = if remaining >= buf.len() as u64 {
+                            buf.len()
+                        } else {
+                            let aligned = (remaining as usize).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+                            std::cmp::min(aligned, buf.len())
+                        };
+                        match file.write(&buf[..to_write]) {
+                            Ok(n) if n == to_write => written += n as u64,
+                            Ok(n) => anyhow::bail!(
+                                "Partial zero-fill write: expected {} bytes, wrote {}",
+                                to_write,
+                                n
+                            ),
+                            Err(e) if e.raw_os_error() == Some(22) => {
+                                anyhow::bail!(
+                                    "Zero-fill write failed with EINVAL while using O_DIRECT. Original error: {}",
+                                    e
+                                )
+                            }
+                            Err(e) => anyhow::bail!("Zero-fill write failed: {}", e),
+                        }
+                    }
+                    file.flush()?;
+                    if written > size {
+                        ftruncate(borrowed_fd, size as i64)?;
+                    }
+                    Ok(())
+                } else {
+                    tracing::warn!(
+                        "fallocate() not supported; using truncate fallback. Set {}=true for zero-fill fallback.",
+                        DISK_ZEROFILL_FALLBACK_KEY
+                    );
+                    ftruncate(borrowed_fd, size as i64)?;
+                    Ok(())
+                }
+            }
+            _ => Err(err.into()),
+        },
+    }
+}
 
 /// Disk-backed storage using memory-mapped files with O_DIRECT support.
 #[derive(Debug)]
@@ -126,18 +204,9 @@ impl DiskStorage {
             (fd, file_path)
         };
 
-        // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        unsafe {
-            fallocate(
-                BorrowedFd::borrow_raw(raw_fd),
-                FallocateFlags::empty(),
-                0,
-                len as i64,
-            )
-            .map_err(|e| {
-                StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
-            })?
-        };
+        allocate_file(raw_fd, len as u64).map_err(|e| {
+            StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
+        })?;
 
         Ok(Self {
             fd: raw_fd as u64,

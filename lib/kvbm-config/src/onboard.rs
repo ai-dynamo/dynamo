@@ -8,11 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_stage_chunk_size() -> usize {
+    16
+}
+
 /// Configuration for KV cache onboarding strategy.
 ///
 /// Onboarding is the process of loading external KV cache blocks from
 /// G2 (host memory) into G1 (GPU memory) for use during inference.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnboardConfig {
     /// The onboarding mode to use.
     ///
@@ -20,6 +24,22 @@ pub struct OnboardConfig {
     /// - `intra`: Synchronous layer-wise loading during forward pass
     #[serde(default)]
     pub mode: OnboardMode,
+
+    /// Number of blocks per G3->G2 staging transfer request.
+    ///
+    /// This is a fixed-size chunk used when staging from disk to host to bound
+    /// transfer request size and background notification pressure.
+    #[serde(default = "default_stage_chunk_size")]
+    pub stage_chunk_size: usize,
+}
+
+impl Default for OnboardConfig {
+    fn default() -> Self {
+        Self {
+            mode: OnboardMode::default(),
+            stage_chunk_size: default_stage_chunk_size(),
+        }
+    }
 }
 
 /// Onboarding mode for loading external KV cache blocks.
@@ -58,6 +78,7 @@ mod tests {
     fn test_default_mode_is_inter() {
         let config = OnboardConfig::default();
         assert_eq!(config.mode, OnboardMode::Inter);
+        assert_eq!(config.stage_chunk_size, 16);
     }
 
     #[test]
@@ -66,11 +87,21 @@ mod tests {
         let json = r#"{"mode": "inter"}"#;
         let config: OnboardConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.mode, OnboardMode::Inter);
+        assert_eq!(config.stage_chunk_size, 16);
 
         // Test intra mode
         let json = r#"{"mode": "intra"}"#;
         let config: OnboardConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.mode, OnboardMode::Intra);
+        assert_eq!(config.stage_chunk_size, 16);
+    }
+
+    #[test]
+    fn test_stage_chunk_size_serde_roundtrip() {
+        let json = r#"{"mode": "inter", "stage_chunk_size": 32}"#;
+        let config: OnboardConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mode, OnboardMode::Inter);
+        assert_eq!(config.stage_chunk_size, 32);
     }
 
     #[test]
@@ -78,5 +109,6 @@ mod tests {
         let json = r#"{}"#;
         let config: OnboardConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.mode, OnboardMode::Inter);
+        assert_eq!(config.stage_chunk_size, 16);
     }
 }

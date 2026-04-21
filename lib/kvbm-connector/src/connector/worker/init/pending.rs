@@ -245,13 +245,16 @@ impl PendingWorkerState {
             let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
                 let mut disk_layout = self.layout_config.clone();
                 disk_layout.num_blocks = disk_blocks;
+                let disk_cache_dir = config
+                    .disk_storage_path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("/tmp"));
+                let disk_path = disk_cache_dir
+                    .join(format!("kvbm_g3_{}.bin", runtime.messenger().instance_id()));
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
-                    .allocate_disk(Some(PathBuf::from(format!(
-                        "/tmp/kvbm_g3_{}.bin",
-                        runtime.messenger().instance_id()
-                    ))))
+                    .allocate_disk(Some(disk_path))
                     .build()?;
 
                 let handle = transfer_manager.register_layout(disk_layout)?;

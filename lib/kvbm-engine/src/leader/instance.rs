@@ -114,6 +114,9 @@ pub struct InstanceLeader {
     /// Object storage client for G4 search and load operations.
     /// Leader calls has_blocks on S3 directly, coordinates workers for get_blocks.
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+
+    /// Number of blocks per G3->G2 staging transfer request.
+    stage_chunk_size: usize,
 }
 
 /// Builder for InstanceLeader.
@@ -128,6 +131,7 @@ pub struct InstanceLeaderBuilder {
     remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+    stage_chunk_size: usize,
 }
 
 impl InstanceLeaderBuilder {
@@ -215,6 +219,11 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    pub fn stage_chunk_size(mut self, size: usize) -> Self {
+        self.stage_chunk_size = size.max(1);
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
@@ -266,6 +275,7 @@ impl InstanceLeaderBuilder {
             transport,
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
+            stage_chunk_size: self.stage_chunk_size.max(1),
         })
     }
 }
@@ -516,6 +526,7 @@ impl InstanceLeader {
         let g2_manager = self.g2_manager.clone();
         let g3_manager = self.g3_manager.clone();
         let parallel_worker = self.parallel_worker.clone();
+        let stage_chunk_size = self.stage_chunk_size;
         let transport = self.transport.clone();
         let sessions = self.sessions.clone();
 
@@ -536,6 +547,7 @@ impl InstanceLeader {
                     g2_manager.clone(),
                     g3_manager.clone(),
                     parallel_worker.clone(),
+                    stage_chunk_size,
                     transport.clone(),
                 );
 
@@ -686,6 +698,7 @@ impl InstanceLeader {
             worker_g2_handles,
             self.g2_manager.clone(),
             self.parallel_worker.clone(),
+            self.stage_chunk_size,
             cmd_rx,
             ServerSessionOptions {
                 auto_stage: options.auto_stage,
@@ -1239,6 +1252,7 @@ impl Leader for InstanceLeader {
             self.g3_manager.clone(),
             self.parallel_worker.clone(),
             self.transport.clone(),
+            self.stage_chunk_size,
             status_tx.clone(),
             all_g2_blocks.clone(),
             match_breakdown.clone(),

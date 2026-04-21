@@ -99,6 +99,7 @@ pub struct InitiatorSession {
     g3_manager: Option<Arc<BlockManager<G3>>>,
     parallel_worker: Option<Arc<dyn ParallelWorkers>>,
     transport: Arc<MessageTransport>,
+    stage_chunk_size: usize,
     status_tx: watch::Sender<OnboardingStatus>,
 
     // Held blocks from local search using BlockHolder for RAII semantics
@@ -140,6 +141,7 @@ impl InitiatorSession {
         g3_manager: Option<Arc<BlockManager<G3>>>,
         parallel_worker: Option<Arc<dyn ParallelWorkers>>,
         transport: Arc<MessageTransport>,
+        stage_chunk_size: usize,
         status_tx: watch::Sender<OnboardingStatus>,
         all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
         match_breakdown: Arc<Mutex<MatchBreakdown>>,
@@ -154,6 +156,7 @@ impl InitiatorSession {
             g3_manager,
             parallel_worker,
             transport,
+            stage_chunk_size,
             status_tx,
             local_g2_blocks: BlockHolder::empty(),
             local_g3_blocks: BlockHolder::empty(),
@@ -894,9 +897,13 @@ impl InitiatorSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3→G2 staging"))?;
 
-        let result =
-            staging::stage_g3_to_g2(&self.local_g3_blocks, &self.g2_manager, &**parallel_worker)
-                .await?;
+        let result = staging::stage_g3_to_g2(
+            &self.local_g3_blocks,
+            &self.g2_manager,
+            &**parallel_worker,
+            self.stage_chunk_size,
+        )
+        .await?;
 
         let _ = self.local_g3_blocks.take_all();
         self.local_g2_blocks.extend(result.new_g2_blocks);

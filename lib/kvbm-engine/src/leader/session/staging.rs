@@ -26,8 +26,14 @@ pub struct StagingResult {
 
 /// Stage G3 blocks to G2.
 ///
-/// Core staging kernel: allocate G2 destinations → execute local transfer (G3→G2)
-/// → register new G2 blocks with the source sequence hashes → return new blocks.
+/// Core staging kernel: allocate G2 destinations → execute local transfers (G3→G2)
+/// in fixed-size chunks sequentially → register new G2 blocks with the source
+/// sequence hashes → return new blocks.
+///
+/// Chunking bounds the number of io_uring SQ entries per NIXL XferReq, preventing
+/// ring exhaustion on large sequences. Chunks are processed sequentially (one
+/// XferReq at a time) to avoid overflowing the background NIXL notification
+/// channel when many sessions stage concurrently.
 ///
 /// The caller is responsible for:
 /// - Clearing the G3 holder (`take_all()`)
@@ -37,6 +43,7 @@ pub async fn stage_g3_to_g2(
     g3_blocks: &BlockHolder<G3>,
     g2_manager: &BlockManager<G2>,
     parallel_worker: &dyn ParallelWorkers,
+    stage_chunk_size: usize,
 ) -> Result<StagingResult> {
     if g3_blocks.is_empty() {
         return Ok(StagingResult {
@@ -45,27 +52,32 @@ pub async fn stage_g3_to_g2(
     }
 
     let src_ids: Vec<BlockId> = g3_blocks.blocks().iter().map(|b| b.block_id()).collect();
+    let chunk_size = stage_chunk_size.max(1);
 
-    // Allocate destination G2 blocks
+    // Allocate all destination G2 blocks upfront
     let dst_blocks = g2_manager
         .allocate_blocks(src_ids.len())
         .ok_or_else(|| anyhow::anyhow!("Failed to allocate G2 blocks"))?;
 
     let dst_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
-    // Execute transfer
-    let notification = parallel_worker.execute_local_transfer(
-        LogicalLayoutHandle::G3,
-        LogicalLayoutHandle::G2,
-        Arc::from(src_ids),
-        Arc::from(dst_ids),
-        TransferOptions::default(),
-    )?;
+    // Process each chunk sequentially: submit one NIXL XferReq, await completion,
+    // then submit the next. Sequential dispatch keeps at most one notification
+    // in the background polling channel at a time, preventing channel overflow
+    // when many staging sessions run concurrently.
+    for (src_chunk, dst_chunk) in src_ids.chunks(chunk_size).zip(dst_ids.chunks(chunk_size)) {
+        let notification = parallel_worker.execute_local_transfer(
+            LogicalLayoutHandle::G3,
+            LogicalLayoutHandle::G2,
+            Arc::from(src_chunk),
+            Arc::from(dst_chunk),
+            TransferOptions::default(),
+        )?;
+        notification.into_future().await?;
+    }
 
-    // Wait for transfer to complete
-    notification.await?;
-
-    // Register new G2 blocks using the G3 blocks' metadata (sequence hashes)
+    // Register new G2 blocks using the G3 blocks' metadata (sequence hashes).
+    // Chunk boundaries do not affect registration order.
     let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
         .into_iter()
         .zip(g3_blocks.blocks().iter())

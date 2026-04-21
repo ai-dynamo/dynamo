@@ -513,7 +513,7 @@ impl TransferManager {
     pub(crate) fn register_cuda_event(
         &self,
         event: cudarc::driver::CudaEvent,
-    ) -> TransferCompleteNotification {
+    ) -> Result<TransferCompleteNotification> {
         self.context.register_cuda_event(event)
     }
 
