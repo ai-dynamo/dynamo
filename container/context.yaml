@@ -35,7 +35,7 @@ dynamo:
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  ffmpeg_version: "7.1"
+  ffmpeg_version: "8.1"
   efa_version: 1.47.0
 
 vllm:
