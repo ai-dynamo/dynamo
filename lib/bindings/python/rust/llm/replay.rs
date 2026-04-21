@@ -1345,7 +1345,25 @@ impl PlannerReplayBridge {
 
     /// Drain accumulated traffic metrics since the last drain.
     ///
-    /// Returns a dict with `duration_s`, `num_req`, `avg_isl`, `avg_osl`.
+    /// Returns a dict with:
+    ///   - `duration_s`      (f64): window length in seconds
+    ///   - `num_req`         (usize): completed requests in the window
+    ///   - `avg_isl`         (f64): mean input sequence length (tokens)
+    ///   - `avg_osl`         (f64): mean output sequence length (tokens)
+    ///   - `avg_ttft_ms`     (f64): mean time-to-first-token in milliseconds,
+    ///                              averaged only over requests that reported
+    ///                              a TTFT sample (0.0 when no samples)
+    ///   - `avg_itl_ms`      (f64): mean inter-token latency in milliseconds,
+    ///                              averaged only over requests that generated
+    ///                              at least one token gap (0.0 when no samples)
+    ///   - `avg_kv_hit_rate` (f64): arithmetic mean of per-request
+    ///                              ``overlap_blocks / isl_blocks`` ratios
+    ///                              across router admissions in the window
+    ///                              (one sample per request, not weighted
+    ///                              by ISL), matching the real router's
+    ///                              `dynamo_component_router_kv_hit_rate`
+    ///                              histogram semantics
+    ///
     /// Call this only on throughput-scaling ticks so the observation window
     /// covers the full `throughput_adjustment_interval`.
     fn drain_traffic(&mut self, py: Python<'_>) -> PyResult<PyObject> {
@@ -1354,13 +1372,16 @@ impl PlannerReplayBridge {
             .as_mut()
             .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
 
-        let (duration_s, num_req, avg_isl, avg_osl) = handle.drain_traffic();
+        let stats = handle.drain_traffic();
 
         let result = json!({
-            "duration_s": duration_s,
-            "num_req": num_req,
-            "avg_isl": avg_isl,
-            "avg_osl": avg_osl,
+            "duration_s": stats.duration_s,
+            "num_req": stats.num_req,
+            "avg_isl": stats.avg_isl,
+            "avg_osl": stats.avg_osl,
+            "avg_ttft_ms": stats.avg_ttft_ms,
+            "avg_itl_ms": stats.avg_itl_ms,
+            "avg_kv_hit_rate": stats.avg_kv_hit_rate,
         });
 
         pythonize(py, &result)

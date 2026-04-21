@@ -5,7 +5,7 @@ package protocol
 
 import (
 	"fmt"
-	"strings"
+	"path/filepath"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -56,17 +56,36 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if opts.SeccompProfile != "" {
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
+	if len(podTemplate.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("checkpoint job requires at least one container")
+	}
+	mainContainer := &podTemplate.Spec.Containers[0]
+
+	// Snapshot contract: control volume + ready-file readiness probe. The
+	// agent reads the pod's Ready condition before starting CRIU dump, so
+	// the workload signals "model loaded, safe to checkpoint" by writing
+	// $DYN_SNAPSHOT_CONTROL_DIR/ready-for-checkpoint. Any per-container
+	// liveness/startup probes are cleared — a checkpoint job runs to a
+	// quiesce-and-sit state, not a long-lived serving state.
+	EnsureControlVolume(&podTemplate.Spec, mainContainer)
+	mainContainer.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"cat", filepath.Join(SnapshotControlMountPath, ReadyForCheckpointFile)},
+			},
+		},
+		PeriodSeconds: 1,
+	}
+	mainContainer.LivenessProbe = nil
+	mainContainer.StartupProbe = nil
+
 	if opts.WrapLaunchJob {
-		if len(podTemplate.Spec.Containers) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires at least one container")
-		}
-		container := &podTemplate.Spec.Containers[0]
-		if len(container.Command) == 0 {
+		if len(mainContainer.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
-		container.Command, container.Args = wrapWithCudaCheckpointLaunchJob(
-			container.Command,
-			container.Args,
+		mainContainer.Command, mainContainer.Args = wrapWithCudaCheckpointLaunchJob(
+			mainContainer.Command,
+			mainContainer.Args,
 		)
 	}
 
@@ -157,18 +176,13 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 	}
 }
 
+// wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
+// workload is launched under `cuda-checkpoint --launch-job`, required for
+// multi-GPU checkpoints. The original command and args are preserved as-is
+// (including shell-form entrypoints): workload-to-agent signaling now uses
+// file sentinels in the snapshot-control volume, so an intervening shell at
+// PID 1 is no longer an issue.
 func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
-	// Unwrap "/bin/sh -c <single-string>" so cuda-checkpoint launches the
-	// actual process directly. Otherwise sh sits between cuda-checkpoint and
-	// the real process and swallows SIGUSR1.
-	if len(command) >= 2 && command[len(command)-1] == "-c" && len(args) == 1 {
-		shell := command[:len(command)-1] // e.g. ["/bin/sh"] — discarded
-		_ = shell
-		parts := strings.Fields(args[0])
-		command = parts[:1] // e.g. ["python3"]
-		args = parts[1:]    // e.g. ["-m", "dynamo.vllm", "--model", ...]
-	}
-
 	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
 	wrappedArgs = append(wrappedArgs, "--launch-job")
 	wrappedArgs = append(wrappedArgs, command...)

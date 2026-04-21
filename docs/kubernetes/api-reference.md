@@ -1542,19 +1542,28 @@ _Underlying type:_ _string_
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 _Validation:_
-- Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s]
+- Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
 
 | Field | Description |
 | --- | --- |
-| `gb200_sxm` |  |
-| `h200_sxm` |  |
-| `h100_sxm` |  |
+| `gb200_sxm` | --- Blackwell ---<br /> |
 | `b200_sxm` |  |
-| `a100_sxm` |  |
-| `l40s` |  |
+| `h200_sxm` | --- Hopper ---<br /> |
+| `h100_sxm` |  |
+| `h100_pcie` |  |
+| `a100_sxm` | --- Ampere ---<br /> |
+| `a100_pcie` |  |
+| `l40s` | --- Ada ---<br /> |
+| `l40` |  |
+| `l4` |  |
+| `v100_sxm` | --- Older NVIDIA ---<br /> |
+| `v100_pcie` |  |
+| `t4` |  |
+| `mi200` | --- AMD ---<br /> |
+| `mi300` |  |
 
 
 #### HardwareSpec
@@ -1571,10 +1580,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+| `interconnect` _string_ | Interconnect describes the primary GPU-to-GPU interconnect *within a node*.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed.<br />  - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink"<br />    vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.<br />Impact of wrong / missing values:<br />  - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance<br />    models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts,<br />    resulting in degraded performance compared to expectations.<br />  - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may<br />    choose conservative plans and leave performance on the table.<br />  - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to<br />    conservative assumptions.<br />Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected. |  | Optional: \{\} <br /> |
+| `rdma` _boolean_ | RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,<br />    GPUDirect settings). It only expresses availability/intent.<br />  - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating<br />    RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery<br />    is unavailable, it may remain unset.<br />Impact of wrong / missing values:<br />  - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or<br />    deployments to assume RDMA is available; depending on the runtime transport selection and<br />    fallback behavior, this can lead to connection/setup failures or performance regressions.<br />  - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and<br />    fall back to non-RDMA transports, usually remaining functional but potentially slower.<br />  - If unset and undiscovered, consumers should treat RDMA availability as unknown and use<br />    conservative defaults / fallback transports. |  | Optional: \{\} <br /> |
 
 
 
@@ -1784,7 +1795,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
-| `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
 | `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
 
 

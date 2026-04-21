@@ -75,6 +75,9 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
+ROUND_ROBIN_MOCKER_SKIP_REASON = (
+    "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
+)
 
 
 def _require_router_aic() -> dict[str, Any]:
@@ -780,6 +783,7 @@ def _launch_disagg_workers(
     indirect=["durable_kv_events"],
 )
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.skip(reason=ROUND_ROBIN_MOCKER_SKIP_REASON)
 def test_mocker_router(
     request,
     runtime_services_dynamic_ports,

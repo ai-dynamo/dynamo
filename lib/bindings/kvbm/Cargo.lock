@@ -1490,14 +1490,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -1652,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dynamo-protocols",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1697,6 +1697,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "crossbeam-queue",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -1751,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -3229,7 +3230,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -3630,9 +3631,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9929c605e135347ccda5e0e7ff0627217f23189915a5c3971265ce490a14abf"
+checksum = "7de62490b58d9862482a2cf223c3aeceaadd01d46ac996d99b4b6a75af204d21"
 dependencies = [
  "anyhow",
  "clap",
@@ -3652,9 +3653,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4997c93ac4b3ded7a999eff0b770aea2448d808ce7f020729e6af11e4c08fe67"
+checksum = "44ec153f868d45d5d48129dd2f1e24755e93f74d6f9f423094a3b784fa6a88cc"
 dependencies = [
  "anyhow",
  "async-trait",

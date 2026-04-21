@@ -69,8 +69,13 @@ pub fn detect_tool_call_start_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) 
 
 /// Returns the position after `<|tool_calls_section_end|>` (or singular variant) or the length
 /// of the chunk if not found.
-pub fn find_tool_call_end_position_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) -> usize {
-    // Find the earliest matching end token variant.
+/// Returns `Some(pos)` when `section_end` is found, or `None` when it is
+/// missing. `None` tells the streaming jail that the section is not properly
+/// closed and it should keep accumulating instead of early-exiting.
+pub fn find_tool_call_end_position_kimi_k2(
+    chunk: &str,
+    config: &KimiK2ParserConfig,
+) -> Option<usize> {
     let mut earliest: Option<usize> = None;
     for end_token in &config.section_end_variants {
         if let Some(pos) = chunk.find(end_token.as_str()) {
@@ -78,7 +83,7 @@ pub fn find_tool_call_end_position_kimi_k2(chunk: &str, config: &KimiK2ParserCon
             earliest = Some(earliest.map_or(end_pos, |e: usize| e.min(end_pos)));
         }
     }
-    earliest.unwrap_or(chunk.len())
+    earliest
 }
 
 /// Format:
@@ -142,6 +147,31 @@ fn find_section_end(
 }
 
 /// Extract tool calls and normal text from message.
+///
+/// ## Difference from Moonshot's reference implementation
+///
+/// The reference parser in
+/// [tool_call_guidance.md](https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md)
+/// requires `section_end` to extract any tool calls:
+///
+/// ```python
+/// pattern = r"<\|tool_calls_section_begin\|>(.*?)<\|tool_calls_section_end\|>"
+/// tool_calls_sections = re.findall(pattern, tool_call_rsp, re.DOTALL)
+/// ```
+///
+/// When `section_end` is missing (model hit max_tokens, EOS, or stop sequence),
+/// `re.findall` returns `[]` and all complete individual tool calls are silently
+/// dropped — even when individual calls have complete `call_begin` + args +
+/// `call_end` markers.
+///
+/// This implementation treats a missing `section_end` as "section extends to
+/// end-of-string", equivalent to:
+///
+/// ```python
+/// pattern = r"<\|tool_calls_section_begin\|>(.*?)(?:<\|tool_calls_section_end\|>|$)"
+/// ```
+///
+/// This allows recovery of complete individual tool calls from truncated output.
 fn extract_tool_calls(
     text: &str,
     config: &KimiK2ParserConfig,
@@ -158,21 +188,23 @@ fn extract_tool_calls(
             // Add text before tool call section to normal parts.
             normal_parts.push(&text[cursor..abs_start]);
 
-            if let Some((end_pos, end_len)) = find_section_end(text, abs_start, config) {
-                let abs_end = abs_start + end_pos + end_len;
-                let block = &text[abs_start..abs_end];
+            let (block, next_cursor) =
+                if let Some((end_pos, end_len)) = find_section_end(text, abs_start, config) {
+                    let abs_end = abs_start + end_pos + end_len;
+                    (&text[abs_start..abs_end], abs_end)
+                } else {
+                    // No section_end found — treat rest of string as section
+                    // body. Complete individual calls can still be extracted;
+                    // truly truncated calls (no call_end) are ignored by
+                    // parse_section_block's regex.
+                    (&text[abs_start..], text.len())
+                };
 
-                // Parse individual tool calls within this section block.
-                if let Ok(mut parsed_calls) = parse_section_block(block, config, tools) {
-                    calls.append(&mut parsed_calls);
-                }
-
-                cursor = abs_end;
-            } else {
-                // No end token found -> treat the rest as normal text.
-                normal_parts.push(&text[abs_start..]);
-                break;
+            if let Ok(mut parsed_calls) = parse_section_block(block, config, tools) {
+                calls.append(&mut parsed_calls);
             }
+
+            cursor = next_cursor;
         } else {
             // No more tool call sections.
             normal_parts.push(&text[cursor..]);
@@ -300,11 +332,12 @@ mod tests {
         let config = default_config();
         let text = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>more text";
         let pos = find_tool_call_end_position_kimi_k2(text, &config);
-        assert_eq!(&text[pos..], "more text");
+        assert_eq!(pos, Some(text.len() - "more text".len()));
+        assert_eq!(&text[pos.unwrap()..], "more text");
 
         let text_no_end = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0";
         let pos = find_tool_call_end_position_kimi_k2(text_no_end, &config);
-        assert_eq!(pos, text_no_end.len());
+        assert_eq!(pos, None, "should return None when section_end is missing");
     }
 
     #[test]
@@ -425,18 +458,66 @@ mod tests {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;
 
-        // Should handle gracefully - section_end not found so whole text is treated as normal
+        // Missing section_end but individual tool call is complete (call_begin + args + call_end).
+        // This happens when the model hits max_tokens before emitting section_end.
+        // The parser should still extract the complete individual tool calls.
+        let (calls, _normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "Should parse complete tool calls even without section_end (max_tokens truncation)"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_parse_truncated_mid_argument_no_section_end() {
+        let config = default_config();
+        // Model hit max_tokens mid-argument — no call_end, no section_end.
+        // Truly incomplete tool call, nothing salvageable.
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NY"#;
+
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(
             calls.len(),
             0,
-            "No tool calls should be parsed without section end"
+            "Truly truncated call (no call_end) should return 0 tool calls"
         );
+        // The section body is consumed by parse_section_block (which finds no
+        // complete calls), so normal content is empty — the raw markers are not
+        // re-emitted as user-visible text.
+        assert_eq!(normal, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_parse_multiple_calls_no_section_end() {
+        let config = default_config();
+        // Two complete individual tool calls, but model stopped before section_end.
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(
-            normal,
-            Some(input.to_string()),
-            "Input should be preserved as normal text"
+            calls.len(),
+            2,
+            "Should parse both complete tool calls even without section_end"
         );
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+    }
+
+    #[test]
+    fn test_parse_complete_plus_truncated_no_section_end() {
+        let config = default_config();
+        // First call is complete, second is truncated mid-argument.
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"tz"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "Should parse the one complete tool call, ignoring the truncated second"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
     }
 
     #[test]
@@ -526,7 +607,7 @@ mod tests {
         // Singular variant end token
         let text = "<|tool_call_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_call_section_end|>more text";
         let pos = find_tool_call_end_position_kimi_k2(text, &config);
-        assert_eq!(&text[pos..], "more text");
+        assert_eq!(&text[pos.unwrap()..], "more text");
     }
 
     // --- Tests inspired by vllm/sglang coverage gaps ---

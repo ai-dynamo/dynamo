@@ -93,12 +93,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
 
+            _hidden = stop_conditions.get("stop_token_ids_hidden") or []
+            _plain = stop_conditions.get("stop_token_ids") or []
+            _merged = list(set(_hidden).union(_plain))
+            stop_token_ids = _merged if _merged else None
+
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                "stop_token_ids": stop_token_ids,
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),

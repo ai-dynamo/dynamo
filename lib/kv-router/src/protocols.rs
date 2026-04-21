@@ -446,8 +446,6 @@ pub struct PrefillLoadHint {
 pub enum ActiveSequenceEventData {
     AddRequest {
         token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
@@ -507,6 +505,9 @@ pub enum KvCacheEventData {
 pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
+    /// Absolute position of the first block in this batch for positional replay.
+    #[serde(default)]
+    pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
 }
@@ -934,6 +935,7 @@ mod tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(0),
                     mm_extra_info: None,
@@ -1137,6 +1139,7 @@ mod tests {
     fn test_kv_cache_events_serialization() {
         let event_data = KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash: Some(ExternalSequenceBlockHash(1)),
+            start_position: None,
             blocks: vec![KvCacheStoredBlockData {
                 block_hash: ExternalSequenceBlockHash(2),
                 tokens_hash: LocalBlockHash(3),

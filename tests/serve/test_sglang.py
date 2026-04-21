@@ -30,7 +30,11 @@ from tests.utils.payload_builder import (
     responses_payload_default,
     responses_stream_payload_default,
 )
-from tests.utils.payloads import LoraTestChatPayload
+from tests.utils.payloads import (
+    ImageGenerationPayload,
+    LoraTestChatPayload,
+    VideoGenerationPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +459,77 @@ sglang_configs = {
         ],
         request_payloads=[
             completion_payload_default(),
+        ],
+    ),
+    # ── Diffusion pre_merge smoke tests ─────────────────────────────────
+    "diffusion_t2i_z_image_turbo": SGLangConfig(
+        name="diffusion_t2i_z_image_turbo",
+        directory=sglang_dir,
+        script_name="image_diffusion.sh",
+        script_args=["--model-path", "Tongyi-MAI/Z-Image-Turbo"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(19.3),
+            pytest.mark.timeout(240),
+            pytest.mark.pre_merge,
+        ],
+        model="Tongyi-MAI/Z-Image-Turbo",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            ImageGenerationPayload(
+                body={
+                    "prompt": "A red apple on a white table",
+                    "size": "512x512",
+                    "response_format": "url",
+                    "nvext": {"num_inference_steps": 4},
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "diffusion_t2v_wan_1_3b": SGLangConfig(
+        name="diffusion_t2v_wan_1_3b",
+        directory=sglang_dir,
+        script_name="text-to-video-diffusion.sh",
+        script_args=[
+            "--wan-size",
+            "1b",
+            "--num-inference-steps",
+            "3",
+            "--num-frames",
+            "9",
+            "--height",
+            "256",
+            "--width",
+            "256",
+        ],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(17.6),
+            pytest.mark.timeout(180),
+            pytest.mark.pre_merge,
+        ],
+        model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            VideoGenerationPayload(
+                body={
+                    "prompt": "A dog running on a beach",
+                    "size": "256x256",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 3,
+                        "num_frames": 9,
+                    },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
         ],
     ),
     "anthropic_messages": SGLangConfig(

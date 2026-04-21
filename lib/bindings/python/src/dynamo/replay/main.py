@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
+from dynamo.common.forward_pass_metrics import (
+    ForwardPassMetrics,
+    ScheduledRequestMetrics,
+)
 from dynamo.llm import AicPerfConfig, KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
@@ -123,6 +127,76 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     )
 
 
+def _generate_aic_prefill_fpms(
+    aic_session,
+    engine_args: MockEngineArgs,
+    granularity: int = 8,
+) -> list[ForwardPassMetrics]:
+    """Generate prefill benchmark FPMs using AIC predictions.
+
+    Sweeps ISL at batch_size=1 within the engine's per-pass token budget
+    (``max_num_batched_tokens``); a single forward pass physically cannot
+    process more than that, so the regression shouldn't see larger sums.
+    For longer ISL, callers use chunked TTFT estimation.
+    """
+    prefill_max = engine_args.max_num_batched_tokens or 8192
+    prefill_step = max(1, (prefill_max - 100) // granularity)
+
+    prefill_fpms: list[ForwardPassMetrics] = []
+    for isl in range(100, prefill_max + 1, prefill_step):
+        ttft_ms = aic_session.predict_prefill(1, isl, 0)
+        if ttft_ms > 0:
+            prefill_fpms.append(
+                ForwardPassMetrics(
+                    wall_time=ttft_ms / 1000.0,
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_prefill_requests=1,
+                        sum_prefill_tokens=isl,
+                    ),
+                )
+            )
+    return prefill_fpms
+
+
+def _generate_aic_decode_fpms(
+    aic_session,
+    engine_args: MockEngineArgs,
+    granularity: int = 8,
+) -> list[ForwardPassMetrics]:
+    """Generate decode benchmark FPMs using AIC predictions.
+
+    Sweeps (batch_size x context_length). ``granularity`` controls the
+    number of sample points per axis; the batch-size ceiling comes from
+    the engine's ``max_num_seqs`` so the regression sees realistic
+    concurrency, not an artificial cap at the sweep density.
+    """
+    max_kv_tokens = engine_args.num_gpu_blocks * engine_args.block_size
+    if max_kv_tokens <= 0:
+        max_kv_tokens = 16384 * 16
+
+    decode_fpms: list[ForwardPassMetrics] = []
+    ctx_lengths = [500, 2000, 4000, 8000]
+    bs_max = engine_args.max_num_seqs or 256
+    bs_step = max(1, bs_max // granularity)
+    for ctx_len in ctx_lengths:
+        for bs in range(1, bs_max + 1, bs_step):
+            sum_kv = bs * ctx_len
+            if sum_kv > max_kv_tokens:
+                break
+            itl_ms = aic_session.predict_decode(bs, ctx_len, 2)
+            if itl_ms > 0:
+                decode_fpms.append(
+                    ForwardPassMetrics(
+                        wall_time=itl_ms / 1000.0,
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=bs,
+                            sum_decode_kv_tokens=sum_kv,
+                        ),
+                    )
+                )
+    return decode_fpms
+
+
 def _run_planner_replay(
     trace_file: str,
     extra_engine_args: MockEngineArgs | None,
@@ -136,6 +210,7 @@ def _run_planner_replay(
     arrival_speedup_ratio: float,
     trace_block_size: int,
     planner_config_arg: str,
+    benchmark_granularity: int = 8,
 ):
     """Run an offline replay with planner-in-the-loop (agg or disagg).
 
@@ -153,7 +228,7 @@ def _run_planner_replay(
     from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
-    planner_config.no_operation = True
+    planner_config.advisory = True
 
     if planner_config.mode == "agg":
         if extra_engine_args is None:
@@ -200,6 +275,107 @@ def _run_planner_replay(
         bridge=bridge,
         capabilities=capabilities,
     )
+
+    # Bootstrap regression models from mocker's perf model.
+    # AIC provides accurate batch-size-aware timing that works with the
+    # planner's linear regression. The default polynomial model cannot
+    # feed the throughput regression (its decode formula is quadratic in
+    # utilization ratio, causing negative regression coefficients).
+    if not adapter._sm._is_easy:
+        ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
+        aic_backend = ref_args.aic_backend
+        if (
+            aic_backend is None
+            or ref_args.aic_system is None
+            or ref_args.aic_model_path is None
+        ):
+            sys.stderr.write(
+                "Note: throughput-based scaling regression requires AIC perf model "
+                "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
+                "Falling back to load-based scaling only.\n"
+            )
+        else:
+            # Create AIC session -- narrow to the concrete exception types
+            # AIC/PyO3 can raise so we degrade gracefully on missing
+            # dependencies or bad config, but don't swallow unrelated bugs
+            # (AttributeError, KeyboardInterrupt, etc.) introduced by
+            # refactors.
+            try:
+                from dynamo._internal.aic import create_session
+
+                aic_session = create_session(
+                    backend_name=aic_backend,
+                    system=ref_args.aic_system,
+                    model_path=ref_args.aic_model_path,
+                    tp_size=ref_args.aic_tp_size or 1,
+                    backend_version=ref_args.aic_backend_version,
+                )
+            except (
+                ImportError,
+                RuntimeError,
+                ValueError,
+                KeyError,
+                FileNotFoundError,
+            ) as e:
+                sys.stderr.write(
+                    f"Warning: AIC session creation failed ({e}); "
+                    "throughput regression will not be bootstrapped.\n"
+                )
+                aic_session = None
+
+            # Generate benchmark FPMs and load into regression.  Disagg
+            # prefill and decode engines typically have different
+            # max_num_seqs and KV cache sizes, so each sweep uses its own
+            # engine args.  Agg has a single engine so uses one set.  AIC's
+            # predict_* can raise on unsupported model/system combos or
+            # numerical edge cases; log and fall back in those cases.
+            if aic_session is not None:
+                p_args = (
+                    extra_engine_args
+                    if planner_config.mode == "agg"
+                    else prefill_engine_args
+                ) or ref_args
+                d_args = (
+                    extra_engine_args
+                    if planner_config.mode == "agg"
+                    else decode_engine_args
+                ) or ref_args
+                try:
+                    prefill_fpms = _generate_aic_prefill_fpms(
+                        aic_session, p_args, benchmark_granularity
+                    )
+                    decode_fpms = _generate_aic_decode_fpms(
+                        aic_session, d_args, benchmark_granularity
+                    )
+                except (RuntimeError, ValueError, KeyError, ArithmeticError) as e:
+                    sys.stderr.write(
+                        f"Warning: AIC benchmark generation failed ({e}); "
+                        "throughput regression will not be bootstrapped.\n"
+                    )
+                    prefill_fpms, decode_fpms = [], []
+
+                if planner_config.mode == "agg":
+                    # Agg regression fits on (sum_prefill_tokens, sum_decode_kv_tokens);
+                    # combine prefill-only and decode-only points so both features
+                    # have variance.
+                    agg_fpms = prefill_fpms + decode_fpms
+                    if agg_fpms:
+                        adapter._sm.load_benchmark_fpms(agg_fpms=agg_fpms)
+                    else:
+                        sys.stderr.write(
+                            "Warning: AIC produced no agg benchmark FPMs\n"
+                        )
+                else:
+                    if prefill_fpms and decode_fpms:
+                        adapter._sm.load_benchmark_fpms(
+                            prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
+                        )
+                    else:
+                        sys.stderr.write(
+                            f"Warning: AIC produced empty benchmark FPMs "
+                            f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
+                        )
+
     return adapter.run()
 
 
@@ -256,6 +432,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--planner-config",
         help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg only)",
     )
+    parser.add_argument(
+        "--benchmark-granularity",
+        type=int,
+        default=8,
+        help="number of sweep points for synthetic perf model benchmark (default: 8, matching profiler)",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     using_trace_file = args.trace_file is not None
@@ -311,6 +493,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arrival_speedup_ratio=args.arrival_speedup_ratio,
             trace_block_size=args.trace_block_size,
             planner_config_arg=args.planner_config,
+            benchmark_granularity=args.benchmark_granularity,
         )
         report = planner_report.trace_report
         if planner_report.scaling_events:
@@ -326,6 +509,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write("\n")
         sys.stdout.write(f"Saved full report to: {report_path}\n")
         sys.stdout.write(f"Planner ticks: {planner_report.total_ticks}\n")
+        if planner_report.html_report_path:
+            sys.stdout.write(
+                f"Planner diagnostics report: {planner_report.html_report_path}\n"
+            )
         return 0
 
     if using_trace_file:
