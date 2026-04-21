@@ -482,11 +482,6 @@ mod push_handler_notify_tests {
     /// the real HealthCheckManager's canary timer is reset via notify_one(),
     /// preventing the canary from firing and keeping the endpoint in its initial
     /// NotReady state (i.e., send_health_check_request is never called).
-    ///
-    /// Full path tested:
-    ///   push_handler.handle_payload() → notify_one() (request arrival + per chunk)
-    ///   → HealthCheckManager.spawn_endpoint_health_check_task select! loop resets
-    ///   → canary never fires → send_health_check_request never called
     #[tokio::test]
     async fn test_notifier_resets_canary_timer() {
         let drt = create_test_drt_async().await;
@@ -494,9 +489,6 @@ mod push_handler_notify_tests {
 
         let notifier = register_endpoint(&drt, endpoint_name);
 
-        // Set up the push_handler pipeline BEFORE starting the HealthCheckManager
-        // so we can send a request immediately and avoid a race where the canary
-        // fires before handle_payload has a chance to notify.
         let engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine { num_chunks: 5 });
         let ingress =
             Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
@@ -517,9 +509,6 @@ mod push_handler_notify_tests {
         // HealthCheckManager. This way we can use a separate Notify for
         // counting without competing with the manager (notify_one only
         // wakes one waiter).
-        //
-        // push_handler will call notify_one() on each of the 5 chunks
-        // + stream completion. The counter task is the sole consumer.
         let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = notify_count.clone();
         let notifier_for_counter = notifier.clone();
@@ -551,11 +540,11 @@ mod push_handler_notify_tests {
         // Verify notifications were received. Notify coalesces multiple calls
         // into single wakeups, so the exact count depends on scheduling. With
         // 5 chunks + 1 stream completion = 6 notify_one() calls, we expect
-        // at least 1 wakeup (coalesced) but typically 2-4.
+        // at least 2 wakeups - one for a streaming chunk, one for stream completion.
         let count = notify_count.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
-            count >= 1,
-            "Expected at least 1 notification wakeup from push_handler streaming, got {count}"
+            count >= 2,
+            "Expected at least 2 notification wakeup from push_handler streaming, got {count}"
         );
 
         // NOW start the HealthCheckManager. It will be the sole consumer of
