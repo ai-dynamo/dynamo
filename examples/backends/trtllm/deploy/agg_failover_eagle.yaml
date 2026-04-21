@@ -92,6 +92,24 @@ spec:
           env:
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
+            # TRT-LLM's MPI-based executor spawns worker ranks via fork/spawn and
+            # pickles the LLM kwargs into them. With --load-format gms, Dynamo
+            # attaches a SleepConfig that contains unpicklable `lambda` defaults
+            # (SleepConfig._make_defaulted_restore_modes). Force the single-process
+            # executor to keep everything in one interpreter and skip the pickle.
+            - name: TLLM_WORKER_USE_SINGLE_PROCESS
+              value: "1"
+            # OpenMPI transport safety: single-container run, no RDMA.
+            - name: MPI4PY_MPIABI
+              value: openmpi
+            - name: OMPI_MCA_coll_ucc_enable
+              value: "0"
+            - name: OMPI_MCA_coll_hcoll_enable
+              value: "0"
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: "self,vader,tcp"
           volumeMounts:
             - name: hf-cache
               mountPath: /home/dynamo/.cache/huggingface
