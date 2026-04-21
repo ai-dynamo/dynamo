@@ -54,6 +54,10 @@ def build_substitution_dict(
     """
     k8s = config.k8s
     hf_token_secret_name = DEFAULT_HF_TOKEN_SECRET_NAME
+    # Per-run image override wins over the K8sConfig default. Populated by
+    # the planner when the user passed ``--image A,B``; otherwise empty and
+    # we fall back to ``k8s.image`` (historical single-image path).
+    image = deploy.image or k8s.image
     variables: Dict[str, str] = {
         # Deploy dimensions
         "DYN_TOKENIZER_BACKEND": TOKENIZER_TEMPLATE_MAP.get(
@@ -65,7 +69,7 @@ def build_substitution_dict(
         "MODEL_NAME": config.model_name,
         "MODEL_PATH": config.model,
         # Image
-        "IMAGE": k8s.image,
+        "IMAGE": image,
         # K8s config
         "NAMESPACE": k8s.namespace,
         "DGD_NAME": k8s.dgd_name,

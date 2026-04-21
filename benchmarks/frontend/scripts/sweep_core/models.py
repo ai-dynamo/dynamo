@@ -24,6 +24,10 @@ class DeployKey:
     tokenizer: str
     workers: int
     num_models: int
+    # Image is part of the deploy identity: different image == different
+    # deployment, so a multi-image sweep triggers a re-deploy when this
+    # changes even under ``reuse_by_deploy_key`` isolation.
+    image: str = ""
     env_overrides: frozenset[tuple[str, str]] = field(default_factory=frozenset)
 
     def to_dict(self) -> dict:
@@ -32,6 +36,7 @@ class DeployKey:
             "tokenizer": self.tokenizer,
             "workers": self.workers,
             "num_models": self.num_models,
+            "image": self.image,
             "env_overrides": dict(self.env_overrides),
         }
 
@@ -43,6 +48,7 @@ class DeployKey:
             tokenizer=d["tokenizer"],
             workers=d["workers"],
             num_models=d["num_models"],
+            image=d.get("image", ""),
             env_overrides=frozenset(env.items())
             if isinstance(env, dict)
             else frozenset(env),
@@ -53,10 +59,14 @@ class DeployKey:
 class DeployDimension:
     """Configuration for a single deployment state."""
 
-    backend: str  # "mocker" or "vllm"
+    backend: str  # "mocker", "vllm", "trtllm", ...
     tokenizer: str  # "hf" or "fastokens"
     workers: int = 2
     num_models: int = 1
+    # Per-run image override. When empty, the executor falls back to
+    # ``config.k8s.image``. Populated by the planner when ``--image`` is a
+    # comma-separated list so each image becomes its own deploy.
+    image: str = ""
     env_overrides: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -66,6 +76,7 @@ class DeployDimension:
             tokenizer=self.tokenizer,
             workers=self.workers,
             num_models=self.num_models,
+            image=self.image,
             env_overrides=frozenset(self.env_overrides.items()),
         )
 
@@ -75,6 +86,7 @@ class DeployDimension:
             "tokenizer": self.tokenizer,
             "workers": self.workers,
             "num_models": self.num_models,
+            "image": self.image,
             "env_overrides": self.env_overrides,
         }
 
@@ -85,6 +97,7 @@ class DeployDimension:
             tokenizer=d["tokenizer"],
             workers=d.get("workers", 2),
             num_models=d.get("num_models", 1),
+            image=d.get("image", ""),
             env_overrides=d.get("env_overrides", {}),
         )
 
@@ -189,11 +202,30 @@ class K8sConfig:
     namespace: str = "dynamo-bench"
     endpoint: str = "frontend:8000"
     dgd_name: str = ""
+    # Default / fallback image when ``DeployDimension.image`` is empty. When
+    # the CLI receives ``--image A,B,C`` the planner emits one deploy per
+    # image; ``K8sConfig.image`` stays set to the first entry for display
+    # and backward-compat.
     image: str = ""
     frontend_port: int = 8000
     worker_replicas: int = 1
     frontend_replicas: int = 1
     deploy_template: str = ""  # path to deploy.yaml template
+    # Optional path to an aiperf Job YAML template rendered per run with
+    # ``string.Template.safe_substitute``. When set, the built-in aiperf
+    # builder in ``sweep_k8s/aiperf.py`` is bypassed. See
+    # ``sweep_k8s/aiperf_template.py`` for the supported variables.
+    aiperf_template: str = ""
+    # Raw aiperf flags appended verbatim to every step's ``aiperf profile``
+    # command. Useful for knobs the built-in builder does not expose
+    # (e.g. ``--prefill-concurrency``, ``--arrival-pattern gamma``).
+    # Ignored when ``aiperf_template`` is set.
+    aiperf_extra: str = ""
+    # PVC used by the aiperf Job for artifact output and tokenizer cache.
+    # The default matches the historical hard-code; override when your
+    # namespace uses ``shared-model-cache`` or any other PVC name.
+    artifact_pvc_name: str = "model-cache"
+    artifact_pvc_mount_path: str = "/model-cache"
     reset_strategy: str = "graph"  # none | frontend | graph
     request_plane: str = "tcp"
     event_plane: str = "nats"
@@ -213,6 +245,10 @@ class K8sConfig:
             "worker_replicas": self.worker_replicas,
             "frontend_replicas": self.frontend_replicas,
             "deploy_template": self.deploy_template,
+            "aiperf_template": self.aiperf_template,
+            "aiperf_extra": self.aiperf_extra,
+            "artifact_pvc_name": self.artifact_pvc_name,
+            "artifact_pvc_mount_path": self.artifact_pvc_mount_path,
             "reset_strategy": self.reset_strategy,
             "request_plane": self.request_plane,
             "event_plane": self.event_plane,
@@ -237,6 +273,10 @@ class SweepConfig:
     mode: str = "local"  # "local" or "k8s"
     backend: str = "mocker"
     tokenizers: List[str] = field(default_factory=lambda: ["hf", "fastokens"])
+    # Comma-separated --image expands into this list. Always non-empty when
+    # ``mode == "k8s"``; becomes the outermost sweep axis so every image
+    # gets its own deploy and its own set of aiperf points.
+    images: List[str] = field(default_factory=list)
     concurrencies: List[int] = field(default_factory=lambda: [50, 100, 200])
     isls: List[int] = field(default_factory=lambda: [512, 1024, 2048])
     osl: int = 256
@@ -267,6 +307,7 @@ class SweepConfig:
             "mode": self.mode,
             "backend": self.backend,
             "tokenizers": self.tokenizers,
+            "images": self.images,
             "concurrencies": self.concurrencies,
             "isls": self.isls,
             "osl": self.osl,

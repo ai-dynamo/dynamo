@@ -65,9 +65,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["mocker", "vllm"],
+        choices=["mocker", "vllm", "trtllm", "sglang", "custom"],
         default="mocker",
-        help="Engine backend: mocker (synthetic) or vllm (real inference)",
+        help=(
+            "Engine backend: mocker (synthetic) or a real engine. "
+            "In k8s template mode the value is passed through to template "
+            "substitution only -- no validation against the image is performed."
+        ),
     )
     parser.add_argument(
         "--tokenizers",
@@ -154,12 +158,58 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     k8s_group.add_argument("--dgd-name", default="", help="DynamoGraphDeployment name")
     k8s_group.add_argument(
-        "--image", default="", help="Container image for k8s deployment"
+        "--image",
+        default="",
+        help=(
+            "Container image for k8s deployment. Accepts a single image, or "
+            "a comma-separated list (e.g. 'img:a,img:b') -- each image "
+            "becomes its own deploy in the sweep, so one invocation can A/B "
+            "two or more builds."
+        ),
     )
     k8s_group.add_argument(
         "--deploy-template",
         default="",
         help="Path to deploy.yaml template (enables template-based deployment)",
+    )
+    k8s_group.add_argument(
+        "--aiperf-template",
+        default="",
+        help=(
+            "Path to an aiperf Job YAML template rendered per step with "
+            "${VAR} substitution. When set, the built-in aiperf Job builder "
+            "is bypassed. See sweep_k8s/aiperf_template.py for supported "
+            "variables (e.g. JOB_NAME, NAMESPACE, ENDPOINT, MODEL_NAME, "
+            "CONCURRENCY, RPS, ISL, OSL, ARTIFACT_PVC_DIR, ...)."
+        ),
+    )
+    k8s_group.add_argument(
+        "--aiperf-extra",
+        default="",
+        help=(
+            "Raw aiperf flags appended to every step's 'aiperf profile' "
+            "command. Example: --aiperf-extra '--prefill-concurrency 100 "
+            "--arrival-pattern gamma'. Ignored when --aiperf-template is "
+            "set (the template controls the full command)."
+        ),
+    )
+    k8s_group.add_argument(
+        "--artifact-pvc-name",
+        default="model-cache",
+        help=(
+            "PVC name mounted into the built-in aiperf Job for artifact "
+            "output and tokenizer cache (default: model-cache). Ignored "
+            "when --aiperf-template is set."
+        ),
+    )
+    k8s_group.add_argument(
+        "--artifact-pvc-mount-path",
+        default="/model-cache",
+        help=(
+            "Mount path for --artifact-pvc-name inside the aiperf Job "
+            "(default: /model-cache). Artifacts land at "
+            "<mount>/perf/<job_name>/ on the PVC."
+        ),
     )
     k8s_group.add_argument(
         "--reset-strategy",
@@ -211,6 +261,10 @@ def config_from_args(args: argparse.Namespace) -> SweepConfig:
     """Convert parsed argparse Namespace to SweepConfig."""
     # Parse comma-separated lists
     tokenizers = [t.strip() for t in args.tokenizers.split(",")]
+    # Image: accept "" (no image), single, or comma-separated list. The
+    # planner iterates over ``images``; ``k8s.image`` is kept synchronized
+    # with the first entry for display / legacy paths that read it directly.
+    images = [i.strip() for i in args.image.split(",") if i.strip()]
     concurrencies = [int(c) for c in args.concurrency.split(",")]
     isls = [int(i) for i in args.isl.split(",")]
     worker_counts = [int(w) for w in args.workers.split(",")]
@@ -233,15 +287,22 @@ def config_from_args(args: argparse.Namespace) -> SweepConfig:
             # Local or k8s-from-host: use repo artifacts directory
             output_dir = str(REPO_ROOT / "artifacts" / f"sweep_{ts}")
 
-    # Build K8s config
+    # Build K8s config. ``image`` is the first entry from --image (or "" if
+    # none was given); the full list lives on SweepConfig.images and drives
+    # the planner.
+    k8s_image = images[0] if images else ""
     k8s_config = K8sConfig(
         namespace=args.namespace,
         dgd_name=args.dgd_name,
-        image=args.image,
+        image=k8s_image,
         frontend_port=args.frontend_port,
         worker_replicas=args.worker_replicas,
         frontend_replicas=args.frontend_replicas,
         deploy_template=args.deploy_template,
+        aiperf_template=args.aiperf_template,
+        aiperf_extra=args.aiperf_extra,
+        artifact_pvc_name=args.artifact_pvc_name,
+        artifact_pvc_mount_path=args.artifact_pvc_mount_path,
         reset_strategy=args.reset_strategy,
         request_plane=args.request_plane,
         event_plane=args.event_plane,
@@ -268,6 +329,11 @@ def config_from_args(args: argparse.Namespace) -> SweepConfig:
         mode=args.mode,
         backend=args.backend,
         tokenizers=tokenizers,
+        # Even with a single --image the planner still iterates the list; we
+        # only populate ``images`` with a sentinel [""] when no image was
+        # supplied AND mode is local, so the planner emits one deploy with
+        # the empty image (local mode ignores it).
+        images=images or [""],
         concurrencies=concurrencies,
         isls=isls,
         osl=args.osl,

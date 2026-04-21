@@ -23,47 +23,67 @@ from sweep_core.naming import build_run_id
 def build_plan(config: SweepConfig) -> SweepPlan:
     """Build a SweepPlan from a SweepConfig.
 
-    The plan contains a flat list of RunSpecs, one per (deploy, aiperf) combination.
-    The ordering is: tokenizers -> workers -> concurrencies -> ISLs -> num_requests -> rps
+    The plan contains a flat list of RunSpecs, one per (deploy, aiperf)
+    combination. Ordering (outer -> inner):
+      images -> tokenizers -> workers -> concurrencies -> ISLs
+      -> num_requests -> rps
 
-    This matches the grid construction order from the original sweep_runner.py.
+    Image is the outermost axis so an entire per-image sub-sweep completes
+    before the deploy swaps to the next image; this minimises DGD restarts
+    when combined with ``reuse_by_deploy_key`` isolation.
+
+    When ``config.images`` contains more than one entry, run_ids are
+    prefixed with an 8-char image hash so sibling runs do not collide.
     """
     runs: list[RunSpec] = []
 
-    for tokenizer in config.tokenizers:
-        for workers in config.worker_counts:
-            for concurrency in config.concurrencies:
-                for isl in config.isls:
-                    for nr in config.num_requests_list:
-                        for rps in config.rps_list:
-                            deploy = DeployDimension(
-                                backend=config.backend,
-                                tokenizer=tokenizer,
-                                workers=workers,
-                                num_models=config.num_models,
-                            )
+    # Normalise: an empty images list means "use k8s.image". The config layer
+    # guarantees at least [""] but older callers / tests may pass empty.
+    images = list(config.images) if config.images else [""]
+    multi_image = len([img for img in images if img]) > 1
 
-                            aiperf = AiperfDimension(
-                                concurrency=concurrency,
-                                isl=isl,
-                                osl=config.osl,
-                                num_requests=nr,
-                                benchmark_duration=config.benchmark_duration
-                                if nr is None
-                                else None,
-                                request_rate=rps,
-                            )
-
-                            run_id = build_run_id(deploy, aiperf)
-
-                            runs.append(
-                                RunSpec(
-                                    deploy=deploy,
-                                    aiperf=aiperf,
-                                    deploy_key=deploy.deploy_key,
-                                    run_id=run_id,
+    for image in images:
+        for tokenizer in config.tokenizers:
+            for workers in config.worker_counts:
+                for concurrency in config.concurrencies:
+                    for isl in config.isls:
+                        for nr in config.num_requests_list:
+                            for rps in config.rps_list:
+                                deploy = DeployDimension(
+                                    backend=config.backend,
+                                    tokenizer=tokenizer,
+                                    workers=workers,
+                                    num_models=config.num_models,
+                                    image=image,
                                 )
-                            )
+
+                                aiperf = AiperfDimension(
+                                    concurrency=concurrency,
+                                    isl=isl,
+                                    osl=config.osl,
+                                    num_requests=nr,
+                                    benchmark_duration=(
+                                        config.benchmark_duration
+                                        if nr is None
+                                        else None
+                                    ),
+                                    request_rate=rps,
+                                )
+
+                                run_id = build_run_id(
+                                    deploy,
+                                    aiperf,
+                                    include_image_tag=multi_image,
+                                )
+
+                                runs.append(
+                                    RunSpec(
+                                        deploy=deploy,
+                                        aiperf=aiperf,
+                                        deploy_key=deploy.deploy_key,
+                                        run_id=run_id,
+                                    )
+                                )
 
     return SweepPlan(
         config=config,
@@ -101,7 +121,23 @@ def print_plan(plan: SweepPlan) -> None:
             print(f"  FE replicas:    {config.k8s.frontend_replicas}")
         if config.k8s.dgd_name:
             print(f"  DGD:            {config.k8s.dgd_name}")
+        non_empty_images = [img for img in config.images if img]
+        if len(non_empty_images) > 1:
+            print(f"  Images:         {len(non_empty_images)} (A/B sweep)")
+            for img in non_empty_images:
+                print(f"                    {img}")
+        elif non_empty_images:
+            print(f"  Image:          {non_empty_images[0]}")
         if config.k8s.deploy_template:
-            print(f"  Template:       {config.k8s.deploy_template}")
+            print(f"  Deploy tmpl:    {config.k8s.deploy_template}")
+        if config.k8s.aiperf_template:
+            print(f"  aiperf tmpl:    {config.k8s.aiperf_template}")
+        if config.k8s.aiperf_extra:
+            print(f"  aiperf extra:   {config.k8s.aiperf_extra}")
+        if config.k8s.artifact_pvc_name != "model-cache":
+            print(
+                f"  Artifact PVC:   {config.k8s.artifact_pvc_name} "
+                f"@ {config.k8s.artifact_pvc_mount_path}"
+            )
         print(f"  Reset strategy: {config.k8s.reset_strategy}")
     print()

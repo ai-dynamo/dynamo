@@ -36,8 +36,15 @@ def _build_aiperf_script(
     warmup_duration: Optional[int] = None,
     warmup_count: Optional[int] = None,
     export_level: str = "summary",
+    aiperf_extra: str = "",
 ) -> str:
-    """Build the shell script that runs inside the Job container."""
+    """Build the shell script that runs inside the Job container.
+
+    ``aiperf_extra`` is appended verbatim after the canonical flags so
+    callers can pass knobs like ``--prefill-concurrency 200``,
+    ``--arrival-pattern gamma``, or additional ``--extra-inputs`` without
+    editing this builder.
+    """
     # Build load-control args
     load_args = ""
     if benchmark_duration:
@@ -58,6 +65,11 @@ def _build_aiperf_script(
         warmup_args = f" --warmup-request-count {warmup_count}"
     else:
         warmup_args = f" --warmup-request-count {concurrency}"
+
+    # Extra flags passthrough (set from K8sConfig.aiperf_extra). Empty
+    # string is a no-op; otherwise the string is splat into the aiperf
+    # command line as-is so users can chain multiple flags.
+    extra_args = aiperf_extra.strip()
 
     return f"""set -e
 apt-get update -qq && apt-get install -y -qq curl jq git procps 2>/dev/null
@@ -103,7 +115,7 @@ aiperf profile \\
     --workers-max {concurrency} \\
     --record-processors 32 \\
     --export-level {export_level} \\
-    --ui simple
+    --ui simple {extra_args}
 
 echo "aiperf done. Artifacts:"
 ls -la "$ARTIFACT_DIR"/
@@ -122,17 +134,28 @@ def _build_job_yaml(
     script: str,
     image_pull_secret: str = "",
     hf_token_secret_name: str = DEFAULT_HF_TOKEN_SECRET_NAME,
+    artifact_pvc_name: str = "model-cache",
+    artifact_pvc_mount_path: str = "/model-cache",
 ) -> str:
     """Build the aiperf k8s Job YAML.
 
     Uses python:3.12-slim with pip-installed aiperf (same pattern as
     recipes/qwen3-235b-a22b-fp8/trtllm/agg/perf.yaml).
+
+    ``artifact_pvc_name`` / ``artifact_pvc_mount_path`` control which PVC
+    holds the aiperf exports + tokenizer cache. Historically hard-coded to
+    ``model-cache``; overridable per namespace via ``K8sConfig``.
+    ``_copy_artifacts_from_pvc`` uses the same two values to spin a helper
+    pod and pull the artifacts back locally.
     """
     image_pull_secret_block = ""
     if image_pull_secret:
         image_pull_secret_block = f"""
       imagePullSecrets:
         - name: {image_pull_secret}"""
+
+    mount = artifact_pvc_mount_path.rstrip("/")
+    artifact_dir = f"{mount}/perf/{job_name}"
 
     return f"""apiVersion: batch/v1
 kind: Job
@@ -171,7 +194,7 @@ spec:
 {_indent(script, 14)}
           env:
             - name: HF_HOME
-              value: /model-cache
+              value: {mount}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -184,14 +207,14 @@ spec:
             - name: JOB_NAME
               value: {job_name}
             - name: ARTIFACT_PVC_DIR
-              value: /model-cache/perf/{job_name}
+              value: {artifact_dir}
           volumeMounts:
-            - name: model-cache
-              mountPath: /model-cache
+            - name: artifact-pvc
+              mountPath: {mount}
       volumes:
-        - name: model-cache
+        - name: artifact-pvc
           persistentVolumeClaim:
-            claimName: model-cache
+            claimName: {artifact_pvc_name}
 """
 
 
@@ -272,11 +295,14 @@ def _copy_artifacts_from_pvc(
     job_name: str,
     namespace: str,
     local_dir: Path,
+    artifact_pvc_name: str = "model-cache",
+    artifact_pvc_mount_path: str = "/model-cache",
 ) -> bool:
-    """Copy aiperf artifacts from the model-cache PVC to the local filesystem.
+    """Copy aiperf artifacts from the artifact PVC to the local filesystem.
 
     Spins up a temporary busybox pod that mounts the PVC, uses kubectl cp
-    to extract the artifacts, then deletes the pod.
+    to extract the artifacts, then deletes the pod. The PVC is mounted
+    read-only here.
 
     Returns True if artifacts were successfully copied and the expected
     profile_export_aiperf.json exists, False otherwise.
@@ -284,10 +310,13 @@ def _copy_artifacts_from_pvc(
     local_dir.mkdir(parents=True, exist_ok=True)
     artifacts_ok = False
     helper_name = f"copy-{job_name[-20:]}"
-    pvc_path = f"/model-cache/perf/{job_name}"
+    mount = artifact_pvc_mount_path.rstrip("/")
+    pvc_path = f"{mount}/perf/{job_name}"
 
     try:
-        # Create a helper pod to access the PVC
+        # Create a helper pod to access the PVC. Volume name is fixed to
+        # ``artifact-pvc`` so helper-pod YAML is independent of the actual
+        # PVC name (which is supplied via claimName).
         helper_yaml = f"""apiVersion: v1
 kind: Pod
 metadata:
@@ -300,13 +329,13 @@ spec:
       image: busybox:latest
       command: ["sh", "-c", "echo ready && sleep 300"]
       volumeMounts:
-        - name: model-cache
-          mountPath: /model-cache
+        - name: artifact-pvc
+          mountPath: {mount}
           readOnly: true
   volumes:
-    - name: model-cache
+    - name: artifact-pvc
       persistentVolumeClaim:
-        claimName: model-cache
+        claimName: {artifact_pvc_name}
 """
         run_kubectl(["apply", "-f", "-"], namespace=namespace, input_data=helper_yaml)
 
@@ -387,13 +416,28 @@ def run_aiperf(
     export_level: str = "summary",
     image_pull_secret: str = "",
     hf_token_secret_name: str = DEFAULT_HF_TOKEN_SECRET_NAME,
-    timeout: int = 600,
+    timeout: int = 1200,
+    aiperf_template: str = "",
+    aiperf_extra: str = "",
+    artifact_pvc_name: str = "model-cache",
+    artifact_pvc_mount_path: str = "/model-cache",
+    k8s_config: Optional[object] = None,
 ) -> bool:
     """Run aiperf as a k8s Job inside the namespace.
 
-    Creates a Job with python:3.12-slim, installs aiperf via pip, runs the
-    benchmark against the in-cluster service endpoint, then copies artifacts
-    back to the local filesystem.
+    Two modes:
+
+    * **Built-in** (default): emits a Job running ``python:3.12-slim`` with
+      aiperf pip-installed at pod start. Flags are assembled here; knobs
+      not exposed as kwargs can still reach aiperf via ``aiperf_extra``
+      (raw string appended to the ``aiperf profile`` command).
+    * **Templated**: when ``aiperf_template`` is a non-empty path, the
+      Job YAML is read from that file and rendered with
+      ``string.Template.safe_substitute`` via
+      :mod:`sweep_k8s.aiperf_template`. The template controls the entire
+      Job spec (image, mounts, command, env, ...) -- it just must honour
+      the ``ARTIFACT_PVC_NAME`` / ``ARTIFACT_PVC_DIR`` contract so the
+      copy helper can retrieve the results.
 
     Args:
         artifact_dir: Local directory for aiperf artifacts.
@@ -402,7 +446,8 @@ def run_aiperf(
         concurrency: Concurrency level.
         isl: Input sequence length.
         namespace: K8s namespace.
-        image: Container image (unused -- uses python:3.12-slim).
+        image: Container image under test (informational -- passed into
+            the aiperf template as ``${IMAGE}`` so logs can record it).
         run_id: Unique run identifier (used in Job name).
         osl: Output sequence length.
         benchmark_duration: Optional benchmark duration in seconds.
@@ -414,6 +459,17 @@ def run_aiperf(
         image_pull_secret: Optional image pull secret for the Job pod.
         hf_token_secret_name: Secret name that stores HF_TOKEN.
         timeout: Job timeout in seconds.
+        aiperf_template: Optional path to a user Job YAML template. When
+            set, the built-in builder is bypassed.
+        aiperf_extra: Raw flags appended to the aiperf command line in
+            built-in mode.
+        artifact_pvc_name: PVC mounted by the aiperf Job for artifact
+            storage (default: ``model-cache``).
+        artifact_pvc_mount_path: Mount path for ``artifact_pvc_name``.
+        k8s_config: Optional ``K8sConfig`` reference; when ``aiperf_template``
+            is used, the full K8sConfig is threaded into the template
+            substitution so user templates can reference fields like
+            ``${IMAGE_PULL_SECRET_BLOCK}``.
 
     Returns:
         True if aiperf succeeded, False otherwise.
@@ -425,27 +481,83 @@ def run_aiperf(
 
     print(f"  Creating aiperf Job: {job_name} (c={concurrency} isl={isl})")
 
-    script = _build_aiperf_script(
-        model_name=model_name,
-        endpoint=endpoint,
-        concurrency=concurrency,
-        isl=isl,
-        osl=osl,
-        benchmark_duration=benchmark_duration,
-        num_requests=num_requests,
-        request_rate=request_rate,
-        warmup_duration=warmup_duration,
-        warmup_count=warmup_count,
-        export_level=export_level,
-    )
+    if aiperf_template:
+        # Templated path: render the user's Job YAML with the full variable
+        # dict, bypass the built-in builder entirely.
+        from pathlib import Path as _Path
 
-    job_yaml = _build_job_yaml(
-        job_name=job_name,
-        namespace=namespace,
-        script=script,
-        image_pull_secret=image_pull_secret,
-        hf_token_secret_name=hf_token_secret_name,
-    )
+        from sweep_k8s.aiperf_template import (
+            build_aiperf_variables,
+            render_aiperf_template,
+        )
+
+        if k8s_config is None:
+            # Build a minimal stand-in so the template renderer still has
+            # the PVC settings it expects. This keeps run_aiperf callable
+            # from tests / ad-hoc scripts that do not have a SweepConfig.
+            from sweep_core.models import K8sConfig as _K8sConfig
+
+            k8s_config = _K8sConfig(
+                namespace=namespace,
+                image=image,
+                image_pull_secret=image_pull_secret,
+                aiperf_template=aiperf_template,
+                aiperf_extra=aiperf_extra,
+                artifact_pvc_name=artifact_pvc_name,
+                artifact_pvc_mount_path=artifact_pvc_mount_path,
+                export_level=export_level,
+            )
+
+        variables = build_aiperf_variables(
+            job_name=job_name,
+            run_id=run_id,
+            namespace=namespace,
+            endpoint=endpoint,
+            model_name=model_name,
+            concurrency=concurrency,
+            isl=isl,
+            osl=osl,
+            benchmark_duration=benchmark_duration,
+            num_requests=num_requests,
+            request_rate=request_rate,
+            warmup_request_count=warmup_count,
+            warmup_duration=warmup_duration,
+            export_level=export_level,
+            k8s=k8s_config,  # type: ignore[arg-type]
+            hf_token_secret_name=hf_token_secret_name,
+            image=image,
+        )
+        template_path = _Path(aiperf_template)
+        if not template_path.exists():
+            print(f"  ERROR: aiperf template not found: {template_path}")
+            return False
+        print(f"  Rendering aiperf template: {template_path.name}")
+        job_yaml = render_aiperf_template(template_path, variables)
+    else:
+        script = _build_aiperf_script(
+            model_name=model_name,
+            endpoint=endpoint,
+            concurrency=concurrency,
+            isl=isl,
+            osl=osl,
+            benchmark_duration=benchmark_duration,
+            num_requests=num_requests,
+            request_rate=request_rate,
+            warmup_duration=warmup_duration,
+            warmup_count=warmup_count,
+            export_level=export_level,
+            aiperf_extra=aiperf_extra,
+        )
+
+        job_yaml = _build_job_yaml(
+            job_name=job_name,
+            namespace=namespace,
+            script=script,
+            image_pull_secret=image_pull_secret,
+            hf_token_secret_name=hf_token_secret_name,
+            artifact_pvc_name=artifact_pvc_name,
+            artifact_pvc_mount_path=artifact_pvc_mount_path,
+        )
 
     # Create the Job
     try:
@@ -462,7 +574,13 @@ def run_aiperf(
     success = _wait_for_job(job_name, namespace, timeout=timeout)
 
     # Copy artifacts from PVC regardless of success (partial results may exist)
-    artifacts_ok = _copy_artifacts_from_pvc(job_name, namespace, artifact_dir)
+    artifacts_ok = _copy_artifacts_from_pvc(
+        job_name,
+        namespace,
+        artifact_dir,
+        artifact_pvc_name=artifact_pvc_name,
+        artifact_pvc_mount_path=artifact_pvc_mount_path,
+    )
     if success and not artifacts_ok:
         print("  Job succeeded but artifacts missing -- marking as failure")
         success = False

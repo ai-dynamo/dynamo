@@ -81,7 +81,7 @@ class K8sDgdExecutor:
             k8s_dgd.wait_model_ready(
                 self._incluster_endpoint,
                 config.model_name,
-                max_wait=300,
+                max_wait=1200,
                 namespace=k8s.namespace,
             )
 
@@ -104,7 +104,7 @@ class K8sDgdExecutor:
                 self._incluster_endpoint,
                 config.model_name,
                 namespace=k8s.namespace,
-                max_wait=300,
+                max_wait=1200,
             )
             return
 
@@ -201,7 +201,14 @@ class K8sDgdExecutor:
             pod_label=frontend_label,
         )
 
-        # Run aiperf as a k8s Job (uses in-cluster service endpoint)
+        # Per-run image wins over K8sConfig.image (multi-image sweeps).
+        # When single-image, deploy.image is empty and we fall back.
+        deploy_image = run_spec.deploy.image or k8s.image
+
+        # Run aiperf as a k8s Job (uses in-cluster service endpoint).
+        # The new kwargs (aiperf_template, aiperf_extra, artifact_pvc_*)
+        # control Tier-1 extensions; defaults match historical behaviour
+        # when the flags are unset.
         success = k8s_aiperf.run_aiperf(
             artifact_dir=run_dir / "aiperf",
             endpoint=self._incluster_endpoint,
@@ -209,7 +216,7 @@ class K8sDgdExecutor:
             concurrency=aiperf.concurrency,
             isl=aiperf.isl,
             namespace=k8s.namespace,
-            image=k8s.image,
+            image=deploy_image,
             run_id=run_spec.run_id,
             osl=aiperf.osl,
             benchmark_duration=aiperf.benchmark_duration,
@@ -218,6 +225,11 @@ class K8sDgdExecutor:
             export_level=k8s.export_level,
             image_pull_secret=k8s.image_pull_secret,
             hf_token_secret_name=k8s_template.DEFAULT_HF_TOKEN_SECRET_NAME,
+            aiperf_template=k8s.aiperf_template,
+            aiperf_extra=k8s.aiperf_extra,
+            artifact_pvc_name=k8s.artifact_pvc_name,
+            artifact_pvc_mount_path=k8s.artifact_pvc_mount_path,
+            k8s_config=k8s,
         )
 
         if success:
