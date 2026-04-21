@@ -15,6 +15,7 @@ from gpu_memory_service.server.fsm import ServerState
 from tests.gpu_memory_service.common.runtime import (
     GMSProcessManager,
     SGLangWithGMSProcess,
+    TRTLLMEagle3WithGMSProcess,
     TRTLLMWithGMSProcess,
     VLLMWithGMSProcess,
 )
@@ -302,16 +303,28 @@ def _trtllm_quiesce(
     return ws
 
 
-@pytest.mark.trtllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.timeout(600)
-def test_gms_shadow_engine_failover_trtllm(
-    request, runtime_services_dynamic_ports, predownload_models
-):
-    """Weights-only shadow failover for TRT-LLM (no KV cache GMS)."""
-    with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
+def _run_trtllm_weights_only_failover(
+    request,
+    engine_cls,
+    *,
+    model_name: str = FAULT_TOLERANCE_MODEL_NAME,
+    coherence_prompt: str = "Hello",
+    expected_substring: str | None = None,
+) -> None:
+    """Shared body for weights-only TRT-LLM shadow failover tests.
+
+    Runs the fixed five-phase choreography:
+      shadow-a publishes -> quiesces
+      shadow-b RO -> quiesces
+      primary RO
+      primary SIGKILL
+      shadow-a resumes + post-failover inference
+
+    If ``expected_substring`` is given, the post-failover completion must contain
+    it — this catches weight/draft binding corruption that would still return
+    syntactically valid but semantically garbled text.
+    """
+    with GMSProcessManager(request, engine_cls, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms
 
@@ -319,9 +332,11 @@ def test_gms_shadow_engine_failover_trtllm(
         shadow_a = manager.start_engine("shadow-a")
         assert_completion_ok(
             frontend_port,
-            "Hello",
+            coherence_prompt,
+            model=model_name,
             failure_message="Shadow A inference failed",
             success_message="Shadow A inference OK",
+            expected_substring=expected_substring,
         )
         ws_a = _trtllm_quiesce(weights_gms, shadow_a, label="Shadow A quiesce")
         weights_hash = ws_a.memory_layout_hash
@@ -330,9 +345,11 @@ def test_gms_shadow_engine_failover_trtllm(
         shadow_b = manager.start_engine("shadow-b", read_only_weights=True)
         assert_completion_ok(
             frontend_port,
-            "Hello",
+            coherence_prompt,
+            model=model_name,
             failure_message="Shadow B inference failed",
             success_message="Shadow B inference OK",
+            expected_substring=expected_substring,
         )
         _trtllm_quiesce(
             weights_gms,
@@ -346,9 +363,11 @@ def test_gms_shadow_engine_failover_trtllm(
         primary = manager.start_engine("primary", read_only_weights=True)
         assert_completion_ok(
             frontend_port,
-            "Primary test",
+            coherence_prompt,
+            model=model_name,
             failure_message="Primary inference failed",
             success_message="Primary inference OK",
+            expected_substring=expected_substring,
         )
         wait_for_weights_state(
             weights_gms,
@@ -372,8 +391,46 @@ def test_gms_shadow_engine_failover_trtllm(
 
         assert_completion_ok(
             frontend_port,
-            "Post failover",
+            coherence_prompt,
+            model=model_name,
             failure_message="Shadow after failover failed",
             success_message="Shadow after failover OK",
             retry_timeout=30.0,
+            expected_substring=expected_substring,
         )
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+def test_gms_shadow_engine_failover_trtllm(
+    request, runtime_services_dynamic_ports, predownload_models
+):
+    """Weights-only shadow failover for TRT-LLM (no KV cache GMS)."""
+    _run_trtllm_weights_only_failover(request, TRTLLMWithGMSProcess)
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
+@pytest.mark.model("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B")
+@pytest.mark.timeout(600)
+def test_gms_shadow_engine_failover_trtllm_eagle3(
+    request, runtime_services_dynamic_ports, predownload_models
+):
+    """Weights-only shadow failover for TRT-LLM with EAGLE3 one-engine spec dec.
+
+    Target: Llama-3.1-8B-Instruct. Draft: yuhuili/EAGLE3-LLaMA3.1-Instruct-8B.
+    Verifies coherent post-failover inference — a shared-tensor rebind bug in
+    the RO path would still produce text but garbled output.
+    """
+    _run_trtllm_weights_only_failover(
+        request,
+        TRTLLMEagle3WithGMSProcess,
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        coherence_prompt="The capital of France is",
+        expected_substring="Paris",
+    )
