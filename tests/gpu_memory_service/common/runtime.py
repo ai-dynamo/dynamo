@@ -310,7 +310,7 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
     quiesce_route = "release_memory_occupation"
     resume_route = "resume_memory_occupation"
 
-    # Override via environment variables for CI or custom setups.
+    # Override via class attributes (subclasses) or environment variables.
     TRTLLM_GMS_MODEL_NAME = os.environ.get(
         "TRTLLM_GMS_MODEL_NAME", FAULT_TOLERANCE_MODEL_NAME
     )
@@ -392,6 +392,54 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
 
     def quiesce_payload(self) -> dict:
         return {}
+
+
+class TRTLLMEagle3WithGMSProcess(TRTLLMWithGMSProcess):
+    """TRT-LLM EAGLE3 one-engine speculative decoding + GMS weights.
+
+    Target: Llama-3.1-8B-Instruct (~16 GB fp16).
+    Draft:  yuhuili/EAGLE3-LLaMA3.1-Instruct-8B (~2 GB).
+    Shadows quiesce their KV immediately, so stacking multiple shadows is VRAM-safe;
+    OOM during this test is almost always CUDA-graph capture — lower the fraction.
+    """
+
+    TRTLLM_GMS_MODEL_NAME = os.environ.get(
+        "TRTLLM_GMS_EAGLE3_MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct"
+    )
+    TRTLLM_GMS_FREE_GPU_MEMORY_FRACTION = os.environ.get(
+        "TRTLLM_GMS_EAGLE3_FREE_GPU_MEMORY_FRACTION", "0.75"
+    )
+    TRTLLM_GMS_MAX_SEQ_LEN = os.environ.get("TRTLLM_GMS_EAGLE3_MAX_SEQ_LEN", "512")
+    TRTLLM_GMS_MAX_NUM_TOKENS = os.environ.get(
+        "TRTLLM_GMS_EAGLE3_MAX_NUM_TOKENS", "512"
+    )
+
+    SPEC_OVERRIDE_JSON = json.dumps(
+        {
+            "speculative_config": {
+                "decoding_type": "Eagle3",
+                "max_draft_len": 3,
+                "speculative_model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                "eagle3_one_model": True,
+            }
+        }
+    )
+
+    def __init__(
+        self,
+        request,
+        frontend_port: int,
+        *,
+        engine_id: str,
+        read_only_weights: bool = False,
+    ):
+        super().__init__(
+            request,
+            frontend_port,
+            engine_id=engine_id,
+            read_only_weights=read_only_weights,
+            override_engine_args=self.SPEC_OVERRIDE_JSON,
+        )
 
 
 class SGLangWithGMSProcess(GMSEngineProcess):

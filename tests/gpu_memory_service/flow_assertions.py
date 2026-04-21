@@ -24,12 +24,15 @@ def assert_completion_ok(
     success_message: str,
     retry_timeout: float = 0.0,
     retry_interval: float = 1.0,
+    model: str = FAULT_TOLERANCE_MODEL_NAME,
+    expected_substring: str | None = None,
+    max_tokens: int = 20,
 ):
     completion = CompletionPayload(
         body={
-            "model": FAULT_TOLERANCE_MODEL_NAME,
+            "model": model,
             "prompt": prompt,
-            "max_tokens": 20,
+            "max_tokens": max_tokens,
         },
         expected_response=[],
         expected_log=[],
@@ -49,6 +52,12 @@ def assert_completion_ok(
             result = response.json()
             if not isinstance(result, dict) or not result.get("choices"):
                 raise AssertionError(failure_message)
+            text = result["choices"][0].get("text", "")
+            if expected_substring is not None and expected_substring not in text:
+                raise AssertionError(
+                    f"{failure_message}: expected substring {expected_substring!r} "
+                    f"in completion, got {text!r}"
+                )
             logger.info("%s: %s", success_message, result)
             return
         except (AssertionError, KeyError, requests.RequestException, ValueError):
