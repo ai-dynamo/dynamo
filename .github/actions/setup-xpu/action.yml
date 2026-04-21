@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Setup XPU runner'
+description: |
+  Detect Intel GPUs (XPU) on the runner and emit the docker flags needed
+  to pass them through into a container. Distinguishes consumer Arc GPUs
+  (which need the V1 Level Zero UR adapter) from data center GPUs (which
+  use the default V2 adapter).
+
+  This action does NOT install drivers or modify the host. It only
+  inspects /sys/class/drm and /dev/dri to derive the runtime flags.
+
+inputs:
+  min_gpus:
+    description: 'Minimum number of XPUs required for this job'
+    required: false
+    default: '1'
+
+outputs:
+  xpu_count:
+    description: 'Number of Intel GPU render devices detected'
+    value: ${{ steps.detect.outputs.xpu_count }}
+  gpu_class:
+    description: 'GPU class: arc-consumer or data-center'
+    value: ${{ steps.detect.outputs.gpu_class }}
+  gpu_name:
+    description: 'Detected GPU name (best-effort)'
+    value: ${{ steps.detect.outputs.gpu_name }}
+  docker_device_flags:
+    description: 'docker run flags to expose /dev/dri (e.g. --device /dev/dri -v /dev/dri:/dev/dri)'
+    value: ${{ steps.detect.outputs.docker_device_flags }}
+  docker_group_flags:
+    description: 'docker run --group-add flags for render device GIDs'
+    value: ${{ steps.detect.outputs.docker_group_flags }}
+  docker_env_flags:
+    description: 'docker run -e flags (e.g. UR_ADAPTERS_FORCE_LOAD for consumer Arc)'
+    value: ${{ steps.detect.outputs.docker_env_flags }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Detect Intel GPUs
+      id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        echo "=== /dev/dri ==="
+        ls -la /dev/dri/ 2>/dev/null || { echo "ERROR: /dev/dri not present"; exit 1; }
+
+        # Count Intel GPU render devices via sysfs (no xpu-smi/lspci dependency)
+        XPU_COUNT=0
+        GPU_NAME=""
+        DEVICE_ID=""
+        for card in /sys/class/drm/card*/device; do
+          [ -f "${card}/vendor" ] || continue
+          VENDOR=$(cat "${card}/vendor" 2>/dev/null || echo "")
+          if [ "${VENDOR}" = "0x8086" ]; then
+            XPU_COUNT=$((XPU_COUNT + 1))
+            if [ -z "${DEVICE_ID}" ]; then
+              DEVICE_ID=$(cat "${card}/device" 2>/dev/null || echo "")
+            fi
+          fi
+        done
+
+        echo "Detected ${XPU_COUNT} Intel GPU(s) (PCI device ID: ${DEVICE_ID:-unknown})"
+
+        if [ "${XPU_COUNT}" -lt "${{ inputs.min_gpus }}" ]; then
+          echo "ERROR: Job requires ${{ inputs.min_gpus }} XPU(s), found ${XPU_COUNT}"
+          exit 1
+        fi
+
+        # Best-effort name resolution: prefer xpu-smi if available, otherwise
+        # fall back to PCI device ID. Used only for human-readable logs.
+        if command -v xpu-smi >/dev/null 2>&1; then
+          GPU_NAME=$(xpu-smi discovery 2>/dev/null | grep "Device Name" | head -1 | sed 's/.*: *//' || echo "")
+        fi
+        if [ -z "${GPU_NAME}" ]; then
+          GPU_NAME="Intel GPU PCI ${DEVICE_ID}"
+        fi
+        echo "GPU name: ${GPU_NAME}"
+
+        # Classify GPU. Consumer Arc GPUs need the V1 Level Zero UR adapter
+        # because PyTorch's default V2 adapter fails on these device IDs with
+        # UR_RESULT_ERROR_UNKNOWN. Data center GPUs (e.g. Intel Data Center
+        # GPU Max series) work with the default V2 adapter.
+        #
+        # Known consumer Arc PCI IDs:
+        #   0xe20b — Arc B580 (Battlemage)
+        #   0xe20c — Arc B570 (Battlemage)
+        #   0x5690 — Arc A770 (Alchemist)
+        #   0x5694 — Arc A750 (Alchemist)
+        DOCKER_ENV_FLAGS=""
+        case "${DEVICE_ID}" in
+          0xe20b|0xe20c|0x5690|0x5694|0x56a0|0x56a1)
+            GPU_CLASS="arc-consumer"
+            DOCKER_ENV_FLAGS="-e UR_ADAPTERS_FORCE_LOAD=/opt/dynamo/venv/lib/libur_adapter_level_zero.so"
+            echo "Consumer Arc GPU detected — forcing Level Zero V1 UR adapter"
+            ;;
+          *)
+            GPU_CLASS="data-center"
+            echo "Treating as data center GPU — using default V2 UR adapter"
+            ;;
+        esac
+
+        # Render-device group GIDs. The XPU container runs as a non-root user
+        # ('dynamo') which needs explicit access to /dev/dri/renderD* nodes
+        # via supplementary groups. Without --group-add, both UR adapters
+        # fail to init and report the misleading UR_RESULT_ERROR_UNSUPPORTED_VERSION.
+        DOCKER_GROUP_FLAGS=""
+        SEEN_GIDS=""
+        for r in /dev/dri/renderD*; do
+          [ -e "${r}" ] || continue
+          GID=$(stat -c '%g' "${r}")
+          case " ${SEEN_GIDS} " in
+            *" ${GID} "*) ;;  # already added
+            *)
+              DOCKER_GROUP_FLAGS="${DOCKER_GROUP_FLAGS} --group-add ${GID}"
+              SEEN_GIDS="${SEEN_GIDS} ${GID}"
+              ;;
+          esac
+        done
+
+        DOCKER_DEVICE_FLAGS="--device /dev/dri -v /dev/dri:/dev/dri"
+
+        echo "xpu_count=${XPU_COUNT}" >> "${GITHUB_OUTPUT}"
+        echo "gpu_class=${GPU_CLASS}" >> "${GITHUB_OUTPUT}"
+        echo "gpu_name=${GPU_NAME}" >> "${GITHUB_OUTPUT}"
+        echo "docker_device_flags=${DOCKER_DEVICE_FLAGS}" >> "${GITHUB_OUTPUT}"
+        echo "docker_group_flags=${DOCKER_GROUP_FLAGS}" >> "${GITHUB_OUTPUT}"
+        echo "docker_env_flags=${DOCKER_ENV_FLAGS}" >> "${GITHUB_OUTPUT}"
