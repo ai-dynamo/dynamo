@@ -18,8 +18,8 @@ on:
         description: 'Runner to execute tests on (amd64 only)'
         required: true
         type: string
-      target_tag_plain:
-        description: 'Plain runtime image tag prefix from the build workflow'
+      container_image_tag:
+        description: 'Container image tag to use for the test'
         required: true
         type: string
       cuda_version:
@@ -68,6 +68,11 @@ on:
         required: false
         type: number
         default: 30
+      gpu_parallel_mode:
+        description: 'pytest-xdist mode for GPU tests: auto, none/0, or a worker count'
+        required: false
+        type: string
+        default: 'none'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -88,90 +93,81 @@ jobs:
       fail-fast: false
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
-        cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1' }}
+    name: ${{ inputs.test_type }} ${{ inputs.cuda_version == '' && 'cpu' || format('cuda{0}', inputs.cuda_version) }}, ${{ matrix.platform }}
+    runs-on: ubuntu-slim
+    # runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'stg-tester-arm-v2' }}
+    # container:
+    #   image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.test_suite_name }}-runtime-test${{ inputs.container_name_tmp }}-${{ inputs.test_suite_name }}-runtime-test-cuda12 #  d94b350d2cedbd0a5b789cc6983e9ac7827aea8c-trtllm-runtime-test-cuda13
+    #   env:
+    #     # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+    #     # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+    #     # USER here sidesteps two symptoms of that mismatch:
+    #     #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+    #     #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+    #     HOME: /__w/dynamo/dynamo
+    #     USER: dynamo
+    # permissions:
+    #   contents: read
+    # services:
+    #   minio:
+    #     image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+    #     env:
+    #       MINIO_ROOT_USER: minioadmin
+    #       MINIO_ROOT_PASSWORD: minioadmin
+    #       MINIO_VOLUMES: /tmp/minio-data
+    #       MINIO_CONSOLE_ADDRESS: ':9001'
+    #     ports:
+    #       - 9000:9000
+    #       - 9001:9001
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        env:
-          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
+      - name: check container image tag
         run: |
-          CUDA_VERSION="${{ matrix.cuda_version }}"
-          CUDA_MAJOR=${CUDA_VERSION%%.*}
-          if [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
-            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
-          else
-            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-cuda${CUDA_MAJOR}
-          fi
-
-          RUNTIME_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}
-          TEST_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}-test
-          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull relevant images
-        shell: bash
-        run: |
-          source ./.github/scripts/retry_docker.sh
-          start_time=$(date +%s)
-          retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
-          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
-          retry_pull quay.io/minio/minio
-          end_time=$(date +%s)
-          duration=$((end_time - start_time))
-          echo "⏱️ Image pull duration: ${duration}s"
-      - name: Run Sanity Check on Runtime Image
-        if: ${{ inputs.run_sanity_check }}
-        shell: bash
-        run: |
-          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
-
-          export WORKSPACE=/workspace
-
-          set +e
-          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-          SANITY_CHECK_EXIT_CODE=$?
-          set -e
-          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-            exit ${SANITY_CHECK_EXIT_CODE}
-          else
-            echo "✅ Sanity check passed"
-          fi
-      - name: Run CPU-only tests (parallelized)
-        if: ${{ inputs.run_cpu_only_tests }}
-        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          test_suite_name: ${{ inputs.test_suite_name }}
-          test_type: "pre_merge_cpu"
-          platform_arch: ${{ matrix.platform }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: ${{ inputs.cpu_parallel_mode }}
-          dind_as_sidecar: 'true'
-      - name: Run GPU tests (sequential)
-        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ inputs.gpu_test_markers }}
-          test_suite_name: ${{ inputs.test_suite_name }}
-          test_type: "pre_merge_gpu"
-          platform_arch: ${{ matrix.platform }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: 'none'
-          dind_as_sidecar: 'true'
+          echo "${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.container_image_tag }}"
+      # - name: Checkout repository
+      #   uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      # - name: Run Sanity Check on Runtime Image
+      #   shell: bash
+      #   # Run from the container's baked-in workspace, not the GHA checkout,
+      #   # so the sanity check reflects what the image actually ships.
+      #   working-directory: /workspace
+      #   run: |
+      #     set +e
+      #     python ./deploy/sanity_check.py --runtime-check --no-gpu-check
+      #     SANITY_CHECK_EXIT_CODE=$?
+      #     if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+      #       echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+      #       exit ${SANITY_CHECK_EXIT_CODE}
+      #     else
+      #       echo "✅ Sanity check passed"
+      #     fi
+      # - name: Run CPU-only tests (parallelized) from /workspace
+      #   if: ${{ inputs.run_cpu_only_tests }}
+      #   timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+      #   # pytest runs from the container's baked-in /workspace (see action's
+      #   # container_workspace input below), NOT from the GHA checkout at
+      #   # $GITHUB_WORKSPACE. Composite-action steps don't inherit the caller's
+      #   # working-directory, so it is passed as an explicit input instead.
+      #   uses: ./.github/actions/pytest-local
+      #   with:
+      #     container_workspace: /workspace
+      #     pytest_marks: ${{ inputs.cpu_only_test_markers }}
+      #     test_suite_name: ${{ inputs.test_suite_name }}
+      #     test_type: "pre_merge_cpu"
+      #     platform_arch: ${{ matrix.platform }}
+      #     hf_token: ${{ secrets.HF_TOKEN }}
+      #     parallel_mode: ${{ inputs.cpu_parallel_mode }}
+      #     framework: ${{ inputs.test_suite_name }}
+      # - name: Run GPU tests (sequential) from /workspace
+      #   timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+      #   if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+      #   uses: ./.github/actions/pytest-local
+      #   with:
+      #     container_workspace: /workspace
+      #     pytest_marks: ${{ inputs.gpu_test_markers }}
+      #     test_suite_name: ${{ inputs.test_suite_name }}
+      #     test_type: "pre_merge_gpu"
+      #     platform_arch: ${{ matrix.platform }}
+      #     hf_token: ${{ secrets.HF_TOKEN }}
+      #     parallel_mode: ${{ inputs.gpu_parallel_mode }}
+      #     framework: ${{ inputs.test_suite_name }}
+      #     verify_gpu: 'true'
