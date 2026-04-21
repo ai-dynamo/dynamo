@@ -21,6 +21,7 @@ use anyhow::Result;
 use futures::stream::{self, StreamExt};
 
 use crate::model_card::ModelDeploymentCard;
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
@@ -42,7 +43,7 @@ use crate::protocols::{
     },
 };
 use crate::tokenizers::{DecodeStream, Tokenizer};
-use dynamo_async_openai::types::StopReason;
+use dynamo_protocols::types::StopReason;
 
 /// Represents the output stream from the execution engine
 pub type ExecutionOutputStream = Annotated<LLMEngineOutput>;
@@ -468,9 +469,13 @@ impl Decoder {
 
         // decode the token
         let detokenize_start = Instant::now();
-        let token = self.decode_stream.step(token_id)?;
+        let token = {
+            let _nvtx = dynamo_nvtx_range!("detokenize");
+            self.decode_stream.step(token_id)?
+        };
+        let detokenize_elapsed = detokenize_start.elapsed();
         if let Some(tracker) = &self.tracker {
-            tracker.record_detokenize_latency(detokenize_start.elapsed());
+            tracker.record_detokenize_latency(detokenize_elapsed);
         }
 
         // stop conditions to not apply until the minimum number of tokens have been generated
@@ -633,7 +638,7 @@ mod tests {
             &self,
             _token_ids: &[TokenIdType],
             _skip_special_tokens: bool,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<traits::DecodeResult> {
             Err(anyhow::anyhow!(
                 "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
             ))

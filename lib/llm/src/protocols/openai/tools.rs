@@ -3,9 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use dynamo_async_openai::types::{
-    ChatCompletionTool, ChatCompletionToolChoiceOption, FunctionObject,
-};
+use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, FunctionObject};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -267,7 +265,7 @@ fn merge_defs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{ChatCompletionToolChoiceOption, ChatCompletionToolType};
+    use dynamo_protocols::types::{ChatCompletionToolChoiceOption, ChatCompletionToolType};
 
     fn sample_tools() -> Vec<ChatCompletionTool> {
         vec![
@@ -310,9 +308,9 @@ mod tests {
     fn named_choice_returns_parameters() {
         let tools = sample_tools();
         let tool_choice = ChatCompletionToolChoiceOption::Named(
-            dynamo_async_openai::types::ChatCompletionNamedToolChoice {
+            dynamo_protocols::types::ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
-                function: dynamo_async_openai::types::FunctionName {
+                function: dynamo_protocols::types::FunctionName {
                     name: "get_weather".to_string(),
                 },
             },
@@ -358,9 +356,9 @@ mod tests {
     fn missing_tool_errors() {
         let tools = sample_tools();
         let tool_choice = ChatCompletionToolChoiceOption::Named(
-            dynamo_async_openai::types::ChatCompletionNamedToolChoice {
+            dynamo_protocols::types::ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
-                function: dynamo_async_openai::types::FunctionName {
+                function: dynamo_protocols::types::FunctionName {
                     name: "unknown".to_string(),
                 },
             },

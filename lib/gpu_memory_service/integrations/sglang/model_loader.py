@@ -14,13 +14,21 @@ Usage:
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 
 import torch
+from gpu_memory_service.client.torch.module import materialize_module_from_gms
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.utils import setup_meta_tensor_workaround
+from gpu_memory_service.integrations.common.utils import (
+    setup_meta_tensor_workaround,
+    strip_gms_model_loader_config,
+)
+from gpu_memory_service.integrations.sglang.memory_saver import (
+    get_gms_memory_saver_impl,
+)
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
+    patch_static_state_for_gms,
     patch_torch_memory_saver,
 )
 
@@ -28,9 +36,13 @@ logger = logging.getLogger(__name__)
 
 # Apply patches at module import time.
 # This module is only imported when load_format="gms" is used.
+# Because SGLang scheduler processes use multiprocessing spawn, these patches
+# must run inside the child process.  The import chain that triggers this is:
+#   child unpickles server_args.load_format -> imports GMSModelLoader -> here.
 patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
+patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
 
 
@@ -45,7 +57,10 @@ class GMSModelLoader:
         if self._default_loader is None:
             from sglang.srt.model_loader.loader import DefaultModelLoader
 
-            config = replace(self.load_config, load_format="auto")
+            config = strip_gms_model_loader_config(
+                self.load_config,
+                load_format="auto",
+            )
             self._default_loader = DefaultModelLoader(config)
         return self._default_loader
 
@@ -56,10 +71,6 @@ class GMSModelLoader:
         device_config,
     ) -> torch.nn.Module:
         """Load or import model weights."""
-        from gpu_memory_service.integrations.sglang.memory_saver import (
-            get_gms_memory_saver_impl,
-        )
-
         impl = get_gms_memory_saver_impl()
         if impl is None:
             raise RuntimeError(
@@ -67,13 +78,12 @@ class GMSModelLoader:
                 "Ensure torch_memory_saver patch was applied before model loading."
             )
 
-        mode = impl.get_mode()
-        logger.info("[GMS] Loading model in %s mode", mode.upper())
+        mode = impl.allocators["weights"].granted_lock_type
+        logger.info("[GMS] Loading model in %s mode", mode.name)
 
-        if mode == "read":
+        if mode == GrantedLockType.RO:
             return self._load_import_only(model_config, device_config, impl)
-        else:
-            return self._load_write_mode(model_config, device_config, impl)
+        return self._load_write_mode(model_config, device_config, impl)
 
     def _load_write_mode(self, model_config, device_config, impl) -> torch.nn.Module:
         """Load model from disk and register with GMS (WRITE mode)."""
@@ -89,17 +99,13 @@ class GMSModelLoader:
 
     def _load_import_only(self, model_config, device_config, impl) -> torch.nn.Module:
         """Import model weights from GMS metadata (READ mode)."""
-        from gpu_memory_service.client.torch.module import materialize_module_from_gms
-
-        allocator = impl.get_allocator()
-        if allocator is None:
-            raise RuntimeError("GMS allocator is None in READ mode")
+        allocator = impl.allocators["weights"]
 
         device_index = torch.cuda.current_device()
         model = self._create_meta_model(model_config, device_config)
 
         materialize_module_from_gms(allocator, model, device_index=device_index)
-        impl.set_imported_weights_bytes(allocator.total_bytes)
+        impl.imported_weights_bytes = allocator.total_bytes
 
         logger.info(
             "[GMS] READ mode: imported %.2f GiB from metadata",
@@ -119,7 +125,10 @@ class GMSModelLoader:
         with meta_device:
             model = get_model(
                 model_config=model_config,
-                load_config=replace(self.load_config, load_format="dummy"),
+                load_config=strip_gms_model_loader_config(
+                    self.load_config,
+                    load_format="dummy",
+                ),
                 device_config=device_config,
             )
 

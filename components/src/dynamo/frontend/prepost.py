@@ -79,6 +79,8 @@ def _prepare_request(
     *,
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
+    exclude_tools_when_tool_choice_none: bool = True,
+    enable_auto_tool_choice: bool = False,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -102,14 +104,24 @@ def _prepare_request(
         request_for_sampling = ChatCompletionRequest.model_validate(request)
 
     tool_parser: ToolParser | None = None
-    if tool_parser_class and request_for_sampling.tools:
+    # With enable_auto_tool_choice the model may emit tool calls even when the
+    # client did not supply an explicit `tools` list, so we activate the parser
+    # whenever the tool_parser_class is available.
+    has_tools = bool(request_for_sampling.tools)
+    if tool_parser_class and (has_tools or enable_auto_tool_choice):
         if request_for_sampling.tool_choice != "none":
             tool_parser = tool_parser_class(tokenizer)
             request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
+    # Strip tools from the template when tool_choice=none so the model doesn't
+    # see them and generate raw XML tool calls in its response.
     tool_dicts = (
         [tool.model_dump() for tool in request_for_sampling.tools]
         if request_for_sampling.tools
+        and not (
+            exclude_tools_when_tool_choice_none
+            and request_for_sampling.tool_choice == "none"
+        )
         else None
     )
     chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
@@ -155,6 +167,8 @@ async def preprocess_chat_request(
     tokenizer: TokenizerLike,
     renderer,
     tool_parser_class: type[ToolParser] | None,
+    exclude_tools_when_tool_choice_none: bool = True,
+    enable_auto_tool_choice: bool = False,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -163,7 +177,11 @@ async def preprocess_chat_request(
         messages,
         chat_params,
     ) = _prepare_request(
-        request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=tool_parser_class,
+        exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        enable_auto_tool_choice=enable_auto_tool_choice,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)

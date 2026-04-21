@@ -71,6 +71,7 @@ type Autoscaling struct {
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.disabled) && self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
 type SharedMemorySpec struct {
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
@@ -154,6 +155,57 @@ func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
+// GPUMemoryServiceMode selects the GMS deployment topology.
+type GPUMemoryServiceMode string
+
+const (
+	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
+	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
+	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	GMSModeInterPod GPUMemoryServiceMode = "interPod"
+)
+
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
+// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
+// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
+// (weights + kv_cache) and communicates with the main container over UDS sockets.
+type GPUMemoryServiceSpec struct {
+	// Enabled activates the GMS sidecar. GPU resources on the main container
+	// are replaced with a DRA ResourceClaim for shared GPU access.
+	Enabled bool `json:"enabled"`
+	// Mode selects the GMS deployment topology.
+	// +kubebuilder:default=intraPod
+	// +kubebuilder:validation:Enum=intraPod;interPod
+	// +optional
+	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
+	// DeviceClassName is the DRA DeviceClass to request GPUs from.
+	// +kubebuilder:default="gpu.nvidia.com"
+	// +optional
+	DeviceClassName string `json:"deviceClassName,omitempty"`
+}
+
+// FailoverSpec configures active-passive failover for a worker component.
+// Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
+// annotation on the DGD.
+type FailoverSpec struct {
+	// Enabled activates failover mode. The main container is cloned into two
+	// engine containers (active + standby) sharing GPUs via DRA. The standby
+	// acquires the flock when the active engine fails.
+	Enabled bool `json:"enabled"`
+	// Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
+	// +kubebuilder:default=intraPod
+	// +kubebuilder:validation:Enum=intraPod;interPod
+	// +optional
+	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
+	// NumShadows is the number of shadow (standby) engine containers per rank.
+	// Reserved for future use — the operator currently creates exactly one shadow.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	NumShadows int32 `json:"numShadows,omitempty"`
+}
+
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
@@ -192,8 +244,8 @@ type ServiceCheckpointConfig struct {
 	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
 
-	// CheckpointRef references an existing Checkpoint CR to use
-	// If specified, Identity is ignored and this checkpoint is used directly
+	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
+	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 

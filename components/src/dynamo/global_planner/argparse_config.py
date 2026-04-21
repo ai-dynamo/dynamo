@@ -53,4 +53,12 @@ Examples:
         help="Log incoming scale requests without executing them (useful for testing the e2e flow without actual K8s scaling)",
     )
 
+    parser.add_argument(
+        "--max-total-gpus",
+        type=int,
+        default=-1,
+        dest="max_total_gpus",
+        help="Maximum total GPUs across all managed pools. Requests that would exceed this limit are rejected. 0 means no GPU scaling is allowed. -1 (default) disables enforcement entirely.",
+    )
+
     return parser

@@ -272,7 +272,6 @@ def test_request_interface():
         prompt_token_ids=[1, 2, 3],
         sampling_params=SamplingParams(max_tokens=10),
         pooling_params=None,
-        eos_token_id=100,
         lora_request=LoRARequest(
             lora_name="test_lora", lora_int_id=1, lora_path="test_path"
         ),

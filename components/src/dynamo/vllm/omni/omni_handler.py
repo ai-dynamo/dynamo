@@ -1,38 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import base64
 import logging
-import tempfile
-import time
-import uuid
+import random
 from dataclasses import dataclass
-from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
-from diffusers.utils import export_to_video
+import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
-from dynamo.common.protocols.image_protocol import (
-    ImageData,
-    NvCreateImageRequest,
-    NvImagesResponse,
-)
-from dynamo.common.protocols.video_protocol import (
-    NvCreateVideoRequest,
-    NvVideosResponse,
-    VideoData,
-)
-from dynamo.common.storage import upload_to_fs
-from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo._core import Context
+from dynamo.common.multimodal import ImageLoader
+from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
+from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
-from dynamo.common.utils.video_utils import (
-    compute_num_frames,
-    normalize_video_frames,
-    parse_size,
-)
+from dynamo.common.utils.video_utils import compute_num_frames, parse_size
+from dynamo.llm.exceptions import EngineShutdown
+from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+from dynamo.vllm.omni.output_formatter import OutputFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +42,19 @@ class EngineInputs:
             image requests). None means use the default for the request type.
     """
 
-    prompt: OmniTextPrompt
+    prompt: Union[OmniTextPrompt, Dict[str, Any]]
     sampling_params_list: list | None = None
     request_type: RequestType = RequestType.CHAT_COMPLETION
     fps: int = 0
+    speed: float = 1.0
     response_format: str | None = None
 
 
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, and text-to-video generation.
+    Handles text-to-text, text-to-image, text-to-video, and text-to-audio generation.
+    Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
     def __init__(
@@ -94,10 +85,26 @@ class OmniHandler(BaseOmniHandler):
         )
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
+        self._image_loader = ImageLoader()
+
+        self.output_formatter = OutputFormatter(
+            model_name=config.served_model_name or config.model,
+            media_fs=media_output_fs,
+            media_http_url=media_output_http_url,
+            default_fps=getattr(config, "default_video_fps", 16),
+        )
+
+        # Audio/TTS handler — composition, not inheritance.
+        self.audio = AudioGenerationHandler(
+            config=config,
+            engine_client=self.engine_client,
+            media_output_fs=media_output_fs,
+            media_output_http_url=media_output_http_url,
+        )
 
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs via the unified OpenAI mode.
 
         Args:
@@ -108,20 +115,55 @@ class OmniHandler(BaseOmniHandler):
             Response dictionaries.
         """
         request_id = context.id()
+        assert request_id is not None, "Request ID is required"
         logger.debug(f"Omni Request ID: {request_id}")
 
         async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
-        self, request: Dict[str, Any], context, request_id: str
+        self, request: Dict[str, Any], context: Context, request_id: str
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request, request_type = parse_request_type(
+        parsed_request_raw, request_type = parse_request_type(
             request, self.config.output_modalities
         )
-        inputs = self.build_engine_inputs(parsed_request, request_type)
+        parsed_request = cast(
+            Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
+            parsed_request_raw,
+        )
+
+        # Pre-load input image for I2V requests (async I/O before sync build)
+        image = None
+        if (
+            request_type == RequestType.VIDEO_GENERATION
+            and isinstance(parsed_request, NvCreateVideoRequest)
+            and parsed_request.input_reference
+        ):
+            try:
+                image = await self._image_loader.load_image(
+                    parsed_request.input_reference
+                )
+            except Exception as e:
+                logger.warning("Failed to load I2V input_reference: %s", e)
+                yield {
+                    "id": request_id,
+                    "object": "video",
+                    "model": self.config.model,
+                    "status": "failed",
+                    "error": f"Failed to load input_reference: {e}",
+                }
+                return
+
+        try:
+            inputs = await self.build_engine_inputs(
+                parsed_request, request_type, image=image
+            )
+        except (ValueError, NotImplementedError) as e:
+            logger.error(f"Invalid request {request_id}: {e}")
+            yield self._error_chunk(request_id, str(e), request_type)
+            return
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -137,170 +179,191 @@ class OmniHandler(BaseOmniHandler):
                 async for stage_output in self.engine_client.generate(
                     **generate_kwargs,
                 ):
-                    if (
-                        stage_output.final_output_type == "text"
-                        and stage_output.request_output
-                    ):
-                        chunk = self._format_text_chunk(
-                            stage_output.request_output,
-                            request_id,
-                            previous_text,
-                        )
-                        if chunk:
-                            output = stage_output.request_output.outputs[0]
-                            previous_text = output.text
-                            yield chunk
+                    chunk = await self.output_formatter.format(
+                        stage_output,
+                        request_id,
+                        request_type=inputs.request_type,
+                        fps=inputs.fps,
+                        response_format=inputs.response_format,
+                        previous_text=previous_text,
+                        speed=inputs.speed,
+                    )
+                    if chunk:
+                        # Track text state for streaming delta
+                        if (
+                            stage_output.final_output_type == "text"
+                            and stage_output.request_output
+                        ):
+                            previous_text = stage_output.request_output.outputs[0].text
+                        yield chunk
 
-                    elif (
-                        stage_output.final_output_type == "image"
-                        and stage_output.images
-                    ):
-                        # vllm-omni uses final_output_type="image" for both
-                        # image and video diffusion outputs. Use the parsed
-                        # request type to route to the correct formatter.
-                        if inputs.request_type == RequestType.VIDEO_GENERATION:
-                            chunk = await self._format_video_chunk(
-                                stage_output.images,
-                                request_id,
-                                fps=inputs.fps,
-                            )
-                        else:
-                            chunk = await self._format_image_chunk(
-                                stage_output.images,
-                                request_id,
-                                response_format=inputs.response_format,
-                                request_type=inputs.request_type,
-                            )
-                        if chunk:
-                            yield chunk
-
-            except GeneratorExit:
+            except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
-                yield self._error_chunk(request_id, str(e))
+                yield self._error_chunk(request_id, str(e), inputs.request_type)
 
-    def build_engine_inputs(
+    async def build_engine_inputs(
         self,
         parsed_request: Union[
-            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+            NvCreateImageRequest,
+            NvCreateVideoRequest,
+            NvCreateAudioSpeechRequest,
+            Dict[str, Any],
         ],
         request_type: RequestType,
+        image: PIL.Image.Image | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
         Args:
             parsed_request: Output from parse_request_type -- a Pydantic model
-                for image/video requests, or a raw dict for chat completions.
+                for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
+            image: Pre-loaded PIL Image for I2V requests (from input_reference).
 
         Returns:
             EngineInputs ready for engine_client.generate().
         """
         if request_type == RequestType.CHAT_COMPLETION:
+            assert isinstance(parsed_request, dict)
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
+            assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
-            return self._engine_inputs_from_video(parsed_request)
-
+            assert isinstance(parsed_request, NvCreateVideoRequest)
+            return self._engine_inputs_from_video(parsed_request, image=image)
         elif request_type == RequestType.AUDIO_GENERATION:
-            raise NotImplementedError("Audio generation is not yet supported")
+            assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
+            return await self.audio.build_engine_inputs(parsed_request)
 
         raise ValueError(f"Unknown request type: {request_type}")
 
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
-        # Chat completions request does not support extra_body passthrough
-        # So, we can't extract any diffusion related params from the raw_request
-        # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
         prompt = OmniTextPrompt(prompt=text_prompt)
 
-        sampling_params_list = None
-
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=sampling_params_list,
+            sampling_params_list=None,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
 
+    @staticmethod
+    def _update_if_not_none(object: Any, key: str, val: Any) -> None:
+        if val is not None:
+            setattr(object, key, val)
+
+    def _build_sampling_params_list(
+        self, diffusion_sp: OmniDiffusionSamplingParams
+    ) -> list:
+        # This is in sync with how vllm-omni builds sampling params currently.
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        result = []
+        for i, default in enumerate(defaults):
+            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
+                "stage_type", "llm"
+            )
+            if stage_type == "diffusion":
+                result.append(diffusion_sp)
+            else:
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+        return result if result else [diffusion_sp]
+
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
         width, height = parse_size(req.size, default_w=1024, default_h=1024)
-        nvext = req.nvext
+        nvext = req.nvext or ImageNvExt()
 
-        prompt = OmniTextPrompt(
-            prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
-        )
+        prompt = OmniTextPrompt(prompt=req.prompt)
+        if nvext and nvext.negative_prompt is not None:
+            prompt.negative_prompt = nvext.negative_prompt
 
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,
         )
-        if req.n is not None:
-            sp.num_outputs_per_prompt = req.n
-        if nvext:
-            if nvext.num_inference_steps is not None:
-                sp.num_inference_steps = nvext.num_inference_steps
-            if nvext.guidance_scale is not None:
-                sp.guidance_scale = nvext.guidance_scale
-            if nvext.seed is not None:
-                sp.seed = nvext.seed
+
+        # TODO: Apply LoRA Request params here and move to shared utilities for disaggregated stages to use as well.
+
+        self._update_if_not_none(sp, "num_outputs_per_prompt", req.n)
+
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        # If seed is not provided, generate a random one to ensure
+        # a proper generator is initialized in the backend.
+        # This fixes issues where using the default global generator
+        # might produce blurry images in some environments.
+        sp.seed = (
+            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
+        )
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
         )
 
-    def _engine_inputs_from_video(self, req: NvCreateVideoRequest) -> EngineInputs:
-        """Build engine inputs from an NvCreateVideoRequest."""
-        width, height = parse_size(req.size)
-        nvext = req.nvext
+    def _engine_inputs_from_video(
+        self,
+        req: NvCreateVideoRequest,
+        image: PIL.Image.Image | None = None,
+    ) -> EngineInputs:
+        """Build engine inputs from an NvCreateVideoRequest.
 
-        nvext_fps = nvext.fps if nvext else None
-        nvext_num_frames = nvext.num_frames if nvext else None
+        Args:
+            req: Parsed video generation request.
+            image: Pre-loaded PIL Image for I2V. When provided, the image is
+                attached to the prompt via ``multi_modal_data`` so vllm-omni's
+                I2V pipeline pre-process can use it.
+        """
+        width, height = parse_size(req.size)
+        nvext = req.nvext or VideoNvExt()
 
         num_frames = compute_num_frames(
-            num_frames=nvext_num_frames,
+            num_frames=nvext.num_frames,
             seconds=req.seconds,
-            fps=nvext_fps,
+            fps=nvext.fps,
             default_fps=DEFAULT_VIDEO_FPS,
         )
-        fps = nvext_fps if nvext_fps is not None else DEFAULT_VIDEO_FPS
+        fps = nvext.fps if nvext.fps is not None else DEFAULT_VIDEO_FPS
 
-        prompt = OmniTextPrompt(
-            prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
-        )
+        prompt = OmniTextPrompt(prompt=req.prompt)
+        if nvext.negative_prompt is not None:
+            prompt.negative_prompt = nvext.negative_prompt
+
+        if image is not None:
+            prompt["multi_modal_data"] = {"image": image}
+            logger.info(
+                "I2V: attached image (%dx%d) to multi_modal_data",
+                image.size[0],
+                image.size[1],
+            )
 
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,
             num_frames=num_frames,
         )
-        if nvext:
-            if nvext.num_inference_steps is not None:
-                sp.num_inference_steps = nvext.num_inference_steps
-            if nvext.guidance_scale is not None:
-                sp.guidance_scale = nvext.guidance_scale
-            if nvext.seed is not None:
-                sp.seed = nvext.seed
-        if fps is not None:
-            sp.fps = fps
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        sp.seed = (
+            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
+        )
+        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
+        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
+        self._update_if_not_none(sp, "fps", fps)
 
         logger.info(
             f"Video diffusion request: prompt='{req.prompt[:50]}...', "
@@ -309,222 +372,7 @@ class OmniHandler(BaseOmniHandler):
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
         )
-
-    async def _prepare_image_output(
-        self, images: list, request_id: str, response_format: str | None = None
-    ) -> list:
-        """Prepare image output for response.
-
-        Args:
-            images: List of PIL Image objects.
-            request_id: Unique request identifier.
-            response_format: Response format ("url" or "b64_json").
-
-        Returns:
-            List of image URLs or base64 data-URL strings.
-        """
-        outlist = []
-
-        for img in images:
-            buffer = BytesIO()
-            img.save(buffer, format="PNG")
-            image_bytes = buffer.getvalue()
-
-            if response_format == "url":
-                storage_path = f"images/{request_id}/{uuid.uuid4()}.png"
-                url = await upload_to_fs(
-                    self.media_output_fs,
-                    storage_path,
-                    image_bytes,
-                    self.media_output_http_url,
-                )
-                outlist.append(url)
-            elif response_format == "b64_json" or response_format is None:
-                img_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                data_url = f"data:image/png;base64,{img_base64}"
-                outlist.append(data_url)
-            else:
-                raise ValueError(f"Invalid response format: {response_format}")
-        return outlist
-
-    async def _format_image_chunk(
-        self,
-        images: list,
-        request_id: str,
-        response_format: str | None = None,
-        request_type: RequestType = RequestType.IMAGE_GENERATION,
-    ) -> Dict[str, Any] | None:
-        """Format image output for the appropriate endpoint response.
-
-        Args:
-            images: List of PIL Image objects generated by AsyncOmni engine.
-            request_id: Unique request identifier.
-            response_format: Response format (url, b64_json, None).
-            request_type: Request type (chat completion, image generation).
-
-        Returns:
-            Formatted response dict, or None if no images generated.
-        """
-        if not images:
-            return self._error_chunk(request_id, "No images generated")
-
-        data_urls = await self._prepare_image_output(
-            images, request_id, response_format
-        )
-
-        if request_type == RequestType.CHAT_COMPLETION:
-            chunk = {
-                "id": request_id,
-                "created": int(time.time()),
-                "object": "chat.completion.chunk",
-                "model": self.config.served_model_name or self.config.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": data_url}}
-                                for data_url in data_urls
-                            ],
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            return chunk
-        elif request_type == RequestType.IMAGE_GENERATION:
-            image_data_list = []
-            for data_url in data_urls:
-                if response_format == "url":
-                    image_data_list.append(ImageData(url=data_url))
-                elif response_format == "b64_json" or response_format is None:
-                    if data_url.startswith("data:image"):
-                        _, b64_part = data_url.split(",", 1)
-                        image_data_list.append(ImageData(b64_json=b64_part))
-                    else:
-                        image_data_list.append(ImageData(b64_json=data_url))
-                else:
-                    raise ValueError(f"Invalid response format: {response_format}")
-
-            output = NvImagesResponse(created=int(time.time()), data=image_data_list)
-            return output.model_dump()
-        else:
-            return None
-
-    async def _format_video_chunk(
-        self,
-        images: list,
-        request_id: str,
-        fps: int,
-    ) -> Dict[str, Any] | None:
-        """Convert diffusion output frames to MP4 and return as NvVideosResponse.
-
-        Args:
-            images: List of PIL Image frames from the diffusion stage.
-            request_id: Unique request identifier.
-            fps: Frames per second for the output video.
-
-        Returns:
-            ``NvVideosResponse.model_dump()`` dict, or ``None`` if no frames.
-        """
-        if not images:
-            return None
-
-        try:
-            start_time = time.time()
-
-            frame_list = normalize_video_frames(images)
-
-            logger.info(
-                f"Encoding {len(frame_list)} frames to MP4 for request {request_id} "
-                f"(fps={fps})"
-            )
-
-            # Encode frames to MP4 via temp file, then read bytes for upload
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
-
-            # Upload via filesystem
-            storage_path = f"videos/{request_id}.mp4"
-            video_url = await upload_to_fs(
-                self.media_output_fs,
-                storage_path,
-                video_bytes,
-                self.media_output_http_url,
-            )
-
-            logger.info(f"Video uploaded to {video_url} for request {request_id}")
-
-            inference_time = time.time() - start_time
-
-            response = NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="completed",
-                progress=100,
-                created=int(time.time()),
-                data=[VideoData(url=video_url)],
-                inference_time_s=inference_time,
-            )
-            return response.model_dump()
-
-        except Exception as e:
-            logger.error(f"Failed to encode video for request {request_id}: {e}")
-            error_response = NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="failed",
-                progress=0,
-                created=int(time.time()),
-                data=[],
-                error=str(e),
-            )
-            return error_response.model_dump()
-
-    def _format_text_chunk(
-        self,
-        request_output,
-        request_id: str,
-        previous_text: str,
-    ) -> Dict[str, Any] | None:
-        """Format text output as OpenAI chat completion chunk."""
-        if not request_output.outputs:
-            return self._error_chunk(request_id, "No outputs from engine")
-
-        output = request_output.outputs[0]
-
-        # Calculate delta text (new text since last chunk)
-        delta_text = output.text[len(previous_text) :]
-
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": delta_text,
-                    },
-                    "finish_reason": normalize_finish_reason(output.finish_reason)
-                    if output.finish_reason
-                    else None,
-                }
-            ],
-        }
-
-        # Add usage on final chunk
-        if output.finish_reason:
-            chunk["usage"] = self._build_completion_usage(request_output)
-
-        return chunk

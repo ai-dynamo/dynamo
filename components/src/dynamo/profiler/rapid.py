@@ -20,18 +20,36 @@ import logging
 import pandas as pd
 import yaml
 from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
-from aiconfigurator.generator.api import (
-    generate_backend_artifacts,
-    generate_naive_config,
-)
+from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
+from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
-from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
-from dynamo.profiler.utils.profile_common import derive_backend_image
+from dynamo.profiler.utils.profile_common import (
+    derive_backend_image,
+    needs_profile_data,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _build_k8s_overrides(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    backend: str,
+) -> dict:
+    """Extract K8s overrides (image, PVC) from a DGDR spec."""
+    overrides: dict = {
+        "k8s_image": derive_backend_image(dgdr.image, backend),
+    }
+    if dgdr.modelCache:
+        if dgdr.modelCache.pvcName:
+            overrides["k8s_pvc_name"] = dgdr.modelCache.pvcName
+        if dgdr.modelCache.pvcMountPath:
+            overrides["k8s_pvc_mount_path"] = dgdr.modelCache.pvcMountPath
+        if dgdr.modelCache.pvcModelPath:
+            overrides["k8s_model_path_in_pvc"] = dgdr.modelCache.pvcModelPath
+    return overrides
 
 
 def _generate_dgd_from_pick(
@@ -61,24 +79,11 @@ def _generate_dgd_from_pick(
     if "total_gpus_needed" in row.index and row["total_gpus_needed"] > 0:
         tc.total_gpus = int(row["total_gpus_needed"])
 
-    generator_overrides: dict = {}
-
-    k8s_overrides: dict = {}
-    k8s_overrides["k8s_image"] = derive_backend_image(dgdr.image, tc.backend_name)
-    if dgdr.modelCache:
-        if dgdr.modelCache.pvcName:
-            k8s_overrides["k8s_pvc_name"] = dgdr.modelCache.pvcName
-        if dgdr.modelCache.pvcMountPath:
-            k8s_overrides["k8s_pvc_mount_path"] = dgdr.modelCache.pvcMountPath
-        if dgdr.modelCache.pvcModelPath:
-            k8s_overrides["k8s_model_path_in_pvc"] = dgdr.modelCache.pvcModelPath
-    if k8s_overrides:
-        generator_overrides["K8sConfig"] = k8s_overrides
-
+    k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
     cfg = task_config_to_generator_config(
         task_config=tc,
         result_df=row,
-        generator_overrides=generator_overrides or None,
+        generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
     )
     tc.total_gpus = original_total_gpus
 
@@ -94,7 +99,7 @@ def _generate_dgd_from_pick(
     return None
 
 
-# in naive mode, use vllm as the default backend
+# Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
 _DEFAULT_NAIVE_BACKEND = "vllm"
 
 
@@ -108,38 +113,37 @@ def _run_naive_fallback(
     """Handle the AIC-unsupported path via naive config generation."""
     if backend == "auto":
         backend = _DEFAULT_NAIVE_BACKEND
-        logger.info(
-            "Auto backend resolved to '%s' for naive fallback.",
-            backend,
-        )
+        logger.info("Auto backend resolved to '%s' for naive fallback.", backend)
     logger.info(
         "AIC does not support this combo — falling back to naive config generation."
     )
-    naive_result = generate_naive_config(model, total_gpus, system, backend)
 
-    dgd_yaml = naive_result.get("artifacts", {}).get("k8s_deploy.yaml", "")
+    generator_params = build_naive_generator_params(
+        model_name=model,
+        total_gpus=total_gpus,
+        system_name=system,
+        backend_name=backend,
+    )
+
+    k8s_overrides = _build_k8s_overrides(dgdr, backend)
+    generator_params.setdefault("K8sConfig", {}).update(k8s_overrides)
+
+    # Generate DGD through the dynamo config modifier (build_dgd_config),
+    # which loads the clean base YAML and produces proper command/args arrays.
+    artifacts = generate_backend_artifacts(
+        params=generator_params,
+        backend=backend,
+        use_dynamo_generator=True,
+    )
+    dgd_yaml = artifacts.get("k8s_deploy.yaml", "")
     dgd_config = yaml.safe_load(dgd_yaml) if dgd_yaml else None
-    if dgd_config:
-        config_modifier = CONFIG_MODIFIERS[backend]
-        dgd_config = config_modifier.update_image(
-            dgd_config, derive_backend_image(dgdr.image, backend)
-        )
-        if dgdr.modelCache and dgdr.modelCache.pvcName:
-            dgd_config = config_modifier.update_model_from_pvc(
-                dgd_config,
-                model_name=model,
-                pvc_name=dgdr.modelCache.pvcName,
-                pvc_mount_path=dgdr.modelCache.pvcMountPath,
-                pvc_path=dgdr.modelCache.pvcModelPath or "",
-            )
-        else:
-            dgd_config = config_modifier.update_model(dgd_config, model_name=model)
 
     return {
         "best_config_df": pd.DataFrame(),
         "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
         "dgd_config": dgd_config,
-        "chosen_exp": "agg",  # AIC's naive route always generate agg config
+        "chosen_exp": "agg",
+        "resolved_backend": backend,
     }
 
 
@@ -156,6 +160,13 @@ def _run_autoscale_sim(
     request_latency: float | None,
 ) -> dict:
     """Build a TaskConfig, run autoscale simulation, collect latencies, generate DGD."""
+    # TODO(AIC): the autoscale path constructs TaskConfig directly; BackendName("auto")
+    # is not a valid enum value, so resolve "auto" to a concrete backend here.
+    # AIC should add native auto-backend support in the autoscale path.
+    if backend == "auto":
+        backend = _DEFAULT_NAIVE_BACKEND
+        logger.info("Auto backend resolved to '%s' for autoscale simulation.", backend)
+
     planner_cfg = dgdr.features.planner if dgdr.features else None
     if planner_cfg and planner_cfg.enable_throughput_scaling:
         logger.warning(
@@ -192,6 +203,7 @@ def _run_autoscale_sim(
         "dgd_config": dgd_config,
         "chosen_exp": "disagg",
         "task_configs": task_configs,
+        "resolved_backend": backend,
     }
 
 
@@ -234,6 +246,28 @@ def _run_default_sim(
         **load_kwargs,
     )
 
+    # When interpolation data is needed (mocker or throughput-scaling), a
+    # disaggregated config is required.  If AIC picked an aggregated config,
+    # override to the best available disaggregated alternative so that
+    # run_interpolation() can run successfully downstream.
+    if chosen == "agg" and needs_profile_data(dgdr):
+        disagg_key = next(
+            (k for k in best_configs if "disagg" in k and not best_configs[k].empty),
+            None,
+        )
+        if disagg_key:
+            logger.info(
+                "AIC picked aggregated config but interpolation data is required — "
+                "overriding to '%s' to support mocker/throughput-scaling.",
+                disagg_key,
+            )
+            chosen = disagg_key
+        else:
+            logger.warning(
+                "AIC picked aggregated config and no disaggregated alternative "
+                "is available; interpolation data will be skipped."
+            )
+
     best_config_df = best_configs.get(chosen, pd.DataFrame())
     best_latencies = best_latencies_map.get(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
@@ -241,12 +275,24 @@ def _run_default_sim(
 
     dgd_config = _generate_dgd_from_pick(dgdr, best_config_df, chosen, task_configs)
 
+    # When backend="auto" AIC expands to per-backend task configs; the winning
+    # row carries the concrete backend name so downstream consumers (e.g.
+    # run_interpolation) can use it without re-encountering "auto".
+    resolved_backend = backend
+    if (
+        backend == "auto"
+        and not best_config_df.empty
+        and "backend" in best_config_df.columns
+    ):
+        resolved_backend = best_config_df.iloc[0]["backend"]
+
     return {
         "best_config_df": best_config_df,
         "best_latencies": best_latencies,
         "dgd_config": dgd_config,
         "chosen_exp": chosen,
         "task_configs": task_configs,
+        "resolved_backend": resolved_backend,
     }
 
 

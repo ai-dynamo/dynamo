@@ -3,7 +3,7 @@
 
 """Shared KV router configuration ArgGroup.
 
-Defines the 16 KvRouterConfig parameters once so that both
+Defines the shared KvRouterConfig parameters once so that both
 ``dynamo.frontend`` and ``dynamo.router`` can reuse them without duplication.
 Field names on ``KvRouterConfigBase`` match the ``KvRouterConfig`` Python
 constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
@@ -26,6 +26,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
+    "router_track_prefill_tokens",
+    "router_prefill_load_model",
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
@@ -33,12 +35,14 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
-    "router_enable_cache_control",
+    "router_queue_policy",
+    "use_remote_indexer",
+    "serve_indexer",
 )
 
 
 class KvRouterConfigBase(ConfigBase):
-    """Mixin carrying the 16 KvRouterConfig fields."""
+    """Mixin carrying the shared KvRouterConfig fields."""
 
     overlap_score_weight: float
     router_temperature: float
@@ -48,6 +52,8 @@ class KvRouterConfigBase(ConfigBase):
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
+    router_track_prefill_tokens: bool
+    router_prefill_load_model: str
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
@@ -55,7 +61,9 @@ class KvRouterConfigBase(ConfigBase):
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
-    router_enable_cache_control: bool
+    router_queue_policy: str
+    use_remote_indexer: bool = False
+    serve_indexer: bool = False
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -63,7 +71,7 @@ class KvRouterConfigBase(ConfigBase):
 
 
 class KvRouterArgGroup(ArgGroup):
-    """CLI arguments for the 16 KvRouterConfig parameters."""
+    """CLI arguments for the shared KvRouterConfig parameters."""
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
@@ -167,6 +175,30 @@ class KvRouterArgGroup(ArgGroup):
             ),
             obsolete_flag="--assume-kv-reuse",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-track-prefill-tokens",
+            env_var="DYN_ROUTER_TRACK_PREFILL_TOKENS",
+            default=True,
+            dest="router_track_prefill_tokens",
+            help=(
+                "KV Router: Include prompt-side prefill tokens in active load accounting. "
+                "Use --no-router-track-prefill-tokens to ignore prompt tokens in router "
+                "prefill-token load, queue pressure, and active_prefill_tokens metrics."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--router-prefill-load-model",
+            env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
+            default="none",
+            choices=["none", "aic"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
+                "'none' keeps static prompt load accounting. "
+                "'aic' decays the oldest active prefill request using AIC-predicted duration."
+            ),
+        )
         add_argument(
             g,
             flag_name="--router-snapshot-threshold",
@@ -222,11 +254,12 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=None,
+            default=4.0,
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
-                "When set, requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Must be > 0. If not set, queueing is disabled."
+                "Requests are queued if all workers exceed this fraction of "
+                "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
+                "queueing sensitivity (queue as soon as any tokens are active)."
             ),
             arg_type=float,
         )
@@ -242,15 +275,27 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=int,
         )
+        add_argument(
+            g,
+            flag_name="--router-queue-policy",
+            env_var="DYN_ROUTER_QUEUE_POLICY",
+            default="fcfs",
+            help=(
+                "KV Router: Scheduling policy for the router queue. "
+                "'fcfs' (default): first-come first-served with priority bumps — optimizes tail TTFT. "
+                "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT."
+            ),
+            arg_type=str,
+            choices=["fcfs", "wspt"],
+        )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-cache-control",
-            env_var="DYN_ENABLE_CACHE_CONTROL",
+            flag_name="--use-remote-indexer",
+            env_var="DYN_USE_REMOTE_INDEXER",
             default=False,
-            dest="router_enable_cache_control",
             help=(
-                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
-                "a cache_control service mesh client and fires pin_prefix after generation for "
-                "requests with nvext.cache_control."
+                "[EXPERIMENTAL] KV Router: Query a remote KV indexer served from the worker "
+                "component via the request plane instead of maintaining a local radix tree."
             ),
+            dest="use_remote_indexer",
         )

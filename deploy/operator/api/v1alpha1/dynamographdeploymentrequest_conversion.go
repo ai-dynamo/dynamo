@@ -80,7 +80,7 @@
 //
 // v1beta1-only fields with no v1alpha1 equivalent (omitted / TODO):
 //
-//	Hardware.*, Workload.{Concurrency,RequestRate}, SLA.{E2ELatency,OptimizationType},
+//	Hardware.*, Workload.{Concurrency,RequestRate}, SLA.{E2ELatency},
 //	Features.{KVRouter}, SearchStrategy
 //
 // # Status field mapping

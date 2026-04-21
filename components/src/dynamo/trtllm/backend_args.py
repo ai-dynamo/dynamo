@@ -162,6 +162,23 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--load-format",
+            env_var="DYN_TRTLLM_LOAD_FORMAT",
+            default="auto",
+            help="Model weight loading format passed to TensorRT-LLM (e.g. 'auto', 'gms').",
+        )
+        add_argument(
+            g,
+            flag_name="--model-loader-extra-config",
+            env_var="DYN_TRTLLM_MODEL_LOADER_EXTRA_CONFIG",
+            default="",
+            help=(
+                "JSON object passed as extra config to the model loader "
+                "(e.g. '{\"gms_read_only\": true}')."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
             default=DisaggregationMode.AGGREGATED.value,
@@ -329,14 +346,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Disable torch.compile optimization.",
         )
-        add_argument(
-            diffusion_group,
-            flag_name="--torch-compile-mode",
-            env_var="DYN_TRTLLM_TORCH_COMPILE_MODE",
-            default="default",
-            choices=["default", "reduce-overhead", "max-autotune"],
-            help="torch.compile mode.",
-        )
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-fullgraph",
@@ -365,13 +374,12 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
         )
-        add_argument(
+        add_negatable_bool_argument(
             diffusion_group,
-            flag_name="--warmup-steps",
-            env_var="DYN_TRTLLM_WARMUP_STEPS",
-            default=1,
-            arg_type=int,
-            help="Number of denoising steps to run during warmup (0 to disable).",
+            flag_name="--skip-warmup",
+            env_var="DYN_TRTLLM_SKIP_WARMUP",
+            default=False,
+            help="Skip warmup inference during initialization.",
         )
         add_argument(
             diffusion_group,
@@ -462,6 +470,8 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     disable_request_abort: bool
+    load_format: str
+    model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
@@ -484,12 +494,11 @@ class DynamoTrtllmConfig(ConfigBase):
     quant_algo: Optional[str]
     quant_dynamic: bool
     disable_torch_compile: bool
-    torch_compile_mode: str
     enable_fullgraph: bool
     fuse_qkv: bool
     enable_cuda_graph: bool
     enable_layerwise_nvtx_marker: bool
-    warmup_steps: int
+    skip_warmup: bool
     dit_dp_size: int
     dit_tp_size: int
     dit_ulysses_size: int

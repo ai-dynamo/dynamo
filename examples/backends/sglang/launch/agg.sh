@@ -5,18 +5,17 @@
 # Aggregated serving: single worker handles both prefill and decode.
 # GPUs: 1
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID 2>/dev/null || true
-    wait $DYNAMO_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
 MODEL="Qwen/Qwen3-0.6B"
 ENABLE_OTEL=false
+USE_UNIFIED=false
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -30,11 +29,16 @@ while [[ $# -gt 0 ]]; do
             ENABLE_OTEL=true
             shift
             ;;
+        --unified)
+            USE_UNIFIED=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model-path <name>  Specify model (default: $MODEL)"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --unified            Use unified_main entry point (Worker)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
@@ -57,35 +61,23 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching Aggregated LLM Worker"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Explain why Roger Federer is considered one of the greatest tennis players of all time\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run worker with metrics enabled
+WORKER_MODULE="dynamo.sglang"
+if [ "$USE_UNIFIED" = true ]; then
+    WORKER_MODULE="dynamo.sglang.unified_main"
+fi
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-python3 -m dynamo.sglang \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -93,5 +85,9 @@ python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --enable-metrics \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" \
-  "${EXTRA_ARGS[@]}"
+  "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

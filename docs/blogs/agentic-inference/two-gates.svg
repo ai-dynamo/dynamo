@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" width="960" height="380">
+  <rect x="0" y="0" width="960" height="380" fill="#0a0a0a" stroke="none" rx="0" ry="0" />
+  <text x="140.0" y="36" fill="#767676" font-size="9" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal" letter-spacing="0.1em">ARRIVAL ORDER</text>
+  <text x="485.0" y="36" fill="#767676" font-size="9" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal" letter-spacing="0.1em">DISPATCH ORDER</text>
+  <text x="800.0" y="36" fill="#767676" font-size="9" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal" letter-spacing="0.1em">ENGINE TREATMENT</text>
+  <text x="330" y="55" fill="#e0e0e0" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal">GATE 1: ROUTER</text>
+  <text x="330" y="71" fill="#76b900" font-size="11" font-family="'Courier New', Courier, monospace" text-anchor="middle" font-weight="normal" font-style="italic">latency_sensitivity</text>
+  <text x="330" y="85" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal">How soon does this reach a worker?</text>
+  <text x="640" y="55" fill="#e0e0e0" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal">GATE 2: ENGINE</text>
+  <text x="640" y="71" fill="#76b900" font-size="11" font-family="'Courier New', Courier, monospace" text-anchor="middle" font-weight="normal" font-style="italic">priority</text>
+  <text x="640" y="85" fill="#767676" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="normal">How is it treated once there?</text>
+  <line x1="330" y1="92" x2="330" y2="340" stroke="#636363" stroke-dasharray="6,4" />
+  <line x1="640" y1="92" x2="640" y2="340" stroke="#636363" stroke-dasharray="6,4" />
+  <rect x="30" y="115" width="220" height="52" fill="#1a1a1a" stroke="#636363" rx="0" ry="0" />
+  <text x="140.0" y="137" fill="#a0a0a0" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal">Background · Lint Check</text>
+  <text x="140.0" y="155" fill="#a0a0a0" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="italic">ls=0.2  p=1</text>
+  <rect x="30" y="182" width="220" height="52" fill="#201810" stroke="#c4a035" rx="0" ry="0" />
+  <text x="140.0" y="204" fill="#c4a035" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal">Subagent · Code Search</text>
+  <text x="140.0" y="222" fill="#c4a035" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="italic">ls=0.7  p=5</text>
+  <rect x="30" y="249" width="220" height="52" fill="#2a4a10" stroke="#76b900" rx="0" ry="0" />
+  <text x="140.0" y="271" fill="#76b900" font-size="13" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="bold" font-style="normal">Lead Agent · Developer Response</text>
+  <text x="140.0" y="289" fill="#76b900" font-size="10" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="normal" font-style="italic">ls=0.9  p=10</text>
+  <path d="M 250,275.0 C 286.0,275.0 294.0,141.0 330,141.0 L 665,141.0" stroke="#76b900" fill="none" stroke-width="2" opacity="0.8" />
+  <path d="M 250,141.0 C 286.0,141.0 294.0,275.0 330,275.0 L 665,275.0" stroke="#636363" fill="none" stroke-width="2" opacity="0.8" />
+  <path d="M 250,208.0 L 665,208.0" stroke="#c4a035" fill="none" stroke-width="2" opacity="0.8" />
+  <rect x="665" y="122.0" width="270" height="38" fill="#2a4a10" stroke="#76b900" rx="0" ry="0" />
+  <text x="800.0" y="145.0" fill="#76b900" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="600" font-style="normal">batch: first · cache: pinned</text>
+  <rect x="665" y="189.0" width="270" height="38" fill="#201810" stroke="#c4a035" rx="0" ry="0" />
+  <text x="800.0" y="212.0" fill="#c4a035" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="600" font-style="normal">batch: middle · cache: moderate</text>
+  <rect x="665" y="256.0" width="270" height="38" fill="#1a1a1a" stroke="#636363" rx="0" ry="0" />
+  <text x="800.0" y="279.0" fill="#b04040" font-size="11" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="600" font-style="normal">batch: last · cache: evict first</text>
+</svg>

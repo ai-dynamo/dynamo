@@ -27,15 +27,15 @@ The SLA Planner supports two scaling modes that can be used independently or tog
 
 Uses pre-deployment profiling data and traffic prediction to compute the number of prefill/decode replicas needed to meet TTFT and ITL SLA targets. Requires profiling data from the Dynamo profiler.
 
-### Load-Based Scaling (Experimental)
+### Load-Based Scaling
 
-Uses real-time per-worker load metrics (active prefill tokens, active KV blocks) from the router to make SLA-aware scaling decisions via online linear regression. Does not require profiling data. Responds quickly to traffic bursts.
+Uses ForwardPassMetrics (FPM) from the Dynamo event plane to make SLA-aware scaling decisions via online linear regression. Does not require profiling data or the KV Router. Responds quickly to traffic bursts. Currently only supported with vLLM (FPM only available in vllm).
 
 When both modes are enabled, throughput-based scaling provides a lower bound on replicas while load-based scaling handles real-time adjustments.
 
 ### Support Matrix
 
-| Deployment Type | Throughput-Based | Load-Based (Experimental) |
+| Deployment Type | Throughput-Based | Load-Based |
 |-----------------|:----------------:|:-------------------------:|
 | Disaggregated   | Supported        | Supported                 |
 | Aggregated      | Unsupported      | Supported                 |
@@ -44,3 +44,4 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 
 - **User docs**: [Planner Guide](../../../../docs/components/planner/planner-guide.md) (deployment, configuration, examples)
 - **Design docs**: [Planner Design](../../../../docs/design-docs/planner-design.md) (architecture, algorithms)
+- **Manual workflows**: [tests/manual/README.md](tests/manual/README.md) (dry run helpers, perf configs, and manual scaling scripts)

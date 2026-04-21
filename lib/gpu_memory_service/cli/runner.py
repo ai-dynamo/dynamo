@@ -13,10 +13,9 @@ Usage:
 
 import asyncio
 import logging
-import signal
 
 import uvloop
-from gpu_memory_service.server import GMSRPCServer
+from gpu_memory_service.server.rpc import GMSRPCServer
 
 from .args import parse_args
 
@@ -37,33 +36,28 @@ async def worker() -> None:
         logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
     logger.info(f"Starting GPU Memory Service Server for device {config.device}")
+    logger.info("GMS tag: %s", config.tag)
     logger.info(f"Socket path: {config.socket_path}")
+    logger.info(
+        "Allocation retry config: interval=%ss timeout=%s",
+        config.alloc_retry_interval,
+        (
+            f"{config.alloc_retry_timeout}s"
+            if config.alloc_retry_timeout is not None
+            else "none"
+        ),
+    )
 
-    server = GMSRPCServer(config.socket_path, device=config.device)
-
-    # Set up shutdown handling
-    shutdown_event = asyncio.Event()
-
-    def signal_handler():
-        logger.info("Received shutdown signal")
-        shutdown_event.set()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    await server.start()
+    server = GMSRPCServer(
+        config.socket_path,
+        device=config.device,
+        allocation_retry_interval=config.alloc_retry_interval,
+        allocation_retry_timeout=config.alloc_retry_timeout,
+    )
 
     logger.info("GPU Memory Service Server ready, waiting for connections...")
     logger.info(f"Clients can connect via socket: {config.socket_path}")
-
-    # Wait for shutdown signal
-    try:
-        await shutdown_event.wait()
-    finally:
-        logger.info("Shutting down GPU Memory Service Server...")
-        await server.stop()
-        logger.info("GPU Memory Service Server shutdown complete")
+    await server.serve()
 
 
 def main() -> None:

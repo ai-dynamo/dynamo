@@ -38,6 +38,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Multi-level horizontal auto-scaling
 - Custom startup ordering for components
 - Resource-aware rolling updates
+- [Topology Aware Scheduling](../topology-aware-scheduling.md) — pack pods within a rack, block, or other topology domain for lower latency
 
 
 [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is a Kubernetes native scheduler optimized for AI workloads at large scale.

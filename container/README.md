@@ -122,7 +122,13 @@ docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
-### 2. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
+### 2. test image (layers test deps on top of runtime):
+```bash
+# Build test image from a runtime image (for running tests locally)
+docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
+```
+
+### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
 ```bash
 run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
@@ -248,7 +254,7 @@ The frontend image is a specialized container that includes the Dynamo component
 **Build EPP Image**
 ```bash
 sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 . "$HOME/.cargo/env"
 cargo install cbindgen
 

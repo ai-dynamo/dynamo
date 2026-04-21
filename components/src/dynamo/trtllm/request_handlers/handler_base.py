@@ -21,18 +21,20 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
-from dynamo._core import Context
+from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -56,6 +58,145 @@ if TYPE_CHECKING:
 
 configure_dynamo_logging()
 
+logger = logging.getLogger(__name__)
+
+
+class TRTLLMEngineQuiesceController:
+    """Adapts TRT-LLM sleep/wake to the standard quiesce controller interface.
+
+    Two memory domains: KV cache via TRT-LLM collective_rpc, weights via GMS.
+    """
+
+    def __init__(self, engine: TensorRTLLMEngine):
+        self._engine = engine
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, tags: list[str] | None = None) -> bool:
+        if self._is_quiesced:
+            return False
+        tags = tags or ["kv_cache", "weights"]
+        if "kv_cache" in tags:
+            self._collective_rpc("sleep", ["kv_cache"])
+        if "weights" in tags:
+            self._release_gms_weights()
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+        tags = tags or ["kv_cache", "weights"]
+        if "weights" in tags:
+            self._restore_gms_weights()
+        if "kv_cache" in tags:
+            self._collective_rpc("wakeup", ["kv_cache"])
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
+
+    def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
+        """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
+        rpc = getattr(self._engine.llm, "_collective_rpc", None)
+        if rpc is None:
+            logger.warning(
+                "TRT-LLM does not expose _collective_rpc; skipping %s", method
+            )
+            return
+        try:
+            rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
+        except Exception:
+            if method != "wakeup":
+                raise
+            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
+            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+
+    @staticmethod
+    def _release_gms_weights() -> None:
+        """Release GMS-managed weight memory."""
+        try:
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
+        except ImportError:
+            return
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None:
+            return
+        manager.unmap_all_vas()
+        manager.abort()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    @staticmethod
+    def _restore_gms_weights() -> None:
+        """Restore GMS-managed weight memory."""
+        try:
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
+            from gpu_memory_service.integrations.trtllm.model_loader import (
+                get_gms_lock_mode,
+            )
+        except ImportError:
+            return
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None or not manager.is_unmapped:
+            return
+        manager.connect(get_gms_lock_mode())
+        manager.remap_all_vas()
+
+
+class _Abortable(Protocol):
+    """Structural type for objects that support abort(). Satisfied by both
+    GenerationResult and _DeferredAbort."""
+
+    def abort(self) -> None:
+        ...
+
+
+class _DeferredAbort:
+    """Wraps GenerationResult.abort() to defer until first token in disagg decode.
+
+    When abort() is called before the first generation result, spawns a
+    background asyncio.Task that reads from GenerationResult.aqueue (TRT-LLM's
+    internal asyncio.Queue, decoupled from Dynamo RPC transport) until the
+    first result arrives, then calls the real abort().
+    """
+
+    def __init__(self, generation_result: GenerationResult):
+        self._generation_result = generation_result
+        self._first_token_received = False
+
+    def signal_first_token(self) -> None:
+        """Called by generate_locally() when first generation result is yielded."""
+        self._first_token_received = True
+
+    def abort(self) -> None:
+        """Abort immediately if first token received, otherwise defer."""
+        if self._first_token_received:
+            self._generation_result.abort()
+            logging.debug("Deferred abort: first token already received, aborting now")
+        else:
+            logging.debug(
+                "Deferred abort: first token not received, spawning background task"
+            )
+            asyncio.create_task(self._wait_and_abort())
+
+    async def _wait_and_abort(self) -> None:
+        """Background task: read from GenerationResult until first token, then abort."""
+        try:
+            async for _ in self._generation_result:
+                break  # First result = KV transfer complete
+        except Exception:
+            pass
+        self._generation_result.abort()
+        logging.debug("Deferred abort: background task completed, abort fired")
+
 
 @dataclass
 class RequestHandlerConfig:
@@ -65,9 +206,9 @@ class RequestHandlerConfig:
 
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
-    publisher: Publisher
+    publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
-    encode_client: Optional[object] = None
+    encode_client: Optional[Client] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
     ] = None  # for multimodal support
@@ -78,9 +219,12 @@ class RequestHandlerConfig:
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    generate_endpoint: Optional[Any] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
+    max_seq_len: Optional[int] = None
+    disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -109,8 +253,19 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.generate_endpoint = config.generate_endpoint
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
+        self.max_seq_len = config.max_seq_len
+        self.disagg_machine_id = config.disagg_machine_id
+        # Sleep/wake state
+        self._quiesce_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._quiesce_controller = TRTLLMEngineQuiesceController(config.engine)
+        self._reject_new_requests = False
 
     def check_error(self, result: dict) -> bool:
         """
@@ -122,6 +277,96 @@ class HandlerBase(BaseGenerativeHandler):
             return (
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
+
+    # ------------------------------------------------------------------
+    # In-flight request tracking (used by sleep/wake)
+    # ------------------------------------------------------------------
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Sleep / wake public API (delegates to TRTLLMEngineQuiesceController)
+    # ------------------------------------------------------------------
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory: unregister endpoint, drain requests, quiesce engine."""
+        body = body or {}
+        tags = body.get("tags")
+
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already released"}
+
+            try:
+                await self._set_reject_new_requests(True)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+
+                timeout_s = float(body.get("timeout_s", 30.0))
+                await self._wait_for_inflight_requests(timeout_s)
+                await self._quiesce_controller.quiesce(tags)
+
+                return {"status": "ok", "message": "Memory released"}
+            except Exception as exc:
+                logger.error("release_memory_occupation failed: %s", exc)
+                # Rollback: TRT-LLM has no pause_generation(), so we
+                # manually unregistered the endpoint and set reject flag
+                # above. Restore both on failure.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Restore GPU memory: resume engine, re-register endpoint."""
+        body = body or {}
+        tags = body.get("tags")
+
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already resumed"}
+
+            try:
+                await self._quiesce_controller.resume(tags)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+
+                await self._set_reject_new_requests(False)
+                self._quiesce_controller.mark_resumed()
+                return {"status": "ok", "message": "Memory resumed"}
+            except Exception as exc:
+                logger.error("resume_memory_occupation failed: %s", exc)
+                return {"status": "error", "message": str(exc)}
 
     @staticmethod
     def _extract_logprobs(
@@ -177,9 +422,9 @@ class HandlerBase(BaseGenerativeHandler):
             for tok_id, logprob_info in token_logprobs_dict.items():
                 token_top_logprobs.append(
                     {
-                        "rank": logprob_info.rank
-                        if hasattr(logprob_info, "rank")
-                        else 0,
+                        "rank": (
+                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
+                        ),
                         "token_id": tok_id,
                         "token": (
                             logprob_info.decoded_token
@@ -194,13 +439,19 @@ class HandlerBase(BaseGenerativeHandler):
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _handle_cancellation(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: _Abortable,
+        context: Context,
     ):
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
 
-        Raise GeneratorExit if shutdown event is triggered.
+        In disaggregated decode mode, generation_result may be a _DeferredAbort
+        wrapper that defers abort() until the first token is received (KV
+        transfer complete).
+
+        Raise EngineShutdown if shutdown event is triggered.
         """
         try:
             cancellation_triggers: list[asyncio.Future[Any]] = [
@@ -236,9 +487,9 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise GeneratorExit if cancellation is due to shutdown event triggered
+            # Raise EngineShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
@@ -246,13 +497,18 @@ class HandlerBase(BaseGenerativeHandler):
 
     @asynccontextmanager
     async def _cancellation_monitor(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: _Abortable,
+        context: Context,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
 
-        Raise GeneratorExit if shutdown event is triggered.
+        In disaggregated decode mode, generation_result may be a _DeferredAbort
+        wrapper that defers abort() until the first token.
+
+        Raise EngineShutdown if shutdown event is triggered.
 
         Yields:
             asyncio.Task: The cancellation monitoring task
@@ -293,6 +549,10 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Remove worker_id if present (added by prefill worker, not needed for decode)
         params_dict.pop("worker_id", None)
+
+        # Deserialize first_gen_log_probs from transport format back to
+        # TRT-LLM's internal {token_id: Logprob} dict format.
+        DisaggregatedParamsCodec.deserialize_first_gen_log_probs(params_dict)
 
         # Extract EPD metadata that was packed by prefill worker
         epd_metadata = {}
@@ -385,6 +645,9 @@ class HandlerBase(BaseGenerativeHandler):
         logging.debug("PREFILL: Successfully encoded disaggregated params")
         params_dict = asdict(encoded_params)
 
+        # Serialize first_gen_log_probs for the Rust transport layer.
+        DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
@@ -455,7 +718,18 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = ep_disaggregated_params
             else:
                 disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
+                    request_type="context_only",
+                    disagg_request_id=get_global_disagg_request_id(
+                        self.disagg_machine_id
+                    ),
+                )
+
+            # Ensure disagg_request_id is set even when using
+            # ep_disaggregated_params, so the PYTHON transceiver can track
+            # requests across prefill/decode workers.
+            if disaggregated_params.disagg_request_id is None:
+                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
+                    self.disagg_machine_id
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
@@ -543,13 +817,19 @@ class HandlerBase(BaseGenerativeHandler):
                 processed_input["multi_modal_data"] = None
             return processed_input
 
+        if self.multimodal_processor is None and self._request_has_multimodal(request):
+            raise RuntimeError(
+                "Multimodal input received but worker started without --modality multimodal. "
+                "Restart the worker with --modality multimodal or remove image_url content."
+            )
+
         # PREFILL/ENCODE/AGGREGATED: Process multimodal content if available
         if self.multimodal_processor:
-            processed_input = await self.multimodal_processor.process_openai_request(
+            mm_result = await self.multimodal_processor.process_openai_request(
                 request, embeddings, ep_disaggregated_params
             )
-            if processed_input:
-                return processed_input
+            if mm_result:
+                return mm_result
 
             # If multimodal processing returned None but request has multimodal data,
             # this is an error (not a text-only request). Raise instead of falling back.
@@ -562,6 +842,20 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
+
+    def _request_has_multimodal(self, request: dict) -> bool:
+        if request.get("multi_modal_data"):
+            return True
+
+        extra_args = request.get("extra_args") or {}
+        messages = extra_args.get("messages") or request.get("messages") or []
+        for message in messages:
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        return True
+        return False
 
     def _normalize_request_format(self, request: dict) -> None:
         """
@@ -612,6 +906,31 @@ class HandlerBase(BaseGenerativeHandler):
             os._exit(1)
 
     async def generate_locally(
+        self,
+        request: dict,
+        context: Context,
+        embeddings: Optional[Union[torch.Tensor, dict]] = None,
+        ep_disaggregated_params: Optional[DisaggregatedParams] = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Track in-flight count, reject during sleep, then delegate to implementation."""
+        started = await self._mark_request_started()
+        if not started:
+            yield {
+                "finish_reason": {
+                    "error": "Worker is temporarily rejecting new requests"
+                },
+                "token_ids": [],
+            }
+            return
+        try:
+            async for chunk in self._generate_locally_impl(
+                request, context, embeddings, ep_disaggregated_params
+            ):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_locally_impl(
         self,
         request: dict,
         context: Context,
@@ -722,8 +1041,18 @@ class HandlerBase(BaseGenerativeHandler):
                     )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
+        if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
+        elif self.max_seq_len is not None:
+            if self.multimodal_processor and processed_input is not None:
+                logging.debug(
+                    "Skipping dynamic max_tokens default for multimodal request..."
+                )
+            else:
+                token_ids = request.get("token_ids", [])
+                input_length = len(token_ids)
+                dynamic_default = max(1, self.max_seq_len - input_length)
+                sampling_params.max_tokens = dynamic_default
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:
@@ -784,9 +1113,23 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
-            # Monitor for cancellation triggers and cancel by calling generation_result.abort()
-            async with self._cancellation_monitor(generation_result, context):
+            # In disagg decode mode, wrap abort() to defer until first token
+            # (KV transfer complete).
+            abort_guard = (
+                _DeferredAbort(generation_result)
+                if self.disaggregation_mode == DisaggregationMode.DECODE
+                else None
+            )
+
+            # Monitor for cancellation triggers and cancel by calling abort()
+            async with self._cancellation_monitor(
+                abort_guard or generation_result, context
+            ):
                 async for res in generation_result:
+                    # Signal first token to deferred abort guard
+                    if abort_guard is not None:
+                        abort_guard.signal_first_token()
+
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
                     if self.first_generation and self.publisher:
@@ -929,7 +1272,11 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
 
-        # 3. ALL OTHER ERRORS - graceful shutdown
+        # 3. EngineShutdown - let it propagate to the Rust bridge
+        except EngineShutdown:
+            raise
+
+        # 4. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)

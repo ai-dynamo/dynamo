@@ -60,6 +60,24 @@ If the block size is too large, it leads to low prefix cache hit ratio.
 For most dense models, we find block size 128 is a good choice.
 
 
+### GPU Memory Fraction
+
+Each engine backend has its own CLI flag to control what fraction of GPU memory is reserved for the KV cache (after model weights and activation buffers are allocated):
+
+| Engine  | CLI flag                         | Engine-specific env var                    | Default
+|---------|----------------------------------|--------------------------------------------|--------
+| vLLM    | `--gpu-memory-utilization`       | —                                          | 0.9
+| SGLang  | `--mem-fraction-static`          | —                                          | 0.88
+| TRT-LLM | `--free-gpu-memory-fraction`    | `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`      | 0.9
+
+Dynamo launch scripts use absolute KV cache overrides for deterministic, parallel-safe GPU memory control. For vLLM, `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` maps to `--kv-cache-memory-bytes`. For SGLang, `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` maps to `--max-total-tokens`. These are set by `tests/utils/profile_pytest.py` during binary-search profiling and by `tests/utils/pytest_parallel_gpu.py` at runtime.
+
+Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
+
+> [!Important]
+> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This is exactly why we use `--kv-cache-memory-bytes` for parallel-safe allocation: it provides a deterministic, absolute KV cache cap that is immune to profiling races.
+
+
 ## Disaggregated Router
 
 Disaggregated router decides whether to prefill a request in the remote prefill engine or locally in the decode engine using chunked prefill.

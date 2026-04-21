@@ -3,7 +3,7 @@
 
 # Standalone Router
 
-A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [Router Guide](/docs/components/router/router-guide.md).
+A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see [Routing Concepts](/docs/components/router/router-concepts.md).
 
 ## Overview
 
@@ -29,7 +29,7 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--router-kv-overlap-score-weight`, `--router-temperature`, `--router-kv-events` / `--no-router-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, `--router-track-active-blocks` / `--no-router-track-active-blocks`). Legacy names without the prefix (e.g., `--block-size`, `--kv-events`) are still accepted but deprecated. For detailed descriptions, see the [Router Guide](/docs/components/router/router-guide.md).
+All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--router-kv-overlap-score-weight`, `--router-temperature`, `--router-kv-events` / `--no-router-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, `--router-track-active-blocks` / `--no-router-track-active-blocks`, `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens`). Legacy names without the prefix (e.g., `--block-size`, `--kv-events`) are still accepted but deprecated. For detailed descriptions, see [Configuration and Tuning](/docs/components/router/router-configuration.md).
 
 ## Architecture
 
@@ -43,7 +43,7 @@ Clients call the `generate` endpoint to stream completions, or call `best_worker
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
 > [!Note]
-> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [Router Guide](/docs/components/router/router-guide.md#disaggregated-serving) for the default setup.
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See [Disaggregated Serving](/docs/components/router/router-disaggregated-serving.md) for the default setup.
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
@@ -74,6 +74,9 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode p
 > **Why `--no-router-track-active-blocks` for prefill routing?**
 > Active block tracking is used for load balancing across decode (generation) phases. For prefill-only routing, decode load is not relevant, so disabling this reduces overhead and simplifies the router state.
 >
+> **When should I use `--no-router-track-prefill-tokens`?**
+> Use it on decode-only routers that should ignore already-completed prompt work. This keeps `active_prefill_tokens`, queue pressure, and load estimates focused on decode-side work after a prefill-to-decode handoff.
+>
 > **Why `--router-block-size` is required for standalone routers:**
 > Unlike the frontend router which can infer block size from the ModelDeploymentCard (MDC) during worker registration, standalone routers cannot access the MDC and must have the block size explicitly specified. This is a work in progress to enable automatic inference.
 
@@ -103,7 +106,9 @@ See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a refere
 
 ## See Also
 
-- [Router Guide](/docs/components/router/router-guide.md) - Configuration and tuning for KV-aware routing
+- [Router Guide](/docs/components/router/router-guide.md) - Deployment modes and quick start
+- [Configuration and Tuning](/docs/components/router/router-configuration.md) - CLI flags, transport modes, and metrics
+- [Disaggregated Serving](/docs/components/router/router-disaggregated-serving.md) - Prefill and decode routing setups
 - [Router Design](/docs/design-docs/router-design.md) - Architecture details and event transport modes
 - [Frontend Router](../frontend/README.md) - Main HTTP frontend with integrated routing
 - [Router Benchmarking](/benchmarks/router/README.md) - Performance testing and tuning

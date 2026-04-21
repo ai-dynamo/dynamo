@@ -60,8 +60,11 @@ func HandleFinalizer[T client.Object](ctx context.Context, obj T, writer client.
 				return false, err
 			}
 			logger.Info("Finalizer removed from object", "resourceVersion", obj.GetResourceVersion())
-			return true, nil
 		}
+		// Object is being deleted — signal the caller to skip reconciliation
+		// regardless of whether we just removed the finalizer or it was already
+		// gone (e.g., removed by a previous reconcile)
+		return true, nil
 	}
 	return false, nil
 }

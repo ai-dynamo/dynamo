@@ -51,6 +51,9 @@ pub struct Runtime {
 
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
+        // Initialise NVTX toggle once from environment (no-op when feature is off)
+        crate::nvtx::init();
+
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 
@@ -146,6 +149,12 @@ impl Runtime {
         if let (Some(pool), Some(permits)) = (&self.compute_pool, &self.block_in_place_permits) {
             crate::compute::thread_local::initialize_context(Arc::clone(pool), Arc::clone(permits));
         }
+        // Name this worker thread in the Nsight Systems timeline (no-op when nvtx feature is off)
+        let thread_name = std::thread::current()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| format!("tokio-worker-{:?}", std::thread::current().id()));
+        crate::nvtx::name_current_thread_impl(&thread_name);
     }
 
     /// Initialize thread-local compute context on all worker threads using a barrier

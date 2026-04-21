@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Deploy template: Mocker backend (no GPUs required).
+#
+# Template variables (substituted by sweep_runner.py --deploy-template):
+#   ${DGD_NAME}              - DynamoGraphDeployment name
+#   ${IMAGE}                 - Container image
+#   ${DYN_TOKENIZER_BACKEND} - "default" (hf) or "fast"
+#   ${FRONTEND_PORT}         - Frontend HTTP port
+#   ${ROUTER_MODE}           - Frontend router mode
+#   ${MODEL_PATH}            - HF model ID
+#   ${MODEL_NAME}            - Served model name
+#   ${NUM_WORKERS}           - Mocker workers per pod
+#   ${FRONTEND_REPLICAS}     - Number of frontend pods (default: 1)
+#   ${WORKER_REPLICAS}       - Number of worker pods
+#   ${SPEEDUP_RATIO}         - Mocker speedup ratio (use large value for near-instant)
+#
+# Usage:
+#   python3 sweep_runner.py --mode k8s --deploy-template dgd/templates/mocker.yaml \
+#       --dgd-name dynamo-bench-mocker --image nvcr.io/.../image:tag \
+#       --tokenizers hf,fastokens --concurrency 50,100 --isl 512
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: ${DGD_NAME}
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: ${FRONTEND_REPLICAS}
+      extraPodSpec:
+${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode ${ROUTER_MODE} --http-port ${FRONTEND_PORT}
+          env:
+            - name: DYN_TOKENIZER_BACKEND
+              value: "${DYN_TOKENIZER_BACKEND}"
+            - name: DYN_PERF_DIAG
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${HF_TOKEN_SECRET_NAME}
+                  key: HF_TOKEN
+
+    MockerWorker:
+      componentType: worker
+      replicas: ${WORKER_REPLICAS}
+      extraPodSpec:
+${WORKER_IMAGE_PULL_SECRETS_BLOCK}
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.mocker \
+                --model-path "${MODEL_PATH}" \
+                --model-name "${MODEL_NAME}" \
+                --num-workers ${NUM_WORKERS} \
+                --speedup-ratio ${SPEEDUP_RATIO}
+          env:
+            - name: MODEL_PATH
+              value: "${MODEL_PATH}"
+            - name: MODEL_NAME
+              value: "${MODEL_NAME}"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${HF_TOKEN_SECRET_NAME}
+                  key: HF_TOKEN

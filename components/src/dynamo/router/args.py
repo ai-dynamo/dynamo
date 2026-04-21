@@ -7,20 +7,25 @@ import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.groups.aic_perf_args import (
+    AicPerfArgGroup,
+    AicPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument
-from dynamo.llm import KvRouterConfig
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.llm import AicPerfConfig, KvRouterConfig
 
 
-class DynamoRouterConfig(KvRouterConfigBase):
+class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
     """Typed configuration for the standalone KV router (router-owned options only)."""
 
     namespace: str
     endpoint: str
     router_block_size: int
+    serve_indexer: bool = False
 
     def validate(self) -> None:
         """Validate config invariants (aligned with Rust KvRouterConfig where applicable)."""
@@ -36,6 +41,29 @@ class DynamoRouterConfig(KvRouterConfigBase):
                 "Expected format: namespace.component.endpoint"
             )
         self.namespace = parts[0]
+        if self.serve_indexer and self.use_remote_indexer:
+            raise ValueError(
+                "--serve-indexer and --use-remote-indexer are mutually exclusive"
+            )
+        if self.router_prefill_load_model == "aic":
+            missing = [
+                flag
+                for flag, value in (
+                    ("--aic-backend", self.aic_backend),
+                    ("--aic-system", self.aic_system),
+                    ("--aic-model-path", self.aic_model_path),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
+                )
+            if not self.router_track_prefill_tokens:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires "
+                    "--router-track-prefill-tokens"
+                )
 
 
 class DynamoRouterArgGroup(ArgGroup):
@@ -66,13 +94,31 @@ class DynamoRouterArgGroup(ArgGroup):
             obsolete_flag="--block-size",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this router's local KV indexer over the request plane.",
+            dest="serve_indexer",
+        )
+
         # KV router options (shared with dynamo.frontend)
         KvRouterArgGroup().add_arguments(parser)
+        AicPerfArgGroup().add_arguments(parser)
 
 
 def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
     """Build KvRouterConfig from DynamoRouterConfig."""
     return KvRouterConfig(**router_config.kv_router_kwargs())
+
+
+def build_aic_perf_config(
+    router_config: DynamoRouterConfig,
+) -> AicPerfConfig | None:
+    if router_config.router_prefill_load_model != "aic":
+        return None
+    return AicPerfConfig(**router_config.aic_perf_kwargs())
 
 
 def parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig:

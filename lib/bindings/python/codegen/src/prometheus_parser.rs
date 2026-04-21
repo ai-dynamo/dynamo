@@ -76,6 +76,9 @@ impl PrometheusParser {
                         macro_prefix = Some(prefix);
                     }
                 }
+                // TODO: Handle nested `pub mod` (e.g. `transport::tcp`, `transport::nats`)
+                // by recursing into sub-modules and emitting nested Python classes.
+                // Currently these are silently skipped, producing empty Python classes.
                 _ => {}
             }
         }

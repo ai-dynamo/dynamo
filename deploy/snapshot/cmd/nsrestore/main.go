@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/orchestrate"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 )
 
 func main() {
@@ -17,7 +17,7 @@ func main() {
 	log := logging.ConfigureLogger("stderr").WithName("nsrestore")
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
-	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint restore")
+	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	flag.Parse()
 
@@ -25,20 +25,16 @@ func main() {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
 
-	opts := orchestrate.RestoreOptions{
+	opts := executor.RestoreOptions{
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 	}
 
-	restoredPID, err := orchestrate.RestoreInNamespace(context.Background(), opts, log)
+	result, err := executor.RestoreInNamespace(context.Background(), opts, log)
 	if err != nil {
 		fatal(log, err, "restore failed")
 	}
-
-	result := struct {
-		RestoredPID int `json:"restoredPID"`
-	}{RestoredPID: restoredPID}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		fatal(log, err, "Failed to write restore result")
 	}

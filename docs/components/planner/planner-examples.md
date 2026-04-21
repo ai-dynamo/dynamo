@@ -4,13 +4,13 @@
 title: Planner Examples
 ---
 
-Practical examples for deploying the SLA Planner with throughput-based scaling. All examples below use the DGDR workflow with pre-deployment profiling. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
+Practical examples for deploying the Planner with throughput-based scaling. All examples below use the DGDR workflow with pre-deployment profiling. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
 
 ## Basic Examples
 
 ### Minimal DGDR with AIC (Fastest)
 
-The simplest way to deploy with the SLA planner. Uses AI Configurator for offline profiling (20-30 seconds instead of hours):
+The simplest way to deploy with the Planner. Uses AI Configurator for offline profiling (20-30 seconds instead of hours):
 
 ```yaml
 apiVersion: nvidia.com/v1beta1

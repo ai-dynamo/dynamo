@@ -4,11 +4,6 @@
 from dynamo.common.multimodal.http_client import get_http_client
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.chat_message_utils import extract_user_text
-from dynamo.vllm.multimodal_utils.chat_processor import (
-    ChatProcessor,
-    CompletionsProcessor,
-    ProcessMixIn,
-)
 from dynamo.vllm.multimodal_utils.encode_utils import (
     encode_image_embeddings,
     get_embedding_hash,
@@ -19,7 +14,7 @@ from dynamo.vllm.multimodal_utils.model import (
     construct_mm_data,
     load_vision_model,
 )
-from dynamo.vllm.multimodal_utils.prefill_worker_utils import load_multimodal_embeddings
+from dynamo.vllm.multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from dynamo.vllm.multimodal_utils.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -30,9 +25,6 @@ from dynamo.vllm.multimodal_utils.protocol import (
 )
 
 __all__ = [
-    "ChatProcessor",
-    "CompletionsProcessor",
-    "ProcessMixIn",
     "encode_image_embeddings",
     "extract_user_text",
     "get_encoder_components",
@@ -48,5 +40,5 @@ __all__ = [
     "MultiModalRequest",
     "MyRequestOutput",
     "vLLMMultimodalRequest",
-    "load_multimodal_embeddings",
+    "MultiModalEmbeddingLoader",
 ]

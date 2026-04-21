@@ -96,6 +96,20 @@ pub mod openai {
         pub type OpenAIVideosStreamingEngine =
             ServerStreamingEngine<NvCreateVideoRequest, Annotated<NvVideosResponse>>;
     }
+
+    pub mod audios {
+        use super::*;
+
+        pub use protocols::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
+
+        /// A [`UnaryEngine`] implementation for the Audio Speech API
+        pub type OpenAIAudiosUnaryEngine =
+            UnaryEngine<NvCreateAudioSpeechRequest, NvAudioSpeechResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the Audio Speech API
+        pub type OpenAIAudiosStreamingEngine =
+            ServerStreamingEngine<NvCreateAudioSpeechRequest, Annotated<NvAudioSpeechResponse>>;
+    }
 }
 
 pub mod generic {

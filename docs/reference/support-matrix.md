@@ -9,7 +9,12 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) -- SGLang `0.5.8` | TensorRT-LLM `1.3.0rc1` | vLLM `0.14.1` | NIXL `0.9.0`
+**Latest stable release:** [v1.0.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
+
+**Experimental releases:**
+- [v1.1.0-dev.3](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3) *(partial -- TensorRT-LLM container only)* -- TensorRT-LLM `1.3.0rc11` | branch ToT also pins SGLang `0.5.10.post1` | vLLM `0.19.0` | NIXL `0.10.1`
+- [v1.1.0-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.2) *(partial -- SGLang + TensorRT-LLM containers)* -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc9` | branch ToT also pins vLLM `0.19.0` | NIXL `0.10.1`
+- [v1.1.0-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.17.1` | NIXL `0.10.1`
 
 | Requirement | Supported |
 | :--- | :--- |
@@ -17,7 +22,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 | **OS** | Ubuntu 22.04, Ubuntu 24.04, CentOS Stream 9 (experimental) |
 | **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
 | **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
-| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.0); experimental for SGLang and vLLM in v0.8.x |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0) |
 
 **On this page:** [Backend Dependencies](#backend-dependencies) | [CUDA and Drivers](#cuda-and-driver-requirements) | [Hardware](#hardware-compatibility) | [Platform](#platform-architecture-compatibility) | [Cloud](#cloud-service-provider-compatibility) | [Build Support](#build-support)
 
@@ -27,8 +32,12 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
-| **v1.0.0** *(in progress)* | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.3** *(experimental, partial)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.2** *(experimental, partial)* | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
+| **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
+| **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v0.9.1** | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
 | **v0.9.0** | `0.5.8` | `1.3.0rc1` | `0.14.1` | `0.9.0` |
 | **v0.8.1.post3** | `0.5.6.post2` | `1.2.0rc6.post3` | `0.12.0` | `0.8.0` |
@@ -43,9 +52,12 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 | **v0.6.0** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 
+For **v1.1.0-dev.2** and **v1.1.0-dev.3**, the cells above match `container/context.yaml` on the corresponding release branch (pins used to build images). Those dev lines are **partial releases**: not every backend has a published Dynamo runtime container for that tag. See [Pre-Release Artifacts](release-artifacts.md#pre-release-artifacts) for what actually shipped.
+
 ### Version Labels
 
 - **main (ToT)** reflects the current development branch.
+- Releases marked *(experimental, partial)* are pre-releases: the table shows branch build pins, which may include backends with no NGC image for that dev tag yet.
 - Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
 ### Version Compatibility
@@ -59,7 +71,12 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **1.0.0** *(in progress)* | **SGLang** | 12.9 | 575.xx+ | |
+| **1.0.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| **1.0.0** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
 | | **vLLM** | 12.9 | 575.xx+ | |
@@ -88,6 +105,8 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | | **vLLM** | 12.8 | 570.xx+ | |
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
+
+Experimental `v1.1.0-dev.*` images follow the same CUDA matrix as `v1.0.1`.
 
 Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 
@@ -168,20 +187,28 @@ For version-specific artifact details, installation commands, and release histor
   - [SGLang Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
   - [SGLang Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime-cu13)
   - [TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
+  - [TensorRT-LLM Runtime (EFA)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime) *(New in v1.0.0, Experimental, AMD64 only)*
   - [vLLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)
   - [vLLM Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime-cu13)
+  - [vLLM Runtime (EFA)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime) *(New in v1.0.0, Experimental, AMD64 only)*
   - [Kubernetes Operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator)
+  - [Snapshot Agent](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent) *(New in v1.0.0, Preview)*
 
 - **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the helm charts supporting Kubernetes deployments of Dynamo:
-  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform) (includes CRDs)
-  - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph)
+  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform) (now includes CRDs)
+  - [Snapshot](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/snapshot) *(New in v1.0.0, Preview)*
+  - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds) *(Deprecated in v1.0.0, CRDs managed by Operator)*
+  - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph) *(Deprecated in v0.9.0)*
 
 - **Rust Crates**:
   - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/)
   - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
-  - [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai/)
+  - [dynamo-protocols](https://crates.io/crates/dynamo-protocols/)
   - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
   - [dynamo-config](https://crates.io/crates/dynamo-config/) *(New in v0.8.0)*
   - [dynamo-memory](https://crates.io/crates/dynamo-memory/) *(New in v0.8.0)*
+  - [dynamo-tokens](https://crates.io/crates/dynamo-tokens/) *(New in v0.9.0)*
+  - [dynamo-mocker](https://crates.io/crates/dynamo-mocker/) *(New in v1.0.0)*
+  - [dynamo-kv-router](https://crates.io/crates/dynamo-kv-router/) *(New in v1.0.0)*
 
 Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#local-quick-start) in the README.

@@ -26,9 +26,9 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt, stream};
 use std::pin::Pin;
@@ -107,14 +107,16 @@ fn load_test_data(file_path: &str) -> TestData {
             .expect("Failed to parse choices");
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: id.clone(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: id.clone(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -152,6 +154,7 @@ async fn parse_response_stream(
             Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
                 stream,
                 reasoning_parser,
+                false,
             ))
         } else {
             Box::pin(stream)
@@ -230,7 +233,7 @@ fn aggregate_content_from_chunks(
 
     for chunk in chunks.iter() {
         if let Some(ref response_data) = chunk.data {
-            for choice in &response_data.choices {
+            for choice in &response_data.inner.choices {
                 // Collect reasoning content
                 if let Some(ref reasoning) = choice.delta.reasoning_content {
                     reasoning_content.push_str(reasoning);
@@ -278,7 +281,7 @@ fn validate_finish_reason(
     // Count finish_reason occurrences and track position
     for (idx, chunk) in chunks.iter().enumerate() {
         if let Some(ref response_data) = chunk.data {
-            for choice in &response_data.choices {
+            for choice in &response_data.inner.choices {
                 if let Some(reason) = choice.finish_reason {
                     finish_reason_count += 1;
                     last_chunk_index = Some(idx);
@@ -1101,5 +1104,156 @@ mod tests {
             validate_finish_reason(&output_chunks, FinishReason::Stop),
             "finish_reason validation failed for non-tool call case"
         );
+    }
+
+    // ---- Kimi K2 streaming jail reproduction tests ----
+    //
+    // These reproduce the customer-reported issue (DIS-1765): Kimi K2 agentic
+    // workflows hitting finish_reason=length repeatedly because the jail never
+    // exits when section_end is missing.
+
+    /// Helper: build a single streaming chunk with optional finish_reason
+    fn make_chunk(
+        content: &str,
+        finish_reason: Option<FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                role: Some(dynamo_protocols::types::Role::Assistant),
+                content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason,
+            stop_reason: None,
+            logprobs: None,
+        };
+        Annotated {
+            id: Some("test-kimi".to_string()),
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-kimi".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "kimi-k2".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
+            }),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// Repro: complete Kimi K2 tool call stream, section_end present → should work.
+    /// This is the baseline / control test.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_complete_section() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.get_weather:0", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(r#"{"location":"NYC"}"#, None),
+            make_chunk("<|tool_call_end|>", None),
+            make_chunk("<|tool_calls_section_end|>", Some(FinishReason::Stop)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Baseline: complete Kimi K2 section should produce tool calls"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+    }
+
+    /// Repro for DIS-1765: model hits max_tokens BEFORE emitting section_end.
+    /// Individual tool call is complete (call_begin + args + call_end), but
+    /// section_end is missing. The jail should still extract the tool call at
+    /// finalize time instead of emitting raw marker text.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_missing_section_end_max_tokens() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.get_weather:0", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(r#"{"location":"NYC"}"#, None),
+            make_chunk("<|tool_call_end|>", None),
+            // Stream ends here — model hit max_tokens, no section_end.
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // BUG: currently the jail stays open, finalize calls the parser which
+        // requires section_end, returns 0 tool calls, and the accumulated
+        // content (with raw markers) is emitted as plain text. The client sees
+        // garbage instead of a structured tool call.
+        assert!(
+            aggregated.has_tool_calls,
+            "Should extract tool calls even when section_end is missing (max_tokens truncation). \
+             Currently broken: jail emits raw marker text as content instead."
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+    }
+
+    /// Repro: multiple complete tool calls, no section_end (max_tokens).
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_multiple_calls_missing_section_end() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk(
+                "<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>",
+                None,
+            ),
+            make_chunk(r#"{"location":"NYC"}<|tool_call_end|>"#, None),
+            make_chunk(
+                "<|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>",
+                None,
+            ),
+            make_chunk(
+                r#"{"timezone":"EST"}<|tool_call_end|>"#,
+                Some(FinishReason::Length),
+            ),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Should extract both tool calls even without section_end"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 2);
     }
 }

@@ -20,7 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Pattern
 
 from typing_extensions import Required, TypedDict
 
@@ -568,7 +568,7 @@ class TerminateProcessFailure(Failure):
             f"Checking Frontend service health (after {service_name} pod restart)..."
         )
 
-        pod_ports = {}  # Temporary dict for port forward tracking
+        pod_ports: dict[str, Any] = {}  # Temporary dict for port forward tracking
         try:
             logger.info("Getting frontend pod and setting up port forward...")
             frontend_pod_name, local_port, frontend_pod = get_frontend_port(

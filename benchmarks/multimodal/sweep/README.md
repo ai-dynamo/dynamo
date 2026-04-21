@@ -47,11 +47,11 @@ input_files:
 # Each config launches the workflow with its own extra_args
 configs:
   - label: cache-off
-    workflow: examples/backends/vllm/launch/vllm_serve_embedding_cache.sh
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
     extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "0"]
 
   - label: cache-on
-    workflow: examples/backends/vllm/launch/vllm_serve_embedding_cache.sh
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
     extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "10"]
 ```
 

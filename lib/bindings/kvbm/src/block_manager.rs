@@ -21,7 +21,7 @@ mod distributed;
 
 pub mod vllm;
 
-/// Add bingings from this crate to the provided module
+/// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockManager>()?;
     m.add_class::<distributed::KvbmWorker>()?;
@@ -29,6 +29,9 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<controller::BlockManagerClient>()?;
     m.add_class::<controller::BlockPoolStatus>()?;
     m.add_class::<controller::ResetBlocksResponse>()?;
+
+    m.add_class::<distributed::PyNcclBootstrap>()?;
+    m.add_class::<distributed::PyNcclCommRef>()?;
 
     vllm::add_to_module(m)?;
 

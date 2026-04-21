@@ -4,3 +4,18 @@
 [build]
 # tokio-console needs this
 rustflags = ["--cfg", "tokio_unstable"]
+
+# Target Haswell (2013) era+ machines. That gets us AVX-2
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3", "--cfg", "tokio_unstable"]
+
+# Target Graviton 2 / Ampere Altra + machines. NEON vector, and LSE atomics.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=neoverse-n1", "--cfg", "tokio_unstable"]
+
+# Static-link pcre2 C library (used by the fastokens tokenizer crate).
+# Without this, pcre2-sys tries to find a system libpcre2 via pkg-config,
+# which breaks Docker builds and bundles a .so into the Python wheel.
+[env]
+PCRE2_SYS_STATIC = "1"
+

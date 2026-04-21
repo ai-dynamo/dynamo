@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 # Module-level GMS lock mode, set by setup_gms() before loader is instantiated.
 # Read by patches.py when creating GMSMemorySaverImpl.
 _gms_lock_mode = None
+_gms_initialized = False
+
+
+def is_gms_active() -> bool:
+    """Return True if setup_gms() has been called successfully."""
+    return _gms_initialized
 
 
 def setup_gms(server_args) -> Type["GMSModelLoader"]:
@@ -65,6 +71,9 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
 
     # Import triggers patches at module level
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
+
+    global _gms_initialized
+    _gms_initialized = True
 
     logger.info("[GMS] Using GMSModelLoader...")
     return GMSModelLoader

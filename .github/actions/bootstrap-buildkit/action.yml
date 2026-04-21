@@ -59,6 +59,10 @@ inputs:
     description: 'Skip the bootstrap step (only create the builder)'
     required: false
     default: 'false'
+  fresh_builder:
+    description: 'Force creation of a new K8s builder even if one already exists. Used by the create-fresh-builder preliminary job.'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
@@ -83,11 +87,14 @@ runs:
       if: inputs.buildkit_worker_addresses == ''
       shell: bash
       run: |
-        if docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
-            # If exit code is 0 (success), print the message
+        if [[ "${{ inputs.fresh_builder }}" != "true" ]] && docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
             echo "✅ Builder '${{ inputs.builder_name }}' already exists. Skipping creation."
         else
-          echo "K8s Builder '${{ inputs.builder_name }}' does not exist. Creating it."
+          if [[ "${{ inputs.fresh_builder }}" == "true" ]] && docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
+            echo "🔄 Forcing fresh K8s builder: removing existing '${{ inputs.builder_name }}'."
+            docker buildx rm ${{ inputs.builder_name }} || true
+          fi
+          echo "🔨 Creating K8s builder '${{ inputs.builder_name }}'."
           docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
           '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
           '--driver-opt=namespace=${{ inputs.namespace }}' \
@@ -112,7 +119,7 @@ runs:
         fi
         sleep 3 # Give the builders some time to be ready
 
-        if [[ "${{ inputs.skip_bootstrap }}" != "true" ]]; then
+        if [[ "${{ inputs.skip_bootstrap }}" != "true" && "${{ inputs.fresh_builder }}" != "true" ]]; then
           echo "::warning::Build is using fallback pod. Please alert the ops team."
           echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
           echo "This build is running on a **fallback pod**. Please alert the ops team." >> $GITHUB_STEP_SUMMARY

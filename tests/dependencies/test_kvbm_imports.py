@@ -54,7 +54,7 @@ def _check_kvbm_imports():
 
 
 # Base tests (no framework markers) - run in main job with --framework none --enable-kvbm
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
 def test_kvbm_wheel_exists():
@@ -62,7 +62,7 @@ def test_kvbm_wheel_exists():
     _check_kvbm_wheel_exists()
 
 
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
 def test_kvbm_imports():
@@ -71,7 +71,7 @@ def test_kvbm_imports():
 
 
 # vLLM-specific tests - run in vLLM job (vLLM auto-enables KVBM)
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -80,7 +80,7 @@ def test_kvbm_wheel_exists_vllm():
     _check_kvbm_wheel_exists()
 
 
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -90,7 +90,7 @@ def test_kvbm_imports_vllm():
 
 
 # TRT-LLM-specific tests - run in TRT-LLM job (TRT-LLM auto-enables KVBM)
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.trtllm
 @pytest.mark.unit
 @pytest.mark.gpu_0
@@ -99,7 +99,7 @@ def test_kvbm_wheel_exists_trtllm():
     _check_kvbm_wheel_exists()
 
 
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 @pytest.mark.trtllm
 @pytest.mark.unit
 @pytest.mark.gpu_0

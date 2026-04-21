@@ -50,6 +50,16 @@ pub struct NvExt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub seed: Option<i64>,
+
+    /// MoE expert switching boundary as a fraction of the denoising schedule (vLLM-Omni I2V).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub boundary_ratio: Option<f32>,
+
+    /// CFG scale for the low-noise expert (vLLM-Omni I2V dual-guidance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guidance_scale_2: Option<f32>,
 }
 
 impl Default for NvExt {

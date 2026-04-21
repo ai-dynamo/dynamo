@@ -32,7 +32,9 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use crate::active_set::reconcile_active_workers;
+use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -72,6 +74,30 @@ impl Block {
             block_hash: Some(block_hash),
         }
     }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.workers.remove(&worker);
+        if self.workers.is_empty() {
+            self.children.clear();
+        }
+    }
+}
+
+impl CleanableNode for Block {
+    type ChildKey = LocalBlockHash;
+
+    fn has_any_workers(&self) -> bool {
+        !self.workers.is_empty()
+    }
+
+    fn children(&self) -> &FxHashMap<LocalBlockHash, SharedBlock> {
+        &self.children
+    }
+
+    fn remove_child(&mut self, key: &LocalBlockHash) {
+        self.children.remove(key);
+    }
 }
 
 /// Thread-safe radix tree for concurrent KV cache lookups.
@@ -100,6 +126,7 @@ pub struct ConcurrentRadixTree {
     root: SharedBlock,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
+    cleanup: CleanupState,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -138,6 +165,7 @@ impl ConcurrentRadixTree {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            cleanup: CleanupState::new(),
         }
     }
 
@@ -228,16 +256,8 @@ impl ConcurrentRadixTree {
                 let child_count = guard.workers.len();
 
                 if child_count != active_count {
-                    // Workers changed: either dropped out (child < active) or
-                    // stale entries exist (child > active). In both cases,
-                    // retain only workers present in the child, scoring dropouts.
-                    active.retain(|w| {
-                        if guard.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
-                        }
+                    reconcile_active_workers(&mut active, &guard.workers, |worker| {
+                        scores.scores.insert(worker, matched_depth);
                     });
                     active_count = active.len();
 
@@ -345,10 +365,13 @@ impl ConcurrentRadixTree {
 
         let mut needs_worker_insert = false;
 
-        let num_blocks_added = op.blocks.len();
+        let mut num_blocks_added = 0;
 
         // In each iteration, we lock the parent block and insert the worker into it from
         // the previous iteration. This avoids locking a block twice.
+        //
+        // Track tree size from worker_lookup insertions so it matches the single-threaded
+        // radix tree's `lookup.len()` semantics and naturally includes the tail block.
         for block_data in op.blocks {
             let child = {
                 let mut parent_guard = current.write();
@@ -364,7 +387,6 @@ impl ConcurrentRadixTree {
                 // parent_guard is dropped at the end of this block
                 match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
-                        // Verify our simplifying assumption: block_hash is uniform across workers
                         {
                             let existing_guard = existing.read();
                             if existing_guard.block_hash != Some(block_data.block_hash) {
@@ -395,9 +417,20 @@ impl ConcurrentRadixTree {
             };
 
             // Update lookup
-            worker_lookup.insert(block_data.block_hash, child.clone());
+            if worker_lookup
+                .insert(block_data.block_hash, child.clone())
+                .is_none()
+            {
+                num_blocks_added += 1;
+            }
 
             current = child;
+        }
+
+        // Insert worker into the last child (not yet handled since there is
+        // no subsequent iteration to pick it up).
+        if needs_worker_insert {
+            current.write().workers.insert(worker);
         }
 
         match self.tree_sizes.get(&worker) {
@@ -408,12 +441,6 @@ impl ConcurrentRadixTree {
                 self.tree_sizes
                     .insert(worker, AtomicUsize::new(num_blocks_added));
             }
-        }
-
-        // Insert worker into the last child (not yet handled since there is
-        // no subsequent iteration to pick it up).
-        if needs_worker_insert {
-            current.write().workers.insert(worker);
         }
 
         Ok(())
@@ -451,12 +478,7 @@ impl ConcurrentRadixTree {
                 continue;
             };
 
-            // Remove the worker from this block's worker set.
-            let mut guard = block.write();
-            guard.workers.remove(&worker);
-            if guard.workers.is_empty() {
-                guard.children.clear();
-            }
+            block.write().drop_worker(worker);
 
             num_removed += 1;
         }
@@ -492,11 +514,7 @@ impl ConcurrentRadixTree {
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
                 for (_, block) in worker_lookup.into_iter() {
-                    let mut guard = block.write();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        guard.children.clear();
-                    }
+                    block.write().drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -524,11 +542,7 @@ impl ConcurrentRadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_lookup) = lookup.remove(&key) {
             for (_, block) in worker_lookup.into_iter() {
-                let mut guard = block.write();
-                guard.workers.remove(&key);
-                if guard.workers.is_empty() {
-                    guard.children.clear();
-                }
+                block.write().drop_worker(key);
             }
             self.tree_sizes.remove(&key);
         }
@@ -569,7 +583,6 @@ impl ConcurrentRadixTree {
         // Queue entries: (current_block, parent_hash, tokens_hash)
         let mut queue = VecDeque::new();
 
-        // Process root's children first
         {
             let root_guard = self.root.read();
             for (tokens_hash, child_block) in &root_guard.children {
@@ -590,6 +603,7 @@ impl ConcurrentRadixTree {
                 // Create a store event for this worker
                 let event = RouterEvent {
                     worker_id: worker.worker_id,
+                    storage_tier: crate::protocols::StorageTier::Device,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -622,14 +636,24 @@ impl ConcurrentRadixTree {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTree {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(e) = self.apply_event(&mut lookup, event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event);
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
@@ -637,6 +661,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                 }
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
+                }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
                 }
                 WorkerTask::DumpEvents(_sender) => {
                     // Handled directly via dump_events() on the shared tree.
@@ -655,6 +682,20 @@ impl SyncIndexer for ConcurrentRadixTree {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn try_schedule_cleanup(&self) -> bool {
+        self.cleanup.try_schedule()
+    }
+
+    fn cancel_scheduled_cleanup(&self) {
+        self.cleanup.cancel();
+    }
+
+    fn run_cleanup_task(&self) {
+        let mut cleanup_guard = CleanupGuard::new(&self.cleanup);
+        cleanup::sweep_stale_children(&self.root);
+        cleanup_guard.mark_completed();
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {

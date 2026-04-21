@@ -19,7 +19,7 @@ The dashboard is organized in **logical request flow order** (21 panels across 6
 - Request Throughput (x=0), Avg Request Duration (x=8), KV Cache Utilization (%) (x=16)
 
 **Row 5: KV Cache + GPU** (y=32)
-- KV Cache Blocks (Active/Total) ⭐ (x=0), GPU Compute Utilization (x=8), GPU Memory Used (x=16)
+- KV Cache Blocks (Total) (x=0), GPU Compute Utilization (x=8), GPU Memory Used (x=16)
 
 **Row 6: NIXL Transfer Metrics** (y=40)
 - GPU Memory Bandwidth (x=0), NVLink Bandwidth (GB/s) (x=8), Worker CPU Usage (x=16)
@@ -69,8 +69,8 @@ These metrics come from the decode worker pods' system endpoints (port 9090). In
 | **Component Latency - Prefill vs Decode** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="prefill",dynamo_endpoint="generate"}` & `{dynamo_component="backend",dynamo_endpoint="generate"}` | `rate(sum[5m]) / rate(count[5m])` | Average request duration for prefill workers (includes NIXL transfer) vs decode workers (entire decode session for all output tokens) over the last 5 minutes. **Note**: Decode worker latency measures the FULL decode session duration, not just time to first token. Only shows `generate` endpoint (filters out `clear_kv_blocks` maintenance operations) |
 | **Decode Worker - Request Throughput** | `dynamo_component_requests_total{dynamo_component="backend"}` | `rate(...[5m])` | Rate of requests processed by decode workers in requests/second |
 | **Decode Worker - Avg Request Duration** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="backend"}` | `rate(sum[5m]) / rate(count[5m])` | Average time decode workers spend processing requests (decode phase only) over the last 5 minutes |
-| **KV Cache Utilization** | `dynamo_component_kvstats_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Worker Processing Time instead for prefill capacity |
-| **KV Cache Blocks (Active/Total)** ⭐ | `dynamo_component_kvstats_active_blocks` & `dynamo_component_kvstats_total_blocks` | Raw values | Number of KV cache blocks in use vs total available for decode workers. When active approaches total, decode workers are at capacity. Shows numeric values (e.g., 2048/5297). **Note**: Only for decode workers |
+| **KV Cache Utilization** | `dynamo_component_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Worker Processing Time instead for prefill capacity |
+| **KV Cache Blocks (Total)** | `dynamo_component_total_blocks` | Raw value | Total number of KV cache blocks available on decode workers. **Note**: Only for decode workers |
 
 ### CPU Metrics (from cAdvisor and Node Exporter)
 These metrics come from Kubernetes cAdvisor (container metrics) and Node Exporter (node-level metrics). CPU bottlenecks can impact prefill/decode performance.
@@ -194,7 +194,7 @@ The DCGM ServiceMonitor must be manually created (see `dcgm-servicemonitor.yaml`
 - Check deployment mode and request routing configuration
 
 ### KV Cache metrics only showing decode workers:
-**Important Limitation**: In disaggregated mode, prefill workers (`--disaggregation-mode prefill`) do NOT expose `dynamo_component_kvstats_*` metrics. Only decode workers expose these.
+**Important Limitation**: In disaggregated mode, prefill workers (`--disaggregation-mode prefill`) do NOT expose `dynamo_component_total_blocks` or `dynamo_component_gpu_cache_usage_percent` metrics. Only decode workers expose these.
 
 **Why this happens:**
 - Prefill workers transfer KV cache to decode workers via NIXL
@@ -259,3 +259,106 @@ The dashboard uses two template variables for flexibility:
 - **Auto-populated**: Dynamically discovers namespaces from frontend pods
 
 **Usage**: All dashboard queries filter by `namespace="$namespace"` to show metrics for the selected deployment. You can switch between different Dynamo deployments in different namespaces using the namespace dropdown at the top of the dashboard.
+
+---
+
+## Intel XPU-SMI Metrics (from XPU-SMI Exporter)
+
+These metrics come from the Intel XPU-SMI Prometheus exporter (`xpu-smi-exporter` job). XPU-SMI collects hardware-level Intel GPU metrics equivalent to NVIDIA's DCGM.
+
+### Setup
+
+Launch the XPU-SMI Prometheus exporter on the host, then start the observability stack with the XPU overlay:
+```bash
+# Install Intel XPU-SMI (xpumanager): https://github.com/intel/xpumanager
+# Start the exporter (serves Prometheus metrics on port 9966)
+python deploy/observability/xpu_smi_exporter.py --port 9966 &
+
+# Start base services
+docker compose -f deploy/docker-compose.yml up -d
+
+# Start observability with XPU overlay (uses prometheus-xpu.yml + xpu-alert-rules.yml)
+docker compose -f deploy/docker-observability.yml -f deploy/docker-observability-xpu.yml up -d
+```
+
+### XPU-SMI Dashboard Panels (`xpu-smi-metrics.json`)
+
+| Panel | Metric | Formula | Description |
+|-------|--------|---------|-------------|
+| **XPU Compute Utilization** | `xpu_engine_group_compute_engine_util` | Raw value (0-100%) | Compute engine utilization per XPU device. Equivalent to `DCGM_FI_DEV_GPU_UTIL` |
+| **XPU Memory Usage** | `xpu_memory_used_bytes`, `xpu_memory_free_bytes` | Raw values | HBM/VRAM used and free bytes per XPU device. Equivalent to `DCGM_FI_DEV_FB_USED/FB_FREE` |
+| **XPU Temperature** | `xpu_temperature_celsius` | Raw value (°C) | GPU die and memory temperature. Labels: `location="gpu"` or `location="memory"`. Thresholds: yellow@70°C, red@85°C |
+| **XPU Power Usage** | `xpu_power_watts` | Raw value (W) | Instantaneous power draw per XPU device. Equivalent to `DCGM_FI_DEV_POWER_USAGE` |
+| **XPU Engine Utilization** | `xpu_engine_group_compute_engine_util`, `xpu_engine_group_copy_engine_util`, `xpu_engine_group_render_engine_util` | Raw values (0-100%) | Per-engine-group utilization breakdown |
+| **XPU Memory Bandwidth** | `xpu_memory_read_bytes_per_second`, `xpu_memory_write_bytes_per_second` | Raw value (bytes/sec) | HBM read/write bandwidth in bytes/sec |
+| **XPU PCIe Bandwidth** | `xpu_pcie_read_bytes_per_second`, `xpu_pcie_write_bytes_per_second` | Raw value (bytes/sec) | PCIe read/write bandwidth. Equivalent to `DCGM_FI_PROF_PCIE_RX/TX_BYTES` |
+| **Avg XPU Utilization** | `xpu_engine_group_compute_engine_util` | `avg(...)` | Average utilization gauge across all XPU devices |
+| **Max XPU Temperature** | `xpu_temperature_celsius{location="gpu"}` | `max(...)` | Maximum temperature gauge across all XPU devices |
+
+### XPU vs NVIDIA DCGM Metric Mapping
+
+| NVIDIA DCGM Metric | Intel XPU-SMI Metric | Description |
+|---|---|---|
+| `DCGM_FI_DEV_GPU_UTIL` | `xpu_engine_group_compute_engine_util` | Compute utilization % |
+| `DCGM_FI_DEV_FB_USED` | `xpu_memory_used_bytes` | Memory used |
+| `DCGM_FI_DEV_FB_FREE` | `xpu_memory_free_bytes` | Memory free |
+| `DCGM_FI_DEV_GPU_TEMP` | `xpu_temperature_celsius{location="gpu"}` | GPU temperature |
+| `DCGM_FI_DEV_MEMORY_TEMP` | `xpu_temperature_celsius{location="memory"}` | Memory temperature |
+| `DCGM_FI_DEV_POWER_USAGE` | `xpu_power_watts` | Power draw (W) |
+| `DCGM_FI_PROF_PCIE_RX_BYTES` | `xpu_pcie_read_bytes_per_second` | PCIe RX bytes/sec |
+| `DCGM_FI_PROF_PCIE_TX_BYTES` | `xpu_pcie_write_bytes_per_second` | PCIe TX bytes/sec |
+
+### Metric Architecture (XPU)
+
+```text
+┌─────────────────┐
+│  Intel XPU-SMI  │ ──► xpu_* metrics (Prometheus port :9966)
+│    Exporter     │     ├─ xpu_engine_group_compute_engine_util
+│  (host process) │     ├─ xpu_memory_used_bytes / free_bytes
+└─────────────────┘     ├─ xpu_temperature_celsius
+                        ├─ xpu_power_watts
+                        └─ xpu_pcie_*_bytes_total
+
+           ▼
+   ┌─────────────────┐
+   │  Prometheus     │ ◄─── scrape job: xpu-smi-exporter (port 9966)
+   │  (monitoring)   │
+   └─────────────────┘
+           ▼
+   ┌─────────────────┐
+   │    Grafana      │ ◄─── xpu-smi-metrics.json dashboard
+   │  (monitoring)   │
+   └─────────────────┘
+```
+
+### XPU Alert Rules (`xpu-alert-rules.yml`)
+
+| Alert | Condition | Severity | Description |
+|-------|-----------|----------|-------------|
+| `XPUHighTemperature` | temp > 85°C for 2m | warning | XPU GPU die overheating |
+| `XPUCriticalTemperature` | temp > 95°C for 30s | critical | Immediate risk of thermal throttle/shutdown |
+| `XPUMemoryAlmostFull` | mem > 90% for 1m | warning | KV cache allocation may fail |
+| `XPUMemoryCritical` | mem > 98% for 30s | critical | OOM imminent |
+| `XPUHighPowerDraw` | power > 400W for 5m | warning | Sustained high power draw |
+| `XPUExporterDown` | `up{job="xpu-smi-exporter"} == 0` for 1m | critical | Monitoring blind spot |
+| `XPULowComputeUtilizationDuringLoad` | util < 10% during active traffic (`rate()` > 0) | warning | Possible dispatch issue |
+| `XPUWorkerLivenessLost` | no XPU metrics + active traffic (`rate()` > 0) | critical | XPU worker crash suspected |
+
+### Troubleshooting XPU Metrics
+
+#### XPU metrics not showing in Prometheus:
+1. Verify XPU-SMI exporter is running: `curl http://localhost:9966/metrics | grep xpu_`
+2. Check Intel GPU is visible: `xpu-smi discovery`
+3. Verify scrape job in Prometheus UI: Status → Targets → `xpu-smi-exporter`
+4. Check firewall: `sudo ufw allow 9966/tcp`
+
+#### XPU device not detected:
+```bash
+# Check device visibility in container
+ls /dev/dri/
+# Should show renderD128, card0, etc.
+
+# Verify XPU-SMI can see the device
+xpu-smi discovery
+# Expected: lists Intel GPU devices with model name, driver version
+```

@@ -52,7 +52,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
+            .set_endpoint_registered(endpoint_name_local.as_str());
 
         loop {
             let req = tokio::select! {
@@ -102,13 +102,26 @@ impl PushEndpoint {
                         instance_id,
                     )
                 } else {
-                    tracing::info_span!("handle_payload")
+                    tracing::info_span!(target: "request_span", "handle_payload")
                 };
+
+                // Extract request_id from headers before passing payload
+                let request_id = req
+                    .message
+                    .headers
+                    .as_ref()
+                    .and_then(|h| h.get("request-id").map(|v| v.to_string()))
+                    .or_else(|| {
+                        req.message
+                            .headers
+                            .as_ref()
+                            .and_then(|h| h.get("x-dynamo-request-id").map(|v| v.to_string()))
+                    });
 
                 tokio::spawn(async move {
                     tracing::trace!(instance_id, "handling new request");
                     let result = ingress
-                        .handle_payload(req.message.payload)
+                        .handle_payload(req.message.payload, request_id)
                         .instrument(span)
                         .await;
                     match result {

@@ -231,11 +231,11 @@ def _compute_tokens_per_image(
     processor_output: dict, processor: Any, model_type: str
 ) -> list[int]:
     """Compute the number of visual tokens for each image from processor output."""
-    if model_type == "qwen2_vl":
+    if model_type in ("qwen2_vl", "qwen3_vl"):
         grid_thw = processor_output.get("image_grid_thw")
         if grid_thw is None:
             raise ValueError(
-                "image_grid_thw not found in processor output for Qwen2-VL"
+                f"image_grid_thw not found in processor output for {model_type}"
             )
 
         merge_size = getattr(processor.image_processor, "merge_size", 2)
@@ -254,8 +254,14 @@ def _get_replacement_id(model_path: str) -> int:
 
     try:
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        replacement_id = config.vocab_size + 1
-        logger.info(f"Got vocab_size={config.vocab_size} from AutoConfig")
+        # Some models (e.g. Qwen3-VL) store vocab_size in text_config, not top-level.
+        vocab_size = getattr(config, "vocab_size", None)
+        if vocab_size is None and hasattr(config, "text_config"):
+            vocab_size = getattr(config.text_config, "vocab_size", None)
+        if vocab_size is None:
+            raise AttributeError("vocab_size not found in config or config.text_config")
+        replacement_id = vocab_size + 1
+        logger.info(f"Got vocab_size={vocab_size} from AutoConfig")
         return replacement_id
     except Exception as e:
         raise RuntimeError(

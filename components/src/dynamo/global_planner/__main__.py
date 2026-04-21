@@ -76,6 +76,11 @@ async def main(runtime: DistributedRuntime, args):
     else:
         logger.info("No-operation mode: DISABLED")
 
+    if args.max_total_gpus >= 0:
+        logger.info(f"Max total GPUs: {args.max_total_gpus}")
+    else:
+        logger.info("Max total GPUs: UNLIMITED")
+
     logger.info("=" * 60)
 
     # Get K8s namespace (where GlobalPlanner pod is running)
@@ -88,6 +93,7 @@ async def main(runtime: DistributedRuntime, args):
         managed_namespaces=args.managed_namespaces,
         k8s_namespace=k8s_namespace,
         no_operation=args.no_operation,
+        max_total_gpus=args.max_total_gpus,
     )
 
     # Serve scale_request endpoint

@@ -24,14 +24,30 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `TLLM_LOG_LEVEL` | TensorRT-LLM backend log level (independent of `DYN_LOG`) | `INFO` | `DEBUG` |
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
-| `OTEL_EXPORT_ENABLED` | Enable OTLP trace exporting | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP exporter endpoint | `http://localhost:4317` | `http://tempo:4317` |
+| `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (defaults to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` if not set) | same as traces endpoint | `http://localhost:4317` |
+
+## OTLP Log Export
+
+When `OTEL_EXPORT_ENABLED=true`, Dynamo exports both **traces and logs** via OTLP. Logs are sent to an OpenTelemetry Collector which routes them to Grafana Loki for aggregation and querying.
+
+By default, logs are exported to the same endpoint as traces (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). To send logs to a different endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`:
+
+```bash
+export OTEL_EXPORT_ENABLED=true
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
+# Optional: send logs to a different endpoint
+# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
+```
+
+The local observability stack (see [Getting Started](README.md#getting-started-quickly)) includes an OpenTelemetry Collector that receives OTLP on `localhost:4317` and routes traces to Tempo and logs to Loki. In Grafana, the Loki datasource is pre-configured with a derived field that links `trace_id` labels to Tempo, so you can jump directly from a log line to its corresponding trace.
 
 ## Getting Started Quickly
 
 ### Start Observability Stack
 
-For collecting and visualizing logs with Grafana Loki (Kubernetes), or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+For collecting and visualizing logs with Grafana Loki, or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions. The stack includes Loki, an OpenTelemetry Collector, and Tempo — all pre-wired together.
 
 ### Enable Structured Logging
 
@@ -313,7 +329,9 @@ command to set the SGLang engine's log level directly (e.g.
 
 ## Related Documentation
 
+- [Distributed Tracing with Tempo](tracing.md)
+- [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md)
+- [Observability Getting Started](README.md)
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md)

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Benchmark and profiling tool dependencies.
+
+aiperf==0.6.0
+genai-perf==0.0.15

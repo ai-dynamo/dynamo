@@ -4,6 +4,7 @@
 """Argument parsing and typed config for Dynamo TRT-LLM."""
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -17,6 +18,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
+from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 
 DEFAULT_ENDPOINT_COMPONENT = "tensorrt_llm"
 DEFAULT_PREFILL_COMPONENT = "prefill"
@@ -70,19 +72,44 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
-    """Parse command-line arguments for the TensorRT-LLM backend."""
+    """Parse command-line arguments for the TensorRT-LLM backend.
+
+    In addition to the known flags, supports dynamic configuration flags
+    of the form ``--trtllm.<group>.<subgroup>.<key> <value>`` which are
+    collected into a nested dict and passed through ``override_engine_args``.
+    Cannot be combined with the explicit ``--override-engine-args`` flag.
+    """
     cli_args = list(argv) if argv is not None else sys.argv[1:]
 
     parser = argparse.ArgumentParser(
-        description="Dynamo TensorRT-LLM worker configuration",
+        description="Dynamo TensorRT-LLM worker configuration\n\n"
+        "Dynamic engine configuration can be passed via dotted flags:\n"
+        "  --trtllm.<group>.<key> <value>\n"
+        "Example:\n"
+        "  --trtllm.kv_cache_config.free_gpu_memory_fraction 0.7\n"
+        "These flags are mutually exclusive with --override-engine-args.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
     DynamoRuntimeArgGroup().add_arguments(parser)
     DynamoTrtllmArgGroup().add_arguments(parser)
 
-    parsed_args = parser.parse_args(cli_args)
+    parsed_args, remaining = parser.parse_known_args(cli_args)
     config = Config.from_cli_args(parsed_args)
+
+    # Parse dynamic --trtllm.* flags from the remaining args
+    dynamic_overrides = parse_dynamic_flags(remaining)
+
+    if dynamic_overrides and config.override_engine_args:
+        logging.error(
+            "--override-engine-args and --trtllm.* dynamic flags are mutually "
+            "exclusive. Use one or the other."
+        )
+        sys.exit(1)
+
+    if dynamic_overrides:
+        config.override_engine_args = json.dumps(dynamic_overrides)
+
     config.validate()
 
     # TODO: move this to common configuration.

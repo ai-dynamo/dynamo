@@ -28,7 +28,6 @@ import (
 
 	istioNetworking "istio.io/api/networking/v1beta1"
 
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -39,11 +38,14 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RestartState holds the restart state for DGD services.
@@ -323,11 +325,12 @@ func generateSingleDCD(
 	deployment.Spec.DynamoNamespace = &dynamoNamespace
 
 	labels := make(map[string]string)
-	deployment.Spec.Labels = labels
-	deployment.Labels = labels
+	maps.Copy(labels, component.Labels)
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+	deployment.Spec.Labels = labels
+	deployment.Labels = labels
 
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(component.ComponentType) {
@@ -335,6 +338,7 @@ func generateSingleDCD(
 	}
 
 	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+	propagateDGDSpecMetadata(parentDGD.Spec.Annotations, parentDGD.Spec.Labels, &deployment.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Apply restart annotation if this service should be restarted.
 	if restartState.ShouldAnnotateService(componentName) {
@@ -835,7 +839,11 @@ func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfN
 		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1})
 		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1})
 	} else {
-		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: *serviceReplicas})
+		replicas := int32(1)
+		if serviceReplicas != nil {
+			replicas = *serviceReplicas
+		}
+		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: replicas})
 	}
 	return roles
 }
@@ -889,12 +897,12 @@ type MultinodeDeployer interface {
 }
 
 // BackendFactory creates backend instances based on the framework type
-func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration) Backend {
+func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration, parentGraphDeploymentName string) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
-		return &VLLMBackend{}
+		return &VLLMBackend{ParentGraphDeploymentName: parentGraphDeploymentName}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
 			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,
@@ -924,8 +932,9 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
-// addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
-func addStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
+// AddStandardEnvVars adds the standard environment variables that are common to
+// both checkpoint jobs and generated worker pods.
+func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
 	standardEnvVars := []corev1.EnvVar{}
 	if operatorConfig.Infrastructure.NATSAddress != "" {
 		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
@@ -995,7 +1004,7 @@ func GenerateBasePodSpec(
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, component.Annotations))
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -1073,7 +1082,7 @@ func GenerateBasePodSpec(
 		})
 	}
 
-	addStandardEnvVars(&container, operatorConfig)
+	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
 
@@ -1109,17 +1118,12 @@ func GenerateBasePodSpec(
 			MountPath: mountPoint,
 		})
 	}
-	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
-		volumes = append(volumes, *shmVol)
-		container.VolumeMounts = append(container.VolumeMounts, *shmMount)
-	}
-
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
 	if multinodeDeployer == nil {
 		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
-	backend := BackendFactory(backendFramework, operatorConfig)
+	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
@@ -1157,27 +1161,12 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
+	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
-
-	// Inject checkpoint configuration if enabled
-	// This handles ALL checkpoint-related modifications:
-	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
-	// - Security context (hostIPC, privileged mode)
-	// - Environment variables (checkpoint path, hash, CRIU settings)
-	// - Storage configuration (volumes, mounts)
-	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
-	// Checkpoint config comes from the operator's controller config (Helm values)
-	var checkpointConfig *configv1alpha1.CheckpointConfiguration
-	if operatorConfig.Checkpoint.Enabled {
-		checkpointConfig = &operatorConfig.Checkpoint
-	}
-	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, checkpointConfig); err != nil {
-		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
-	}
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
@@ -1195,6 +1184,23 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// GMS: replace nvidia.com/gpu with a shared DRA claim and add the server sidecar.
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
+		}
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+	}
+
+	// Clone main container into two engine containers (active + standby) for failover.
+	// Runs after GMS so the main container already has DRA claims and shared volume.
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1209,9 +1215,8 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
-
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
 		workerHashSuffix = component.Labels[commonconsts.KubeLabelDynamoWorkerHash]
@@ -1222,7 +1227,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
-		DiscoveryBackend:               discoveryBackend,
+		Discovery:                      discovery,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
@@ -1244,7 +1249,7 @@ func generateFrontendSidecar(
 		ComponentType:                  commonconsts.ComponentTypeFrontend,
 		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
-		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		Discovery:                      parentContext.Discovery,
 		DynamoNamespace:                parentContext.DynamoNamespace,
 	}
 
@@ -1273,7 +1278,7 @@ func generateFrontendSidecar(
 		container.Env = MergeEnvs(container.Env, spec.Envs)
 	}
 
-	addStandardEnvVars(&container, operatorConfig)
+	AddStandardEnvVars(&container, operatorConfig)
 
 	return container, nil
 }
@@ -1296,6 +1301,7 @@ func GeneratePodSpecForComponent(
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
@@ -1310,6 +1316,7 @@ func GeneratePodSpecForComponent(
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
 	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
@@ -1330,12 +1337,34 @@ func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1alph
 	}
 }
 
+// propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
+// the component as a low-priority base. Service-level values take precedence.
+func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+	for k, v := range annotations {
+		if component.Annotations == nil {
+			component.Annotations = make(map[string]string)
+		}
+		if _, exists := component.Annotations[k]; !exists {
+			component.Annotations[k] = v
+		}
+	}
+	for k, v := range labels {
+		if component.Labels == nil {
+			component.Labels = make(map[string]string)
+		}
+		if _, exists := component.Labels[k]; !exists {
+			component.Labels[k] = v
+		}
+	}
+}
+
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
+	kubeClient ctrlclient.Reader,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
@@ -1344,6 +1373,8 @@ func GenerateGrovePodCliqueSet(
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
+	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
@@ -1352,6 +1383,10 @@ func GenerateGrovePodCliqueSet(
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}
+
+	// Inject deployment-level topology constraint (PCS template).
+	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
+	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
 	// Validate kai-scheduler queue once if kai-scheduler is enabled
 	var validatedQueueName string
@@ -1364,6 +1399,7 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
+	discoveryContext := NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
@@ -1410,16 +1446,40 @@ func GenerateGrovePodCliqueSet(
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
 			}
 
+			if operatorConfig.Checkpoint.Enabled {
+				if err := checkpoint.InjectCheckpointIntoPodSpec(
+					ctx,
+					kubeClient,
+					dynamoDeployment.Namespace,
+					podSpec,
+					checkpointInfo,
+				); err != nil {
+					return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", r.Name, err)
+				}
+			}
+
+			minAvailable := int32(1)
+			if isMultinode {
+				minAvailable = r.Replicas
+			}
+
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
 				Name: strings.ToLower(r.Name),
 				Spec: grovev1alpha1.PodCliqueSpec{
 					RoleName:     strings.ToLower(r.Name),
 					Replicas:     r.Replicas,
-					MinAvailable: ptr.To(int32(1)),
+					MinAvailable: ptr.To(minAvailable),
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
+
+			// For single-node services, set topology constraint directly on the clique.
+			// For multinode services, the constraint goes on the PCSG instead;
+			// child cliques inherit from PCSG and should NOT have explicit constraints.
+			if !isMultinode {
+				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
+			}
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, discoveryContext)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1428,6 +1488,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
+			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
 
 			// Apply restart annotation if this service should be restarted.
 			// For services not in the current restart order, preserve their existing annotation
@@ -1459,10 +1520,11 @@ func GenerateGrovePodCliqueSet(
 
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:         strings.ToLower(serviceName),
-				CliqueNames:  cliqueNames,
-				Replicas:     component.Replicas,
-				MinAvailable: ptr.To(int32(1)),
+				Name:               strings.ToLower(serviceName),
+				CliqueNames:        cliqueNames,
+				Replicas:           component.Replicas,
+				MinAvailable:       ptr.To(int32(1)),
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			})
 		}
 	}
@@ -1477,7 +1539,7 @@ func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
+	discovery DiscoveryContext,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
@@ -1506,18 +1568,21 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
-
-	// Inject checkpoint labels AFTER user labels so they cannot be overridden.
-	var err error
-	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
+	// Re-apply system labels after user merge to prevent override
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	if component.ComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}
-
-	// Only mark pods as restore targets when a concrete checkpoint is ready.
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
-		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
+	if component.DynamoNamespace != nil {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *component.DynamoNamespace
+	}
+	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	// Discovery labels on pod template — needed for Pod reflector filtering in container mode
+	if discovery.Backend == configv1alpha1.DiscoveryBackendKubernetes {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 	return labels, nil
 }
@@ -1702,8 +1767,10 @@ func GenerateBasePodSpecForController(
 	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
-	// For controller usage, we may not have serviceName, so use the component name as fallback
-	serviceName := dynComponent.Name
+	serviceName := dynComponent.Spec.ServiceName
+	if serviceName == "" {
+		serviceName = dynComponent.Name
+	}
 	podSpec, err := GenerateBasePodSpec(
 		componentSpec,
 		backendFramework,
@@ -1737,31 +1804,4 @@ func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) str
 		// For unknown backends, don't assume compilation cache support
 		return ""
 	}
-}
-
-func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
-	// default: enabled=true, size=8Gi
-	size := resource.MustParse(commonconsts.DefaultSharedMemorySize)
-	if spec != nil {
-		if spec.Disabled {
-			return nil, nil
-		}
-		if !spec.Size.IsZero() {
-			size = spec.Size
-		}
-	}
-	volume := corev1.Volume{
-		Name: commonconsts.KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &size,
-			},
-		},
-	}
-	volumeMount := corev1.VolumeMount{
-		Name:      commonconsts.KubeValueNameSharedMemory,
-		MountPath: commonconsts.DefaultSharedMemoryMountPath,
-	}
-	return &volume, &volumeMount
 }

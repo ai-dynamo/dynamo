@@ -30,6 +30,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
@@ -39,8 +40,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -64,6 +67,7 @@ const (
 	KubeAnnotationDeploymentStrategy                    = "nvidia.com/deployment-strategy"
 	KubeAnnotationDeploymentRollingUpdateMaxSurge       = "nvidia.com/deployment-rolling-update-max-surge"
 	KubeAnnotationDeploymentRollingUpdateMaxUnavailable = "nvidia.com/deployment-rolling-update-max-unavailable"
+	SchedulerNameVolcano                                = "volcano"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -79,6 +83,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -178,6 +183,25 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err != nil {
 			return
 		}
+	}
+
+	// Sync GMS ResourceClaimTemplate before creating workload resources
+	if r.RuntimeConfig.DRAEnabled {
+		serviceName := dynamoComponentDeployment.Spec.ServiceName
+		if serviceName == "" {
+			serviceName = dynamoComponentDeployment.Name
+		}
+		spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
+		gpuCount, deviceClassName := dra.ExtractGPUParams(spec.GPUMemoryService, spec.Resources)
+		claimTemplateName := dra.ResourceClaimTemplateName(dynamoComponentDeployment.GetParentGraphDeploymentName(), serviceName)
+		_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
+		}
+	} else if dynamoComponentDeployment.Spec.GPUMemoryService != nil && dynamoComponentDeployment.Spec.GPUMemoryService.Enabled {
+		return ctrl.Result{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
 	}
 
 	// Create the appropriate workload resource based on deployment type
@@ -561,7 +585,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	}
 	leaderPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
-	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
+	leaderPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
 	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
 
@@ -614,7 +638,7 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
-	workerPodTemplateSpec.Spec.SchedulerName = "volcano"
+	workerPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
 	if workerPodTemplateSpec.ObjectMeta.Annotations == nil {
 		workerPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
@@ -959,7 +983,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	// the old pod is terminated before the restore placeholder is started.
 	if podTemplateSpec != nil &&
 		podTemplateSpec.Labels != nil &&
-		podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget] == commonconsts.KubeLabelValueTrue {
+		podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue {
 		strategy = appsv1.DeploymentStrategy{
 			Type: appsv1.RecreateDeploymentStrategyType,
 		}
@@ -1040,7 +1064,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	// Resolve checkpoint for this component
 	var checkpointInfo *checkpoint.CheckpointInfo
-	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
+	if r.Config.Checkpoint.Enabled &&
+		opt.dynamoComponentDeployment.Spec.Checkpoint != nil &&
+		opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
 		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
@@ -1053,6 +1079,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
+	if r.Config.Checkpoint.Enabled {
+		if err := checkpoint.InjectCheckpointIntoPodSpec(
+			ctx,
+			r.Client,
+			opt.dynamoComponentDeployment.Namespace,
+			podSpec,
+			checkpointInfo,
+		); err != nil {
+			return nil, errors.Wrap(err, "failed to inject checkpoint config")
+		}
+	}
 
 	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
 	if len(podSpec.Containers) == 0 {
@@ -1061,25 +1098,31 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
+	// Add discovery labels to pod template for Pod-based daemon filtering
+	if commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, opt.dynamoComponentDeployment.Spec.Annotations) {
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
 	if extraPodMetadata != nil {
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
-	// Restore labels are operator-controlled. Clear any stale/user-provided
-	// value after metadata merge; the controller re-adds it only when the
-	// checkpoint contract below is satisfied.
-	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
-
-	// Explicit restore orchestration contract:
-	// only mark pods as restore targets when checkpoint material is ready.
-	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
-		podLabels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
-		if checkpointInfo.Hash != "" {
-			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
-		}
+	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
 	}
+	if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
+		podLabels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
+	}
+	if workerHash := opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	// Restore labels are operator-controlled state. Clear stale values after
+	// metadata merge and only reapply them when checkpoint material is ready.
+	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart

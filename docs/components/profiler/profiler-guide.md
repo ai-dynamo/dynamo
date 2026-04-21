@@ -200,7 +200,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -332,10 +332,13 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 The operator automatically discovers GPU resources from cluster nodes, providing hardware info (GPU model, VRAM, GPUs per node) and automatic profiling search space calculation.
 
 **Requirements:**
-- **Cluster-scoped operators**: Have node read permissions by default
-- **Namespace-scoped operators**: GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
+- **Cluster-scoped operators** (recommended): Have node read permissions by default. GPU discovery works automatically.
 
-**For namespace-scoped operators**, GPU discovery is controlled by a Helm value:
+> **DEPRECATED:** The following applies only to namespace-scoped operators, which are deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
+
+- **Namespace-scoped operators** (deprecated): GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
+
+**For namespace-scoped operators (deprecated)**, GPU discovery is controlled by a Helm value:
 
 ```bash
 # GPU discovery enabled (default) — Helm provisions read-only node access automatically
@@ -371,7 +374,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
 
   searchStrategy: rapid  # or thorough
   autoApply: true

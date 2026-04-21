@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_stream::stream;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
-    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
@@ -100,6 +100,10 @@ struct ChoiceJailState {
     is_jailed: bool,
     /// Accumulated content for this choice while jailed
     accumulated_content: String,
+    /// Accumulated logprobs for this choice while jailed.
+    /// Logprobs from each jailed chunk are appended so the full token-level
+    /// log-probability information is preserved when the jail emits.
+    accumulated_logprobs: Option<ChatChoiceLogprobs>,
     /// Buffer for partial marker matches across chunks
     partial_match_buffer: String,
     /// Stream finish reason
@@ -116,7 +120,7 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_async_openai::types::StopReason>,
+    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -124,9 +128,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(
-                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
-            ),
+            content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                content.to_string(),
+            )),
             tool_calls,
             function_call: None,
             refusal: None,
@@ -145,6 +149,7 @@ impl ChoiceJailState {
             index,
             is_jailed: starts_jailed,
             accumulated_content: String::new(),
+            accumulated_logprobs: None,
             partial_match_buffer: String::new(),
             stream_finish_reason: None,
             emitted_tool_calls_count: 0,
@@ -152,16 +157,41 @@ impl ChoiceJailState {
         }
     }
 
-    /// Add content to this choice's accumulation
-    fn accumulate(&mut self, content: &str) {
+    /// Add content and logprobs to this choice's accumulation
+    fn accumulate(&mut self, content: &str, logprobs: Option<&ChatChoiceLogprobs>) {
         if self.is_jailed {
             self.accumulated_content.push_str(content);
+            // Accumulate logprobs so they are preserved across jailed chunks.
+            if let Some(lp) = logprobs {
+                let state_lps = self.accumulated_logprobs.get_or_insert(ChatChoiceLogprobs {
+                    content: None,
+                    refusal: None,
+                });
+                if let Some(content_lps) = &lp.content {
+                    state_lps
+                        .content
+                        .get_or_insert_with(Vec::new)
+                        .extend(content_lps.clone());
+                }
+                if let Some(refusal_lps) = &lp.refusal {
+                    state_lps
+                        .refusal
+                        .get_or_insert_with(Vec::new)
+                        .extend(refusal_lps.clone());
+                }
+            }
         }
+    }
+
+    /// Consume the accumulated logprobs, replacing them with `None`.
+    fn take_accumulated_logprobs(&mut self) -> Option<ChatChoiceLogprobs> {
+        self.accumulated_logprobs.take()
     }
 
     /// End jailing and return the accumulated content
     fn end_jail(&mut self) -> String {
         self.is_jailed = false;
+        self.accumulated_logprobs = None;
         std::mem::take(&mut self.accumulated_content)
     }
 
@@ -232,22 +262,31 @@ impl ChoiceJailState {
 
                         // Handle trailing content if any
                         if !trailing_part.is_empty() {
-                            #[allow(deprecated)]
-                            let trailing_choice = create_choice_stream(
-                                choice.index,
-                                choice.delta.role,
-                                trailing_part,
-                                None,
-                                choice.finish_reason,
-                                None,
-                                choice.logprobs.clone(),
-                            );
-                            emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                            if jail_stream.should_start_jail(trailing_part) {
+                                self.is_jailed = true;
+                                self.accumulated_content = trailing_part.to_string();
+                                // No logprobs to seed here — they were already emitted with the tool call
+                                self.accumulated_logprobs = None;
+                            } else {
+                                #[allow(deprecated)]
+                                let trailing_choice = create_choice_stream(
+                                    choice.index,
+                                    choice.delta.role,
+                                    trailing_part,
+                                    None,
+                                    choice.finish_reason,
+                                    None,
+                                    choice.logprobs.clone(),
+                                );
+                                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                            }
                         }
                     } else {
                         // Start jailing with the marker and suffix
                         self.is_jailed = true;
                         self.accumulated_content = full_content;
+                        // Seed accumulated logprobs with this chunk's logprobs
+                        self.accumulated_logprobs = choice.logprobs.clone();
                     }
 
                     self.partial_match_buffer.clear();
@@ -296,6 +335,8 @@ impl ChoiceJailState {
                         // Start jailing with the combined content
                         self.is_jailed = true;
                         self.accumulated_content = combined_content;
+                        // Seed accumulated logprobs with this chunk's logprobs
+                        self.accumulated_logprobs = choice.logprobs.clone();
                         self.partial_match_buffer.clear();
                     } else {
                         // No markers - emit everything
@@ -317,25 +358,31 @@ impl ChoiceJailState {
                 }
             }
         } else {
-            // Already jailed - accumulate and check for unjail
-            self.accumulate(content);
+            // Already jailed - accumulate content AND logprobs, then check for unjail
+            self.accumulate(content, choice.logprobs.as_ref());
 
             let (should_end, split_pos) =
                 jail_stream.should_end_jail(&self.accumulated_content).await;
 
             if should_end {
+                // Take accumulated logprobs before borrowing accumulated_content
+                let jail_logprobs = self.take_accumulated_logprobs();
+
                 // Split the content
                 let (jailed_part, trailing_part) = self.accumulated_content.split_at(split_pos);
+                let trailing_owned = trailing_part.to_string();
+                let jailed_owned = jailed_part.to_string();
 
-                // Create the unjailed choice
-                let unjailed_choice = jail_stream
+                // Create the unjailed choice, using accumulated logprobs
+                let mut unjailed_choice = jail_stream
                     .create_tool_call_choice(
                         choice.index,
-                        jailed_part,
+                        &jailed_owned,
                         choice,
                         self.emitted_tool_calls_count,
                     )
                     .await;
+                unjailed_choice.logprobs = jail_logprobs;
 
                 // Determine emission type based on whether tool calls were parsed
                 if unjailed_choice.delta.tool_calls.is_some() {
@@ -347,23 +394,28 @@ impl ChoiceJailState {
                     emissions.push(ChoiceEmission::Content(unjailed_choice));
                 }
 
-                // Handle trailing content if any
-                if !trailing_part.is_empty() {
-                    #[allow(deprecated)]
-                    let trailing_choice = create_choice_stream(
-                        choice.index,
-                        choice.delta.role,
-                        trailing_part,
-                        None,
-                        choice.finish_reason,
-                        None,
-                        choice.logprobs.clone(),
-                    );
-                    emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                }
-
-                // End jailing
+                // End jailing before processing trailing content
                 self.end_jail();
+
+                // Handle trailing content if any
+                if !trailing_owned.is_empty() {
+                    if jail_stream.should_start_jail(&trailing_owned) {
+                        self.is_jailed = true;
+                        self.accumulated_content = trailing_owned;
+                    } else {
+                        #[allow(deprecated)]
+                        let trailing_choice = create_choice_stream(
+                            choice.index,
+                            choice.delta.role,
+                            &trailing_owned,
+                            None,
+                            choice.finish_reason,
+                            None,
+                            choice.logprobs.clone(),
+                        );
+                        emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                    }
+                }
             }
             // If not unjailing, don't emit anything (still accumulating)
         }
@@ -382,7 +434,7 @@ impl ChoiceJailState {
                 None,
                 self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
                 None,
-                None,
+                self.accumulated_logprobs.clone(),
             );
 
             let mut final_choice = jail_stream
@@ -393,6 +445,8 @@ impl ChoiceJailState {
                     self.emitted_tool_calls_count,
                 )
                 .await;
+            // Attach the full accumulated logprobs to the final choice
+            final_choice.logprobs = self.take_accumulated_logprobs();
 
             // Preserve any pending reasoning content collected while jailed.
             if let Some(pending_reasoning) = self.pending_reasoning_content.take() {
@@ -470,6 +524,9 @@ pub struct JailedStream {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    /// When set, only tool calls with this name are emitted (enforces tool_choice=named
+    /// when a tool_call_parser is active and the parser-aware MarkerBased path is used).
+    named_tool_name: Option<String>,
     tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     marker_matcher: MarkerMatcher,
@@ -492,8 +549,9 @@ impl JailedStream {
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         let jail_mode = self.jail_mode.clone();
+        let named_tool_active = self.named_tool_name.is_some();
         let jailed_stream = self.apply(stream);
-        JailedStream::fix_finish_reason(jailed_stream, jail_mode)
+        JailedStream::fix_finish_reason(jailed_stream, jail_mode, named_tool_active)
     }
 
     /// Apply the jail transformation to a stream of chat completion responses
@@ -513,6 +571,10 @@ impl JailedStream {
             let mut last_annotated_id: Option<String> = None;
             let mut last_annotated_event: Option<String> = None;
             let mut last_annotated_comment: Option<Vec<String>> = None;
+            // Track stream response metadata so finalization chunks carry real values
+            let mut last_stream_id = String::new();
+            let mut last_stream_model = String::new();
+            let mut last_stream_created: u32 = 0;
 
             // Pin the stream for iteration (stack pinning is more efficient)
             tokio::pin!(stream);
@@ -521,9 +583,13 @@ impl JailedStream {
             // Process each item in the stream
             while let Some(response) = stream.next().await {
                 if let Some(chat_response) = response.data.as_ref() {
+                    last_stream_id.clone_from(&chat_response.inner.id);
+                    last_stream_model.clone_from(&chat_response.inner.model);
+                    last_stream_created = chat_response.inner.created;
+
                     let mut all_emissions = Vec::new();
 
-                    if chat_response.choices.is_empty() {
+                    if chat_response.inner.choices.is_empty() {
                         // No choices processed (e.g., usage-only chunk)
                         // Pass through as-is to preserve usage and other metadata
                         yield response;
@@ -531,12 +597,12 @@ impl JailedStream {
                     }
 
                     // Process each choice independently using the new architecture
-                    for choice in &chat_response.choices {
+                    for choice in &chat_response.inner.choices {
                         if let Some(ref content) = choice.delta.content {
                             // Jailing only applies to text content
                             let text_content = match content {
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
+                                dynamo_protocols::types::ChatCompletionMessageContent::Parts(_) => None,
                             };
 
                             if let Some(text) = text_content {
@@ -666,16 +732,18 @@ impl JailedStream {
 
             if !final_emissions.is_empty() {
                 tracing::debug!("Stream ended while jailed, releasing accumulated content");
-                // Create a dummy response for finalization
+                // Create a finalization response carrying forward real stream metadata
                 let dummy_response = NvCreateChatCompletionStreamResponse {
-                    id: "stream-end".to_string(),
+                    inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                        id: last_stream_id,
                     object: "chat.completion.chunk".to_string(),
-                    created: 0,
-                    model: "unknown".to_string(),
+                        created: last_stream_created,
+                        model: last_stream_model,
                     choices: Vec::new(),
                     usage: None,
                     service_tier: None,
                     system_fingerprint: None,
+                    },
                     nvext: None,
                 };
 
@@ -705,7 +773,7 @@ impl JailedStream {
             EmissionMode::Packed => {
                 // Pack all choices into a single response
                 let mut response = base_response.clone();
-                response.choices = emissions.into_iter().map(|e| e.into_choice()).collect();
+                response.inner.choices = emissions.into_iter().map(|e| e.into_choice()).collect();
 
                 vec![Annotated {
                     data: Some(response),
@@ -721,7 +789,7 @@ impl JailedStream {
                     .into_iter()
                     .map(|emission| {
                         let mut response = base_response.clone();
-                        response.choices = vec![emission.into_choice()];
+                        response.inner.choices = vec![emission.into_choice()];
 
                         Annotated {
                             data: Some(response),
@@ -756,7 +824,7 @@ impl JailedStream {
     async fn should_end_jail(&self, accumulated_content: &str) -> (bool, usize) {
         match &self.jail_mode {
             JailMode::MarkerBased => {
-                // Path 1: End sequence detected
+                // Path 1: End sequence detected via naive string search.
                 let end_marker_info = if !self.jail_end_sequences.is_empty() {
                     self.jail_end_sequences.iter().find_map(|seq| {
                         accumulated_content
@@ -770,10 +838,17 @@ impl JailedStream {
                 // Path 2: Complete tool call(s) can be parsed (early exit)
                 let early_exit = self.should_exit_jail_early(accumulated_content).await;
 
-                if let Some((end_pos, _)) = end_marker_info {
-                    (true, end_pos)
-                } else if early_exit {
-                    // For early exit, find where the complete tool call ends
+                // When a tool_call_parser is active, prefer Path 2 over Path 1 so
+                // that `find_tool_call_end_position` advances past all consecutive
+                // parallel tool calls instead of splitting at the first end tag.
+                // Fall back to Path 1 when parsing fails (e.g. malformed content).
+                if early_exit {
+                    // For early exit, find where the complete tool call ends.
+                    // `find_tool_call_end_position` returns `None` when the
+                    // section wrapper isn't closed (e.g. kimi_k2 without
+                    // section_end). In that case, don't early-exit — more
+                    // parallel calls may follow. The calls will be recovered
+                    // by `finalize()` at stream end.
                     if let Some(parser) = &self.tool_call_parser {
                         let tools_slice = self.tool_definitions.as_deref();
                         if let Ok((_, _)) = try_tool_call_parse_aggregate(
@@ -783,15 +858,21 @@ impl JailedStream {
                         )
                         .await
                         {
-                            let split_pos =
-                                find_tool_call_end_position(accumulated_content, Some(parser));
-                            (true, split_pos)
+                            if let Some(split_pos) =
+                                find_tool_call_end_position(accumulated_content, Some(parser))
+                            {
+                                (true, split_pos)
+                            } else {
+                                (false, accumulated_content.len())
+                            }
                         } else {
                             (false, accumulated_content.len())
                         }
                     } else {
                         (false, accumulated_content.len())
                     }
+                } else if let Some((end_pos, _)) = end_marker_info {
+                    (true, end_pos)
                 } else {
                     (false, accumulated_content.len())
                 }
@@ -846,6 +927,37 @@ impl JailedStream {
                 if let Ok((tool_calls, normal_text)) = parse_result
                     && !tool_calls.is_empty()
                 {
+                    // If a named tool filter is set (tool_choice=named + parser path), reject
+                    // tool calls that don't match the required tool name.
+                    let tool_calls = if let Some(ref required_name) = self.named_tool_name {
+                        let filtered: Vec<_> = tool_calls
+                            .into_iter()
+                            .filter(|tc| tc.function.name == *required_name)
+                            .collect();
+                        if filtered.is_empty() {
+                            tracing::warn!(
+                                required = %required_name,
+                                "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                            );
+                        }
+                        filtered
+                    } else {
+                        tool_calls
+                    };
+
+                    if tool_calls.is_empty() {
+                        // All parsed calls were for the wrong tool — return content choice
+                        return create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            accumulated_content,
+                            None,
+                            base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
+                            base_choice.logprobs.clone(),
+                        );
+                    }
+
                     // Convert to streaming format
                     let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
                         .into_iter()
@@ -853,7 +965,7 @@ impl JailedStream {
                         .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
                             index: (tool_call_offset + idx) as u32,
                             id: Some(tool_call.id),
-                            r#type: Some(tool_call.r#type),
+                            r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
                                 name: Some(tool_call.function.name),
                                 arguments: Some(tool_call.function.arguments),
@@ -868,7 +980,7 @@ impl JailedStream {
                         Some(tool_call_chunks),
                         None,
                         None,
-                        None,
+                        base_choice.logprobs.clone(),
                     );
                     return choice;
                 }
@@ -922,7 +1034,7 @@ impl JailedStream {
         ChatCompletionMessageToolCallChunk {
             index,
             id: Some(format!("call-{}", Uuid::new_v4())),
-            r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some(name),
                 arguments: Some(arguments),
@@ -994,6 +1106,7 @@ impl JailedStream {
     fn fix_finish_reason<S>(
         input_stream: S,
         jail_mode: JailMode,
+        named_tool_active: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -1005,7 +1118,7 @@ impl JailedStream {
             while let Some(mut response) = input_stream.next().await {
                 // Track if any choice emitted tool calls
                 if let Some(ref data) = response.data {
-                    for choice in &data.choices {
+                    for choice in &data.inner.choices {
                         if choice.delta.tool_calls.is_some() {
                             has_tool_calls_per_choice.insert(choice.index, true);
                         }
@@ -1014,7 +1127,7 @@ impl JailedStream {
 
                 // Fix finish_reason based on jail mode and whether tool calls were emitted
                 if let Some(ref mut data) = response.data {
-                    for choice in &mut data.choices {
+                    for choice in &mut data.inner.choices {
                         if let Some(finish) = choice.finish_reason {
                             // Only modify Stop finish reason, preserve Length/ContentFilter
                             if finish == FinishReason::Stop {
@@ -1022,10 +1135,10 @@ impl JailedStream {
 
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
-                                        // Traditional: if tool calls emitted, change to ToolCalls
-                                        if has_tool_calls {
+                                        if has_tool_calls && !named_tool_active {
                                             choice.finish_reason = Some(FinishReason::ToolCalls);
                                         }
+                                        // When named_tool_active, keep Stop (OpenAI spec for tool_choice=named)
                                     }
                                     JailMode::Immediate { format } => {
                                         // tool_choice mode: apply specific finish_reason logic
@@ -1060,6 +1173,9 @@ pub struct JailedStreamBuilder {
     jail_start_sequences: Vec<String>,
     jail_end_sequences: Vec<String>,
     tool_call_parser: Option<String>,
+    /// When set, only tool calls with this name are emitted (enforces tool_choice=named
+    /// when a tool_call_parser is active and the parser-aware MarkerBased path is used).
+    named_tool_name: Option<String>,
     tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
     emission_mode: EmissionMode,
     jail_mode: JailMode,
@@ -1072,6 +1188,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: Vec::new(),
             jail_end_sequences: Vec::new(),
             tool_call_parser: None,
+            named_tool_name: None,
             tool_definitions: None,
             emission_mode: EmissionMode::default(),
             jail_mode: JailMode::MarkerBased,
@@ -1113,6 +1230,14 @@ impl JailedStreamBuilder {
     /// Set the tool call parser to use for detection and parsing
     pub fn tool_call_parser(mut self, parser: impl Into<String>) -> Self {
         self.tool_call_parser = Some(parser.into());
+        self
+    }
+
+    /// Constrain parsed output to a single named tool (for tool_choice=named + parser path).
+    /// When set, tool calls emitted by the parser that don't match `tool_name` are silently
+    /// filtered out, enforcing the named-tool contract even when the model emits the wrong tool.
+    pub fn named_tool_filter(mut self, tool_name: impl Into<String>) -> Self {
+        self.named_tool_name = Some(tool_name.into());
         self
     }
 
@@ -1235,6 +1360,7 @@ impl JailedStreamBuilder {
             jail_start_sequences: self.jail_start_sequences,
             jail_end_sequences: self.jail_end_sequences,
             tool_call_parser: self.tool_call_parser,
+            named_tool_name: self.named_tool_name,
             tool_definitions: self.tool_definitions,
             emission_mode: self.emission_mode,
             marker_matcher,
@@ -1246,5 +1372,357 @@ impl JailedStreamBuilder {
 impl Default for JailedStreamBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_protocols::types::CreateChatCompletionStreamResponse;
+    use futures::stream;
+
+    /// Helper: build a single-choice stream chunk with text content
+    #[allow(deprecated)]
+    fn text_chunk(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: Some(Role::Assistant),
+                content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    text.to_string(),
+                )),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        Annotated {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "id-42".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: 0,
+                    model: "test-model".to_string(),
+                    choices: vec![choice],
+                    usage: None,
+                    service_tier: None,
+                    system_fingerprint: None,
+                },
+                nvext: None,
+            }),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// Collect all emitted tool calls from the jailed stream output
+    fn collect_tool_calls(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<(String, String)> {
+        let mut tool_calls = Vec::new();
+        for resp in responses {
+            if let Some(ref data) = resp.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref tcs) = choice.delta.tool_calls {
+                        for tc in tcs {
+                            if let Some(ref func) = tc.function {
+                                let name = func.name.clone().unwrap_or_default();
+                                let args = func.arguments.clone().unwrap_or_default();
+                                tool_calls.push((name, args));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tool_calls
+    }
+
+    /// Collect all emitted text content from the jailed stream output
+    fn collect_text_content(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> String {
+        responses
+            .iter()
+            .flat_map(|r| r.data.iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|c| {
+                if let Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(t)) =
+                    &c.delta.content
+                {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Helper: build a single-choice stream chunk with text content and logprobs
+    fn text_chunk_with_logprobs(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let logprobs = ChatChoiceLogprobs {
+            content: Some(
+                text.chars()
+                    .enumerate()
+                    .map(
+                        |(i, c)| dynamo_protocols::types::ChatCompletionTokenLogprob {
+                            token: c.to_string(),
+                            logprob: -(i as f32 + 1.0) * 0.1,
+                            bytes: Some(c.to_string().into_bytes()),
+                            top_logprobs: vec![],
+                        },
+                    )
+                    .collect(),
+            ),
+            refusal: None,
+        };
+
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: Some(Role::Assistant),
+                content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    text.to_string(),
+                )),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: Some(logprobs),
+        };
+
+        Annotated {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "id-42".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: 0,
+                    model: "test-model".to_string(),
+                    choices: vec![choice],
+                    usage: None,
+                    service_tier: None,
+                    system_fingerprint: None,
+                },
+                nvext: None,
+            }),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// Collect all logprobs from jailed stream output choices
+    fn collect_logprobs(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<Option<ChatChoiceLogprobs>> {
+        responses
+            .iter()
+            .flat_map(|r| r.data.iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .map(|c| c.logprobs.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_preserves_logprobs_single_chunk() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk_with_logprobs(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "Expected 1 tool call, got {:?}",
+            tool_calls
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+
+        // Logprobs must be preserved even though the entire output is a tool call
+        let all_logprobs = collect_logprobs(&responses);
+        let has_some_logprobs = all_logprobs.iter().any(|lp| lp.is_some());
+        assert!(
+            has_some_logprobs,
+            "Logprobs should be preserved for tool call responses, got all None: {:?}",
+            all_logprobs
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_preserves_logprobs_multiple_chunks() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![
+            text_chunk_with_logprobs("<tool_call>\n{\"name\": \"get_weather\", \"arguments\""),
+            text_chunk_with_logprobs(": {\"location\": \"SF\"}}\n</tool_call>"),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(!tool_calls.is_empty(), "Expected tool calls, got none");
+
+        let all_logprobs = collect_logprobs(&responses);
+        let has_some_logprobs = all_logprobs.iter().any(|lp| lp.is_some());
+        assert!(
+            has_some_logprobs,
+            "Logprobs should be preserved for tool call responses across chunks, got all None",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_with_text_preserves_logprobs() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk_with_logprobs(
+            "Let me check.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert_eq!(tool_calls.len(), 1);
+
+        let all_logprobs = collect_logprobs(&responses);
+        let has_some_logprobs = all_logprobs.iter().any(|lp| lp.is_some());
+        assert!(
+            has_some_logprobs,
+            "Logprobs should be preserved for mixed text+tool_call responses",
+        );
+
+        // Verify the logprobs content is non-empty
+        let logprob_entries: Vec<_> = all_logprobs
+            .iter()
+            .filter_map(|lp| lp.as_ref())
+            .filter_map(|lp| lp.content.as_ref())
+            .collect();
+        assert!(
+            logprob_entries.iter().any(|entries| !entries.is_empty()),
+            "Logprobs content should have entries",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_tool_call_single_chunk() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"PST\"}}\n</tool_call>",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert!(
+            tool_calls.len() >= 2,
+            "Expected at least 2 tool calls, got {}: {:?}",
+            tool_calls.len(),
+            tool_calls
+        );
+
+        let names: Vec<&str> = tool_calls.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"get_weather"),
+            "Missing get_weather tool call. Got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"get_time"),
+            "Missing get_time tool call. Got: {:?}",
+            names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_tool_call_multiple_chunks() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![
+            text_chunk("<tool_call>\n{\"name\": \"get_weather\", \"arguments\""),
+            text_chunk(
+                ": {\"location\": \"SF\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_time\"",
+            ),
+            text_chunk(", \"arguments\": {\"timezone\": \"PST\"}}\n</tool_call>"),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert!(
+            tool_calls.len() >= 2,
+            "Expected at least 2 tool calls, got {}: {:?}",
+            tool_calls.len(),
+            tool_calls
+        );
+
+        let names: Vec<&str> = tool_calls.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"get_weather"),
+            "Missing get_weather tool call. Got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"get_time"),
+            "Missing get_time tool call. Got: {:?}",
+            names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trailing_text_not_re_jailed() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>\nDone!",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "Expected exactly 1 tool call, got {}: {:?}",
+            tool_calls.len(),
+            tool_calls
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+
+        let all_text = collect_text_content(&responses);
+        assert!(
+            all_text.contains("Done!"),
+            "Trailing text 'Done!' should appear in output. Got text: {:?}",
+            all_text
+        );
     }
 }

@@ -68,7 +68,7 @@ func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 
 // getMultinodeFlags returns the multinode flags and whether shell interpretation is needed
 func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) (string, bool) {
-	distInitAddr := fmt.Sprintf("%s:%s", multinodeDeployer.GetLeaderHostname(serviceName), SglangPort)
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	var nodeRank string
 	var needsShell bool
@@ -79,6 +79,7 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 	} else {
 		nodeRank, needsShell = multinodeDeployer.GetNodeRank()
 	}
+	distInitAddr := fmt.Sprintf("%s:%s", leaderHostname, SglangPort)
 
 	flags := fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
 	return flags, needsShell

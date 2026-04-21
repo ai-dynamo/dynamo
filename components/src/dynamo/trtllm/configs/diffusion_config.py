@@ -6,8 +6,10 @@
 This module defines the DiffusionConfig dataclass used for configuring
 video and image diffusion workers.
 
-Fields map to TensorRT-LLM's DiffusionArgs sub-configs:
-- PipelineConfig: torch_compile, CUDA graph, warmup, offloading, fuse_qkv
+Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
+- PipelineConfig: offloading, fuse_qkv, NVTX markers
+- TorchCompileConfig: torch_compile, fullgraph
+- CudaGraphConfig: CUDA graph capture
 - AttentionConfig: attention backend (VANILLA, TRTLLM)
 - ParallelConfig: dit_*_size parallelism dimensions
 - TeaCacheConfig: caching optimization
@@ -69,7 +71,6 @@ class DiffusionConfig:
 
     # ── Pipeline optimization config (maps to PipelineConfig) ──
     disable_torch_compile: bool = False
-    torch_compile_mode: str = "default"
     # Enable torch.compile fullgraph mode (stricter but potentially faster)
     enable_fullgraph: bool = False
     # QKV fusion for transformer attention layers
@@ -79,14 +80,14 @@ class DiffusionConfig:
     enable_cuda_graph: bool = False
     # Enable per-layer NVTX markers for profiling
     enable_layerwise_nvtx_marker: bool = False
-    # Number of denoising steps to run during warmup (0 to disable)
-    warmup_steps: int = 1
+    # Skip warmup inference during initialization (default: run warmup)
+    skip_warmup: bool = False
 
     # ── Attention config (maps to AttentionConfig) ──
     # Attention backend: "VANILLA" (PyTorch SDPA) or "TRTLLM"
     attn_backend: str = "VANILLA"
 
-    # ── Quantization config (maps to DiffusionArgs.quant_config) ──
+    # ── Quantization config (maps to VisualGenArgs.quant_config) ──
     # Quantization algorithm. Options:
     #   None (no quantization), "FP8", "FP8_BLOCK_SCALES", "NVFP4",
     #   "W4A16_AWQ", "W4A8_AWQ", "W8A8_SQ_PER_CHANNEL"
@@ -133,7 +134,7 @@ class DiffusionConfig:
             f"attn_backend={self.attn_backend}, "
             f"quant_algo={self.quant_algo}, "
             f"enable_cuda_graph={self.enable_cuda_graph}, "
-            f"warmup_steps={self.warmup_steps}, "
+            f"skip_warmup={self.skip_warmup}, "
             f"dit_dp_size={self.dit_dp_size}, "
             f"dit_tp_size={self.dit_tp_size})"
         )

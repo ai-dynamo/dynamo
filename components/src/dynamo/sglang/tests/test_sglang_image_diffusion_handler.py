@@ -6,7 +6,7 @@
 import base64
 import io
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from PIL import Image
@@ -347,10 +347,7 @@ class TestImageDiffusionWorkerHandler:
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = Mock(return_value=[test_image.tobytes()])
-        handler._get_trace_header = Mock(
-            return_value={"traceparent": "00-1234567890-1234567890-01"}
-        )
+        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
 
         request = {
             "prompt": "A yellow square",
@@ -368,8 +365,13 @@ class TestImageDiffusionWorkerHandler:
 
         # Execute generation
         results = []
-        async for result in handler.generate(request, mock_context):
-            results.append(result)
+        trace_patch = patch(
+            "dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler.build_trace_headers",
+            return_value={"traceparent": "00-1234567890-1234567890-01"},
+        )
+        with trace_patch:
+            async for result in handler.generate(request, mock_context):
+                results.append(result)
 
         # Verify results
         handler._generate_images.assert_called_once_with(
@@ -380,4 +382,59 @@ class TestImageDiffusionWorkerHandler:
             guidance_scale=7.5,
             seed=42,
             negative_prompt="negative",
+            input_reference=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_passes_image_path(
+        self, handler, mock_context, tmp_path
+    ):
+        """Test that input_reference is passed as image_path to the generator."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        input_ref = str(tmp_path / "test_input.png")
+        request = {
+            "prompt": "Transform this image",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": input_ref,
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify image_path was passed to the generator
+        call_args = handler.generator.generate.call_args
+        sampling_params = call_args[1]["sampling_params_kwargs"]
+        assert sampling_params["image_path"] == input_ref
+
+    @pytest.mark.asyncio
+    async def test_generate_t2i_no_image_path(self, handler, mock_context):
+        """Test that image_path is NOT passed when input_reference is absent."""
+        test_image = Image.new("RGB", (256, 256), color="red")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        request = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify image_path was NOT passed
+        call_args = handler.generator.generate.call_args
+        sampling_params = call_args[1]["sampling_params_kwargs"]
+        assert "image_path" not in sampling_params

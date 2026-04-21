@@ -10,13 +10,42 @@ use educe::Educe;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    component::{Endpoint, Instance, TransportType},
+    component::{DeviceType, Endpoint, Instance, TransportType},
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::nats,
 };
+
+fn endpoint_device_type() -> Option<DeviceType> {
+    // Common CUDA masks that explicitly disable GPU visibility.
+    if std::env::var("CUDA_VISIBLE_DEVICES")
+        .ok()
+        .map(|v| {
+            let l = v.trim().to_ascii_lowercase();
+            l.is_empty() || l == "-1" || l == "none" || l == "void"
+        })
+        .unwrap_or(false)
+    {
+        return Some(DeviceType::Cpu);
+    }
+
+    // Container runtimes often use NVIDIA_VISIBLE_DEVICES to gate GPU visibility.
+    if std::env::var("NVIDIA_VISIBLE_DEVICES")
+        .ok()
+        .map(|v| {
+            let l = v.trim().to_ascii_lowercase();
+            l == "none" || l == "void"
+        })
+        .unwrap_or(false)
+    {
+        return Some(DeviceType::Cpu);
+    }
+
+    // Default: no explicit CPU override means this endpoint is CUDA-capable.
+    Some(DeviceType::Cuda)
+}
 
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
@@ -115,6 +144,21 @@ impl EndpointConfigBuilder {
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
+            if system_health.lock().health_check_enabled()
+                && endpoint
+                    .drt()
+                    .local_endpoint_registry()
+                    .get(&endpoint.name)
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "Endpoint '{}' has a health_check_payload and canary is enabled, \
+                     but no local engine is registered. Call .register_local_engine() \
+                     before .start() so the canary health check can function.",
+                    endpoint.name
+                );
+            }
+
             // Build transport based on request plane mode
             let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
@@ -124,6 +168,7 @@ impl EndpointConfigBuilder {
                 namespace: endpoint_id.namespace.clone(),
                 instance_id: connection_id,
                 transport,
+                device_type: endpoint_device_type(),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -202,6 +247,7 @@ impl EndpointConfigBuilder {
             component: endpoint_id.component.clone(),
             endpoint: endpoint_id.name.clone(),
             transport,
+            device_type: endpoint_device_type(),
         };
 
         if let Err(e) = discovery.register(discovery_spec).await {
@@ -240,10 +286,13 @@ fn build_transport_type_inner(
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
+            // If a fixed port is explicitly configured, use it directly.
+            // Otherwise, use the actual bound port (set by HTTP server after binding when port 0 is used).
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8888);
+                .filter(|&p| p != 0)
+                .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
@@ -261,6 +310,7 @@ fn build_transport_type_inner(
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include instance_id and endpoint name for proper TCP routing.
@@ -293,17 +343,25 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    if mode == RequestPlaneMode::Tcp {
-        // Only force server init when we *don't* have a valid explicit port.
-        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
+    // For TCP and HTTP with OS-assigned ports, we must ensure the server is initialized
+    // (bound to a port) before we can construct a correct transport address.
+    let has_fixed_port = match mode {
+        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .is_some();
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Http => std::env::var("DYN_HTTP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Nats => true, // NATS doesn't need port init
+    };
 
-        if !has_fixed_port {
-            // Ensure request plane server is initialized before building transport.
-            let _ = endpoint.drt().request_plane_server().await?;
-        }
+    if !has_fixed_port {
+        // Ensure request plane server is initialized before building transport.
+        let _ = endpoint.drt().request_plane_server().await?;
     }
 
     build_transport_type_inner(mode, endpoint_id, connection_id)
@@ -329,6 +387,7 @@ impl Endpoint {
             endpoint: endpoint_id.name,
             instance_id,
             transport,
+            device_type: endpoint_device_type(),
         });
 
         let discovery = drt.discovery();
@@ -370,6 +429,7 @@ impl Endpoint {
             component: endpoint_id.component,
             endpoint: endpoint_id.name,
             transport,
+            device_type: endpoint_device_type(),
         };
 
         let discovery = drt.discovery();

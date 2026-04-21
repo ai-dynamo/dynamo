@@ -200,6 +200,33 @@ class ChatPayloadWithLogprobs(ChatPayload):
                         logprob_val <= 0
                     ), f"logprob should be <= 0, got {logprob_val}"
 
+                    # Validate bytes field is populated for the selected token
+                    assert "bytes" in item, "Missing 'bytes' in logprobs content item"
+                    token_str = item["token"]
+                    if token_str:
+                        assert (
+                            item["bytes"] is not None
+                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
+                        assert isinstance(
+                            item["bytes"], list
+                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
+
+                    # Validate top_logprobs entries have token, logprob, and bytes
+                    for top_lp in item["top_logprobs"]:
+                        assert (
+                            "token" in top_lp
+                        ), "Missing 'token' in top_logprobs entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), "Missing 'logprob' in top_logprobs entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), "Missing 'bytes' in top_logprobs entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
                 )
@@ -214,11 +241,14 @@ class ToolCallingChatPayload(ChatPayload):
         self.expected_tool_name = expected_tool_name
 
     def validate(self, response, content: str) -> None:
-        """Validate that tool calls exist in the response."""
-        # First run the standard validation
-        super().validate(response, content)
+        """Validate that tool calls exist in the response.
 
-        # Then validate tool calls specifically
+        Skips the parent's expected_response substring check because tool call
+        responses produce structured JSON arguments, not natural-language text.
+        The expected_response keywords are instead matched against the
+        concatenated tool call arguments so callers can still assert that the
+        model "understood" the input (e.g. expected_response=["purple"]).
+        """
         response_data = response.json()
         choices = response_data.get("choices", [])
         assert choices, "Response missing choices"
@@ -230,13 +260,16 @@ class ToolCallingChatPayload(ChatPayload):
         logger.info(f"Tool calls detected: {len(tool_calls)} call(s)")
 
         # Validate tool call structure
+        all_args = []
         for i, tc in enumerate(tool_calls):
             assert "function" in tc, f"Tool call {i} missing 'function' field"
             function = tc.get("function", {})
             assert "name" in function, f"Tool call {i} missing function name"
             assert "arguments" in function, f"Tool call {i} missing function arguments"
+            args_str = function.get("arguments", "")
+            all_args.append(args_str)
             logger.info(
-                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
+                f"  [{i}] Function: {function.get('name')}, Args: {args_str[:100]}..."
             )
 
         # If expected tool name is provided, validate it
@@ -246,6 +279,24 @@ class ToolCallingChatPayload(ChatPayload):
                 self.expected_tool_name in tool_names
             ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+        # Check expected_response keywords against tool call arguments (OR logic)
+        if self.expected_response:
+            combined_args = " ".join(all_args).lower()
+            found = [kw for kw in self.expected_response if kw.lower() in combined_args]
+            if not found:
+                logger.error(
+                    f"VALIDATION FAILED - Expected to find at least one of "
+                    f"{self.expected_response} in tool call arguments"
+                )
+                logger.error(f"Tool call arguments: {combined_args}")
+                raise AssertionError(
+                    f"Expected content not found in tool call arguments. "
+                    f"Expected at least one of: {self.expected_response}. "
+                    f"Tool call arguments: {combined_args}"
+                )
+            else:
+                logger.info(f"Found expected keywords in tool args: {found}")
 
 
 @dataclass
@@ -481,6 +532,26 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                         assert (
                             logprob_val <= 0
                         ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+
+                # Validate top_logprobs entries have token, logprob, and bytes when present
+                top_logprobs_list = logprobs_data.get("top_logprobs", [])
+                for i, token_top_lps in enumerate(top_logprobs_list):
+                    if not token_top_lps:
+                        continue
+                    for top_lp in token_top_lps:
+                        assert (
+                            "token" in top_lp
+                        ), f"Missing 'token' in top_logprobs[{i}] entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), f"Missing 'logprob' in top_logprobs[{i}] entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), f"Missing 'bytes' in top_logprobs[{i}] entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
@@ -1105,6 +1176,29 @@ class SGLangMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for SGLang disaggregated workers.
+
+    Disagg workers (prefill/decode) expose fewer sglang:* metrics than
+    aggregated workers because each only runs half the scheduler pipeline.
+    Observed: ~14 unique sglang:* metrics vs ~25 for aggregated.
+    """
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        checks = super()._get_backend_specific_checks()
+        for check in checks:
+            if check.name == "sglang:*":
+                check.validator = lambda value: len(set(value)) >= 10
+                check.error_msg = lambda name, value: (
+                    f"Expected at least 10 unique sglang:* metrics, but found only {len(set(value))}"
+                )
+                check.success_msg = lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 10)"
+                )
+        return checks
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
@@ -1223,3 +1317,51 @@ def completions_response_handler(response):
 
 def chat_completions_response_handler(response):
     return ChatPayload.extract_content(response)
+
+
+@dataclass
+class ImageGenerationPayload(BasePayload):
+    """Payload for /v1/images/generations endpoint (diffusion image generation)."""
+
+    endpoint: str = "/v1/images/generations"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in image response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Image response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
+
+
+@dataclass
+class VideoGenerationPayload(BasePayload):
+    """Payload for /v1/videos endpoint (diffusion video generation)."""
+
+    endpoint: str = "/v1/videos"
+    timeout: int = 600
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "completed", (
+            f"Video generation not completed. Status: {result.get('status')}, "
+            f"Error: {result.get('error', 'none')}"
+        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"

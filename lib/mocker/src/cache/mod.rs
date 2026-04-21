@@ -4,5 +4,7 @@
 //! Cache data structures for KV block management.
 
 pub mod hash_cache;
+pub mod radix_cache;
 
 pub use hash_cache::HashCache;
+pub use radix_cache::RadixCache;

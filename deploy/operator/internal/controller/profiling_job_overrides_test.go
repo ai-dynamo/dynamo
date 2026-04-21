@@ -352,6 +352,55 @@ func TestApplyProfilingJobOverrides_DNSConfigAndPolicy(t *testing.T) {
 	}
 }
 
+func TestApplyProfilingJobOverrides_TerminationGracePeriodSeconds(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				TerminationGracePeriodSeconds: ptr.To[int64](120),
+			},
+		},
+	})
+	if job.Spec.Template.Spec.TerminationGracePeriodSeconds == nil || *job.Spec.Template.Spec.TerminationGracePeriodSeconds != 120 {
+		t.Errorf("expected TerminationGracePeriodSeconds=120, got %v", job.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	}
+}
+
+func TestApplyProfilingJobOverrides_TopologySpreadConstraints(t *testing.T) {
+	job := baseJob()
+	tsc := []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.DoNotSchedule,
+		},
+	}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				TopologySpreadConstraints: tsc,
+			},
+		},
+	})
+	if len(job.Spec.Template.Spec.TopologySpreadConstraints) != 1 {
+		t.Error("topologySpreadConstraints not applied")
+	}
+}
+
+func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+			},
+		},
+	})
+	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken != false {
+		t.Error("expected AutomountServiceAccountToken=false")
+	}
+}
+
 func TestApplyProfilingJobOverrides_VolumesDedup(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -563,6 +612,42 @@ func TestApplyProfilingJobOverrides_ContainerSecurityContext(t *testing.T) {
 	})
 	if job.Spec.Template.Spec.Containers[0].SecurityContext != sc {
 		t.Error("container securityContext not applied")
+	}
+}
+
+func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
+	job := baseJob()
+	// Seed a default pod-level security context (mimics what the controller sets).
+	job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr.To(true),
+		RunAsUser:    ptr.To[int64](1000),
+		RunAsGroup:   ptr.To[int64](1000),
+		FSGroup:      ptr.To[int64](1000),
+	}
+	override := &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr.To(false),
+	}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				SecurityContext: override,
+			},
+		},
+	})
+	got := job.Spec.Template.Spec.SecurityContext
+	if got == nil {
+		t.Fatal("pod securityContext is nil after override")
+	}
+	// User override wins: RunAsNonRoot should be false.
+	if got.RunAsNonRoot == nil || *got.RunAsNonRoot != false {
+		t.Errorf("expected RunAsNonRoot=false, got %v", got.RunAsNonRoot)
+	}
+	// Controller defaults preserved for fields not specified in the override.
+	if got.RunAsUser == nil || *got.RunAsUser != 1000 {
+		t.Errorf("expected RunAsUser=1000 (controller default preserved), got %v", got.RunAsUser)
+	}
+	if got.FSGroup == nil || *got.FSGroup != 1000 {
+		t.Errorf("expected FSGroup=1000 (controller default preserved), got %v", got.FSGroup)
 	}
 }
 

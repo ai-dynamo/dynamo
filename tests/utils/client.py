@@ -159,6 +159,7 @@ def wait_for_model_availability(
     logger: logging.Logger,
     max_attempts: int = 15,
     attempt_timeouts: list[float] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> bool:
     """
     Wait for model to be available by sending test requests.
@@ -197,7 +198,9 @@ def wait_for_model_availability(
             logger.debug(
                 f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
             )
-            response = requests.post(test_url, json=test_payload, timeout=timeout_val)
+            response = requests.post(
+                test_url, json=test_payload, timeout=timeout_val, headers=headers
+            )
 
             if response.status_code == 200:
                 logger.info(f"Model '{model}' is available and responding")

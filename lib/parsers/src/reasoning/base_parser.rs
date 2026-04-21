@@ -82,6 +82,15 @@ impl BasicReasoningParser {
 }
 
 impl ReasoningParser for BasicReasoningParser {
+    fn set_in_reasoning(&mut self, in_reasoning: bool) {
+        self._in_reasoning = in_reasoning;
+        if in_reasoning {
+            // Mark the start token as already stripped so the parser doesn't
+            // look for it in the stream — the template already injected it.
+            self.stripped_think_start = true;
+        }
+    }
+
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
         let has_think_tag = text.contains(&self.think_start_token);
         let in_reasoning = self._in_reasoning || has_think_tag;

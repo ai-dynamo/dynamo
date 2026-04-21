@@ -9,15 +9,15 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -37,11 +37,11 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .utils import extract_mm_urls, random_uuid
 
 logger = logging.getLogger(__name__)
 
 
-_MASK_64_BITS = (1 << 64) - 1
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
@@ -50,10 +50,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
-
-
-def random_uuid() -> str:
-    return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"  # 16 hex chars
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -81,6 +77,7 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        enable_auto_tool_choice: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -89,6 +86,23 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.exclude_tools_when_tool_choice_none = True
+        self.enable_auto_tool_choice = enable_auto_tool_choice
+
+    def _get_eos_token_ids(self) -> list[int]:
+        """Return EOS token ids using tokenizer metadata.
+
+        vLLM 0.17.0 removed EngineCoreRequest.eos_token_id, so Dynamo can no
+        longer read EOS ids from the preprocessed request object.
+        """
+        eos_token_ids = getattr(self.tokenizer, "eos_token_ids", None)
+        if eos_token_ids is not None and not isinstance(eos_token_ids, int):
+            return list(eos_token_ids)
+
+        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if eos_token_id is None:
+            return []
+        return [eos_token_id]
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -109,11 +123,30 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
+        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
+        # The Rust HTTP layer accepts None/missing, so normalize before validation.
+        messages = request.get("messages") or []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    img_url = part.get("image_url")
+                    if isinstance(img_url, dict) and img_url.get("detail") is None:
+                        img_url["detail"] = "auto"
+
         pre = await preprocess_chat_request(
             request,
             tokenizer=self.tokenizer,
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
+            exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+            enable_auto_tool_choice=self.enable_auto_tool_choice,
         )
 
         request_for_sampling = pre.request_for_sampling
@@ -135,7 +168,11 @@ class VllmProcessor:
             max_tokens=max_tokens,
         )
         # generation_config.json
+        # Skip eos_token_id: vLLM 0.17.0 made SamplingParams.eos_token_id a
+        # read-only property; eos tokens are handled via eos_token_ids below.
         for k, v in self.input_processor.generation_config_fields.items():
+            if k == "eos_token_id":
+                continue
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
 
@@ -179,17 +216,13 @@ class VllmProcessor:
             request_id,
             prompt_inputs,
             sampling_params,
-            # arrival_time: float | None = None,
-            # lora_request: LoRARequest | None = None,
-            # tokenization_kwargs: dict[str, Any] | None = None,
-            # trace_headers: Mapping[str, str] | None = None,
-            # priority: int = 0,
-            # data_parallel_rank: int | None = None,
+            GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
         )
 
         InputProcessor.assign_request_id(vllm_preproc)
 
-        # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
+        # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
+        # tokenizer metadata for EOS ids when constructing the router payload.
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
@@ -234,11 +267,21 @@ class VllmProcessor:
                 "prompt_logprobs": sp.prompt_logprobs,
                 "skip_special_tokens": sp.skip_special_tokens,
             },
-            "eos_token_ids": [vllm_preproc.eos_token_id]
-            if vllm_preproc.eos_token_id is not None
-            else [],
+            "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
+            "routing": request.get("routing"),
         }
+
+        # Forward multimodal URLs so the backend handler can load the media.
+        mm_data = extract_mm_urls(request.get("messages") or [])
+        if mm_data:
+            dynamo_preproc["multi_modal_data"] = mm_data
+
+        # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        if request_for_sampling.mm_processor_kwargs is not None:
+            dynamo_preproc[
+                "mm_processor_kwargs"
+            ] = request_for_sampling.mm_processor_kwargs
 
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -273,12 +316,18 @@ class VllmProcessor:
 
         try:
             if self.is_kv_router:
+                extra_args: dict[str, Any] = {}
+                mm_proc_kwargs = dynamo_preproc.get("mm_processor_kwargs")
+                if mm_proc_kwargs is not None:
+                    extra_args["mm_processor_kwargs"] = mm_proc_kwargs
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
                     model=dynamo_preproc["model"],
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
+                    extra_args=extra_args or None,
                 )
             else:
                 dynamo_stream = await self.router.generate(
@@ -399,11 +448,14 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
+        trust_remote_code = self.config.trust_remote_code
+        enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
             model=source_path,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
+            trust_remote_code=trust_remote_code,
         )
         vllm_config = VllmConfig(
             model_config=model_config,
@@ -414,12 +466,30 @@ class EngineFactory:
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
+
+        # Resolve stream_interval: env var override > backend config > default (20)
+        stream_interval = self.stream_interval
+        if not os.getenv("DYN_VLLM_STREAM_INTERVAL"):
+            backend_interval = (
+                mdc.runtime_config().get("runtime_data", {}).get("stream_interval")
+            )
+            if backend_interval is not None:
+                try:
+                    stream_interval = max(1, int(backend_interval))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid stream_interval=%r from backend runtime_config, "
+                        "using default=%d",
+                        backend_interval,
+                        stream_interval,
+                    )
+
         output_processor = OutputProcessor(
             tokenizer,
             log_stats=False,
-            stream_interval=self.stream_interval,
+            stream_interval=stream_interval,
         )
-        logger.info("vLLM OutputProcessor stream_interval=%d", self.stream_interval)
+        logger.info("vLLM OutputProcessor stream_interval=%d", stream_interval)
 
         tool_parser_name = self.flags.tool_call_parser or mdc.runtime_config().get(
             "tool_call_parser"
@@ -439,7 +509,7 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
-        (namespace_name, component_name, endpoint_name) = instance_id.triple()
+        namespace_name, component_name, endpoint_name = instance_id.triple()
         generate_endpoint = self.runtime.endpoint(
             f"{namespace_name}.{component_name}.{endpoint_name}"
         )
@@ -462,6 +532,10 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            enable_auto_tool_choice=enable_auto_tool_choice,
+        )
+        gen.exclude_tools_when_tool_choice_none = (
+            self.config.exclude_tools_when_tool_choice_none
         )
 
         return PythonAsyncEngine(gen.generator, loop)

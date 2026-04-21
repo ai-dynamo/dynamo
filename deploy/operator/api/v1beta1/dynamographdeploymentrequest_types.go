@@ -165,15 +165,6 @@ const (
 	ProfilingReasonJobCreationFailed = "JobCreationFailed"
 )
 
-// OptimizationType specifies the profiling optimization strategy.
-// +kubebuilder:validation:Enum=latency;throughput
-type OptimizationType string
-
-const (
-	OptimizationTypeLatency    OptimizationType = "latency"
-	OptimizationTypeThroughput OptimizationType = "throughput"
-)
-
 // SearchStrategy controls the profiling search depth.
 // +kubebuilder:validation:Enum=rapid;thorough
 type SearchStrategy string
@@ -181,6 +172,34 @@ type SearchStrategy string
 const (
 	SearchStrategyRapid    SearchStrategy = "rapid"
 	SearchStrategyThorough SearchStrategy = "thorough"
+)
+
+// GPUSKUType is the AIC hardware system identifier for a supported GPU.
+// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+type GPUSKUType string
+
+const (
+	// --- Blackwell ---
+	GPUSKUTypeGB200SXM GPUSKUType = "gb200_sxm"
+	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	// --- Hopper ---
+	GPUSKUTypeH200SXM  GPUSKUType = "h200_sxm"
+	GPUSKUTypeH100SXM  GPUSKUType = "h100_sxm"
+	GPUSKUTypeH100PCIe GPUSKUType = "h100_pcie"
+	// --- Ampere ---
+	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
+	GPUSKUTypeA100PCIe GPUSKUType = "a100_pcie"
+	// --- Ada ---
+	GPUSKUTypeL40S GPUSKUType = "l40s"
+	GPUSKUTypeL40  GPUSKUType = "l40"
+	GPUSKUTypeL4   GPUSKUType = "l4"
+	// --- Older NVIDIA ---
+	GPUSKUTypeV100SXM  GPUSKUType = "v100_sxm"
+	GPUSKUTypeV100PCIe GPUSKUType = "v100_pcie"
+	GPUSKUTypeT4       GPUSKUType = "t4"
+	// --- AMD ---
+	GPUSKUTypeMI200 GPUSKUType = "mi200"
+	GPUSKUTypeMI300 GPUSKUType = "mi300"
 )
 
 // BackendType specifies the inference backend.
@@ -218,14 +237,7 @@ type WorkloadSpec struct {
 }
 
 // SLASpec defines the service-level agreement targets for profiling optimization.
-// Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 type SLASpec struct {
-	// OptimizationType controls the profiling optimization strategy.
-	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
-	// +optional
-	// +kubebuilder:validation:Enum=latency;throughput
-	OptimizationType OptimizationType `json:"optimizationType,omitempty"`
-
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
 	// +python-default=2000
@@ -305,7 +317,7 @@ type KVRouterSpec struct {
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
 	// Planner is the raw SLA planner configuration passed to the planner service.
-	// Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
+	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
 	// Go treats this as opaque bytes; the Planner service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.
 	// +optional
@@ -324,9 +336,11 @@ type FeaturesSpec struct {
 // HardwareSpec describes the hardware resources available for profiling and deployment.
 // These fields are typically auto-filled by the operator from cluster discovery.
 type HardwareSpec struct {
-	// GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+	// GPUSKU is the AIC hardware system identifier for the GPU.
+	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
 	// +optional
-	GPUSKU string `json:"gpuSku,omitempty"`
+	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
 	// +optional
@@ -339,6 +353,49 @@ type HardwareSpec struct {
 	// NumGPUsPerNode is the number of GPUs per node.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+	// Interconnect describes the primary GPU-to-GPU interconnect *within a node*.
+	//
+	// Semantics / usage:
+	//   - This is capability metadata used for profiling, planning, and deployment decisions.
+	//   - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed.
+	//   - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink"
+	//     vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.
+	//
+	// Impact of wrong / missing values:
+	//   - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance
+	//     models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts,
+	//     resulting in degraded performance compared to expectations.
+	//   - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may
+	//     choose conservative plans and leave performance on the table.
+	//   - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to
+	//     conservative assumptions.
+	//
+	// Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected.
+	//
+	// +optional
+	Interconnect string `json:"interconnect,omitempty"`
+
+	// RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.
+	//
+	// Semantics / usage:
+	//   - This is capability metadata used for profiling, planning, and deployment decisions.
+	//   - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,
+	//     GPUDirect settings). It only expresses availability/intent.
+	//   - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating
+	//     RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery
+	//     is unavailable, it may remain unset.
+	//
+	// Impact of wrong / missing values:
+	//   - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or
+	//     deployments to assume RDMA is available; depending on the runtime transport selection and
+	//     fallback behavior, this can lead to connection/setup failures or performance regressions.
+	//   - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and
+	//     fall back to non-RDMA transports, usually remaining functional but potentially slower.
+	//   - If unset and undiscovered, consumers should treat RDMA availability as unknown and use
+	//     conservative defaults / fallback transports.
+	//
+	// +optional
+	RDMA *bool `json:"rdma,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
@@ -500,8 +557,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
-// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1
-// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`,priority=1
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`
 // +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type DynamoGraphDeploymentRequest struct {

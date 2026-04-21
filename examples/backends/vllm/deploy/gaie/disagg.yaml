@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen
+spec:
+  backendFramework: vllm
+  services:
+    Epp:
+      envFromSecret: hf-token-secret
+      componentType: epp
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "16"
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: DYN_ENFORCE_DISAGG
+              value: "true"
+      eppConfig:
+        config:
+          plugins:
+            - type: disagg-profile-handler
+            - name: prefill-filter
+              type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "prefill"
+                allowsNoLabel: false
+            - name: decode-filter
+              type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: false
+            - name: picker
+              type: max-score-picker
+            - name: dyn-prefill
+              type: dyn-prefill-scorer
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          schedulingProfiles:
+          - name: prefill
+            plugins:
+            - pluginRef: prefill-filter
+              weight: 1
+            - pluginRef: dyn-prefill
+              weight: 1
+            - pluginRef: picker
+              weight: 1
+          - name: decode
+            plugins:
+            - pluginRef: decode-filter
+              weight: 1
+            - pluginRef: dyn-decode
+              weight: 1
+            - pluginRef: picker
+              weight: 1
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 2Gi
+      frontendSidecar:
+        image: docker.io/lambda108/dynamo:post-rebase
+        args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+        envFromSecret: hf-token-secret
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: MODEL_PATH
+              value: "Qwen/Qwen3-0.6B"
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
+          command:
+          - /bin/sh
+          - -c
+          image: docker.io/lambda108/dynamo:post-rebase
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 2Gi
+      frontendSidecar:
+        image: docker.io/lambda108/dynamo:post-rebase
+        args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+        envFromSecret: hf-token-secret
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: MODEL_PATH
+              value: "Qwen/Qwen3-0.6B"
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --block-size 16"
+          command:
+          - /bin/sh
+          - -c
+          image: docker.io/lambda108/dynamo:post-rebase
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"

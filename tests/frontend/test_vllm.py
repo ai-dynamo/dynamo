@@ -89,6 +89,8 @@ class VllmWorkerProcess(ManagedProcess):
             "dynamo.vllm",
             "--model",
             TEST_MODEL,
+            "--max-model-len",
+            "32768",  # 32768 uses ~1.5 GiB (original default 131072 used ~6 GiB KV cache)
             "--dyn-tool-call-parser",
             "harmony",
             "--dyn-reasoning-parser",
@@ -96,6 +98,17 @@ class VllmWorkerProcess(ManagedProcess):
             "--max-model-len",  # this reduced max context window and amount of GPU memory allocated for context
             "32768",
         ]
+
+        kv_bytes = os.environ.get("_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES")
+        if kv_bytes:
+            command.extend(
+                [
+                    "--kv-cache-memory-bytes",
+                    kv_bytes,
+                    "--gpu-memory-utilization",
+                    "0.01",
+                ]
+            )
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
@@ -222,7 +235,10 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-@pytest.mark.timeout(300)  # ~3x measured total (~70s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
+@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
+# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+@pytest.mark.timeout(300)  # 3x observed ~70s wall time, rounded up
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models
@@ -288,7 +304,10 @@ def test_reasoning_effort(
         )
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~50s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling
+@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
+# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+@pytest.mark.timeout(113)  # 3x observed 37.4s wall time
 @pytest.mark.post_merge
 def test_tool_calling(
     request, start_services: ServicePorts, predownload_models
@@ -330,7 +349,10 @@ def test_tool_calling(
     ), "Expected get_current_weather tool to be called"
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~50s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling_second_round
+@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
+# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+@pytest.mark.timeout(115)  # 3x observed 38.1s wall time
 @pytest.mark.nightly
 def test_tool_calling_second_round(
     request, start_services: ServicePorts, predownload_models
@@ -394,7 +416,10 @@ def test_tool_calling_second_round(
     ), "Expected response to include temperature information from tool call result (20°C)"
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~57s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning
+@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
+# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+@pytest.mark.timeout(131)  # 3x observed 43.4s wall time
 @pytest.mark.nightly
 def test_reasoning(request, start_services: ServicePorts, predownload_models) -> None:
     """Test reasoning functionality with a mathematical problem."""

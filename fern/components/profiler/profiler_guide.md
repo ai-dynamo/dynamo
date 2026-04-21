@@ -66,7 +66,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -83,7 +83,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
 
   workload:
     isl: 3000
@@ -229,7 +229,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
 
   workload: { ... }
   sla: { ... }
@@ -578,6 +578,6 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [DGDR Examples](../../../components/src/dynamo/profiler/deploy/) - Complete DGDR YAML examples
+- [DGDR Examples](../../../docs/components/profiler/profiler-examples.md) - Complete DGDR YAML examples
 - [DGDR API Reference](/docs/kubernetes/api-reference.md) - DGDR specification
 - [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py) - Full Configuration Reference

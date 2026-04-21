@@ -5,12 +5,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_kv_router::{
+    config::RouterConfigOverride,
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
-use crate::kv_router::protocols::{BlockExtraInfo, WorkerId};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -32,9 +34,13 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Data parallel rank for the request
+    /// Data parallel rank for the decode worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
 
     /// Expected number of output tokens for this request.
     /// Used as a hint for routing decisions to estimate resource requirements.
@@ -56,14 +62,15 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 
-    /// TTL in seconds for cache control pinning. None = no pinning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_ttl: Option<u64>,
-
-    /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
+    /// Worker IDs provided externally and not discovered by the router.
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+
+    /// Session control for subagent KV isolation and sticky routing.
+    /// Contains session_id (for affinity) and optional action (open/close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -84,7 +91,7 @@ pub struct PrefillResult {
     pub disaggregated_params: serde_json::Value,
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
+    pub prompt_tokens_details: Option<dynamo_protocols::types::PromptTokensDetails>,
 }
 
 /// Optional multimodal routing-only data.
@@ -104,6 +111,8 @@ pub struct MmRoutingInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    #[serde(rename(serialize = "Url"))]
+    RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
 }
 
@@ -185,6 +194,17 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Multimodal processor kwargs forwarded to the backend engine
+    /// (e.g. `{"use_audio_in_video": true}` for omni models).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_processor_kwargs: Option<serde_json::Value>,
+
+    /// Optional request timestamp in milliseconds forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
 
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]

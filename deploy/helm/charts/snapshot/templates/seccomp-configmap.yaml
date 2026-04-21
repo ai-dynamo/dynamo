@@ -9,7 +9,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: seccomp
 data:
   block-iouring.json: |
     {
@@ -24,4 +23,3 @@ data:
       ]
     }
 {{- end }}
-

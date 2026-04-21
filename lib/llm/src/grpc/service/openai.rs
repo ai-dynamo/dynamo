@@ -21,9 +21,9 @@ use super::kserve::inference;
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, InflightGuard, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
+use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::Status;
 
@@ -54,14 +54,23 @@ pub async fn completion_response_stream(
     // create the context for the request
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());
+    let streaming = request.inner.stream.unwrap_or(false);
+    let model_name = request.inner.model.clone();
+    let cancellation_labels = CancellationLabels {
+        model: model_name.clone(),
+        endpoint: "grpc_completions".to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id.clone());
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
-
-    let streaming = request.inner.stream.unwrap_or(false);
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
     // update the request to always stream
     let request = request.map(|mut req| {
         req.inner.stream = Some(true);
@@ -76,14 +85,21 @@ pub async fn completion_response_stream(
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(model)
-        .map_err(|_| Status::not_found("model not found"))?;
+        .map_err(|e| match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                Status::unavailable("model temporarily unavailable")
+            }
+            _ => Status::not_found("model not found"),
+        })?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Completions, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Completions,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -91,10 +107,16 @@ pub async fn completion_response_stream(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| Status::internal(format!("Failed to generate completions: {}", e)))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                crate::http::service::metrics::Endpoint::Completions,
+            );
+            return Status::resource_exhausted(e.to_string());
+        }
+        Status::internal(format!("Failed to generate completions: {}", e))
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();

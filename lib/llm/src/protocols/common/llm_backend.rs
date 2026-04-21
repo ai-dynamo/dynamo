@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
-use dynamo_async_openai::types::CompletionUsage;
-use dynamo_async_openai::types::StopReason;
+use dynamo_protocols::types::CompletionUsage;
+use dynamo_protocols::types::StopReason;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
@@ -59,6 +59,8 @@ pub struct TopLogprob {
     pub token_id: TokenIdType,
     pub token: TokenType,
     pub logprob: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
 }
 pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 

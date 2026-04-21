@@ -35,6 +35,11 @@ issues:
       linters:
         - lll
         - nakedret
+    # Intentional internal usage of deprecated namespace-restricted mode fields/packages.
+    # The feature is soft-deprecated (still functional) so internal references are expected.
+    - linters:
+        - staticcheck
+      text: "SA1019:.*deprecated.*namespace"
 linters:
   disable-all: true
   enable:

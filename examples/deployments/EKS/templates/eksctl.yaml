@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${AWS_REGION}
+
+availabilityZones:
+${EKS_CP_AZS}
+
+autoModeConfig:
+  enabled: true
+
+addonsConfig:
+  disableDefaultAddons: true
+
+addons:
+  - name: aws-efs-csi-driver
+    version: latest
+    useDefaultPodIdentityAssociations: true

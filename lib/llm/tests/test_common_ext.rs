@@ -276,11 +276,11 @@ fn test_completions_common_values() {
 fn test_serialization_preserves_structure() {
     // Test that serialization preserves the flattened structure
     let request = NvCreateChatCompletionRequest {
-        inner: dynamo_async_openai::types::CreateChatCompletionRequest {
+        inner: dynamo_protocols::types::CreateChatCompletionRequest {
             model: "test-model".to_string(),
-            messages: vec![dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+            messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                         "Hello".to_string(),
                     ),
                     ..Default::default()

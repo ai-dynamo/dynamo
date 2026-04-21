@@ -52,7 +52,7 @@ helm.sh/chart: {{ include "snapshot.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-app.kubernetes.io/component: checkpoint-agent
+app.kubernetes.io/component: snapshot-agent
 {{- end }}
 
 {{/*

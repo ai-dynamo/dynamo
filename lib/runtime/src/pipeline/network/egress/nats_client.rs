@@ -8,6 +8,7 @@
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use crate::error::{DynamoError, ErrorType};
+use crate::metrics::transport_metrics::NATS_ERRORS_TOTAL;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -51,6 +52,9 @@ impl RequestPlaneClient for NatsRequestClient {
             .request_with_headers(address.clone(), nats_headers, payload)
             .await
             .map_err(|e| {
+                NATS_ERRORS_TOTAL
+                    .with_label_values(&["request_failed"])
+                    .inc();
                 anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)

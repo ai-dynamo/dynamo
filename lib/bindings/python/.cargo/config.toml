@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mirrors the root .cargo/config.toml so this standalone workspace
+# gets the same build flags (tokio_unstable is required for Tokio metrics APIs).
+
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

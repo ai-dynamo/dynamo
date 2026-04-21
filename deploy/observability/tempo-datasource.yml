@@ -15,6 +15,14 @@ datasources:
       httpMethod: GET
       serviceMap:
         datasourceUid: tempo
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{service_name=~".+"} | trace_id = "$${__trace.traceId}"'
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
       search:
         hide: false
       nodeGraph:

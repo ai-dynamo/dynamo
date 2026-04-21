@@ -6,6 +6,12 @@
 # GPU 0: Encode (vision encoder)
 # GPU 0: PD worker (prefill + decode, TP=1)
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-VL-2B-Instruct"}
@@ -21,21 +27,19 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 # Extra arguments forwarded to the PD worker (e.g. --multimodal-embedding-cache-capacity-gb 10)
 EXTRA_PD_ARGS=("$@")
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $ENCODE_PID $PD_PID_1 2>/dev/null || true
-    wait $DYNAMO_PID $ENCODE_PID $PD_PID_1 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+# Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
+# child processes would inherit. Unset it so only workers that need it set their own.
+unset DYN_SYSTEM_PORT
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Multimodal E/PD" "$MODEL_PATH" "$HTTP_PORT"
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
-# run encode worker (vision encoder on GPU 0)
+# run encode worker (vision encoder on GPU 0) with metrics on port 8081
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -44,9 +48,9 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode encode &
-ENCODE_PID=$!
 
-# run PD worker 1 (GPU 0)
+# run PD worker 1 (GPU 0) with metrics on port 8082
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -55,6 +59,6 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --encode-endpoint "$ENCODE_ENDPOINT" \
   --disaggregation-mode prefill_and_decode \
   "${EXTRA_PD_ARGS[@]}" &
-PD_PID_1=$!
 
-wait $DYNAMO_PID
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

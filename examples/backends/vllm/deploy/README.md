@@ -35,6 +35,24 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `VLLMDecodeWorker`: Specialized decode-only worker
 - `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
+### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
+Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
+
+### 6. **Deployments with Intel XPU (Optional)** (`agg_xpu_dra.yaml` or `disagg_xpu_dra.yaml`)
+Hardware-specific aggregated/disaggregated deployment using Kubernetes Dynamic Resource Allocation (DRA).
+
+**Aggregated Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `VllmDecodeWorker`: Single worker with XPU target (`VLLM_TARGET_DEVICE=xpu`)
+- GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
+
+**Disaggregated Architecture:**
+- `Frontend`: HTTP API server coordinating between workers
+- `VllmDecodeWorker`: Specialized decode-only worker with XPU target
+- `VllmPrefillWorker`: Specialized prefill-only worker with XPU target
+- GPU allocation via `ResourceClaimTemplate` and pod-level `resourceClaims`
+- Communication via NIXL transfer backend with XPU buffer
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -94,7 +112,7 @@ Before using these templates, ensure you have:
 
 1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
-3. **Container registry access** for vLLM runtime images
+3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
@@ -121,6 +139,9 @@ Select the deployment pattern that matches your requirements:
 - Use `disagg.yaml` for maximum performance
 - Use `disagg_router.yaml` for high-performance with KV cache routing
 - Use `disagg_planner.yaml` for SLA-optimized performance
+- Use `agg_xpu_dra.yaml` for aggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use `disagg_xpu_dra.yaml` for disaggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
@@ -157,6 +178,31 @@ export DEPLOYMENT_FILE=agg.yaml
 
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
+
+#### Deploy with Intel XPU  (Optional)
+If your cluster uses Intel GPU devices via Kubernetes Dynamic Resource Allocation (DRA), ensure:
+- Your Kubernetes cluster is **v1.34+** (required for DRA API v1), and
+- The [Intel XPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) is installed.
+
+Deploy the XPU template (includes the ResourceClaimTemplate):
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy
+
+# For aggregated deployment
+kubectl apply -f agg_xpu_dra.yaml -n $NAMESPACE
+
+# OR for disaggregated deployment
+kubectl apply -f disagg_xpu_dra.yaml -n $NAMESPACE
+```
+
+Verify claim allocation:
+
+```bash
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get dynamographdeployment -n $NAMESPACE
+```
+
+`agg_xpu_dra.yaml` and `disagg_xpu_dra.yaml` are optional hardware-specific templates and do not change the default deployment paths defined by `agg.yaml` and `disagg.yaml`.
 
 ### 4. Using Custom Dynamo Frameworks Image for vLLM
 
@@ -249,6 +295,7 @@ args:
 - **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
 - **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
 

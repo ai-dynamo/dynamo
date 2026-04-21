@@ -366,14 +366,22 @@ impl RuntimeConfig {
 
     /// Create a new default runtime configuration
     pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
-        tokio::runtime::Builder::new_multi_thread()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder
             .worker_threads(
                 self.num_worker_threads
                     .unwrap_or_else(|| std::thread::available_parallelism().unwrap().get()),
             )
             .max_blocking_threads(self.max_blocking_threads)
-            .enable_all()
-            .build()
+            .enable_all();
+        if env_is_truthy(environment_names::runtime::DYN_ENABLE_POLL_HISTOGRAM) {
+            tracing::info!(
+                "Tokio poll-time histogram enabled (DYN_ENABLE_POLL_HISTOGRAM); \
+                 expect ~2× Instant::now() overhead per task poll"
+            );
+            builder.enable_metrics_poll_time_histogram();
+        }
+        builder.build()
     }
 }
 

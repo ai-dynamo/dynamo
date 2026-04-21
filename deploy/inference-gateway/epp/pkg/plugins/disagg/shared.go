@@ -40,8 +40,15 @@ const (
 	PrefillProfileName = "prefill"
 	DecodeProfileName  = "decode"
 
-	// PrefillEnabledStateKey is used to communicate prefill-enabled status
-	// from the DisaggProfileHandler to the scorer plugins via CycleState.
+	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
+	// Initially set to true by DisaggProfileHandler.Pick() if a "prefill" scheduling
+	// profile exists in the EPP config. Overwritten to false per-request in two cases:
+	//   - DisaggProfileHandler.Pick(): prefill profile result is nil (no prefill pods
+	//     passed the label-filter).
+	//   - DynPrefillScorer.Score(): prefill FFI routing failed (prefill router not yet
+	//     activated, e.g., worker registered in K8s but not yet in Dynamo discovery).
+	// The decode scorer reads this to decide whether to use overlap_score_weight=0
+	// (disaggregated) or normal KV cache overlap scoring (aggregated).
 	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
 )
 

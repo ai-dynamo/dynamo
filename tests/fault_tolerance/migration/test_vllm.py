@@ -36,6 +36,14 @@ pytestmark = [
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
+        "migration_max_seq_len",
+        [
+            pytest.param(None, id="max_seq_len_disabled"),
+            pytest.param(1_000_000, id="max_seq_len_not_exceeded"),
+            pytest.param(1, id="max_seq_len_exceeded"),
+        ],
+    ),
+    pytest.mark.parametrize(
         "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
     ),
     pytest.mark.parametrize(
@@ -214,6 +222,7 @@ def test_request_migration_vllm_aggregated(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -224,12 +233,17 @@ def test_request_migration_vllm_aggregated(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+        migration_max_seq_len: Max sequence length for migration state tracking
         request_api: "chat" for chat completion API, "completion" for completion API
         stream: True for streaming, False for non-streaming
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
@@ -250,6 +264,7 @@ def test_request_migration_vllm_aggregated(
                     worker2,
                     receiving_pattern="Decode Request ID: ",
                     migration_limit=migration_limit,
+                    migration_max_seq_len=migration_max_seq_len,
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
@@ -265,6 +280,7 @@ def test_request_migration_vllm_prefill(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -282,7 +298,11 @@ def test_request_migration_vllm_prefill(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
@@ -318,6 +338,7 @@ def test_request_migration_vllm_prefill(
                         prefill2,
                         receiving_pattern="Prefill Request ID: ",
                         migration_limit=migration_limit,
+                        migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
@@ -343,6 +364,7 @@ def test_request_migration_vllm_kv_transfer(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -360,7 +382,11 @@ def test_request_migration_vllm_kv_transfer(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -396,6 +422,7 @@ def test_request_migration_vllm_kv_transfer(
                         decode2,
                         receiving_pattern="Decode Request ID: ",
                         migration_limit=migration_limit,
+                        migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
@@ -421,6 +448,7 @@ def test_request_migration_vllm_decode(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -442,7 +470,11 @@ def test_request_migration_vllm_decode(
         )
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -478,6 +510,7 @@ def test_request_migration_vllm_decode(
                         decode2,
                         receiving_pattern="Decode Request ID: ",
                         migration_limit=migration_limit,
+                        migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,

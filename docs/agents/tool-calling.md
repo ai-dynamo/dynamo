@@ -10,49 +10,54 @@ to output function arguments for the relevant function(s) which you can execute 
 
 Tool calling (AKA function calling) is controlled using the `tool_choice` and `tools` request parameters.
 
-
 ## Prerequisites
 
 To enable this feature, you should set the following flag while launching the backend worker
 
-- `--dyn-tool-call-parser` : select the parser from the available parsers list using the below command
+- `--dyn-tool-call-parser`: select the tool call parser from the supported list below
 
 ```bash
 # <backend> can be sglang, trtllm, vllm, etc. based on your installation
-python -m dynamo.<backend> --help"
+python -m dynamo.<backend> --help
 ```
 
 > [!NOTE]
-> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on `<TOOLCALL>` and `<|python_tag|>` tool tags.
+> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags.
 
 > [!TIP]
 > If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
 > with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
 
+> [!TIP]
+> If your model also emits reasoning content that should be separated from normal output, see [Reasoning](reasoning.md) for the supported `--dyn-reasoning-parser` values.
 
-Parser to Model Mapping
+## Supported Tool Call Parsers
 
-| Parser Name | Supported Models                                                      |
-|-------------|-----------------------------------------------------------------------|
-| hermes      | Qwen/Qwen2.5-*, Qwen/QwQ-32B, NousResearch/Hermes-2-Pro-*, NousResearch/Hermes-2-Theta-*, NousResearch/Hermes-3-* |
-| mistral | mistralai/Mistral-7B-Instruct-v0.3, Additional mistral function-calling models are compatible as well.|
-| llama3_json | meta-llama/Llama-3.1-*, meta-llama/Llama-3.2-* |
-| harmony | openai/gpt-oss-* |
-| nemotron_deci | nvidia/nemotron-* |
-| nemotron_nano | nvidia/NVIDIA-Nemotron-3-Nano-* |
-| phi4 | Phi-4-* |
-| deepseek_v3 | deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1, deepseek-ai/DeepSeek-R1-0528 |
-| deepseek_v3_1 | deepseek-ai/DeepSeek-V3.1 |
-| pythonic |  meta-llama/Llama-4-* |
-| jamba |  ai21labs/AI21-Jamba-*-1.5, ai21labs/AI21-Jamba-*-1.6, ai21labs/AI21-Jamba-*-1.7, |
-| glm47 | zai-org/GLM-4.7 |
-| kimi_k2 | moonshotai/Kimi-K2-Thinking*, moonshotai/Kimi-K2-Instruct*, moonshotai/Kimi-K2.5* |
+The tool call parser names currently supported in the codebase are:
 
-\* Currently requires converting `tiktoken.model` to `tokenizers.json`.
+| Parser Name | Typical Models / Format |
+|-------------|-------------------------|
+| `deepseek_v3` | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-R1-0528` |
+| `deepseek_v3_1` | `deepseek-ai/DeepSeek-V3.1` |
+| `deepseek_v3_2` | DeepSeek V3.2 DSML tool calling (`<｜DSML｜function_calls>...`) |
+| `default` | Dynamo's fallback parser for &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags when no explicit parser is configured |
+| `glm47` | `zai-org/GLM-4.7` |
+| `harmony` | `openai/gpt-oss-*` |
+| `hermes` | `Qwen/Qwen2.5-*`, `Qwen/QwQ-32B`, `NousResearch/Hermes-2-Pro-*`, `NousResearch/Hermes-2-Theta-*`, `NousResearch/Hermes-3-*` |
+| `jamba` | `ai21labs/AI21-Jamba-*-1.5`, `ai21labs/AI21-Jamba-*-1.6`, `ai21labs/AI21-Jamba-*-1.7` |
+| `kimi_k2` | `moonshotai/Kimi-K2-Thinking*`, `moonshotai/Kimi-K2-Instruct*`, `moonshotai/Kimi-K2.5*`; currently requires converting `tiktoken.model` to `tokenizers.json` |
+| `llama3_json` | `meta-llama/Llama-3.1-*`, `meta-llama/Llama-3.2-*` |
+| `minimax_m2` | MiniMax M2.1 XML-style tool calling (`<minimax:tool_call>...`) |
+| `mistral` | `mistralai/Mistral-7B-Instruct-v0.3` and other Mistral models that emit `[TOOL_CALLS]...[/TOOL_CALLS]` |
+| `nemotron_deci` | `nvidia/nemotron-*` |
+| `nemotron_nano` | `nvidia/NVIDIA-Nemotron-3-Nano-*`; uses the same tool-call format as `qwen3_coder` |
+| `phi4` | `Phi-4-*` |
+| `pythonic` | `meta-llama/Llama-4-*` |
+| `qwen3_coder` | XML-style tool calling such as `<tool_call><function=...>` |
 
 > [!TIP]
 > For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with
-> `--dyn-reasoning-parser kimi_k25` so that both `<think>` blocks and tool calls
+> `--dyn-reasoning-parser kimi_k25` from [Reasoning](reasoning.md) so that both `<think>` blocks and tool calls
 > are parsed correctly from the same response.
 
 ## Examples

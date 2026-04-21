@@ -9,9 +9,9 @@ use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
-use crate::kv_router::protocols::WorkerId;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use dynamo_kv_router::protocols::WorkerId;
 
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;

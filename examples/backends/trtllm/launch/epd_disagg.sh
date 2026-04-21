@@ -2,6 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"meta-llama/Llama-4-Scout-17B-16E-Instruct"}
@@ -17,20 +23,12 @@ export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID $DECODE_PID $ENCODE_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID $DECODE_PID $ENCODE_PID 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
-
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D (8 GPUs)" "$MODEL_PATH" "$HTTP_PORT"
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
-DYNAMO_PID=$!
 
 # run encode worker
 CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
@@ -41,7 +39,6 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode encode &
-ENCODE_PID=$!
 
 # run prefill worker
 CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
@@ -51,7 +48,6 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
   --encode-endpoint "$ENCODE_ENDPOINT" &
-PREFILL_PID=$!
 
 # run decode worker
 CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
@@ -60,6 +56,6 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode decode &
-DECODE_PID=$!
 
-wait $DYNAMO_PID
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

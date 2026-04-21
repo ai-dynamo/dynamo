@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
 };
@@ -111,7 +111,7 @@ pub fn maybe_wrap_stream(
     let mut prefill_tx = Some(tx);
     Box::pin(stream.map(move |item| {
         if let Some(ref resp) = item.data {
-            for choice in &resp.choices {
+            for choice in &resp.inner.choices {
                 if let Some(ChatCompletionMessageContent::Text(ref text)) = choice.delta.content {
                     accumulated_text.push_str(text);
                 }
