@@ -369,7 +369,7 @@ mod tests {
 
         // Test case: max_size < DEFAULT_SHRINK_SIZE
         // Should return max_size (capped by .min())
-        let max_size_1mb = 1 * 1024 * 1024;
+        let max_size_1mb = 1024 * 1024;
         let result = resolve_shrink_message_size(max_size_1mb, None);
         assert_eq!(result, max_size_1mb, "1MB max should be capped to 1MB");
 
