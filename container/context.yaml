@@ -106,6 +106,11 @@ trtllm:
   pip_wheel: tensorrt-llm==1.3.0rc11
   trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
 
+  # Dynamo-owned TRT-LLM fork — Python overlay on top of the upstream wheel.
+  # Leave fork_url empty to disable the overlay and use vanilla upstream.
+  fork_url: https://github.com/galletas1712/TensorRT-LLM
+  fork_ref: dynamo/main
+
   github_trtllm_commit: v1.3.0rc11
   torch_version: 2.11.0a0+eb65b36914.nv26.2
   torch_tensorrt_version: 2.11.0a0

@@ -172,3 +172,24 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi; \
     sed -i 's/pip3 install/uv pip install/g' "$TRT_INSTALLER"; \
     bash "$TRT_INSTALLER"
+
+# Overlay Python sources from the Dynamo-owned TRT-LLM fork on top of the
+# installed wheel. The upstream wheel supplies compiled .so extensions; the fork
+# contributes only pure-Python changes under tensorrt_llm/. Leave TRTLLM_FORK_URL
+# empty to skip the overlay.
+ARG TRTLLM_FORK_URL
+ARG TRTLLM_FORK_REF
+RUN if [ -n "${TRTLLM_FORK_URL}" ]; then \
+        echo "[fork-overlay] cloning ${TRTLLM_FORK_URL}@${TRTLLM_FORK_REF}"; \
+        GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch "${TRTLLM_FORK_REF}" "${TRTLLM_FORK_URL}" /tmp/trtllm_fork && \
+        INSTALLED_DIR="$(python -c 'import os, tensorrt_llm; print(os.path.dirname(tensorrt_llm.__file__))')" && \
+        echo "[fork-overlay] target: ${INSTALLED_DIR}" && \
+        FORK_SHA="$(git -C /tmp/trtllm_fork rev-parse HEAD)" && \
+        # Replace only .py sources so compiled artifacts in the wheel are preserved.
+        (cd /tmp/trtllm_fork/tensorrt_llm && find . -name '*.py' -print0 | \
+            xargs -0 -I{} install -D -m 644 "{}" "${INSTALLED_DIR}/{}") && \
+        echo "${FORK_SHA}" > "${INSTALLED_DIR}/DYNAMO_FORK_SHA" && \
+        rm -rf /tmp/trtllm_fork; \
+    else \
+        echo "[fork-overlay] TRTLLM_FORK_URL empty — skipping overlay"; \
+    fi

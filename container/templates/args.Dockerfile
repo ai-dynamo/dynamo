@@ -116,6 +116,8 @@ ARG TENSORRTLLM_PIP_WHEEL={{ context.trtllm.pip_wheel }}
 ARG TENSORRTLLM_INDEX_URL={{ context.trtllm.index_url }}
 ARG GITHUB_TRTLLM_COMMIT={{ context.trtllm.github_trtllm_commit }}
 ARG TRTLLM_WHEEL_IMAGE={{ context.trtllm.trtllm_wheel_image }}
+ARG TRTLLM_FORK_URL={{ context.trtllm.fork_url }}
+ARG TRTLLM_FORK_REF={{ context.trtllm.fork_ref }}
 
 # Copy pytorch installation from NGC PyTorch
 ARG FLASHINFER_PYTHON_VER={{ context.trtllm.flashinfer_python_ver }}
