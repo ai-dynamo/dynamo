@@ -1453,9 +1453,9 @@ impl
                                 });
                             }
                             *accumulated_reasoning_tokens = 0;
-                         }
-                         Ok(data)
-                     });
+                        }
+                        Ok(data)
+                    });
                     std::future::ready(Some(result))
                 },
             ))
