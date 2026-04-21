@@ -59,6 +59,10 @@ inputs:
     description: 'Skip the bootstrap step (only create the builder)'
     required: false
     default: 'false'
+  suppress_fallback_warning:
+    description: 'Suppress the fallback pod warning when intentionally using the Kubernetes driver'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
@@ -109,10 +113,12 @@ runs:
 
         sleep 3 # Give the builders some time to be ready
 
-        echo "::warning::Build is using fallback pod"
-        echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
-        echo "This build is using the **fallback pod** because the preferred remote builders are unavailable. Expected during nightly runs and outside business hours." >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ inputs.suppress_fallback_warning }}" != "true" ]]; then
+          echo "::warning::Build is using fallback pod"
+          echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
+          echo "This build is using the **fallback pod** because the preferred remote builders are unavailable. Expected during nightly runs and outside business hours." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
         
 
 

@@ -39,8 +39,7 @@ jobs:
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
-          fresh_builder: 'true'
-
+          suppress_fallback_warning: 'true'
 
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
