@@ -41,15 +41,16 @@ fn get_shrink_message_size() -> usize {
 
         // Warn if the configured value was clamped
         if let Some(configured) = env_shrink_size
-            && configured != resolved {
-                tracing::warn!(
-                    configured_size = configured,
-                    resolved_size = resolved,
-                    max_size = max_size,
-                    initial_buffer_size = INITIAL_BUFFER_SIZE,
-                    "DYN_TCP_SHRINK_MESSAGE_SIZE was clamped to valid range. Note the size is in bytes."
-                );
-            }
+            && configured != resolved
+        {
+            tracing::warn!(
+                configured_size = configured,
+                resolved_size = resolved,
+                max_size = max_size,
+                initial_buffer_size = INITIAL_BUFFER_SIZE,
+                "DYN_TCP_SHRINK_MESSAGE_SIZE was clamped to valid range. Note the size is in bytes."
+            );
+        }
 
         resolved
     })
