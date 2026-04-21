@@ -8,12 +8,21 @@ import os
 import time
 from typing import Optional
 
+from kubernetes.client import ApiException
+from kubernetes.config.config_exception import ConfigException
+
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
 from dynamo.planner.connectors.remote_client import RemotePlannerClient
-from dynamo.planner.errors import EmptyTargetReplicasError
+from dynamo.planner.errors import (
+    DeploymentModelNameMismatchError,
+    DeploymentValidationError,
+    EmptyTargetReplicasError,
+    ModelNameNotFoundError,
+    UserProvidedModelNameMismatchError,
+)
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
     build_worker_info_from_defaults,
@@ -237,7 +246,7 @@ class GlobalPlannerConnector(PlannerConnector):
                 dynamo_namespace=self.dynamo_namespace,
                 model_name=self.model_name,
             )
-        except Exception as e:
+        except (DeploymentValidationError, ConfigException, ApiException) as e:
             logger.warning(
                 "GlobalPlannerConnector: could not initialize local "
                 f"KubernetesConnector for MDC capability lookup: {e}. "
@@ -279,6 +288,11 @@ class GlobalPlannerConnector(PlannerConnector):
         if local is not None:
             try:
                 return local.get_model_name(**kwargs)
-            except Exception as e:
+            except (
+                ModelNameNotFoundError,
+                DeploymentModelNameMismatchError,
+                UserProvidedModelNameMismatchError,
+                ApiException,
+            ) as e:
                 logger.warning(f"Could not resolve model name from local DGD args: {e}")
         return "managed-remotely"

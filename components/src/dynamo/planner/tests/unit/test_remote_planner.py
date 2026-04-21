@@ -16,7 +16,8 @@ from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.connectors.remote_client import RemotePlannerClient
-from dynamo.planner.errors import EmptyTargetReplicasError
+from dynamo.planner.errors import DeploymentValidationError, EmptyTargetReplicasError
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 
 async def _async_responses(*items):
@@ -330,16 +331,26 @@ async def test_connector_unsupported_and_noop_operations(connector):
 
 
 def test_connector_model_name_and_predicted_load(connector_runtime):
-    """Test GlobalPlannerConnector model name and predicted load tracking"""
-    # With model name
+    """Test GlobalPlannerConnector model name and predicted load tracking.
+
+    The ``model_name=None`` branch forces KubernetesConnector init to raise
+    so the connector falls back to the "managed-remotely" placeholder
+    deterministically, independent of the caller's kube config.
+    """
+    # With model name — local connector is never consulted.
     c1 = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
     assert c1.get_model_name() == "test"
 
-    # Without model name — local KubernetesConnector creation fails (no
-    # DYN_PARENT_DGD_K8S_NAME / kube config in the test env), so we fall
-    # back to the placeholder.
-    c2 = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name=None)
-    assert c2.get_model_name() == "managed-remotely"
+    # Without model name — force the local connector init to fail so we
+    # exercise the fallback deterministically.
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c2 = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name=None
+        )
+        assert c2.get_model_name() == "managed-remotely"
 
     # Predicted load
     c1.set_predicted_load(42.0, 256.0, 128.0)
@@ -351,8 +362,6 @@ def test_connector_get_worker_info_delegates_to_local_k8s(connector_runtime):
     so that MDC-populated capabilities (context_length, max_kv_tokens, ...)
     reach load-scaling under environment=global-planner.
     """
-    from dynamo.planner.monitoring.worker_info import WorkerInfo
-
     c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
     mdc_info = WorkerInfo(
         k8s_name="VllmPrefillWorker",
@@ -382,14 +391,18 @@ def test_connector_get_worker_info_delegates_to_local_k8s(connector_runtime):
 def test_connector_get_worker_info_falls_back_on_local_init_failure(connector_runtime):
     """If the pool-local KubernetesConnector can't be created (e.g. outside
     a cluster), get_worker_info should fall back to hard-coded defaults
-    rather than raising.
+    rather than raising. Forces the init failure explicitly so the test
+    doesn't depend on the caller's kube config.
     """
-    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
-    # Simulate exhausted init attempt with no connector available.
-    c._local_k8s_connector = None
-    c._local_k8s_init_attempted = True
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name="test"
+        )
+        info = c.get_worker_info(SubComponentType.PREFILL, backend="vllm")
 
-    info = c.get_worker_info(SubComponentType.PREFILL, backend="vllm")
     # Defaults populate component identifiers but leave capability fields
     # unset — callers use this to detect "no MDC" without crashing.
     assert info.context_length is None
