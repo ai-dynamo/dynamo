@@ -461,6 +461,7 @@ mod push_handler_notify_tests {
                 namespace: "test_namespace".to_string(),
                 instance_id: 0,
                 transport: TransportType::Nats(endpoint_name.to_string()),
+                device_type: None,
             },
             payload,
         );
@@ -493,20 +494,32 @@ mod push_handler_notify_tests {
 
         let notifier = register_endpoint(&drt, endpoint_name);
 
-        // Start the real HealthCheckManager with a short canary wait.
-        // If the canary fires, it will call send_health_check_request which
-        // succeeds (mock engine registered) and sets status to Ready.
-        let config = HealthCheckConfig {
-            canary_wait_time: Duration::from_millis(200),
-            request_timeout: Duration::from_secs(1),
-        };
-        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
-        manager.clone().start().await.unwrap();
+        // Set up the push_handler pipeline BEFORE starting the HealthCheckManager
+        // so we can send a request immediately and avoid a race where the canary
+        // fires before handle_payload has a chance to notify.
+        let engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine { num_chunks: 5 });
+        let ingress =
+            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
 
-        // Spawn a counter task that observes notifications on the same notifier.
-        // Since Notify coalesces, we count wakeups (not individual notify_one calls).
-        // push_handler calls notify_one() on each chunk + stream completion,
-        // so we expect at least 1 wakeup.
+        // Pre-create the TCP receiver and encoded payload
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
+        let payload = encode_request(
+            &request_id,
+            connection_info,
+            &serde_json::json!({"prompt": "test"}),
+        );
+
+        // Send the request through push_handler BEFORE starting the
+        // HealthCheckManager. This way we can use a separate Notify for
+        // counting without competing with the manager (notify_one only
+        // wakes one waiter).
+        //
+        // push_handler will call notify_one() on each of the 5 chunks
+        // + stream completion. The counter task is the sole consumer.
         let notify_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = notify_count.clone();
         let notifier_for_counter = notifier.clone();
@@ -523,23 +536,6 @@ mod push_handler_notify_tests {
             }
         });
 
-        // Set up the push_handler pipeline with the SAME notifier
-        let engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine { num_chunks: 5 });
-        let ingress =
-            Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
-        ingress
-            .set_endpoint_health_check_notifier(notifier)
-            .unwrap();
-
-        // Send a request through push_handler — this will call notify_one()
-        // on each of the 5 streaming chunks + stream completion.
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
-        let payload = encode_request(
-            &request_id,
-            connection_info,
-            &serde_json::json!({"prompt": "test"}),
-        );
         let result = ingress
             .handle_payload(payload, Some(request_id.clone()))
             .await;
@@ -561,6 +557,30 @@ mod push_handler_notify_tests {
             count >= 1,
             "Expected at least 1 notification wakeup from push_handler streaming, got {count}"
         );
+
+        // NOW start the HealthCheckManager. It will be the sole consumer of
+        // the notifier going forward. The canary wait is 500ms — we'll send
+        // another request to reset the timer, then verify it didn't fire.
+        let config = HealthCheckConfig {
+            canary_wait_time: Duration::from_millis(500),
+            request_timeout: Duration::from_secs(1),
+        };
+        let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
+        manager.clone().start().await.unwrap();
+
+        // Send a second request to reset the canary timer
+        let request_id2 = uuid::Uuid::new_v4().to_string();
+        let (_server2, connection_info2) = setup_tcp_receiver(&request_id2).await;
+        let payload2 = encode_request(
+            &request_id2,
+            connection_info2,
+            &serde_json::json!({"prompt": "test2"}),
+        );
+        let result2 = ingress.handle_payload(payload2, Some(request_id2)).await;
+        assert!(result2.is_ok(), "second handle_payload should succeed");
+
+        // Wait less than canary_wait_time
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         // The canary should NOT have fired. Since the endpoint starts as NotReady
         // and send_health_check_request (which sets Ready on success) was never
@@ -692,6 +712,7 @@ mod integration_tests {
                 namespace: "test_namespace".to_string(),
                 instance_id: 12345,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                device_type: None,
             },
             payload.clone(),
         );
@@ -727,6 +748,7 @@ mod integration_tests {
                     namespace: "test_namespace".to_string(),
                     instance_id: i,
                     transport: crate::component::TransportType::Nats(endpoint.clone()),
+                    device_type: None,
                 },
                 payload,
             );
@@ -770,6 +792,7 @@ mod integration_tests {
                 namespace: "test_namespace".to_string(),
                 instance_id: 999,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                device_type: None,
             },
             payload.clone(),
         );
