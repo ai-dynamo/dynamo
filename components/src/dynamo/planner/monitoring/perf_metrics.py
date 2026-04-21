@@ -5,8 +5,10 @@
 
 Priority chain:
   1. Call ``get_perf_metrics`` Dynamo endpoint (PR 7779 self-benchmark)
-  2. Fallback: convert legacy profiler npz to synthetic FPMs
-  3. If both fail: raise
+  2. Run AIConfigurator interpolation in-process if an ``AICInterpolationSpec``
+     is supplied (rapid mode)
+  3. Convert legacy profiler NPZ / JSON to synthetic FPMs (thorough mode)
+  4. If all three fail: raise
 """
 
 import asyncio
@@ -21,6 +23,7 @@ from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
@@ -33,19 +36,23 @@ async def fetch_pre_deployment_metrics(
     worker_info: WorkerInfo,
     profile_results_dir: Optional[str],
     component_type: SubComponentType,
+    aic_spec: Optional[AICInterpolationSpec] = None,
 ) -> list[ForwardPassMetrics]:
     """Fetch pre-deployment engine perf data as an FPM list.
 
-    1. Try ``get_perf_metrics`` endpoint (PR 7779 self-benchmark)
-    2. Fallback: convert legacy profiler data (npz or JSON) to synthetic FPMs
-    3. If both fail: raise
+    1. Try ``get_perf_metrics`` endpoint (PR 7779 self-benchmark).
+    2. If ``aic_spec`` is set, run AIC interpolation in-process (rapid mode).
+    3. Convert legacy profiler data (NPZ or JSON) to synthetic FPMs
+       (thorough mode).
+    4. If all three fail: raise.
 
     Args:
         runtime: DistributedRuntime instance.
         namespace: Dynamo namespace.
         worker_info: WorkerInfo for the target component.
-        profile_results_dir: Path to legacy profiler npz data (fallback).
+        profile_results_dir: Path to legacy profiler data (last-resort fallback).
         component_type: PREFILL or DECODE.
+        aic_spec: AIC interpolation spec from the profiler (rapid mode only).
 
     Returns:
         List of ForwardPassMetrics suitable for regression bootstrap.
@@ -57,24 +64,53 @@ async def fetch_pre_deployment_metrics(
         )
         return fpms
 
+    if aic_spec is not None:
+        try:
+            fpms = _try_aic_interpolation(aic_spec, component_type)
+            if fpms:
+                logger.info(
+                    f"Loaded {len(fpms)} FPMs from AIC interpolation "
+                    f"({aic_spec.hf_id} on {aic_spec.system}/{aic_spec.backend})"
+                )
+                return fpms
+        except ImportError as e:
+            logger.error(
+                "aic_interpolation is set but aiconfigurator is not installed "
+                "in the planner image: %s",
+                e,
+            )
+        except Exception as e:
+            logger.warning(f"AIC interpolation failed, falling back to files: {e}")
+
     if profile_results_dir:
         try:
             fpms = _convert_profiling_data_to_fpms(profile_results_dir, component_type)
             if fpms:
                 logger.info(
-                    f"Loaded {len(fpms)} FPMs from legacy profiler npz at {profile_results_dir}"
+                    f"Loaded {len(fpms)} FPMs from legacy profiler data at "
+                    f"{profile_results_dir}"
                 )
                 return fpms
         except Exception as e:
             logger.warning(
-                f"Failed to load profiling npz from {profile_results_dir}: {e}"
+                f"Failed to load profiling data from {profile_results_dir}: {e}"
             )
 
     raise RuntimeError(
-        "Failed to obtain pre-deployment performance data. "
-        "Either enable --benchmark-mode on the vLLM worker (get_perf_metrics endpoint) "
-        "or provide profiling results via --profile-results-dir."
+        "Failed to obtain pre-deployment performance data. Either enable the "
+        "get_perf_metrics endpoint on the worker, provide an aic_interpolation "
+        "spec (rapid mode), or supply profiling results via profile_results_dir."
     )
+
+
+def _try_aic_interpolation(
+    aic_spec: AICInterpolationSpec,
+    component_type: SubComponentType,
+) -> list[ForwardPassMetrics]:
+    """Delegate to the AIC sweep. Separated so the ImportError is catchable."""
+    from dynamo.planner.monitoring.aic_interpolation import run_aic_interpolation
+
+    return run_aic_interpolation(aic_spec, component_type)
 
 
 async def _try_endpoint(

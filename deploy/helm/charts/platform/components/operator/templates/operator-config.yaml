@@ -132,9 +132,6 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
-      {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
-      readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
-      {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:
