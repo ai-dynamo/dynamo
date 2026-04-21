@@ -384,7 +384,8 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
-                // TODO: Do we want any of user_data or runtime_config?
+                // TODO: Do we want any of router_config, user_data or runtime_config?
+                // need to cascade down checksum calculation if we want them
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
