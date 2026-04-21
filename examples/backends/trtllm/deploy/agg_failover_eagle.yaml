@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# TRT-LLM EAGLE3 shadow-failover sample DGD (nscale).
+#
+# Image: REPLACE_WITH_TRTLLM_RUNTIME_TAG — substitute with the tag
+# produced by the eagle3-local-impl docker build once it completes.
+#
+# Failover behavior:
+#   - Operator clones the worker into engine-0 (active) + engine-1 (standby)
+#     sharing 1 GPU via DRA.
+#   - DYN_TRTLLM_GMS_SHADOW_MODE=true is injected by the operator.
+#   - Each engine reads ENGINE_ID and sets gms_lock_mode accordingly
+#     (engine-0: rw_or_ro, engine-1: ro).
+#   - When engine-0 dies, engine-1 acquires the failover flock and resumes.
+#
+# Deploy: `kubectl apply -n schwinns -f examples/backends/trtllm/deploy/agg_failover_eagle.yaml`
+#
+# Decoding config shape verified against TensorRT-LLM HEAD 497b07d6c:
+#   - tensorrt_llm/llmapi/llm_args.py:1025-1026   -> decoding_type: "Eagle3"
+#   - tensorrt_llm/llmapi/llm_args.py:649-653     -> speculative_model (AliasChoices
+#                                                   also accepts speculative_model_dir)
+#   - tensorrt_llm/llmapi/llm_args.py:885-891     -> eagle3_one_model default=True
+#   - tests/unittest/_torch/speculative/test_eagle3.py:201-209 (reference usage)
+#
+# Attention backend: TRT-LLM _torch default is "TRTLLM" (tensorrt_llm/_torch/
+# model_config.py:98), NOT FlashInfer, so the B200 FlashInfer + shadow-init
+# crash we hit on vLLM does not apply here. No attn_backend override needed.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-agg-failover-eagle
+  annotations:
+    nvidia.com/dynamo-kube-discovery-mode: container
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: ngc-secret
+        mainContainer:
+          image: REPLACE_WITH_TRTLLM_RUNTIME_TAG
+    TrtllmWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      gpuMemoryService:
+        enabled: true
+      failover:
+        enabled: true
+      extraPodSpec:
+        imagePullSecrets:
+          - name: ngc-secret
+        mainContainer:
+          image: REPLACE_WITH_TRTLLM_RUNTIME_TAG
+          workingDir: /workspace/examples/backends/trtllm
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            - --model
+            - meta-llama/Llama-3.1-8B-Instruct
+            - --gpus-per-node
+            - "1"
+            - --load-format
+            - gms
+            # Enables ENGINE_ID -> gms_lock_mode plumbing for shadow failover.
+            - --gms-shadow-mode
+            # Leave headroom for cuda-graph capture on top of weights + KV.
+            - --free-gpu-memory-fraction
+            - "0.75"
+            - --max-seq-len
+            - "256"
+            - --max-num-tokens
+            - "256"
+            # EAGLE3 one-engine: target + draft live under a single nn.Module,
+            # so a single ModelLoader.load call covers both models and the
+            # existing GMS one-engine patch handles it without change.
+            - --override-engine-args
+            - '{"speculative_config":{"decoding_type":"Eagle3","speculative_model":"yuhuili/EAGLE3-LLaMA3.1-Instruct-8B","max_draft_len":3,"eagle3_one_model":true}}'
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /home/dynamo/.cache/huggingface
+        volumes:
+          - name: hf-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+        nodeSelector:
+          gds-test: "true"
+          nvidia.com/gpu.present: "true"
+        tolerations:
+          - effect: NoSchedule
+            key: nvidia.com/gpu
+            operator: Exists
+          - effect: NoSchedule
+            key: dra
+            operator: Exists
