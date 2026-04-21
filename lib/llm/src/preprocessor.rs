@@ -108,20 +108,59 @@ fn replace_prefix_tokens(
     let template_cut_start = (0..template_prefix_token_ids.len())
         .rev()
         .find(|&pos| eos_token_ids.contains(&template_token_ids[pos]))
-        .with_context(|| {
-            format!(
-                "No EOS token ID found in the chat-templated messages. \
-template_prefix_len={}, template_len={}",
-                template_prefix_token_ids.len(),
-                template_token_ids.len()
-            )
-        })?;
+        .unwrap_or(template_prefix_token_ids.len());
 
     Ok([
         &model_prefix_token_ids[..model_cut_end],
         &template_token_ids[template_cut_start..],
     ]
     .concat())
+}
+
+pub(crate) fn apply_required_prefix_token_ids_to_chat_request(
+    formatter: &dyn OAIPromptFormatter,
+    tokenizer: &dyn crate::tokenizers::traits::Tokenizer,
+    request: &NvCreateChatCompletionRequest,
+    token_ids: &[u32],
+    eos_token_ids: &[u32],
+    add_special_tokens: bool,
+) -> Result<Option<Vec<u32>>> {
+    let Some(required_prefix_token_ids) = request.required_prefix_token_ids.as_ref() else {
+        return Ok(None);
+    };
+
+    let prefix_request = PrefixReuseChatRequest {
+        base: request,
+        messages: messages_to_last_assistant(request),
+    };
+    let template_prefix_prompt = formatter
+        .render(&prefix_request)
+        .with_context(|| "Failed to apply prompt template for prefix reuse")?;
+    let template_prefix_token_ids = tokenizer
+        .encode_with_special_tokens(&template_prefix_prompt, add_special_tokens)?
+        .token_ids()
+        .to_vec();
+
+    Ok(Some(replace_prefix_tokens(
+        required_prefix_token_ids,
+        &template_prefix_token_ids,
+        token_ids,
+        eos_token_ids,
+    )?))
+}
+
+pub(crate) fn messages_to_last_assistant(
+    request: &NvCreateChatCompletionRequest,
+) -> Vec<ChatCompletionRequestMessage> {
+    let messages = &request.inner.messages;
+    let last_assistant_idx = messages
+        .iter()
+        .rposition(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)));
+
+    match last_assistant_idx {
+        Some(idx) => messages[..=idx].to_vec(),
+        None => messages.clone(),
+    }
 }
 
 struct PrefixReuseChatRequest<'a> {
@@ -483,48 +522,19 @@ impl OpenAIPreprocessor {
         }
     }
 
-    fn messages_to_last_assistant(
-        request: &NvCreateChatCompletionRequest,
-    ) -> Vec<ChatCompletionRequestMessage> {
-        let messages = &request.inner.messages;
-        let last_assistant_idx = messages.iter().rposition(|message| {
-            matches!(message, ChatCompletionRequestMessage::Assistant(_))
-        });
-
-        match last_assistant_idx {
-            Some(idx) => messages[..=idx].to_vec(),
-            None => messages.clone(),
-        }
-    }
-
     fn maybe_apply_required_prefix_token_ids(
         &self,
         request: &NvCreateChatCompletionRequest,
         token_ids: &[u32],
     ) -> Result<Option<Vec<u32>>> {
-        let Some(required_prefix_token_ids) = request.required_prefix_token_ids.as_ref() else {
-            return Ok(None);
-        };
-
-        let prefix_request = PrefixReuseChatRequest {
-            base: request,
-            messages: Self::messages_to_last_assistant(request),
-        };
-        let template_prefix_prompt = self
-            .formatter
-            .render(&prefix_request)
-            .with_context(|| "Failed to apply prompt template for prefix reuse")?;
-        let template_prefix_token_ids = self
-            .encode_with_timing(&template_prefix_prompt, None)?
-            .token_ids()
-            .to_vec();
-
-        Ok(Some(replace_prefix_tokens(
-            required_prefix_token_ids,
-            &template_prefix_token_ids,
+        apply_required_prefix_token_ids_to_chat_request(
+            self.formatter.as_ref(),
+            self.tokenizer.as_ref(),
+            request,
             token_ids,
             self.model_info.eos_token_ids().as_slice(),
-        )?))
+            false,
+        )
     }
 
     /// Replace inline `data:` URLs with empty strings in message content parts.
@@ -1979,7 +1989,7 @@ mod tests {
         }))
         .unwrap();
 
-        let messages = OpenAIPreprocessor::messages_to_last_assistant(&request);
+        let messages = messages_to_last_assistant(&request);
 
         assert_eq!(messages.len(), 2);
         assert!(matches!(

@@ -44,6 +44,7 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::model_card::ModelDeploymentCard;
+use crate::preprocessor::apply_required_prefix_token_ids_to_chat_request;
 use crate::preprocessor::prompt::PromptFormatter;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
@@ -475,9 +476,68 @@ fn make_tokenize_chat_completion_request(
         chat_template_args: Some(request.merged_chat_template_kwargs()),
         media_io_kwargs: request.media_io_kwargs.clone(),
         return_tokens_as_token_ids: None,
-        required_prefix_token_ids: None,
+        required_prefix_token_ids: request.required_prefix_token_ids.clone(),
         unsupported_fields: Default::default(),
     }
+}
+
+fn render_tokenize_chat_tokens(
+    card: &ModelDeploymentCard,
+    model: String,
+    request: &TokenizeChatRequest,
+) -> Result<Vec<u32>, ErrorResponse> {
+    request.validate().map_err(bad_request)?;
+
+    let formatter =
+        PromptFormatter::from_mdc_with_chat_template(card, request.chat_template.as_deref())
+            .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to build chat formatter"))?;
+    let tokenizer = card
+        .tokenizer()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+    let eos_token_ids = card
+        .model_info
+        .as_ref()
+        .ok_or_else(|| {
+            ErrorMessage::internal_server_error(
+                "Tokenizer metadata is missing model_info for prefix reuse.",
+            )
+        })?
+        .get_model_info()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load model info"))?
+        .eos_token_ids();
+
+    let wrapped_request = make_tokenize_chat_completion_request(model.clone(), request);
+    let mut prompt = match &formatter {
+        PromptFormatter::OAI(formatter) => formatter.render(&wrapped_request),
+    }
+    .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to render chat prompt"))?;
+
+    if request.continue_final_message {
+        prompt = apply_continue_final_message(prompt, &request.messages)?;
+    }
+
+    let mut token_ids = tokenizer
+        .encode_with_special_tokens(&prompt, request.add_special_tokens)
+        .map_err(|err| {
+            ErrorMessage::from_anyhow(err, "Failed to tokenize rendered chat prompt")
+        })?
+        .token_ids()
+        .to_vec();
+
+    token_ids = match &formatter {
+        PromptFormatter::OAI(formatter) => apply_required_prefix_token_ids_to_chat_request(
+            formatter.as_ref(),
+            tokenizer.as_ref(),
+            &wrapped_request,
+            &token_ids,
+            eos_token_ids.as_slice(),
+            request.add_special_tokens,
+        )
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to apply tokenize prefix reuse"))?
+        .unwrap_or(token_ids),
+    };
+
+    Ok(token_ids)
 }
 
 fn render_tokenize_chat_prompt(
@@ -2133,13 +2193,7 @@ async fn tokenize(
                 .model
                 .clone()
                 .unwrap_or_else(|| card.display_name.clone());
-            let prompt = render_tokenize_chat_prompt(&card, model, &request)?;
-            let encoding = tokenizer
-                .encode_with_special_tokens(&prompt, request.add_special_tokens)
-                .map_err(|err| {
-                    ErrorMessage::from_anyhow(err, "Failed to tokenize rendered chat prompt")
-                })?;
-            let token_ids = encoding.token_ids().to_vec();
+            let token_ids = render_tokenize_chat_tokens(&card, model, &request)?;
             let token_strs = if request.return_token_strs {
                 Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
                     ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
@@ -3945,6 +3999,7 @@ mod tests {
                     media_io_kwargs: None,
                     mm_processor_kwargs: None,
                     tools: None,
+                    required_prefix_token_ids: None,
                 };
                 let prompt =
                     render_tokenize_chat_prompt(&card, "test-model".to_string(), &request).unwrap();
@@ -3966,6 +4021,7 @@ mod tests {
                         media_io_kwargs: None,
                         mm_processor_kwargs: None,
                         tools: None,
+                        required_prefix_token_ids: None,
                     })),
                 )
                 .await
@@ -4004,6 +4060,7 @@ mod tests {
             media_io_kwargs: None,
             mm_processor_kwargs: None,
             tools: Some(tools.clone()),
+            required_prefix_token_ids: None,
         };
         let prompt =
             render_tokenize_chat_prompt(&card, "test-model".to_string(), &request).unwrap();
@@ -4023,6 +4080,7 @@ mod tests {
                 media_io_kwargs: None,
                 mm_processor_kwargs: None,
                 tools: Some(tools),
+                required_prefix_token_ids: None,
             })),
         )
         .await
@@ -4077,6 +4135,7 @@ mod tests {
                 media_io_kwargs: None,
                 mm_processor_kwargs: None,
                 tools: None,
+                required_prefix_token_ids: None,
             })),
         )
         .await
@@ -4208,6 +4267,7 @@ mod tests {
                 serde_json::json!({"size": "ignored"}),
             )])),
             tools: None,
+            required_prefix_token_ids: None,
         };
         let prompt =
             render_tokenize_chat_prompt(&card, "test-model".to_string(), &request).unwrap();
@@ -4235,12 +4295,116 @@ mod tests {
                     serde_json::json!({"size": "ignored"}),
                 )])),
                 tools: None,
+                required_prefix_token_ids: None,
             })),
         )
         .await
         .unwrap();
         let body: TokenizeResponse = response_json(response).await;
         assert_eq!(body.tokens, expected.token_ids());
+    }
+
+    #[tokio::test]
+    async fn test_tokenize_chat_route_applies_required_prefix_token_ids() {
+        let (state, card) = make_tokenize_state("test-model");
+        let request = TokenizeChatRequest {
+            model: Some("test-model".to_string()),
+            messages: sample_chat_messages(),
+            add_generation_prompt: true,
+            return_token_strs: false,
+            continue_final_message: false,
+            add_special_tokens: true,
+            chat_template: None,
+            chat_template_kwargs: None,
+            media_io_kwargs: None,
+            mm_processor_kwargs: None,
+            tools: None,
+            required_prefix_token_ids: None,
+        };
+
+        let baseline_tokens =
+            render_tokenize_chat_tokens(&card, "test-model".to_string(), &request).unwrap();
+        let wrapped_request =
+            make_tokenize_chat_completion_request("test-model".to_string(), &request);
+        let prefix_wrapped_request = NvCreateChatCompletionRequest {
+            inner: dynamo_protocols::types::CreateChatCompletionRequest {
+                model: wrapped_request.inner.model.clone(),
+                messages: crate::preprocessor::messages_to_last_assistant(&wrapped_request),
+                tools: wrapped_request.inner.tools.clone(),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: wrapped_request.chat_template_args.clone(),
+            media_io_kwargs: wrapped_request.media_io_kwargs.clone(),
+            return_tokens_as_token_ids: None,
+            required_prefix_token_ids: None,
+            unsupported_fields: Default::default(),
+        };
+        let formatter =
+            PromptFormatter::from_mdc_with_chat_template(&card, request.chat_template.as_deref())
+                .unwrap();
+        let tokenizer = card.tokenizer().unwrap();
+        let prefix_tokens = match &formatter {
+            PromptFormatter::OAI(formatter) => {
+                let prompt = formatter.render(&prefix_wrapped_request).unwrap();
+                tokenizer
+                    .encode_with_special_tokens(&prompt, request.add_special_tokens)
+                    .unwrap()
+                    .token_ids()
+                    .to_vec()
+            }
+        };
+
+        let eos_token_ids = card
+            .model_info
+            .as_ref()
+            .unwrap()
+            .get_model_info()
+            .unwrap()
+            .eos_token_ids();
+        let eos_token = eos_token_ids[0];
+        let replacement_token = if eos_token == 0 { 1 } else { 0 };
+        let mut required_prefix_token_ids = prefix_tokens.clone();
+        if let Some(last_non_eos) = required_prefix_token_ids
+            .iter_mut()
+            .rev()
+            .find(|token| **token != eos_token)
+        {
+            *last_non_eos = replacement_token;
+        } else {
+            panic!("expected at least one non-EOS token in prefix");
+        }
+
+        let expected_tokens = match &formatter {
+            PromptFormatter::OAI(formatter) => apply_required_prefix_token_ids_to_chat_request(
+                formatter.as_ref(),
+                tokenizer.as_ref(),
+                &NvCreateChatCompletionRequest {
+                    required_prefix_token_ids: Some(required_prefix_token_ids.clone()),
+                    ..wrapped_request.clone()
+                },
+                &baseline_tokens,
+                eos_token_ids.as_slice(),
+                request.add_special_tokens,
+            )
+            .unwrap()
+            .unwrap(),
+        };
+
+        let response = tokenize(
+            State(state),
+            Json(TokenizeRequest::Chat(TokenizeChatRequest {
+                required_prefix_token_ids: Some(required_prefix_token_ids),
+                ..request
+            })),
+        )
+        .await
+        .unwrap();
+        let body: TokenizeResponse = response_json(response).await;
+
+        assert_eq!(body.tokens, expected_tokens);
+        assert_ne!(body.tokens, baseline_tokens);
     }
 
     #[test]

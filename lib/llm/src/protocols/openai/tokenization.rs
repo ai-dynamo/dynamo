@@ -56,6 +56,8 @@ pub struct TokenizeChatRequest {
     pub mm_processor_kwargs: Option<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<dynamo_protocols::types::ChatCompletionTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_prefix_token_ids: Option<Vec<TokenIdType>>,
 }
 
 impl TokenizeChatRequest {
