@@ -44,7 +44,7 @@ pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy};
-pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
+pub use indexer::{BranchShardedIndexer, MaybeError, SyncIndexer, ThreadPoolIndexer};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
     KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, RouterEventSink,
