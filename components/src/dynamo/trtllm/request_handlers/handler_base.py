@@ -1094,7 +1094,16 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
+        # Extract priority if set (e.g., health check sets 1.0 for highest priority).
+        # TRT-LLM accepts priority as a float in [0.0, 1.0], default 0.5.
+        priority = request.get("priority")
+
         try:
+            # Build optional kwargs — only pass priority if explicitly set
+            optional_kwargs = {}
+            if priority is not None:
+                optional_kwargs["priority"] = priority
+
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
@@ -1103,6 +1112,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                **optional_kwargs,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
