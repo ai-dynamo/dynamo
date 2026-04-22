@@ -330,13 +330,17 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
     call_log = []
 
     class FakeEndpoint:
-        async def serve_endpoint(self, *_args, **_kwargs):
+        def serve_endpoint(self, *_args, **_kwargs):
             call_log.append("serve_endpoint")
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                call_log.append("serve_cancelled")
-                raise
+
+            async def wait_forever():
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    call_log.append("serve_cancelled")
+                    raise
+
+            return asyncio.create_task(wait_forever())
 
     class FakeLock:
         def __init__(self, path):

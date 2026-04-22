@@ -544,12 +544,10 @@ async def init_llm_worker(
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
         standby_generate_proxy = _StandbyGenerateProxy(health_check_payload)
-        standby_serve_task = asyncio.create_task(
-            endpoint.serve_endpoint(
-                standby_generate_proxy.generate,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            )
+        standby_serve_task = endpoint.serve_endpoint(
+            standby_generate_proxy.generate,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
         )
         await asyncio.sleep(0)
         if standby_serve_task.done():
