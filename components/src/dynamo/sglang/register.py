@@ -15,6 +15,11 @@ from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_schedul
 from dynamo.sglang.args import DynamoConfig
 
 
+def _get_registered_model_name(server_args: ServerArgs) -> str:
+    """Return the user-facing model name Dynamo should advertise for this worker."""
+    return getattr(server_args, "served_model_name", None) or server_args.model_path
+
+
 async def _register_model_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
@@ -274,9 +279,7 @@ async def register_image_diffusion_model(
         by default. When output_modalities is provided, the ModelType is derived
         from the given modality names instead.
     """
-    model_name = (
-        getattr(server_args, "served_model_name", None) or server_args.model_path
-    )
+    model_name = _get_registered_model_name(server_args)
 
     model_type = ModelType.Images
     if output_modalities:
@@ -330,9 +333,7 @@ async def register_video_generation_model(
     Note:
         Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
     """
-    model_name = (
-        getattr(server_args, "served_model_name", None) or server_args.model_path
-    )
+    model_name = _get_registered_model_name(server_args)
 
     try:
         await register_model(
