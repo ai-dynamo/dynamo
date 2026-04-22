@@ -26,6 +26,9 @@ const MAX_REDIRECTS: usize = 3;
 // Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
 // 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
 // (reserved). Link-local 169.254/16 covers the AWS / OpenStack metadata IP.
+//
+// Keep this list in sync with the Python counterpart
+// (components/src/dynamo/common/multimodal/url_validator.py::_BLOCKED_IP_NETWORKS).
 static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
     [
         "0.0.0.0/8",
@@ -58,6 +61,9 @@ static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
 // Hostnames we reject by literal match without any DNS lookup. Defends
 // against /etc/hosts tricks or malicious resolvers that alias metadata /
 // internal-service names to attacker IPs. Match is case-insensitive.
+//
+// Keep this list in sync with the Python counterpart
+// (components/src/dynamo/common/multimodal/url_validator.py::_BLOCKED_HOSTS).
 static BLOCKED_HOSTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         "localhost",
@@ -126,9 +132,10 @@ impl MediaFetcher {
         }
 
         // Host-level checks: blocked hostnames and IP literals in blocked
-        // ranges. DNS-resolved IPs are checked in `check_if_url_allowed_async`.
+        // ranges. DNS-resolved IPs are checked in `check_if_url_allowed_with_dns`.
         if !self.allow_private_ips {
-            match url.host() {
+            let ip_literal = match url.host() {
+                None => anyhow::bail!("URL has no host component"),
                 Some(url::Host::Domain(domain)) => {
                     let lowered = domain.to_ascii_lowercase();
                     if BLOCKED_HOSTS.contains(lowered.as_str()) {
@@ -136,20 +143,15 @@ impl MediaFetcher {
                             "Host '{domain}' is blocked (resolves to internal service)"
                         );
                     }
+                    None
                 }
-                Some(url::Host::Ipv4(ip)) => {
-                    let addr = IpAddr::V4(ip);
-                    if is_blocked_ip(&addr) {
-                        anyhow::bail!("IP literal '{addr}' is in a blocked range");
-                    }
-                }
-                Some(url::Host::Ipv6(ip)) => {
-                    let addr = IpAddr::V6(ip);
-                    if is_blocked_ip(&addr) {
-                        anyhow::bail!("IP literal '{addr}' is in a blocked range");
-                    }
-                }
-                None => anyhow::bail!("URL has no host component"),
+                Some(url::Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+                Some(url::Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+            };
+            if let Some(ip) = ip_literal
+                && is_blocked_ip(&ip)
+            {
+                anyhow::bail!("IP literal '{ip}' is in a blocked range");
             }
         }
 
