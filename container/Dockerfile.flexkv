@@ -32,9 +32,12 @@ RUN apt-get update && \
 USER dynamo
 
 # Install FlexKV from source
+# LIBRARY_PATH includes CUDA stubs so the linker can find libcuda.so at build time
+# (the real libcuda.so is provided by the host driver at runtime)
 ARG FLEXKV_REF=main
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    export LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-} && \
     git clone --depth 1 --branch ${FLEXKV_REF} https://github.com/taco-project/FlexKV.git /tmp/FlexKV && \
     cd /tmp/FlexKV && \
     ./build.sh && \
