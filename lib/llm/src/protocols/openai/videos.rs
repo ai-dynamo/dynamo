@@ -42,10 +42,10 @@ pub struct NvCreateVideoRequest {
 
     /// Output container format: "mp4", "webm", "gif", etc.
     /// This field is used as model hint and the model may not
-    /// return the requested format, should check with response_format
+    /// return the requested format, should check with output_format
     /// field in the response data.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<String>,
+    pub output_format: Option<String>,
 
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,7 @@ pub struct NvCreateVideoRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VideoData {
     /// Actual container format of this video: "mp4", "webm", "gif"
-    pub response_format: String,
+    pub output_format: String,
 
     /// URL of the generated video (if response_format is "url")
     #[serde(skip_serializing_if = "Option::is_none")]
