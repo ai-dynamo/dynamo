@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	sigs.k8s.io/controller-runtime v0.22.4
-	sigs.k8s.io/gateway-api-inference-extension v1.2.1
+	sigs.k8s.io/gateway-api-inference-extension v1.4.0
 )
 
 require (
@@ -105,5 +105,5 @@ require (
 )
 
 // NOTE: For local development, uncomment the replace directive below.
-// For Docker builds, keep it commented out to use the published v1.2.1 release.
+// For Docker builds, keep it commented out to use the published v1.4.0 release.
 // replace sigs.k8s.io/gateway-api-inference-extension => ../../../gaie_latest/gateway-api-inference-extension
