@@ -71,7 +71,7 @@ Dynamo is now supported directly in LangChain using the [NVIDIA AI Endpoints int
 
 ### Speculative prefill
 
-After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/src/bin/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
+After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
 
 ### Priority-aware routing
 

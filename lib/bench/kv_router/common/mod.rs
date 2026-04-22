@@ -674,6 +674,7 @@ impl SequenceData {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: self
                         .local_hashes
                         .iter()

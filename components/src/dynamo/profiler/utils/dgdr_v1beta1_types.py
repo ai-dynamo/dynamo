@@ -59,11 +59,20 @@ class SearchStrategy(str, Enum):
 
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
+    B200SXM = "b200_sxm"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"
-    B200SXM = "b200_sxm"
+    H100PCIe = "h100_pcie"
     A100SXM = "a100_sxm"
+    A100PCIe = "a100_pcie"
     L40S = "l40s"
+    L40 = "l40"
+    L4 = "l4"
+    V100SXM = "v100_sxm"
+    V100PCIe = "v100_pcie"
+    T4 = "t4"
+    MI200 = "mi200"
+    MI300 = "mi300"
 
 
 class BackendType(str, Enum):
@@ -209,6 +218,14 @@ class HardwareSpec(BaseModel):
     )
     numGpusPerNode: Optional[int] = Field(
         default=None, description="NumGPUsPerNode is the number of GPUs per node."
+    )
+    interconnect: Optional[str] = Field(
+        default=None,
+        description='Interconnect describes the primary GPU-to-GPU interconnect *within a node*.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed. - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink" vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.  Impact of wrong / missing values: - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts, resulting in degraded performance compared to expectations. - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may choose conservative plans and leave performance on the table. - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to conservative assumptions.  Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected. ',
+    )
+    rdma: Optional[bool] = Field(
+        default=None,
+        description="RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator, GPUDirect settings). It only expresses availability/intent. - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery is unavailable, it may remain unset.  Impact of wrong / missing values: - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or deployments to assume RDMA is available; depending on the runtime transport selection and fallback behavior, this can lead to connection/setup failures or performance regressions. - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and fall back to non-RDMA transports, usually remaining functional but potentially slower. - If unset and undiscovered, consumers should treat RDMA availability as unknown and use conservative defaults / fallback transports. ",
     )
 
 

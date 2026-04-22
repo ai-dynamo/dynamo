@@ -53,7 +53,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
-from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
+from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
@@ -63,39 +63,20 @@ from dynamo.trtllm.request_handlers.handlers import (
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 
+# Optional imports for Rust frontend media decoding support
+MediaDecoder: type | None = None
+MediaFetcher: type | None = None
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
-
-
-async def get_engine_runtime_config(
-    engine: TensorRTLLMEngine, config: Config
-) -> ModelRuntimeConfig:
-    """Retrieve runtime configuration from TensorRT-LLM engine."""
-    runtime_config = ModelRuntimeConfig()
-
-    try:
-        # Extract total_kv_blocks from engine stats
-        stats = engine.llm.get_stats_async(timeout=5)
-        stat = await anext(stats)
-        runtime_config.total_kv_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-        logging.info(
-            f"Set runtime config total_kv_blocks: {runtime_config.total_kv_blocks}"
-        )
-
-        # Extract max number of sequences
-        runtime_config.max_num_seqs = config.max_batch_size
-        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
-
-        # Get max_num_batched_tokens from config
-        runtime_config.max_num_batched_tokens = config.max_num_tokens
-        logging.info(
-            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
-        )
-    except Exception as e:
-        logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
-        # Keep default/None values if retrieval fails
-
-    return runtime_config
 
 
 def build_kv_connector_config(config: Config):
@@ -441,6 +422,7 @@ async def init_llm_worker(
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
+            enable_frontend_decoding=config.frontend_decoding,
         )
 
     else:
@@ -499,8 +481,11 @@ async def init_llm_worker(
         # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
         # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
         # Both parameters control the same thing: how many requests can be processed simultaneously
-        runtime_config.max_num_seqs = config.max_batch_size
-        runtime_config.max_num_batched_tokens = config.max_num_tokens
+
+        # Need to get max_num_seqs and max_num_batched_tokens from engine_args
+        # because they can be overridden by --extra-engine-args or --override-engine-args
+        runtime_config.max_num_seqs = engine_args["max_batch_size"]
+        runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.exclude_tools_when_tool_choice_none = (
@@ -614,6 +599,21 @@ async def init_llm_worker(
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
+        media_decoder = None
+        media_fetcher = None
+        if config.frontend_decoding:
+            if not MEDIA_DECODER_AVAILABLE:
+                raise RuntimeError(
+                    "--frontend-decoding requires MediaDecoder support. "
+                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+                )
+            assert MediaDecoder is not None and MediaFetcher is not None
+            media_decoder = MediaDecoder()
+            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_fetcher = MediaFetcher()
+            media_fetcher.timeout_ms(30000)
+            media_fetcher.allow_direct_port(False)
+
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only
         # Prefill and decode workers register - frontend detects their role via ModelType
@@ -628,6 +628,8 @@ async def init_llm_worker(
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
+                media_decoder=media_decoder,
+                media_fetcher=media_fetcher,
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)

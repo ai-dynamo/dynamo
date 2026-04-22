@@ -51,3 +51,12 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         _uuid_cache[device] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+
+
+def wait_for_weights_socket(device: int) -> None:
+    """Block until the GMS weights socket for the given device exists."""
+    import time
+
+    path = get_socket_path(device, "weights")
+    while not os.path.exists(path):
+        time.sleep(0.1)

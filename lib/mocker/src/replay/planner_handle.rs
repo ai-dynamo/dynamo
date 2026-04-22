@@ -15,7 +15,7 @@ use anyhow::Result;
 use dynamo_kv_router::config::KvRouterConfig;
 
 use super::offline::agg::AggRuntime;
-use super::offline::components::ReplayMode;
+use super::offline::components::{ReplayMode, TrafficStats};
 use super::offline::disagg::DisaggRuntime;
 use super::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport,
@@ -162,10 +162,14 @@ impl PlannerReplayHandle {
 
     /// Drain accumulated traffic metrics since the last drain.
     ///
-    /// Returns `(duration_s, num_req, avg_isl, avg_osl)`. Call this only on
-    /// throughput-scaling ticks so the window covers the full
-    /// `throughput_adjustment_interval`, not just the gap between load ticks.
-    pub fn drain_traffic(&mut self) -> (f64, usize, f64, f64) {
+    /// Call this only on throughput-scaling ticks so the window covers the
+    /// full `throughput_adjustment_interval`, not just the gap between load
+    /// ticks. The returned [`TrafficStats::avg_kv_hit_rate`] is the
+    /// arithmetic mean of per-request ``overlap / isl`` ratios across
+    /// admissions in the window — matching the real router's per-request
+    /// Prometheus histogram, where each request contributes one sample
+    /// regardless of ISL size.
+    pub fn drain_traffic(&mut self) -> TrafficStats {
         match &mut self.runtime {
             RuntimeKind::Agg(rt) => rt.drain_traffic(),
             RuntimeKind::Disagg(rt) => rt.drain_traffic(),
