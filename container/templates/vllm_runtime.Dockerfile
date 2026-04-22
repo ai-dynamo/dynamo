@@ -409,6 +409,10 @@ RUN cd /usr/local/lib && \
     ldconfig
 {% endif %}
 
+{% if target == "runtime" %}
+{% include "templates/sbom_inject.Dockerfile" %}
+{% endif %}
+
 USER dynamo
 
 ARG DYNAMO_COMMIT_SHA

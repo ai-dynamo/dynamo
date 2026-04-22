@@ -626,3 +626,45 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+##################################
+##### Build-time SBOM Tooling ####
+##################################
+# cargo-auditable is installed during wheel_builder so any Rust crate compiled
+# in this stage embeds a `.dep-v0` section that syft can read later. The actual
+# SBOM scan + attribution rendering happens in the runtime stage (see
+# templates/sbom_inject.Dockerfile) where the framework site-packages and all
+# other runtime artifacts are present and can be discovered dynamically.
+{% if target == "runtime" %}
+
+# Install cargo-auditable from pre-built binary (saves 2-3 min vs cargo install).
+# cargo-auditable embeds dependency-tree metadata into Rust binaries for SBOM tooling.
+# The cargo-wrapper script below ensures maturin invokes cargo-auditable transparently.
+ARG CARGO_AUDITABLE_VERSION=0.6.4
+USER root
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) CARGO_AUD_TRIPLE="x86_64-unknown-linux-gnu" ;; \
+      arm64) CARGO_AUD_TRIPLE="aarch64-unknown-linux-gnu" ;; \
+      *) echo "Unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    CARGO_AUD_URL="https://github.com/rust-secure-code/cargo-auditable/releases/download/v${CARGO_AUDITABLE_VERSION}/cargo-auditable-${CARGO_AUD_TRIPLE}.tar.gz"; \
+    if curl -fsSL --head "$CARGO_AUD_URL" >/dev/null 2>&1; then \
+        curl -fsSL "$CARGO_AUD_URL" | tar -xz -C /usr/local/cargo/bin/ --strip-components=1 "cargo-auditable-${CARGO_AUD_TRIPLE}/cargo-auditable"; \
+    else \
+        echo "Binary not available for ${CARGO_AUD_TRIPLE}, falling back to cargo install"; \
+        /usr/local/cargo/bin/cargo install --locked cargo-auditable@${CARGO_AUDITABLE_VERSION}; \
+    fi; \
+    chmod +x /usr/local/cargo/bin/cargo-auditable
+
+# Create cargo wrapper so maturin uses cargo-auditable transparently.
+# Maturin honors the CARGO environment variable; this wrapper invokes
+# `cargo auditable` which embeds dependency metadata into compiled binaries.
+# TODO(SBOM): Verify maturin + cargo-auditable integration produces valid .dep-v0 sections
+RUN printf '#!/bin/sh\nexec /usr/local/cargo/bin/cargo auditable "$@"\n' > /usr/local/bin/cargo-wrapper && \
+    chmod +x /usr/local/bin/cargo-wrapper
+ENV CARGO=/usr/local/bin/cargo-wrapper
+
+# Drop privileges back to dynamo before any subsequent stage COPYs from this one.
+USER dynamo
+{% endif %}

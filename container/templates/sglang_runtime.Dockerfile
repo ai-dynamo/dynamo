@@ -87,6 +87,10 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
     ln -s /workspace /sgl-workspace/dynamo
 
+{% if target == "runtime" %}
+{% include "templates/sbom_inject.Dockerfile" %}
+{% endif %}
+
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
