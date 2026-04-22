@@ -68,6 +68,16 @@ on:
         required: false
         type: number
         default: 30
+      dind_as_sidecar:
+        description: >-
+          'true' runs pytest inside a container with DinD sidecar and xdist workers
+          (-n parallel_mode). 'false' runs pytest sequentially with --cpus/--memory
+          limits and no xdist. Leave default 'true' unless the test suite needs
+          sequential execution (e.g. shared-port NATS/ETCD fixtures that don't
+          support parallel workers).
+        required: false
+        type: string
+        default: 'true'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -161,7 +171,7 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
-          dind_as_sidecar: 'true'
+          dind_as_sidecar: ${{ inputs.dind_as_sidecar }}
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
@@ -174,4 +184,4 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
-          dind_as_sidecar: 'true'
+          dind_as_sidecar: ${{ inputs.dind_as_sidecar }}

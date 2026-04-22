@@ -160,6 +160,9 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       cpu_parallel_mode: '4'
       run_gpu_tests: false
+      # Dynamo's bindings conftest shares a single NATS/ETCD instance on fixed
+      # ports, so xdist parallel workers race on port 4222. Run sequentially.
+      dind_as_sidecar: 'false'
     secrets: inherit
 
   dynamo-test-sequential:
@@ -179,6 +182,7 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
+      dind_as_sidecar: 'false'  # sequential — shared NATS/ETCD ports, see dynamo-test-parallel
     secrets: inherit
 
   dynamo-test-gpu:
