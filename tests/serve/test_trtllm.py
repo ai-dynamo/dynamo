@@ -404,6 +404,7 @@ trtllm_configs = {
                         "seed": 42,
                     },
                 },
+                timeout=300,
                 repeat_count=1,
                 expected_response=[],
                 expected_log=[],

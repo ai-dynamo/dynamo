@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import logging
 import math
 import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import requests
@@ -1381,9 +1383,6 @@ class I2VPayload(VideoGenerationPayload):
     """Payload for image-to-video via /v1/videos with input_reference."""
 
     def __post_init__(self):
-        import base64
-        from io import BytesIO
-
         from PIL import Image
 
         image_buffer = BytesIO()
