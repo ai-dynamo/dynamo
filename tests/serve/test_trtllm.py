@@ -70,6 +70,33 @@ trtllm_configs = {
             metric_payload_default(min_num_requests=6, backend="trtllm"),
         ],
     ),
+    # Aggregated with canary health check enabled.
+    # Validates the health check payload (with priority=1.0) is accepted by
+    # the engine and the /health endpoint reports ready after canary succeeds.
+    "aggregated_health_check": TRTLLMConfig(
+        name="aggregated_health_check",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
+        health_check_workers=True,
+        env={
+            "DYN_HEALTH_CHECK_ENABLED": "true",
+            "DYN_CANARY_WAIT_TIME": "2",
+        },
+        request_payloads=[
+            chat_payload_default(),
+        ],
+    ),
     "aggregated_unified": TRTLLMConfig(
         name="aggregated_unified",
         directory=trtllm_dir,
