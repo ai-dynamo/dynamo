@@ -1147,7 +1147,7 @@ mod tests {
     fn kimi_k2_parser() -> BasicReasoningParser {
         // Mirrors the `kimi_k25` registration in reasoning/mod.rs.
         BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true)
-            .with_tool_start_token("<|tool_calls_section_begin|>")
+            .with_tool_start_token(crate::reasoning::KIMI_K2_TOOL_SECTION_BEGIN)
     }
 
     #[test]

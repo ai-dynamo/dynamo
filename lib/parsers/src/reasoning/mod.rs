@@ -14,6 +14,11 @@ pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 
+/// Kimi-K2/K2.5 tool-call section marker. Shared between the `kimi_k25` reasoning-parser
+/// registration and its test fixtures so both stay in sync. Mirrors
+/// `KimiK2ParserConfig::default().section_start` in `crate::tool_calling::config`.
+pub(crate) const KIMI_K2_TOOL_SECTION_BEGIN: &str = "<|tool_calls_section_begin|>";
+
 static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
 
 /// Initialize the global reasoning parser map
@@ -170,7 +175,7 @@ impl ReasoningParserType {
             ReasoningParserType::KimiK25 => ReasoningParserWrapper {
                 parser: Box::new(
                     BasicReasoningParser::new("<think>".into(), "</think>".into(), true, true)
-                        .with_tool_start_token("<|tool_calls_section_begin|>"),
+                        .with_tool_start_token(KIMI_K2_TOOL_SECTION_BEGIN),
                 ),
             },
             ReasoningParserType::Mistral => ReasoningParserWrapper {
