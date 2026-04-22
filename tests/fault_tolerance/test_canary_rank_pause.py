@@ -146,6 +146,7 @@ def _wait_for_status(url: str, target: int, deadline_s: float) -> int:
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.gpu_1
+@pytest.mark.timeout(300)
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("scenario", SCENARIOS)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
