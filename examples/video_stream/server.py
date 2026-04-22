@@ -20,7 +20,10 @@ Usage:
 
 import argparse
 import asyncio
+import copy
+import json
 import logging
+import re
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -82,6 +85,17 @@ _HTML = """\
                border-top-color: #60a5fa; border-radius: 50%;
                animation: spin .7s linear infinite; display: none; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .mock-warn { display: none; font-size: 0.75rem; color: #f59e0b;
+                 background: #1c1407; border: 1px solid #78350f;
+                 border-radius: 4px; padding: 6px 10px; margin-bottom: 10px; }
+    .debug-panel { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+    .debug-label { font-size: 0.7rem; color: #4b5563; text-transform: uppercase;
+                   letter-spacing: 0.06em; margin-bottom: 3px; }
+    .debug-pre { font-family: 'Menlo', 'Consolas', monospace; font-size: 0.72rem;
+                 background: #070707; border: 1px solid #1c1c1c; border-radius: 4px;
+                 padding: 8px 10px; color: #6ee7b7; white-space: pre-wrap;
+                 word-break: break-all; max-height: 160px; overflow-y: auto;
+                 min-height: 36px; }
   </style>
 </head>
 <body>
@@ -94,6 +108,9 @@ _HTML = """\
 
   <!-- ── MJPEG Live ── -->
   <div id="tab-mjpeg" class="tab active">
+    <div id="mj-mock-warn" class="mock-warn">
+      Mock model: always streams the same pre-recorded video — prompt, size, fps, and seconds are ignored.
+    </div>
     <div class="form-grid">
       <label>Model
         <input id="mj-model" value="video-stream-model" />
@@ -120,10 +137,17 @@ _HTML = """\
       <span class="placeholder" id="mj-placeholder">Stream will appear here</span>
       <img id="mj-frame" alt="" style="display:none" />
     </div>
+    <div class="debug-panel">
+      <div><div class="debug-label">Request body</div><pre id="mj-req-log" class="debug-pre">—</pre></div>
+      <div><div class="debug-label">Response chunks</div><pre id="mj-res-log" class="debug-pre">—</pre></div>
+    </div>
   </div>
 
   <!-- ── MP4 Playback ── -->
   <div id="tab-mp4" class="tab">
+    <div id="mp-mock-warn" class="mock-warn">
+      Mock model: always returns the same pre-recorded video — prompt, size, and seconds are ignored.
+    </div>
     <div class="form-grid">
       <label>Model
         <input id="mp-model" value="video-stream-model" />
@@ -148,9 +172,25 @@ _HTML = """\
       <img   id="mp-img"   alt="" style="display:none" />
       <video id="mp-video" controls style="display:none"></video>
     </div>
+    <div class="debug-panel">
+      <div><div class="debug-label">Request body</div><pre id="mp-req-log" class="debug-pre">—</pre></div>
+      <div><div class="debug-label">Response chunks</div><pre id="mp-res-log" class="debug-pre">—</pre></div>
+    </div>
   </div>
 
   <script>
+    // ── Mock-model warning ───────────────────────────────────────────────────
+    const MOCK_MODEL = 'video-stream-model';
+    function bindMockWarn(inputId, warnId) {
+      const inp  = document.getElementById(inputId);
+      const warn = document.getElementById(warnId);
+      function update() { warn.style.display = inp.value.trim() === MOCK_MODEL ? 'block' : 'none'; }
+      inp.addEventListener('input', update);
+      update();
+    }
+    bindMockWarn('mj-model', 'mj-mock-warn');
+    bindMockWarn('mp-model', 'mp-mock-warn');
+
     // ── Tab switching ────────────────────────────────────────────────────────
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -292,6 +332,33 @@ _HTML = """\
         mpSpinner.style.display = 'none';
       }
     });
+
+    // ── Debug panel polling ──────────────────────────────────────────────────
+    const mjReqLog = document.getElementById('mj-req-log');
+    const mjResLog = document.getElementById('mj-res-log');
+    const mpReqLog = document.getElementById('mp-req-log');
+    const mpResLog = document.getElementById('mp-res-log');
+    let _lastReq = null, _lastChunks = null;
+
+    setInterval(async () => {
+      try {
+        const d = await fetch('/api/debug').then(r => r.json());
+        if (d.request !== _lastReq) {
+          const txt = d.request || '—';
+          mjReqLog.textContent = txt;
+          mpReqLog.textContent = txt;
+          _lastReq = d.request;
+        }
+        if (d.chunks !== _lastChunks) {
+          const txt = d.chunks || '—';
+          mjResLog.textContent = txt;
+          mpResLog.textContent = txt;
+          mjResLog.scrollTop = mjResLog.scrollHeight;
+          mpResLog.scrollTop = mpResLog.scrollHeight;
+          _lastChunks = d.chunks;
+        }
+      } catch (_) {}
+    }, 100);
   </script>
 </body>
 </html>
@@ -308,11 +375,7 @@ async def handle_index(request: web.Request) -> web.Response:
 
 
 async def handle_stream(request: web.Request) -> web.StreamResponse:
-    """GET /api/stream?model=...&prompt=... → Dynamo POST /v1/videos/stream (MJPEG).
-
-    Maps query parameters to the Dynamo JSON body so the browser can use a
-    plain img.src = '/api/stream?...' for native MJPEG display.
-    """
+    """GET /api/stream?model=...&prompt=... → Dynamo POST /v1/videos/stream (MJPEG)."""
     q = request.rel_url.query
     model = q.get("model", "")
     prompt = q.get("prompt", "")
@@ -329,6 +392,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         nvext["fps"] = int(q["fps"])
     if nvext:
         body["nvext"] = nvext
+
+    debug = request.app["debug"]
+    debug["request"] = json.dumps(body, indent=2)
+    debug["chunks"] = ""
+
     dynamo_url = request.app["dynamo_url"]
     timeout = ClientTimeout(total=None, connect=10)
 
@@ -343,19 +411,60 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
                         reason=f"Dynamo error {upstream.status}: {text}"
                     )
 
-                response = web.StreamResponse(
-                    headers={
-                        "Content-Type": upstream.headers.get(
-                            "Content-Type",
-                            "multipart/x-mixed-replace; boundary=frame",
-                        )
-                    }
+                ct = upstream.headers.get(
+                    "Content-Type", "multipart/x-mixed-replace; boundary=frame"
                 )
+                m = re.search(r"boundary=(\S+)", ct)
+                boundary = (m.group(1) if m else "frame").strip('"')
+                bound_b = f"--{boundary}\r\n".encode()
+                head_end = b"\r\n\r\n"
+                next_bound_b = f"--{boundary}".encode()
+
+                response = web.StreamResponse(headers={"Content-Type": ct})
                 await response.prepare(request)
+
+                buf = b""
+                frame_idx = 0
                 async for chunk in upstream.content.iter_any():
                     await response.write(chunk)
-                    await asyncio.sleep(0.1)  # Verify
+                    buf += chunk
+                    if len(buf) > 2_097_152:
+                        buf = buf[-1_048_576:]
+                    while True:
+                        bpos = buf.find(bound_b)
+                        if bpos == -1:
+                            break
+                        hstart = bpos + len(bound_b)
+                        hend = buf.find(head_end, hstart)
+                        if hend == -1:
+                            break
+                        nextb = buf.find(next_bound_b, hend + len(head_end))
+                        if nextb == -1:
+                            break
+                        headers_text = buf[hstart:hend].decode(
+                            "utf-8", errors="replace"
+                        )
+                        data_size = nextb - (hend + len(head_end)) - 2
+                        ct_match = re.search(
+                            r"Content-Type:\s*([^\r\n]+)", headers_text, re.I
+                        )
+                        entry = {
+                            "frame": frame_idx,
+                            "content_type": (
+                                ct_match.group(1).strip() if ct_match else "image/jpeg"
+                            ),
+                            "data": f"<frame_data_{frame_idx}>",
+                            "size_bytes": max(0, data_size),
+                        }
+                        debug["chunks"] += json.dumps(entry) + "\n"
+                        frame_idx += 1
+                        buf = buf[nextb:]
+                    debug["chunks"] += "==== end of response chunk ====\n"
 
+                    # Add client-side delay to show streaming frames
+                    # Otherwise the frames will be updated as soon as
+                    # the next frame is received which is too fast to see.
+                    await asyncio.sleep(0.2)
     except web.HTTPException:
         raise
     except Exception as exc:
@@ -368,6 +477,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 async def handle_video(request: web.Request) -> web.Response:
     """POST /api/video → Dynamo POST /v1/videos (non-streaming JSON)."""
     body = await request.json()
+
+    debug = request.app["debug"]
+    debug["request"] = json.dumps(body, indent=2)
+    debug["chunks"] = ""
+
     dynamo_url = request.app["dynamo_url"]
     timeout = ClientTimeout(total=300, connect=10)
 
@@ -375,10 +489,23 @@ async def handle_video(request: web.Request) -> web.Response:
         async with ClientSession(timeout=timeout) as session:
             async with session.post(f"{dynamo_url}/v1/videos", json=body) as upstream:
                 json_body = await upstream.json()
+                sanitized = copy.deepcopy(json_body)
+                if isinstance(sanitized.get("data"), list):
+                    for i, item in enumerate(sanitized["data"]):
+                        if "b64_json" in item:
+                            item["b64_json"] = f"<video_data_{i}>"
+                        if "url" in item:
+                            item["url"] = f"<video_url_{i}>"
+                debug["chunks"] = json.dumps(sanitized, indent=2)
                 return web.json_response(json_body, status=upstream.status)
     except Exception as exc:
         logger.error("Video proxy error: %s", exc)
         raise web.HTTPBadGateway(reason=str(exc))
+
+
+async def handle_debug(request: web.Request) -> web.Response:
+    """GET /api/debug → current request body and response chunks strings."""
+    return web.json_response(request.app["debug"])
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +516,9 @@ async def handle_video(request: web.Request) -> web.Response:
 def make_app(dynamo_url: str) -> web.Application:
     app = web.Application()
     app["dynamo_url"] = dynamo_url.rstrip("/")
+    app["debug"] = {"request": "", "chunks": ""}
     app.router.add_get("/", handle_index)
+    app.router.add_get("/api/debug", handle_debug)
     app.router.add_get("/api/stream", handle_stream)
     app.router.add_post("/api/video", handle_video)
     return app
