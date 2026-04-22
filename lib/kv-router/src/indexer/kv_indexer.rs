@@ -49,7 +49,7 @@ fn apply_event_with_prune_tracking(
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
     let event_for_prune = prune_manager.is_some().then(|| event.clone());
-    let result = trie.apply_event(event);
+    let result = trie.apply_event_with_counters(event, Some(counters));
     let result_is_ok = result.is_ok();
     let tree_size = trie.current_size();
     tracing::trace!(

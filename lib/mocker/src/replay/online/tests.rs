@@ -9,7 +9,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -24,7 +24,7 @@ use super::entrypoints::{
     simulate_trace_requests, simulate_trace_requests_with_stats,
     simulate_trace_workload_with_stats,
 };
-use super::state::{LiveReplayMode, SharedLiveRuntimeStats, WorkloadDispatchState, record_arrival};
+use super::state::{SharedLiveRuntimeStats, WorkloadDispatchState, record_arrival};
 use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
 
 fn replay_args() -> MockEngineArgs {
@@ -349,7 +349,6 @@ async fn test_workload_wakeup_is_not_lost_when_completion_happens_before_await()
 
 #[tokio::test]
 async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion_gated() {
-    let semaphore = Arc::new(Semaphore::new(1));
     let notify = Arc::new(Notify::new());
     let wake = notify.notified();
     tokio::pin!(wake);
@@ -357,13 +356,7 @@ async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion
     assert!(
         tokio::time::timeout(
             tokio::time::Duration::from_millis(20),
-            wait_for_workload_progress(
-                LiveReplayMode::Concurrency { max_in_flight: 1 },
-                Some(semaphore.as_ref()),
-                None,
-                Instant::now(),
-                wake.as_mut(),
-            ),
+            wait_for_workload_progress(None, Instant::now(), wake.as_mut()),
         )
         .await
         .is_err(),
@@ -372,13 +365,7 @@ async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion
 
     let wake = notify.notified();
     tokio::pin!(wake);
-    let wait = wait_for_workload_progress(
-        LiveReplayMode::Concurrency { max_in_flight: 1 },
-        Some(semaphore.as_ref()),
-        None,
-        Instant::now(),
-        wake.as_mut(),
-    );
+    let wait = wait_for_workload_progress(None, Instant::now(), wake.as_mut());
     let notify_task = {
         let notify = Arc::clone(&notify);
         tokio::spawn(async move {
