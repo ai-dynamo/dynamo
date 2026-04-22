@@ -9,7 +9,7 @@
 # --enable-dp-attention) which are swept by the profiler.
 model: "deepseek-ai/DeepSeek-R1"
 backend: sglang
-image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0"
+image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2"
 hardware:
   gpuSku: h200_sxm
   totalGpus: 16
