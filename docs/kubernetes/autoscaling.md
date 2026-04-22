@@ -359,7 +359,7 @@ Add this rule to your `prometheus-adapter-values.yaml` (alongside the TTFT rule)
     overrides:
       namespace: {resource: "namespace"}
   name:
-    as: "dynamo_queued_requests"
+    as: "dynamo_frontend_pending_requests"
   metricsQuery: |
     sum(<<.Series>>{<<.LabelMatchers>>}) by (namespace, dynamo_namespace)
 ```
@@ -383,7 +383,7 @@ spec:
   - type: External
     external:
       metric:
-        name: dynamo_queued_requests
+        name: dynamo_frontend_pending_requests
         selector:
           matchLabels:
             dynamo_namespace: "default-sglang-agg"
@@ -506,7 +506,7 @@ spec:
   - type: prometheus
     metadata:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
-      metricName: dynamo_queued_requests
+      metricName: dynamo_frontend_pending_requests
       query: |
         sum(dynamo_frontend_stage_requests{dynamo_namespace="default-sglang-agg"})
       threshold: "10"    # Scale up when queue > 10 requests
