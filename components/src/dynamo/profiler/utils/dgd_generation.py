@@ -70,7 +70,12 @@ def assemble_final_config(
     1. **Mocker** — swap the base to the mocker DGD template if enabled.
     2. **Planner** — inject the Planner service + planner-config ConfigMap.
     3. **Profile data** — attach interpolation-data ConfigMap when mocker
-       or planner-throughput is enabled.
+       or planner-throughput is enabled. The ConfigMap is only emitted
+       when the picked config is disaggregated AND the interpolation NPZ
+       files were produced on disk; agg picks skip interpolation entirely
+       (see the gate in ``profile_sla.py``), so no ConfigMap is attached
+       in that case and the planner / mocker have no profiling-data
+       fallback for aggregated deployments today.
     """
     if not dgd_config:
         return dgd_config
