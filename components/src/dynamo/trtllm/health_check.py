@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from dynamo.health_check import HealthCheckPayload
+from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
@@ -89,3 +90,15 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             },
         }
         super().__init__()
+
+
+def build_worker_health_check_payload(
+    disaggregation_mode: DisaggregationMode,
+    tokenizer: Any = None,
+) -> dict:
+    payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+    if disaggregation_mode == DisaggregationMode.DECODE:
+        # Tells the DECODE handler to run the probe locally (context+decode)
+        # instead of the usual generation_only path which needs a prefill peer.
+        payload["disaggregated_params"] = {"request_type": "context_and_generation"}
+    return payload

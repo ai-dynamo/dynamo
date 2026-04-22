@@ -54,7 +54,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, get_llm_engine
-from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import build_worker_health_check_payload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -633,8 +633,10 @@ async def init_llm_worker(
                 media_fetcher=media_fetcher,
             )
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+        health_check_payload = build_worker_health_check_payload(
+            disaggregation_mode=config.disaggregation_mode,
+            tokenizer=tokenizer,
+        )
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
