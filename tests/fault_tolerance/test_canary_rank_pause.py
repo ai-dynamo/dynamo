@@ -11,21 +11,31 @@ tokens, but the Python dispatch layer is still alive). We then poll
   * When canary is ENABLED AND the endpoint has a registered payload,
     ``/health`` flips to 503 — the canary probe times out against the
     paused engine and marks the endpoint NotReady. This is the positive
-    case the user asked for: *"canary can detect the issues we have seen."*
+    case: *"canary can detect the issues we have seen."*
 
   * When canary is DISABLED (or the endpoint opts out by registering no
-    payload, as trtllm disagg decode does today), ``/health`` STAYS at
-    200 — there is no active liveness probe. This is the negative
-    control the user asked for: it proves the harness distinguishes the
-    "canary working" path from the "no canary" path, rather than
-    always reporting success.
+    payload), ``/health`` STAYS at 200 — there is no active liveness
+    probe. This is the negative control: it proves the harness
+    distinguishes the "canary working" path from the "no canary" path,
+    rather than always reporting success.
 
-After each case we ``SIGCONT`` the rank and verify ``/health`` returns to
-Ready, both as a cleanup and as a round-trip sanity check.
+After each case we ``SIGCONT`` the rank and (for detect cases) verify
+``/health`` returns to Ready as a round-trip sanity check.
+
+Coverage matrix — ``{trtllm, vllm, sglang} × {agg, disagg-prefill,
+disagg-decode}`` — confirms all three backends ship a canary that
+catches engine-level hangs in disagg setups:
+  * vllm decode uses the handler's natural agg-style fallback when
+    ``prefill_result`` is absent (handlers.py::_generate_token_mode).
+  * sglang decode uses ``FAKE_BOOTSTRAP_HOST`` via
+    ``SglangDisaggHealthCheckPayload`` to bypass real KV transfer.
+  * trtllm decode uses a ``_canary_probe`` marker + handler short-circuit
+    to ``request_type="context_and_generation"``
+    (handler_base.py::_setup_disaggregated_params_for_mode).
 
 Style mirrors ``tests/serve/test_trtllm.py::test_deployment`` — same
 ``EngineProcess.from_script`` launcher, same ``/health`` polling. We do
-not use the ``tests/fault_tolerance/hardware/fault_injection_service``
+not use the ``tests/fault_tolerance/hardware/fault_injection_service/``
 helpers; just POSIX signals.
 """
 
@@ -43,7 +53,9 @@ import psutil
 import pytest
 import requests
 
+from tests.serve.test_sglang import sglang_configs
 from tests.serve.test_trtllm import trtllm_configs
+from tests.serve.test_vllm import vllm_configs
 from tests.utils.engine_process import EngineProcess
 
 logger = logging.getLogger(__name__)
@@ -59,15 +71,34 @@ RESUME_RECOVER_BUDGET_S = 30
 STARTUP_READY_BUDGET_S = 120
 
 
+# Per-backend engine-rank discovery patterns. These match the substrings that
+# appear in the engine subprocess's command line. Keep in sync with the
+# `stragglers` declared on each backend's test config.
+_RANK_PATTERNS: dict[str, tuple[str, ...]] = {
+    "trtllm": ("TRTLLM:EngineCore", "tensorrt_llm"),
+    "vllm": ("VLLM::EngineCore", "EngineCoreProc"),
+    "sglang": ("SGLANG:EngineCore", "sgl_scheduler"),
+}
+
+# Per-backend config dicts keyed by backend name.
+_CONFIGS_BY_BACKEND = {
+    "trtllm": trtllm_configs,
+    "vllm": vllm_configs,
+    "sglang": sglang_configs,
+}
+
+
 @dataclass
 class RankPauseScenario:
     """One row in the test matrix."""
 
     # Label used in pytest param IDs.
     label: str
-    # Which trtllm_configs entry to launch (must already be defined in tests/serve).
+    # Backend: trtllm / vllm / sglang. Selects config dict + rank-discovery pattern.
+    backend: str
+    # Which {backend}_configs entry to launch.
     base_config_key: str
-    # Which system-port index to monitor (0 = prefill / single worker, 1 = decode).
+    # Which system-port index to monitor (0 = prefill/single worker, 1 = decode).
     system_port_index: int
     # Whether to enable canary in the worker env.
     canary_enabled: bool
@@ -76,46 +107,64 @@ class RankPauseScenario:
     expected: str
 
 
-# NB: only trtllm scenarios for now. vllm + sglang added in follow-ups once
-# we verify the engine-rank process discovery pattern for each backend.
-SCENARIOS: list[RankPauseScenario] = [
-    # Positive case: agg worker, canary on. Canary should catch the pause.
-    RankPauseScenario(
-        label="trtllm-agg-canary-on",
-        base_config_key="aggregated",
-        system_port_index=0,
-        canary_enabled=True,
-        expected="detect",
-    ),
-    # Negative control: same worker, canary off. Harness must NOT false-positive.
+# Coverage: {backend} × {agg, disagg-prefill, disagg-decode} with canary ENABLED
+# (expected=detect), plus one canary-OFF negative control on trtllm to prove the
+# harness doesn't false-positive. Agg uses the "aggregated" config (port 0 is
+# the single worker's system port); prefill/decode use "disaggregated_same_gpu"
+# which spawns both workers on one GPU (ports 0 and 1).
+SCENARIOS: list[RankPauseScenario] = []
+for _backend in ("trtllm", "vllm", "sglang"):
+    SCENARIOS.extend(
+        [
+            RankPauseScenario(
+                label=f"{_backend}-agg-canary-on",
+                backend=_backend,
+                base_config_key="aggregated",
+                system_port_index=0,
+                canary_enabled=True,
+                expected="detect",
+            ),
+            RankPauseScenario(
+                label=f"{_backend}-disagg-prefill-canary-on",
+                backend=_backend,
+                base_config_key="disaggregated_same_gpu",
+                system_port_index=0,  # DYN_SYSTEM_PORT1 = prefill
+                canary_enabled=True,
+                expected="detect",
+            ),
+            RankPauseScenario(
+                label=f"{_backend}-disagg-decode-canary-on",
+                backend=_backend,
+                base_config_key="disaggregated_same_gpu",
+                system_port_index=1,  # DYN_SYSTEM_PORT2 = decode
+                canary_enabled=True,
+                expected="detect",
+            ),
+        ]
+    )
+
+# Negative control — canary off; /health must NOT flip. One representative
+# scenario is enough to prove the harness distinguishes detect/miss.
+SCENARIOS.append(
     RankPauseScenario(
         label="trtllm-agg-canary-off",
+        backend="trtllm",
         base_config_key="aggregated",
         system_port_index=0,
         canary_enabled=False,
         expected="miss",
-    ),
-    # Disagg decode: canary probe short-circuits in
-    # `_setup_disaggregated_params_for_mode` via the `_canary_probe` marker
-    # (see TrtllmDisaggDecodeHealthCheckPayload). Engine runs the probe as
-    # a local agg request, so pausing the rank blocks the probe and flips
-    # /health to 503 — same as aggregated.
-    RankPauseScenario(
-        label="trtllm-disagg-decode-canary-on",
-        base_config_key="disaggregated_same_gpu",
-        system_port_index=1,  # DYN_SYSTEM_PORT2 = decode worker
-        canary_enabled=True,
-        expected="detect",
-    ),
-]
+    )
+)
 
 
-def _find_engine_rank_pid(parent_pid: int, timeout_s: float = 30.0) -> int:
-    """Locate the TRT-LLM engine-rank subprocess under the test's worker parent.
+def _find_engine_rank_pid(
+    parent_pid: int, patterns: tuple[str, ...], timeout_s: float = 30.0
+) -> int:
+    """Locate the engine-rank subprocess under the test's worker parent.
 
-    The trtllm Python worker spawns a child process with a command line
-    containing ``EngineCore`` (see ``stragglers`` in TRTLLMConfig). We wait
-    up to ``timeout_s`` for it to appear so callers don't race startup.
+    Each backend spawns a child process whose command line contains a
+    recognizable marker (see ``_RANK_PATTERNS``). We wait up to
+    ``timeout_s`` for it to appear so callers don't race startup.
     """
     deadline = time.monotonic() + timeout_s
     last_err: Exception | None = None
@@ -127,14 +176,14 @@ def _find_engine_rank_pid(parent_pid: int, timeout_s: float = 30.0) -> int:
                     cmd = " ".join(child.cmdline())
                 except psutil.Error:
                     continue
-                if "EngineCore" in cmd or "tensorrt_llm" in cmd:
+                if any(p in cmd for p in patterns):
                     return child.pid
         except psutil.NoSuchProcess as e:
             last_err = e
         time.sleep(0.5)
     raise RuntimeError(
-        f"Could not find engine-rank child of pid={parent_pid} within {timeout_s}s. "
-        f"Last error: {last_err}"
+        f"Could not find engine-rank child of pid={parent_pid} matching "
+        f"{patterns} within {timeout_s}s. Last error: {last_err}"
     )
 
 
@@ -161,7 +210,6 @@ def _wait_for_status(url: str, target: int, deadline_s: float) -> int:
 
 @pytest.mark.e2e
 @pytest.mark.nightly
-@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(
     "scenario",
@@ -177,7 +225,8 @@ def test_canary_detects_rank_pause(
     num_system_ports,  # noqa: ANN001
     predownload_models,  # noqa: ANN001
 ) -> None:
-    base = trtllm_configs[scenario.base_config_key]
+    configs = _CONFIGS_BY_BACKEND[scenario.backend]
+    base = configs[scenario.base_config_key]
     config = dataclasses.replace(base, frontend_port=dynamo_dynamic_ports.frontend_port)
     config.env.update(
         {
@@ -195,15 +244,14 @@ def test_canary_detects_rank_pause(
     target_port = system_ports[scenario.system_port_index]
     health_url = f"http://localhost:{target_port}/health"
     logger.info(
-        "[%s] health_url=%s canary=%s expected=%s",
+        "[%s] backend=%s health_url=%s canary=%s expected=%s",
         scenario.label,
+        scenario.backend,
         health_url,
         scenario.canary_enabled,
         scenario.expected,
     )
 
-    # Build env + launch the worker using the exact same machinery as
-    # test_deployment so the scenario matches real CI conditions.
     extra_env: dict[str, str] = {}
     for i, p in enumerate(system_ports, start=1):
         extra_env[f"DYN_SYSTEM_PORT{i}"] = str(p)
@@ -212,6 +260,8 @@ def test_canary_detects_rank_pause(
     extra_env["DYN_HEALTH_CHECK_ENABLED"] = (
         "true" if scenario.canary_enabled else "false"
     )
+
+    patterns = _RANK_PATTERNS[scenario.backend]
 
     with EngineProcess.from_script(config, request, extra_env=extra_env) as proc:
         # 1. Wait for the worker to become healthy (Ready) before we pause.
@@ -222,8 +272,13 @@ def test_canary_detects_rank_pause(
         )
 
         # 2. Find the engine rank subprocess and SIGSTOP it.
-        rank_pid = _find_engine_rank_pid(proc.proc.pid)
-        logger.info("[%s] pausing engine rank pid=%d", scenario.label, rank_pid)
+        rank_pid = _find_engine_rank_pid(proc.proc.pid, patterns)
+        logger.info(
+            "[%s] pausing engine rank pid=%d (patterns=%s)",
+            scenario.label,
+            rank_pid,
+            patterns,
+        )
         os.kill(rank_pid, signal.SIGSTOP)
         try:
             # 3. Give the canary (or lack thereof) time to notice.
@@ -235,9 +290,9 @@ def test_canary_detects_rank_pause(
                     f"{PAUSE_DETECT_BUDGET_S}s"
                 )
             else:  # miss
-                # Wait the full budget; /health must stay 200 throughout. We
-                # sample periodically rather than trusting a single poll so a
-                # transient glitch doesn't masquerade as "miss".
+                # /health must stay 200 throughout the window. Sample
+                # periodically so a transient glitch doesn't masquerade as
+                # "miss".
                 deadline = time.monotonic() + PAUSE_DETECT_BUDGET_S
                 flips = 0
                 while time.monotonic() < deadline:
