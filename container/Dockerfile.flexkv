@@ -31,7 +31,11 @@ RUN apt-get update && \
 
 USER dynamo
 
-# Install FlexKV Python package
+# Install FlexKV from source
+ARG FLEXKV_REF=main
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install flexkv
+    git clone --depth 1 --branch ${FLEXKV_REF} https://github.com/taco-project/FlexKV.git /tmp/FlexKV && \
+    cd /tmp/FlexKV && \
+    ./build.sh && \
+    rm -rf /tmp/FlexKV
