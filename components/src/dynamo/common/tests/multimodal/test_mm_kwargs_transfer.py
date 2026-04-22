@@ -12,6 +12,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsShmReceiver,
     MmKwargsShmSender,
+    MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
     TensorTransferSpec,
 )
@@ -143,7 +144,9 @@ class TestMmKwargsShmTransfer:
 
         # Receiver reads back
         receiver = MmKwargsShmReceiver()
-        results = receiver.receive(meta)
+        results = await receiver.receive(
+            MmKwargsShmTransferMetadata.model_validate(meta)
+        )
 
         assert "__pickled_kwargs_item__" in results
         items = results["__pickled_kwargs_item__"]
@@ -175,7 +178,9 @@ class TestMmKwargsShmTransfer:
 
         # Receiver reads back
         receiver = MmKwargsShmReceiver()
-        results = receiver.receive(meta)
+        results = await receiver.receive(
+            MmKwargsShmTransferMetadata.model_validate(meta)
+        )
 
         items = results["__pickled_kwargs_item__"]
         assert len(items) == 3
@@ -206,7 +211,9 @@ class TestMmKwargsShmTransfer:
         assert meta["mm_hashes"] == ["hash_0", "hash_1", "hash_2"]  # All hashes
 
         receiver = MmKwargsShmReceiver()
-        results = receiver.receive(meta)
+        results = await receiver.receive(
+            MmKwargsShmTransferMetadata.model_validate(meta)
+        )
         items = results["__pickled_kwargs_item__"]
         assert len(items) == 2
         assert pickle.loads(items[0]) == "real_data_0"

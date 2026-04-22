@@ -38,6 +38,9 @@ from dynamo.common.multimodal.embedding_transfer import (
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
+    MmKwargsReceiver,
+    MmKwargsShmReceiver,
+    MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -1195,20 +1198,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             list(extra_args.keys()),
         )
 
-        # SHM path (same-node, ~1.5ms). Only works when frontend and backend
-        # share /dev/shm; if the read fails (cross-node), fall through to
-        # normal processing.
-        shm_meta = extra_args.get("mm_kwargs_shm")
-        if shm_meta:
+        # SHM path first (same-node, ~1.5ms). Only works when frontend and
+        # backend share /dev/shm; if the read fails (cross-node), fall through
+        # to normal processing.
+        shm_meta_raw = extra_args.get("mm_kwargs_shm")
+        if shm_meta_raw:
+            shm_meta = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
             return await self._receive_mm_kwargs(
-                extra_args, "shm", shm_meta, shm_meta["modality"]
+                extra_args, "shm", MmKwargsShmReceiver(), shm_meta
             )
 
         nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
         if nixl_meta_raw:
-            metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+            nixl_meta = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+            if self._mm_kwargs_receiver is None:
+                self._mm_kwargs_receiver = MmKwargsNixlReceiver()
             return await self._receive_mm_kwargs(
-                extra_args, "nixl", metadata, metadata.modality
+                extra_args, "nixl", self._mm_kwargs_receiver, nixl_meta
             )
 
         logger.debug("[mm-routing] No mm_kwargs transfer metadata in extra_args")
@@ -1218,21 +1224,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self,
         extra_args: Dict[str, Any],
         transport: str,
-        meta: Any,
-        modality: str,
+        receiver: MmKwargsReceiver,
+        metadata: Any,
     ) -> Dict[str, Any] | None:
         """Shared NIXL/SHM receive path.
 
-        Fetches pickled ``MultiModalKwargsItem`` bytes via the requested
-        ``transport``, deserializes them, builds an ``EngineInput`` dict,
-        and injects into the engine's MM processor cache. Returns None on
-        any validation or transport failure (caller falls back).
+        Calls ``receiver.receive(metadata)`` to fetch pickled
+        ``MultiModalKwargsItem`` bytes, deserializes them, builds an
+        ``EngineInput`` dict, and injects into the engine's MM processor
+        cache. Returns None on any validation or transport failure
+        (caller falls back).
         """
-        is_nixl = transport == "nixl"
-        color = "magenta" if is_nixl else "cyan"
-        label = f"mm_backend:{transport}_receive"
-
-        rng = _nvtx.start_range(label, color=color)
+        color = "magenta" if transport == "nixl" else "cyan"
+        rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
         try:
             mm_hashes = extra_args.get("mm_hashes")
             mm_placeholders = extra_args.get("mm_placeholders")
@@ -1243,21 +1247,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 return None
 
-            # Receive pickled kwargs items.
-            if is_nixl:
-                with _nvtx.annotate("mm_backend:nixl_setup", color=color):
-                    if self._mm_kwargs_receiver is None:
-                        self._mm_kwargs_receiver = MmKwargsNixlReceiver()
-                    receiver = self._mm_kwargs_receiver
-                with _nvtx.annotate("mm_backend:nixl_rdma_read", color=color):
-                    results = await receiver.receive(meta)
-            else:
-                from dynamo.common.multimodal.mm_kwargs_transfer import (
-                    MmKwargsShmReceiver,
-                )
-
-                with _nvtx.annotate("mm_backend:shm_open_and_read", color=color):
-                    results = MmKwargsShmReceiver().receive(meta)
+            # Receive pickled kwargs items (NVTX wrap is owned by the receiver).
+            results = await receiver.receive(metadata)
 
             pickled_items = results.get("__pickled_kwargs_item__")
             if not pickled_items:
@@ -1295,8 +1286,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 return None
 
-            mm_hashes_dict = {modality: mm_hashes}
-            mm_kwargs_dict = {modality: kwargs_items}
+            mm_hashes_dict = {metadata.modality: mm_hashes}
+            mm_kwargs_dict = {metadata.modality: kwargs_items}
             with _nvtx.annotate(
                 f"mm_backend:{transport}_build_engine_input", color=color
             ):
@@ -1306,7 +1297,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "mm_kwargs": mm_kwargs_dict,
                     "mm_hashes": mm_hashes_dict,
                     "mm_placeholders": {
-                        modality: [
+                        metadata.modality: [
                             PlaceholderRange(offset=off, length=length)
                             for off, length in mm_placeholders
                         ],

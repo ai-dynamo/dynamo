@@ -65,6 +65,25 @@ class MmKwargsTransferMetadata(BaseModel):
     mm_hashes: list[str]  # frontend-computed hashes for consistency
 
 
+class MmKwargsShmItem(BaseModel):
+    """Metadata for a single shared-memory segment carrying one pickled item."""
+
+    name: str
+    size: int
+
+
+class MmKwargsShmTransferMetadata(BaseModel):
+    """Metadata for transferring mm_kwargs via shared memory (same-node).
+
+    Sent from frontend to backend alongside the routing request. Mirrors
+    ``MmKwargsTransferMetadata`` for the SHM transport.
+    """
+
+    modality: str  # e.g. "image"
+    items: list[MmKwargsShmItem]
+    mm_hashes: list[str]
+
+
 # ---------------------------------------------------------------------------
 # Sender (frontend side) — abstract base + concrete implementations
 # ---------------------------------------------------------------------------
@@ -94,12 +113,26 @@ class MmKwargsSender(ABC):
     _nvtx_label: str = "mm_frontend:sender_prepare"
     _nvtx_color: str = "cyan"
 
+    # Subclass hook label used for the pickle step.
+    _pickle_nvtx_label: str = "mm_frontend:pickle_dumps"
+
+    def _is_available(self) -> bool:
+        """Return True if this transport is usable. Default True; NIXL overrides."""
+        return True
+
     async def prepare(
         self,
         mm_features: list[Any],
         modality: str = "image",
     ) -> tuple[dict[str, Any] | None, list[Any]]:
         """Serialize and register mm_kwargs for transfer to the backend.
+
+        Walks mm_features, collects per-feature mm_hashes, skips
+        ``data is None`` features, pickles each remaining ``feat.data``,
+        and delegates the transport-specific hand-off to
+        :meth:`_encode_item`. Once all items are encoded, calls
+        :meth:`_assemble_extra_args` to build the dict returned to the
+        caller.
 
         Returns:
             (extra_args_update, cleanup_items)
@@ -109,15 +142,54 @@ class MmKwargsSender(ABC):
                 response stream completes.
         """
         with _nvtx.annotate(self._nvtx_label, color=self._nvtx_color):
-            return await self._prepare(mm_features, modality)
+            if not self._is_available() or not mm_features:
+                return None, []
+
+            encoded_items: list[Any] = []
+            cleanup_items: list[Any] = []
+            mm_hashes: list[str] = []
+
+            for i, feat in enumerate(mm_features):
+                if feat.mm_hash:
+                    mm_hashes.append(feat.mm_hash)
+                if feat.data is None:
+                    continue
+
+                with _nvtx.annotate(self._pickle_nvtx_label, color=self._nvtx_color):
+                    pickled = pickle.dumps(feat.data)
+
+                encoded, cleanup = await self._encode_item(i, pickled)
+                encoded_items.append(encoded)
+                if cleanup is not None:
+                    cleanup_items.append(cleanup)
+
+            if not encoded_items:
+                return None, []
+
+            return (
+                self._assemble_extra_args(modality, encoded_items, mm_hashes),
+                cleanup_items,
+            )
 
     @abstractmethod
-    async def _prepare(
+    async def _encode_item(self, idx: int, pickled: bytes) -> tuple[Any, Any | None]:
+        """Subclass hook: hand off pickled bytes to the transport.
+
+        Returns ``(encoded_item, cleanup_item)`` — ``encoded_item`` is whatever
+        the subclass wants to collect (e.g. a ``TensorTransferSpec`` or
+        ``MmKwargsShmItem``); ``cleanup_item`` is an opaque handle the caller
+        passes to :meth:`cleanup` (e.g. an NIXL completion future or an
+        ``shm.SharedMemory`` handle), or ``None`` if no cleanup is needed.
+        """
+
+    @abstractmethod
+    def _assemble_extra_args(
         self,
-        mm_features: list[Any],
-        modality: str = "image",
-    ) -> tuple[dict[str, Any] | None, list[Any]]:
-        """Subclass hook: do the actual serialize/register work."""
+        modality: str,
+        encoded_items: list[Any],
+        mm_hashes: list[str],
+    ) -> dict[str, Any]:
+        """Subclass hook: build the ``extra_args`` update dict from encoded items."""
 
     @abstractmethod
     async def cleanup(self, items: list[Any]) -> None:
@@ -137,6 +209,7 @@ class MmKwargsNixlSender(MmKwargsSender):
 
     _nvtx_label = "mm_frontend:nixl_sender_prepare"
     _nvtx_color = "magenta"
+    _pickle_nvtx_label = "mm_nixl:pickle_dumps"
 
     def __init__(self) -> None:
         # Lazy import to avoid hard dependency when NIXL is not available.
@@ -150,80 +223,44 @@ class MmKwargsNixlSender(MmKwargsSender):
             self._available = False
             logger.warning("nixl_connect not available; MmKwargsNixlSender disabled")
 
-    async def _prepare(
-        self,
-        mm_features: list[Any],  # list[MultiModalFeatureSpec]
-        modality: str = "image",
-    ) -> tuple[dict[str, Any] | None, list[Any]]:
-        """Register mm_kwargs tensors from mm_features with NIXL.
+    def _is_available(self) -> bool:
+        return self._available
 
-        Returns:
-            (extra_args_update, completion_futures) or (None, []) if no
-            tensors to transfer. Pass completion_futures to cleanup() after
-            streaming so the frontend waits for the backend to finish reading.
-        """
-        if not self._available:
-            logger.debug("[NIXL-Sender] NIXL not available, skipping")
-            return None, []
-        if not mm_features:
-            logger.debug("[NIXL-Sender] No mm_features to send")
-            return None, []
+    async def _encode_item(
+        self, idx: int, pickled: bytes
+    ) -> tuple[TensorTransferSpec, Awaitable[None]]:
+        """Register pickled bytes with NIXL and return the spec + completion."""
+        with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
+            pickled_tensor = torch.frombuffer(bytearray(pickled), dtype=torch.uint8)
+            descriptor = self._nixl_connect.Descriptor(pickled_tensor)
+            readable_op = await self._connector.create_readable(descriptor)
         logger.debug(
-            "[NIXL-Sender] Preparing %d mm_features for NIXL transfer",
-            len(mm_features),
+            "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(pickled)
         )
+        spec = TensorTransferSpec(
+            field_name="__pickled_kwargs_item__",
+            shape=[len(pickled)],
+            dtype_str="uint8",
+            serialized_request=readable_op.metadata().model_dump(),
+        )
+        return spec, readable_op.wait_for_completion()
 
-        tensor_specs: list[TensorTransferSpec] = []
-        completions: list[Awaitable[None]] = []
-        mm_hashes: list[str] = []
-
-        for i, feat in enumerate(mm_features):
-            if feat.mm_hash:
-                mm_hashes.append(feat.mm_hash)
-
-            if feat.data is None:
-                logger.debug("[NIXL-Sender] feature[%d]: data is None, skipping", i)
-                continue
-
-            # Pickle the kwargs item — preserves MultiModalFieldElem + field objects
-            with _nvtx.annotate("mm_nixl:pickle_dumps", color="magenta"):
-                pickled_item = pickle.dumps(feat.data)
-            logger.debug(
-                "[NIXL-Sender] feature[%d]: pickled kwargs_item (%d bytes)",
-                i,
-                len(pickled_item),
-            )
-
-            # Register pickled bytes as a NIXL transfer
-            with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
-                pickled_tensor = torch.frombuffer(
-                    bytearray(pickled_item), dtype=torch.uint8
-                )
-                descriptor = self._nixl_connect.Descriptor(pickled_tensor)
-                readable_op = await self._connector.create_readable(descriptor)
-
-            spec = TensorTransferSpec(
-                field_name="__pickled_kwargs_item__",
-                shape=[len(pickled_item)],
-                dtype_str="uint8",
-                serialized_request=readable_op.metadata().model_dump(),
-            )
-            tensor_specs.append(spec)
-            completions.append(readable_op.wait_for_completion())
-
-        if not tensor_specs:
-            return None, []
-
+    def _assemble_extra_args(
+        self,
+        modality: str,
+        encoded_items: list[Any],
+        mm_hashes: list[str],
+    ) -> dict[str, Any]:
         metadata = MmKwargsTransferMetadata(
             modality=modality,
-            tensor_specs=tensor_specs,
+            tensor_specs=encoded_items,
             mm_hashes=mm_hashes,
         )
         logger.debug(
             "[NIXL-Sender] registered %d tensor(s) for transfer",
             len(metadata.tensor_specs),
         )
-        return {"mm_kwargs_nixl": metadata.model_dump()}, completions
+        return {"mm_kwargs_nixl": metadata.model_dump()}
 
     async def cleanup(self, items: list[Any]) -> None:
         """Await NIXL completion futures so memory regions can be deregistered."""
@@ -237,8 +274,43 @@ class MmKwargsNixlSender(MmKwargsSender):
 
 
 # ---------------------------------------------------------------------------
-# Receiver (backend side) — pre-registered descriptor pool
+# Receiver (backend side) — abstract base + concrete implementations
 # ---------------------------------------------------------------------------
+
+
+class MmKwargsReceiver(ABC):
+    """Abstract base for backend-side mm_kwargs reception.
+
+    Subclasses implement different transport mechanisms (NIXL RDMA, shared
+    memory). The caller in handlers treats them uniformly::
+
+        receiver: MmKwargsReceiver = self._select_mm_kwargs_receiver(extra_args)
+        results = await receiver.receive(metadata)
+
+    The base class owns the per-request NVTX annotation via class-level
+    ``_nvtx_label`` / ``_nvtx_color`` attributes that subclasses override.
+    ``receive`` is a concrete template method that wraps ``_receive`` with
+    ``_nvtx.annotate`` so callers don't need to know which transport is in
+    use.
+    """
+
+    # Subclasses override these to tag their own NVTX range.
+    _nvtx_label: str = "mm_backend:receiver_read"
+    _nvtx_color: str = "cyan"
+
+    async def receive(self, metadata: BaseModel) -> dict[str, Any]:
+        """Fetch pickled mm_kwargs items using this transport.
+
+        Returns a dict keyed by field name (typically a single key
+        ``"__pickled_kwargs_item__"`` → ``list[bytes]``).
+        """
+        with _nvtx.annotate(self._nvtx_label, color=self._nvtx_color):
+            return await self._receive(metadata)
+
+    @abstractmethod
+    async def _receive(self, metadata: BaseModel) -> dict[str, Any]:
+        """Subclass hook: do the actual transport-specific read."""
+
 
 # Default max pickled kwargs size: 8MB (covers most single-image models).
 _DEFAULT_MAX_ITEM_BYTES = 8 * 1024 * 1024
@@ -246,7 +318,7 @@ _DEFAULT_MAX_ITEM_BYTES = 8 * 1024 * 1024
 _DEFAULT_POOL_SIZE = 16
 
 
-class MmKwargsNixlReceiver:
+class MmKwargsNixlReceiver(MmKwargsReceiver):
     """Pulls mm_kwargs tensors from the frontend via NIXL READ.
 
     Uses pre-registered descriptor pooling to avoid per-request NIXL
@@ -258,6 +330,9 @@ class MmKwargsNixlReceiver:
         mm_kwargs = await receiver.receive(transfer_metadata)
         # mm_kwargs is a dict like {"__pickled_kwargs_item__": [bytes, ...]}
     """
+
+    _nvtx_label = "mm_backend:nixl_receiver_read"
+    _nvtx_color = "magenta"
 
     def __init__(
         self,
@@ -331,16 +406,16 @@ class MmKwargsNixlReceiver:
             desc._data_size = original_size
         self._pool.put(desc)
 
-    async def receive(self, metadata: MmKwargsTransferMetadata) -> dict[str, Any]:
+    async def _receive(self, metadata: BaseModel) -> dict[str, Any]:
         """Pull all data described in metadata via NIXL READ.
 
         Returns:
             Dict mapping field_name to received data (tensor or bytes).
         """
+        assert isinstance(metadata, MmKwargsTransferMetadata)
         if not self._available:
             raise RuntimeError("NIXL not available for mm_kwargs reception")
 
-        rng = _nvtx.start_range("mm_nixl:receiver_read", color="magenta")
         # Pre-allocate result slots to preserve spec order regardless of
         # completion order from asyncio.gather.
         read_tasks = []
@@ -386,7 +461,6 @@ class MmKwargsNixlReceiver:
         for desc, is_dynamic, orig_size in acquired:
             self._release_descriptor(desc, is_dynamic, orig_size)
 
-        _nvtx.end_range(rng)
         return results
 
 
@@ -410,56 +484,37 @@ class MmKwargsShmSender(MmKwargsSender):
 
     _nvtx_label = "mm_frontend:shm_sender_prepare"
     _nvtx_color = "cyan"
+    _pickle_nvtx_label = "mm_shm:pickle_dumps"
 
-    async def _prepare(
+    async def _encode_item(
+        self, idx: int, pickled: bytes
+    ) -> tuple[MmKwargsShmItem, shm.SharedMemory]:
+        """Write pickled bytes to a fresh shared-memory segment."""
+        name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{idx}"
+        with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
+            sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
+            sm.buf[: len(pickled)] = pickled
+        logger.debug(
+            "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
+            idx,
+            len(pickled),
+            name,
+        )
+        return MmKwargsShmItem(name=name, size=len(pickled)), sm
+
+    def _assemble_extra_args(
         self,
-        mm_features: list[Any],
-        modality: str = "image",
-    ) -> tuple[dict[str, Any] | None, list[Any]]:
-        """Pickle mm_kwargs into shared memory.
-
-        Returns:
-            (extra_args_update, shm_handles) or (None, []) if nothing to send.
-            Pass shm_handles to cleanup() after streaming completes.
-        """
-        if not mm_features:
-            return None, []
-
-        items: list[dict[str, Any]] = []
-        handles: list[shm.SharedMemory] = []
-        mm_hashes: list[str] = []
-
-        for i, feat in enumerate(mm_features):
-            if feat.mm_hash:
-                mm_hashes.append(feat.mm_hash)
-            if feat.data is None:
-                continue
-
-            with _nvtx.annotate("mm_shm:pickle_dumps", color="cyan"):
-                pickled = pickle.dumps(feat.data)
-            name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{i}"
-            with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
-                sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
-                sm.buf[: len(pickled)] = pickled
-            handles.append(sm)
-            items.append({"name": name, "size": len(pickled)})
-            logger.debug(
-                "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
-                i,
-                len(pickled),
-                name,
-            )
-
-        if not items:
-            return None, []
-
-        meta: dict[str, Any] = {
-            "modality": modality,
-            "items": items,
-            "mm_hashes": mm_hashes,
-        }
-        logger.debug("[SHM-Sender] wrote %d item(s) to shared memory", len(items))
-        return {"mm_kwargs_shm": meta}, handles
+        modality: str,
+        encoded_items: list[Any],
+        mm_hashes: list[str],
+    ) -> dict[str, Any]:
+        metadata = MmKwargsShmTransferMetadata(
+            modality=modality, items=encoded_items, mm_hashes=mm_hashes
+        )
+        logger.debug(
+            "[SHM-Sender] wrote %d item(s) to shared memory", len(encoded_items)
+        )
+        return {"mm_kwargs_shm": metadata.model_dump()}
 
     async def cleanup(self, items: list[Any]) -> None:
         """Release shared memory handles after the backend has read."""
@@ -476,34 +531,36 @@ class MmKwargsShmSender(MmKwargsSender):
                 )
 
 
-class MmKwargsShmReceiver:
+class MmKwargsShmReceiver(MmKwargsReceiver):
     """Reads pickled mm_kwargs from shared memory.
 
     Usage::
 
         receiver = MmKwargsShmReceiver()
-        result = receiver.receive(shm_metadata)
+        result = await receiver.receive(shm_metadata)
         # result is {"__pickled_kwargs_item__": [bytes, bytes, ...]}
     """
 
-    def receive(self, meta: dict[str, Any]) -> dict[str, Any]:
+    _nvtx_label = "mm_backend:shm_receiver_read"
+    _nvtx_color = "cyan"
+
+    async def _receive(self, metadata: BaseModel) -> dict[str, Any]:
         """Read from shared memory and return pickled bytes.
 
         Returns:
             Dict with "__pickled_kwargs_item__" key mapping to list of bytes.
         """
-        rng = _nvtx.start_range("mm_shm:receiver_read", color="cyan")
+        assert isinstance(metadata, MmKwargsShmTransferMetadata)
         results: dict[str, Any] = {}
 
-        for item in meta.get("items", []):
-            name = item["name"]
-            size = item["size"]
+        for item in metadata.items:
             with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
-                sm = shm.SharedMemory(name=name, create=False)
-                data = bytes(sm.buf[:size])
+                sm = shm.SharedMemory(name=item.name, create=False)
+                data = bytes(sm.buf[: item.size])
                 sm.close()
             results.setdefault("__pickled_kwargs_item__", []).append(data)
-            logger.debug("[SHM-Receiver] read %d bytes from shm %s", size, name)
+            logger.debug(
+                "[SHM-Receiver] read %d bytes from shm %s", item.size, item.name
+            )
 
-        _nvtx.end_range(rng)
         return results
