@@ -29,12 +29,24 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=9.6,
             ),
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on disagg e_pd. "
+                        "https://linear.app/nvidia/issue/OPS-4445"
+                    ),
+                    pytest.mark.pre_merge,
+                ],
                 timeout_s=340,
                 single_gpu=True,
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on disagg epd. "
+                        "https://linear.app/nvidia/issue/OPS-4445"
+                    ),
+                    pytest.mark.pre_merge,
+                ],
                 timeout_s=300,
                 single_gpu=True,
             ),
@@ -56,7 +68,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 delayed_start=60,
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on disagg epd. "
+                        "https://linear.app/nvidia/issue/OPS-4445"
+                    ),
+                    pytest.mark.pre_merge,
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,

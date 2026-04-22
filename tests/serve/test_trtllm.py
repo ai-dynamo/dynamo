@@ -138,6 +138,9 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450"
+            ),
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 6.6 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,

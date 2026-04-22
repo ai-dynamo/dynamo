@@ -116,6 +116,7 @@ impl KvManager {
 
             KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                start_position: None,
                 blocks: full_blocks
                     .into_iter()
                     .zip(local_hashes_slice.iter())
