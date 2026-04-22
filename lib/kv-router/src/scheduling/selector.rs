@@ -230,7 +230,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 .get(&worker)
                 .copied()
                 .unwrap_or(0);
-            let prefill_token = *prefill_tokens.get(&worker).unwrap_or(&isl);
+            let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
+            let prefill_token = prefill_tokens
+                .get(&worker)
+                .copied()
+                .unwrap_or(default_prefill_token);
             let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
             let decode_block = *decode_blocks
                 .get(&worker)

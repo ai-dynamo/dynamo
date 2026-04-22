@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def is_truthy(val: str) -> bool:
     """Truthy values: "1", "true", "on", "yes" (case-insensitive)."""
-    return val.lower() in ("1", "true", "on", "yes")
+    return val.strip().lower() in ("1", "true", "on", "yes")
 
 
 def get_consolidator_mode() -> str:

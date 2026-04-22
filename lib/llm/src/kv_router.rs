@@ -208,16 +208,17 @@ fn tier_overlap_blocks_from_tiered_matches(
         );
     }
 
-    if let Some(disk_matches) = tiered_matches
-        .lower_tier
-        .get(&dynamo_kv_router::protocols::StorageTier::Disk)
-    {
-        tier_overlap_blocks.disk.extend(
-            disk_matches
-                .hits
-                .iter()
-                .map(|(worker, hits)| (*worker, *hits)),
-        );
+    // Disk and External share the same weighting (see `storage_tier_weight`),
+    // so accumulate both into the disk bucket.
+    for tier in [
+        dynamo_kv_router::protocols::StorageTier::Disk,
+        dynamo_kv_router::protocols::StorageTier::External,
+    ] {
+        if let Some(matches) = tiered_matches.lower_tier.get(&tier) {
+            for (worker, hits) in &matches.hits {
+                *tier_overlap_blocks.disk.entry(*worker).or_default() += *hits;
+            }
+        }
     }
 
     tier_overlap_blocks
@@ -620,9 +621,8 @@ where
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
-        let overlap_blocks = (cached_tokens / self.block_size as usize) as u32;
         let prefill_load_hint =
-            self.prefill_load_hint_for(isl_tokens, overlap_blocks, track_prefill_tokens);
+            self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
         if let Err(e) = self
             .scheduler
@@ -657,14 +657,14 @@ where
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;

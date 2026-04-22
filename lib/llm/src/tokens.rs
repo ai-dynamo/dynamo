@@ -468,11 +468,26 @@ impl TokenBlock {
     }
 
     /// Assigns the TRT-LLM/framework hash chain for this block.
+    ///
+    /// Idempotent: calling with the same values on an already-assigned block
+    /// is a no-op, but re-assigning a different chain panics to match the
+    /// invariant `sync_external_sequence_hashes` enforces.
     pub fn assign_external_hashes(
         &mut self,
         external_sequence_hash: SequenceHash,
         external_parent_sequence_hash: Option<SequenceHash>,
     ) {
+        if let Some(existing) = self.external_sequence_hash {
+            assert_eq!(
+                existing, external_sequence_hash,
+                "external_sequence_hash re-assignment mismatch",
+            );
+            assert_eq!(
+                self.external_parent_sequence_hash, external_parent_sequence_hash,
+                "external_parent_sequence_hash re-assignment mismatch",
+            );
+            return;
+        }
         self.external_sequence_hash = Some(external_sequence_hash);
         self.external_parent_sequence_hash = external_parent_sequence_hash;
     }

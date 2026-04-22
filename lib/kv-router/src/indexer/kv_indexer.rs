@@ -403,7 +403,9 @@ impl KvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
-        resp_rx.await.map_err(|_| KvRouterError::IndexerOffline)
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
     #[cfg(test)]

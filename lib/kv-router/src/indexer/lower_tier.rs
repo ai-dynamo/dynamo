@@ -217,12 +217,15 @@ impl LowerTierIndexer {
                 local_hash: block.tokens_hash,
             };
 
+            // If this worker already has a different parent/local for the same
+            // block_hash, or if the shared edge is owned by a conflicting
+            // child_hash, stop the walk: any further blocks in this chain would
+            // hang off an edge this index never accepted for the worker.
             if worker_map
                 .get(&block.block_hash)
                 .is_some_and(|existing_key| *existing_key != key)
             {
-                parent_hash = Some(block.block_hash);
-                continue;
+                break;
             }
 
             let inserted = match self.edges.entry(key) {
@@ -235,9 +238,11 @@ impl LowerTierIndexer {
                 }
             };
 
-            if inserted {
-                worker_map.insert(block.block_hash, key);
+            if !inserted {
+                break;
             }
+
+            worker_map.insert(block.block_hash, key);
             parent_hash = Some(block.block_hash);
         }
     }
@@ -432,7 +437,8 @@ impl LowerTierIndexer {
             let next_breakpoint = breakpoints
                 .get(idx + 1)
                 .map(|(p, _)| *p)
-                .unwrap_or(local_hashes.len());
+                .unwrap_or(local_hashes.len())
+                .min(local_hashes.len());
 
             let mut overflow = FrontierBuckets::default();
 

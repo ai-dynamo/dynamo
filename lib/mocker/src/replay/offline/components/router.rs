@@ -549,7 +549,7 @@ impl OfflineReplayRouter {
 
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
-        let overlap_blocks = selection.effective_overlap_blocks.round() as u32;
+        let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
 
         self.slots
             .add_request(
