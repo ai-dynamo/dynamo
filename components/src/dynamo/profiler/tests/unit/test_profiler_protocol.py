@@ -40,7 +40,11 @@ def dgdr_name_env(monkeypatch):
 
 
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
-    """build_dgd_config applies per-node GPU shaping when topology is provided."""
+    """build_dgd_config applies per-node GPU shaping when topology is provided.
+
+    When the worker only uses data-parallelism (no TP/PP spanning nodes),
+    multinode should NOT be set — dp shards are independent replicas.
+    """
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -50,6 +54,32 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
         prefill_replicas=1,
         prefill_gpus=1,
         decode_cli_args=["--data-parallel-size", "16"],
+        decode_replicas=1,
+        decode_gpus=16,
+        num_gpus_per_node=8,
+    )
+
+    decode_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    assert decode_service["resources"]["limits"]["gpu"] == "8"
+    # dp=16 with default tp=1: each shard fits on one node, no multinode needed
+    assert decode_service.get("multinode") is None
+
+
+def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
+    """multinode IS set when TP exceeds GPUs per node (single instance spans nodes)."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="meta-llama/Llama-3-70B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp", "16"],
         decode_replicas=1,
         decode_gpus=16,
         num_gpus_per_node=8,
