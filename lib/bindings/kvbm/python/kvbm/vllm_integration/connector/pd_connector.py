@@ -29,6 +29,17 @@ try:
 except ImportError:
     pass
 
+# Optional import for FlexKV support
+_FlexKVConnectorV1: Optional[Type] = None
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector import (
+        FlexKVConnectorV1,
+    )
+
+    _FlexKVConnectorV1 = FlexKVConnectorV1
+except ImportError:
+    pass
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
@@ -71,11 +82,15 @@ class PdConnector(MultiConnector):
         allowed_first_types: list[Type] = [DynamoConnector]
         if _LMCacheConnectorV1 is not None:
             allowed_first_types.append(_LMCacheConnectorV1)
+        if _FlexKVConnectorV1 is not None:
+            allowed_first_types.append(_FlexKVConnectorV1)
 
         if not isinstance(self._connectors[0], tuple(allowed_first_types)):
             allowed_names = ["DynamoConnector"]
             if _LMCacheConnectorV1 is not None:
                 allowed_names.append("LMCacheConnectorV1")
+            if _FlexKVConnectorV1 is not None:
+                allowed_names.append("FlexKVConnectorV1")
             raise TypeError(
                 f"Expected first connector to be {' or '.join(allowed_names)}, "
                 f"got {type(self._connectors[0]).__name__}"
