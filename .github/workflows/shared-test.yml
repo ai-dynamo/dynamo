@@ -68,15 +68,6 @@ on:
         required: false
         type: number
         default: 30
-      dind_as_sidecar:
-        description: >-
-          'true' runs pytest with pytest-xdist (-n cpu_parallel_mode). 'false'
-          ignores cpu_parallel_mode, runs pytest without xdist, and applies
-          --cpus/--memory limits on docker run. Default 'true' matches how the
-          vllm/sglang/trtllm CPU tests run.
-        required: false
-        type: string
-        default: 'true'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -170,7 +161,7 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
-          dind_as_sidecar: ${{ inputs.dind_as_sidecar }}
+          dind_as_sidecar: 'true'
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
@@ -183,4 +174,4 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
-          dind_as_sidecar: ${{ inputs.dind_as_sidecar }}
+          dind_as_sidecar: 'true'
