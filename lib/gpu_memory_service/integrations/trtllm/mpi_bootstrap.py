@@ -76,7 +76,7 @@ def _get_mpi_rank_and_comm() -> tuple[int, object | None]:
 
 
 def _wait_for_shadow_activation() -> None:
-    """Block standby after RO weight import, before KV/executor init.
+    """Block standby after the temp estimator path, before final full-KV init.
 
     This mirrors the flock semantics used at the parent layer, but keeps the
     wait inside TRT-LLM's synchronous executor-construction path without
@@ -109,7 +109,7 @@ def _wait_for_shadow_activation() -> None:
 
 
 def install_executor_finalize_hook() -> None:
-    """Finalize delayed publishes and gate standby after RO import in MPI children."""
+    """Finalize delayed publishes and gate standby before final full-KV build."""
     global _executor_finalize_hook_installed
     if _executor_finalize_hook_installed:
         return
@@ -125,14 +125,31 @@ def install_executor_finalize_hook() -> None:
     original_create_py_executor_instance = (
         _py_executor_creator.create_py_executor_instance
     )
-    original_pytorch_model_engine = _py_executor_creator.PyTorchModelEngine
+    original_teardown_managers = _py_executor_creator.KvCacheCreator.teardown_managers
+    original_gc_collect = _py_executor_creator.gc.collect
 
     @wraps(original_create_py_executor)
     def patched_create_py_executor(*args, **kwargs):
-        def gated_pytorch_model_engine(*engine_args, **engine_kwargs):
-            model_engine = original_pytorch_model_engine(*engine_args, **engine_kwargs)
-            _wait_for_shadow_activation()
-            return model_engine
+        wait_after_gc = False
+        waited_for_activation = False
+
+        def patched_teardown_managers(*teardown_args, **teardown_kwargs):
+            nonlocal wait_after_gc
+
+            result = original_teardown_managers(*teardown_args, **teardown_kwargs)
+            if _is_shadow_standby():
+                wait_after_gc = True
+            return result
+
+        def patched_gc_collect(*collect_args, **collect_kwargs):
+            nonlocal wait_after_gc, waited_for_activation
+
+            result = original_gc_collect(*collect_args, **collect_kwargs)
+            if wait_after_gc and not waited_for_activation:
+                _wait_for_shadow_activation()
+                waited_for_activation = True
+                wait_after_gc = False
+            return result
 
         def patched_create_py_executor_instance(*instance_args, **instance_kwargs):
             executor = original_create_py_executor_instance(
@@ -162,11 +179,18 @@ def install_executor_finalize_hook() -> None:
             _py_executor_creator.create_py_executor_instance = (
                 patched_create_py_executor_instance
             )
-        _py_executor_creator.PyTorchModelEngine = gated_pytorch_model_engine
+        if _is_shadow_standby():
+            _py_executor_creator.KvCacheCreator.teardown_managers = (
+                patched_teardown_managers
+            )
+            _py_executor_creator.gc.collect = patched_gc_collect
         try:
             return original_create_py_executor(*args, **kwargs)
         finally:
-            _py_executor_creator.PyTorchModelEngine = original_pytorch_model_engine
+            _py_executor_creator.KvCacheCreator.teardown_managers = (
+                original_teardown_managers
+            )
+            _py_executor_creator.gc.collect = original_gc_collect
             _py_executor_creator.create_py_executor_instance = (
                 original_create_py_executor_instance
             )
@@ -174,7 +198,7 @@ def install_executor_finalize_hook() -> None:
     _py_executor_creator.create_py_executor = patched_create_py_executor
     _executor_finalize_hook_installed = True
     logger.info(
-        "[GMS] Patched TensorRT-LLM create_py_executor to finalize delayed publish before start_worker"
+        "[GMS] Patched TensorRT-LLM create_py_executor for delayed publish and standby activation gating"
     )
 
 

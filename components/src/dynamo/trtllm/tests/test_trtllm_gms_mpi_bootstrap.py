@@ -70,6 +70,7 @@ def stubbed_env(monkeypatch):
     )
     torch_module = types.ModuleType("torch")
     torch_module.cuda = types.SimpleNamespace(empty_cache=lambda: None)
+    gc_module = types.SimpleNamespace(collect=lambda: call_log.append("gc_collect"))
 
     class FakePyExecutor:
         def __init__(self, name: str = "executor"):
@@ -82,6 +83,16 @@ def stubbed_env(monkeypatch):
         def __init__(self, *args, **kwargs):
             call_log.append("model_engine_init")
 
+    class FakeKvCacheCreator:
+        def build_managers(self, _resources, estimating_kv_cache):
+            call_log.append(f"build_managers:{estimating_kv_cache}")
+
+        def configure_kv_cache_capacity(self, _py_executor):
+            call_log.append("configure_kv_cache_capacity")
+
+        def teardown_managers(self, _resources):
+            call_log.append("teardown_managers")
+
     def fake_create_py_executor_instance(*args, name: str = "executor", **kwargs):
         return FakePyExecutor(name)
 
@@ -93,6 +104,8 @@ def stubbed_env(monkeypatch):
 
     trtllm_pyexecutor_creator_module.PyExecutor = FakePyExecutor
     trtllm_pyexecutor_creator_module.PyTorchModelEngine = FakePyTorchModelEngine
+    trtllm_pyexecutor_creator_module.KvCacheCreator = FakeKvCacheCreator
+    trtllm_pyexecutor_creator_module.gc = gc_module
     trtllm_pyexecutor_creator_module.create_py_executor_instance = (
         fake_create_py_executor_instance
     )
@@ -328,7 +341,7 @@ def test_worker_init_hook_skips_child_finalize_hook_without_delay_flag(
     fake_finalize.assert_not_called()
 
 
-def test_worker_init_hook_standby_gates_after_model_engine_before_kv_build(
+def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_build(
     stubbed_env, monkeypatch
 ):
     bootstrap = stubbed_env["bootstrap"]
@@ -336,12 +349,23 @@ def test_worker_init_hook_standby_gates_after_model_engine_before_kv_build(
     call_log = stubbed_env["call_log"]
 
     def fake_create_py_executor(*args, **kwargs):
+        kv_cache_creator = py_executor_creator.KvCacheCreator()
+
         call_log.append("create_py_executor")
         py_executor_creator.PyTorchModelEngine()
-        call_log.append("after_model_engine")
-        py_executor_creator.create_py_executor_instance(name="final")
-        call_log.append("after_kv_build")
-        return object()
+        kv_cache_creator.build_managers({}, True)
+        call_log.append("temp_executor_created")
+        py_executor = py_executor_creator.create_py_executor_instance(name="temp")
+        py_executor.start_worker()
+        kv_cache_creator.configure_kv_cache_capacity(py_executor)
+        kv_cache_creator.teardown_managers({})
+        del py_executor
+        py_executor_creator.gc.collect()
+        kv_cache_creator.build_managers({}, False)
+        call_log.append("final_executor_created")
+        final_executor = py_executor_creator.create_py_executor_instance(name="final")
+        final_executor.start_worker()
+        return final_executor
 
     py_executor_creator.create_py_executor = fake_create_py_executor
 
@@ -372,9 +396,16 @@ def test_worker_init_hook_standby_gates_after_model_engine_before_kv_build(
         "setup:{'gms_read_only': True}",
         "create_py_executor",
         "model_engine_init",
+        "build_managers:True",
+        "temp_executor_created",
+        "start_worker:temp",
+        "configure_kv_cache_capacity",
+        "teardown_managers",
+        "gc_collect",
         "wait_for_activation",
-        "after_model_engine",
-        "after_kv_build",
+        "build_managers:False",
+        "final_executor_created",
+        "start_worker:final",
     ]
 
 

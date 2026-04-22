@@ -413,9 +413,6 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
     assert call_log == [
         "serve_endpoint",
         "health:True",
-        "lock_path:/tmp/failover.lock",
-        "owner:None",
-        "owner:engine-0",
         "get_llm_engine",
         "engine_enter",
         "serve_cancelled",

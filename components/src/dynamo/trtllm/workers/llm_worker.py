@@ -550,8 +550,6 @@ async def init_llm_worker(
         logging.info("[Shadow] Primary acquired startup lock, starting engine init")
 
     if shadow_standby:
-        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
         standby_generate_proxy = _StandbyGenerateProxy(health_check_payload)
         standby_serve_task = endpoint.serve_endpoint(
             standby_generate_proxy.generate,
@@ -566,9 +564,6 @@ async def init_llm_worker(
         logging.info(
             "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
         )
-        startup_lock = FlockFailoverLock(failover_lock_path)
-        while await startup_lock.owner() != "engine-0":
-            await asyncio.sleep(0.1)
 
     try:
         async with get_llm_engine(
