@@ -1029,15 +1029,18 @@ impl JailedStream {
                     bare_json_mode: true,
                     ..Default::default()
                 };
+                // Per-path indices are placeholders — final indices are assigned
+                // below after the named filter so dropped entries don't leave
+                // gaps and multi-emission streams don't collide.
                 if let Ok((parsed, _)) = try_tool_call_parse_basic_json(
                     accumulated_content,
                     &basic_json_cfg,
                     self.tool_definitions.as_deref(),
                 ) && !parsed.is_empty()
                 {
-                    tool_call_chunks.extend(parsed.into_iter().enumerate().map(|(idx, tc)| {
+                    tool_call_chunks.extend(parsed.into_iter().map(|tc| {
                         ChatCompletionMessageToolCallChunk {
-                            index: idx as u32,
+                            index: 0,
                             id: Some(tc.id),
                             r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
@@ -1067,9 +1070,9 @@ impl JailedStream {
                     )
                     .await
                 {
-                    tool_call_chunks.extend(tool_calls.into_iter().enumerate().map(|(idx, tc)| {
+                    tool_call_chunks.extend(tool_calls.into_iter().map(|tc| {
                         ChatCompletionMessageToolCallChunk {
-                            index: idx as u32,
+                            index: 0,
                             id: Some(tc.id),
                             r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
@@ -1098,6 +1101,13 @@ impl JailedStream {
                             "tool_choice=named: parsers emitted no matching tool calls; dropping jail output"
                         );
                     }
+                }
+
+                // Assign final indices: renumber survivors 0..n (no gaps from
+                // the filter) then add the cumulative offset for consistency
+                // with the MarkerBased branch across multi-emission streams.
+                for (new_idx, chunk) in tool_call_chunks.iter_mut().enumerate() {
+                    chunk.index = (tool_call_offset + new_idx) as u32;
                 }
 
                 if !tool_call_chunks.is_empty() {
