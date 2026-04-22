@@ -129,7 +129,7 @@ navigation:
           - page: SGLang Diffusion
             path: ../pages-dev/backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
-            path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
+            path: ../pages-dev/backends/trtllm/trtllm-diffusion.md
       - page: Chat Processor Options
         path: ../pages-dev/agents/chat-processor-options.md
       - page: Tool Calling
@@ -203,8 +203,8 @@ navigation:
             path: ../pages-dev/backends/trtllm/trtllm-examples.md
           - page: Observability
             path: ../pages-dev/backends/trtllm/trtllm-observability.md
-          - page: Video Diffusion (Experimental)
-            path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
+          - page: Diffusion (Experimental)
+            path: ../pages-dev/backends/trtllm/trtllm-diffusion.md
           - page: Known Issues and Mitigations
             path: ../pages-dev/backends/trtllm/trtllm-known-issues.md
       - page: vLLM
