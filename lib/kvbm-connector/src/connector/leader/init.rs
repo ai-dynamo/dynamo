@@ -291,9 +291,15 @@ impl ConnectorLeader {
 
         for (i, future) in initialize_futures.into_iter().enumerate() {
             tracing::trace!(worker_idx = i, "Awaiting initialization for worker");
-            let worker_layout = future
-                .await
-                .with_context(|| format!("Failed to initialize worker {}", i))?;
+            let worker_layout = future.await.map_err(|e| {
+                tracing::error!(
+                    worker_idx = i,
+                    error = %e,
+                    error_chain = ?e,
+                    "Worker initialization failed"
+                );
+                e
+            }).with_context(|| format!("Failed to initialize worker {}", i))?;
             tracing::trace!(worker_idx = i, "Worker initialization completed");
 
             // Collect metadata for later storage

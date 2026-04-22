@@ -232,11 +232,29 @@ impl PendingWorkerState {
 
             let mut host_layout = self.layout_config.clone();
             host_layout.num_blocks = config.host_block_count;
+
+            let total_bytes = host_layout.required_bytes() as u64;
+            tracing::info!(
+                host_block_count = config.host_block_count,
+                bytes_per_block = host_layout.bytes_per_block(),
+                total_gb = total_bytes / (1024 * 1024 * 1024),
+                "Allocating pinned host memory for G2 layout"
+            );
+
             let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                 .with_config(host_layout)
                 .fully_contiguous()
                 .allocate_pinned(Some(self.cuda_device_id as u32))
-                .build()?;
+                .build()
+                .map_err(|e| {
+                    tracing::error!(
+                        host_block_count = config.host_block_count,
+                        total_gb = total_bytes / (1024 * 1024 * 1024),
+                        error = %e,
+                        "Failed to allocate pinned host memory for G2 layout"
+                    );
+                    e
+                })?;
 
             let g2_handle = transfer_manager.register_layout(host_layout)?;
             created_layouts.push(LogicalLayoutHandle::G2);
@@ -245,6 +263,15 @@ impl PendingWorkerState {
             let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
                 let mut disk_layout = self.layout_config.clone();
                 disk_layout.num_blocks = disk_blocks;
+
+                let disk_total_bytes = disk_layout.required_bytes() as u64;
+                tracing::info!(
+                    disk_block_count = disk_blocks,
+                    bytes_per_block = disk_layout.bytes_per_block(),
+                    total_gb = disk_total_bytes / (1024 * 1024 * 1024),
+                    "Allocating disk-backed memory for G3 layout"
+                );
+
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
@@ -252,7 +279,16 @@ impl PendingWorkerState {
                         "/tmp/kvbm_g3_{}.bin",
                         runtime.messenger().instance_id()
                     ))))
-                    .build()?;
+                    .build()
+                    .map_err(|e| {
+                        tracing::error!(
+                            disk_block_count = disk_blocks,
+                            total_gb = disk_total_bytes / (1024 * 1024 * 1024),
+                            error = %e,
+                            "Failed to allocate disk-backed memory for G3 layout"
+                        );
+                        e
+                    })?;
 
                 let handle = transfer_manager.register_layout(disk_layout)?;
                 created_layouts.push(LogicalLayoutHandle::G3);
