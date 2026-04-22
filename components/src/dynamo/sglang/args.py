@@ -59,6 +59,32 @@ class Config:
         else:
             return DisaggregationMode.AGGREGATED
 
+    @property
+    def metrics_worker_type(self) -> str:
+        """Return the worker_type label used for SGLang request metrics.
+
+        Disaggregated dashboards should key off this label instead of
+        `dynamo_component`, since the component label tracks the public endpoint
+        hierarchy (`prefill`/`backend`) rather than the operational worker role.
+        """
+        if self.dynamo_args.multimodal_processor:
+            return "processor"
+        if self.dynamo_args.multimodal_encode_worker:
+            return "encoder"
+        if self.dynamo_args.embedding_worker:
+            return "embedding"
+        if self.dynamo_args.image_diffusion_worker:
+            return "image_diffusion"
+        if self.dynamo_args.video_generation_worker:
+            return "video_generation"
+        if self.dynamo_args.diffusion_worker:
+            return "diffusion"
+        if self.serving_mode == DisaggregationMode.PREFILL:
+            return "prefill"
+        if self.serving_mode == DisaggregationMode.DECODE:
+            return "decode"
+        return "aggregated"
+
 
 # Register SGLang-specific encoders with the shared system
 @register_encoder(Config)

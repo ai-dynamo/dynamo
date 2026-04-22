@@ -16,6 +16,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.publisher import build_worker_metrics_labels
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -154,6 +155,44 @@ async def test_obsolete_dyn_endpoint_types_flag_is_supported(mock_sglang_cli):
 
     config = await parse_args(sys.argv[1:])
     assert config.dynamo_args.endpoint_types == "completions"
+
+
+@pytest.mark.asyncio
+async def test_prefill_metrics_labels_use_prefill_worker_type(mock_sglang_cli):
+    """Prefill workers should expose worker_type=prefill for request metrics."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "prefill",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.metrics_worker_type == "prefill"
+    assert build_worker_metrics_labels(config, "Qwen/Qwen3-0.6B") == [
+        ("model", "Qwen/Qwen3-0.6B"),
+        ("worker_type", "prefill"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_decode_metrics_labels_use_decode_worker_type(mock_sglang_cli):
+    """Decode workers should expose worker_type=decode for request metrics."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "decode",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.metrics_worker_type == "decode"
+    assert build_worker_metrics_labels(config, "Qwen/Qwen3-0.6B") == [
+        ("model", "Qwen/Qwen3-0.6B"),
+        ("worker_type", "decode"),
+    ]
 
 
 @pytest.mark.asyncio

@@ -666,14 +666,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "(1000 * rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",dynamo_component=\"prefill\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",dynamo_component=\"prefill\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(1000 * rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",worker_type=\"prefill\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",worker_type=\"prefill\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "Avg - {{pod}}",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "(1000 * histogram_quantile(0.99, rate(dynamo_component_request_duration_seconds_bucket{namespace=\"$namespace\",dynamo_component=\"prefill\",dynamo_endpoint=\"generate\"}[5m]))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(1000 * histogram_quantile(0.99, rate(dynamo_component_request_duration_seconds_bucket{namespace=\"$namespace\",worker_type=\"prefill\",dynamo_endpoint=\"generate\"}[5m]))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "P99 - {{pod}}",
               "range": true,
               "refId": "B"
@@ -765,7 +765,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "(rate(dynamo_component_requests_total{namespace=\"$namespace\",dynamo_component=\"prefill\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(rate(dynamo_component_requests_total{namespace=\"$namespace\",worker_type=\"prefill\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "{{pod}}",
               "range": true,
               "refId": "A"
@@ -857,14 +857,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "(rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",dynamo_component=\"prefill\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",dynamo_component=\"prefill\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",worker_type=\"prefill\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",worker_type=\"prefill\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "Prefill Avg - {{pod}}",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "(rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",dynamo_component=\"backend\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",dynamo_component=\"backend\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "(rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",worker_type=\"decode\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",worker_type=\"decode\",dynamo_endpoint=\"generate\"}[5m])) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "Decode Avg - {{pod}}",
               "range": true,
               "refId": "B"
@@ -956,7 +956,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "((rate(dynamo_component_requests_total{namespace=\"$namespace\",dynamo_component=\"backend\"}[5m]))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "((rate(dynamo_component_requests_total{namespace=\"$namespace\",worker_type=\"decode\",dynamo_endpoint=\"generate\"}[5m]))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "{{pod}}",
               "range": true,
               "refId": "A"
@@ -1048,7 +1048,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "((rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",dynamo_component=\"backend\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",dynamo_component=\"backend\"}[5m]))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+              "expr": "((rate(dynamo_component_request_duration_seconds_sum{namespace=\"$namespace\",worker_type=\"decode\",dynamo_endpoint=\"generate\"}[5m]) / rate(dynamo_component_request_duration_seconds_count{namespace=\"$namespace\",worker_type=\"decode\",dynamo_endpoint=\"generate\"}[5m]))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
               "legendFormat": "{{pod}}",
               "range": true,
               "refId": "A"

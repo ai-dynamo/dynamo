@@ -21,6 +21,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.prometheus_names import labels as prometheus_labels
 from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
 
@@ -270,6 +271,14 @@ class DynamoSglangPublisher:
         return self.kv_publishers
 
 
+def build_worker_metrics_labels(config: Config, model_name: str) -> list[tuple[str, str]]:
+    """Build extra labels for SGLang request and engine metrics."""
+    return [
+        (prometheus_labels.MODEL, model_name),
+        (prometheus_labels.WORKER_TYPE, config.metrics_worker_type),
+    ]
+
+
 def setup_prometheus_registry(
     engine: sgl.Engine, generate_endpoint: Endpoint, config: Config
 ) -> "CollectorRegistry":
@@ -308,6 +317,7 @@ def setup_prometheus_registry(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
+        inject_custom_labels={prometheus_labels.WORKER_TYPE: config.metrics_worker_type},
         namespace_name=config.dynamo_args.namespace,
         component_name=config.dynamo_args.component,
         endpoint_name=config.dynamo_args.endpoint,
@@ -349,6 +359,7 @@ async def setup_sgl_metrics(
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=dynamo_component_registry,
+        inject_custom_labels={prometheus_labels.WORKER_TYPE: config.metrics_worker_type},
     )
 
     # Create all Dynamo component gauges using the dedicated registry
@@ -358,7 +369,7 @@ async def setup_sgl_metrics(
         component_name=config.dynamo_args.component,
     )
 
-    metrics_labels = [("model", engine.server_args.served_model_name)]
+    metrics_labels = build_worker_metrics_labels(config, engine.server_args.served_model_name)
     publisher = DynamoSglangPublisher(
         engine,
         config,

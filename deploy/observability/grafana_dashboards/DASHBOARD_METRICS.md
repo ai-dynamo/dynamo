@@ -58,17 +58,17 @@ These metrics come from the prefill worker pods' system endpoints (port 9090). T
 
 | Panel | Metric | Formula | Description |
 |-------|--------|---------|-------------|
-| **Prefill Worker Processing Time** | `dynamo_component_request_duration_seconds_{sum,count,bucket}{dynamo_component="prefill",dynamo_endpoint="generate"}` | `1000 * rate(sum[5m]) / rate(count[5m])` for avg, `histogram_quantile(0.99, ...)` for P99 | Average and P99 time (in ms) spent processing prefill requests. **Includes prefill computation AND KV cache transfer over NIXL** |
-| **Prefill Worker Throughput** | `dynamo_component_requests_total{dynamo_component="prefill",dynamo_endpoint="generate"}` | `rate(...[5m])` | Rate of prefill requests being processed in requests/second |
+| **Prefill Worker Processing Time** | `dynamo_component_request_duration_seconds_{sum,count,bucket}{worker_type="prefill",dynamo_endpoint="generate"}` | `1000 * rate(sum[5m]) / rate(count[5m])` for avg, `histogram_quantile(0.99, ...)` for P99 | Average and P99 time (in ms) spent processing prefill requests. **Includes prefill computation AND KV cache transfer over NIXL** |
+| **Prefill Worker Throughput** | `dynamo_component_requests_total{worker_type="prefill",dynamo_endpoint="generate"}` | `rate(...[5m])` | Rate of prefill requests being processed in requests/second |
 
 ### Decode Worker Metrics (from Decode Worker Pods)
 These metrics come from the decode worker pods' system endpoints (port 9090). In disaggregated mode, decode workers receive KV cache from prefill workers and perform token generation.
 
 | Panel | Metric | Formula | Description |
 |-------|--------|---------|-------------|
-| **Component Latency - Prefill vs Decode** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="prefill",dynamo_endpoint="generate"}` & `{dynamo_component="backend",dynamo_endpoint="generate"}` | `rate(sum[5m]) / rate(count[5m])` | Average request duration for prefill workers (includes NIXL transfer) vs decode workers (entire decode session for all output tokens) over the last 5 minutes. **Note**: Decode worker latency measures the FULL decode session duration, not just time to first token. Only shows `generate` endpoint (filters out `clear_kv_blocks` maintenance operations) |
-| **Decode Worker - Request Throughput** | `dynamo_component_requests_total{dynamo_component="backend"}` | `rate(...[5m])` | Rate of requests processed by decode workers in requests/second |
-| **Decode Worker - Avg Request Duration** | `dynamo_component_request_duration_seconds_{sum,count}{dynamo_component="backend"}` | `rate(sum[5m]) / rate(count[5m])` | Average time decode workers spend processing requests (decode phase only) over the last 5 minutes |
+| **Component Latency - Prefill vs Decode** | `dynamo_component_request_duration_seconds_{sum,count}{worker_type="prefill",dynamo_endpoint="generate"}` & `{worker_type="decode",dynamo_endpoint="generate"}` | `rate(sum[5m]) / rate(count[5m])` | Average request duration for prefill workers (includes NIXL transfer) vs decode workers (entire decode session for all output tokens) over the last 5 minutes. **Note**: Decode worker latency measures the FULL decode session duration, not just time to first token. Only shows `generate` endpoint (filters out `clear_kv_blocks` maintenance operations) |
+| **Decode Worker - Request Throughput** | `dynamo_component_requests_total{worker_type="decode",dynamo_endpoint="generate"}` | `rate(...[5m])` | Rate of requests processed by decode workers in requests/second |
+| **Decode Worker - Avg Request Duration** | `dynamo_component_request_duration_seconds_{sum,count}{worker_type="decode",dynamo_endpoint="generate"}` | `rate(sum[5m]) / rate(count[5m])` | Average time decode workers spend processing requests (decode phase only) over the last 5 minutes |
 | **KV Cache Utilization** | `dynamo_component_gpu_cache_usage_percent` | Raw value (0-100%) | GPU memory utilization for KV cache storage of active requests. High values (>90%) indicate workers are at capacity and requests are queueing. **Note**: Only available for decode workers - prefill workers in disaggregated mode don't expose this metric. Monitor Prefill Worker Processing Time instead for prefill capacity |
 | **KV Cache Blocks (Total)** | `dynamo_component_total_blocks` | Raw value | Total number of KV cache blocks available on decode workers. **Note**: Only for decode workers |
 
@@ -85,20 +85,22 @@ These metrics track request processing across all worker pods (prefill and decod
 
 | Panel | Metric | Formula | Description |
 |-------|--------|---------|-------------|
-| **Worker Request Throughput** | `dynamo_component_requests_total{dynamo_endpoint="generate"}` | `rate(...[5m])` | Requests per second processed by each worker, broken down by component type (prefill, backend). Shows overall system throughput |
+| **Worker Request Throughput** | `dynamo_component_requests_total{dynamo_endpoint="generate"}` | `rate(...[5m])` | Requests per second processed by each worker, broken down by worker role via the `worker_type` label. Shows overall system throughput |
 | **Worker Data Transfer** | `dynamo_component_request_bytes_total` & `dynamo_component_response_bytes_total` | `rate(...[5m])` | Bytes per second transferred in requests (IN) and responses (OUT). Shows data throughput across worker pods |
 
 ## Metric Label Filters
 
 ### Component Name Filtering
-- **Prefill workers**: `dynamo_component="prefill"`
-- **Decode workers**: `dynamo_component="backend"`
+- **Prefill workers**: `worker_type="prefill"`
+- **Decode workers**: `worker_type="decode"`
 - **All workers**: Filter by `dynamo_endpoint="generate"` to exclude maintenance operations like `clear_kv_blocks`
+- **Why `worker_type`?**: Disaggregated workers can share the same public `dynamo_component` hierarchy, so the dashboards use `worker_type` to separate prefill vs decode request series reliably.
 
 ### Important Labels
 - `pod`: Specific pod name (e.g., `llama3-70b-disagg-sn-0-vllmprefillworker-hrnt5`)
 - `namespace`: Kubernetes namespace (e.g., `robert`)
 - `dynamo_component`: Component type (`prefill`, `backend`, `frontend`)
+- `worker_type`: Worker role (`prefill`, `decode`, `aggregated`, etc.) used for disaggregated worker panels
 - `dynamo_endpoint`: Endpoint name (`generate`, `clear_kv_blocks`)
 - `gpu`: GPU index (0-7 for DCGM metrics)
 - `Hostname`: Node hostname (for DCGM metrics)
