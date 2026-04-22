@@ -32,7 +32,7 @@ fn make_store_event_with_dp_rank(
     local_hashes: &[u64],
     dp_rank: u32,
 ) -> RouterEvent {
-    make_store_event_full(worker_id, local_hashes, dp_rank, None)
+    make_store_event_full(worker_id, local_hashes, dp_rank, None, None)
 }
 
 /// Create a store event with parent hash for continuation sequences.
@@ -72,9 +72,18 @@ fn make_store_event_with_parent(
         0,
         KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
+            start_position: None,
             blocks: stored_blocks_with_sequence_hashes(&new_block_hashes, new_seq_hashes),
         }),
     )
+}
+
+fn make_store_event_with_start_position(
+    worker_id: u64,
+    local_hashes: &[u64],
+    start_position: u32,
+) -> RouterEvent {
+    make_store_event_full(worker_id, local_hashes, 0, None, Some(start_position))
 }
 
 /// Create a store event with all options.
@@ -83,6 +92,7 @@ fn make_store_event_full(
     local_hashes: &[u64],
     dp_rank: u32,
     parent_hash: Option<ExternalSequenceBlockHash>,
+    start_position: Option<u32>,
 ) -> RouterEvent {
     let local_block_hashes: Vec<LocalBlockHash> =
         local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
@@ -94,6 +104,7 @@ fn make_store_event_full(
         dp_rank,
         KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
+            start_position,
             blocks: stored_blocks_with_sequence_hashes(&local_block_hashes, &seq_hashes),
         }),
     )
@@ -782,6 +793,46 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    async fn test_flat_dump_replay_preserves_start_positions() {
+        let index = make_indexer("flat");
+        index
+            .apply_event(make_store_event_with_start_position(0, &[11, 12], 10))
+            .await;
+
+        flush_and_settle(index.as_ref()).await;
+
+        let dumped = index.dump_events().await.unwrap();
+        let stored = dumped
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(data) => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(
+            stored
+                .iter()
+                .map(|data| data.start_position)
+                .collect::<Vec<_>>(),
+            vec![Some(10), Some(11)]
+        );
+        assert!(stored.iter().all(|data| data.parent_hash.is_none()));
+
+        let replay = make_indexer("flat");
+        for event in dumped {
+            replay.apply_event(event).await;
+        }
+
+        flush_and_settle(replay.as_ref()).await;
+
+        assert_eq!(
+            snapshot_tree(index.as_ref()).await,
+            snapshot_tree(replay.as_ref()).await
+        );
+    }
+
+    #[tokio::test]
     #[apply(indexer_template)]
     async fn test_multiple_dp_ranks(variant: &str) {
         let index = make_indexer(variant);
@@ -1081,6 +1132,7 @@ mod lora_tests {
             0,
             KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: stored_blocks_with_sequence_hashes(&base_hashes, &base_seq),
             }),
         );
@@ -1093,6 +1145,7 @@ mod lora_tests {
             0,
             KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: stored_blocks_with_sequence_hashes(&lora_hashes, &lora_seq),
             }),
         );
@@ -1177,6 +1230,7 @@ mod lora_tests {
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&base_local, &base_seq),
                 }),
             ))
@@ -1191,6 +1245,7 @@ mod lora_tests {
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&lora_local, &lora_seq),
                 }),
             ))
@@ -1262,6 +1317,7 @@ mod lora_tests {
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
                 }),
             ))
@@ -1275,6 +1331,7 @@ mod lora_tests {
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
                 }),
             ))
@@ -2126,6 +2183,7 @@ mod local_indexer_tests {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(block_hash),
                         tokens_hash: LocalBlockHash(block_hash),
@@ -2234,6 +2292,7 @@ mod local_indexer_tests {
                     event_id: id,
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: None,
+                        start_position: None,
                         blocks: vec![KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(id * 100),
                             tokens_hash: LocalBlockHash(id * 200),
@@ -2335,6 +2394,7 @@ mod local_indexer_tests {
                     event_id: id,
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: None,
+                        start_position: None,
                         blocks: vec![KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(id * 100),
                             tokens_hash: LocalBlockHash(id * 200),
@@ -2423,6 +2483,7 @@ mod local_indexer_tests {
                 event_id: 1,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
@@ -2479,6 +2540,7 @@ mod local_indexer_tests {
                 event_id: 1,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),

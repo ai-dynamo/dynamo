@@ -557,6 +557,7 @@ fn sequence_to_router_event(sequence: &SequenceData, event_id: u64) -> RouterEve
         event_id,
         data: KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash: None,
+            start_position: None,
             blocks: sequence
                 .local_hashes
                 .iter()
