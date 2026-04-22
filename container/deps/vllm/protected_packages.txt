@@ -1,0 +1,13 @@
+# Keep the core vllm-openai runtime solve intact while layering omni extras.
+numpy
+torch
+torchvision
+torchaudio
+triton
+vllm
+transformers
+tokenizers
+safetensors
+flashinfer-python
+flash-attn
+xformers
