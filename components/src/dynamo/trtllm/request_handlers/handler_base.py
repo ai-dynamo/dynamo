@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import hashlib
 import logging
 import os
 import re
@@ -261,6 +262,16 @@ class HandlerBase(BaseGenerativeHandler):
         self._no_inflight_requests.set()
         self._quiesce_controller = TRTLLMEngineQuiesceController(config.engine)
         self._reject_new_requests = False
+        self.system_fingerprint = self._compute_system_fingerprint()
+
+    def _compute_system_fingerprint(self) -> str:
+        llm = getattr(self.engine, "llm", None)
+        if llm is not None:
+            args = getattr(llm, "args", None)
+            if args is not None and hasattr(args, "json"):
+                digest = hashlib.sha256(args.json().encode()).hexdigest()[:10]
+                return f"fp_{digest}"
+        return "fp_unknown"
 
     def check_error(self, result: dict) -> bool:
         """
@@ -1141,7 +1152,10 @@ class HandlerBase(BaseGenerativeHandler):
                     # tokens generated in this iteration to create the "delta".
                     next_total_toks = len(output.token_ids)
 
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                    out = {
+                        "token_ids": output.token_ids[num_output_tokens_so_far:],
+                        "system_fingerprint": self.system_fingerprint,
+                    }
 
                     # Extract logprobs from the output
                     log_probs, top_logprobs = self._extract_logprobs(

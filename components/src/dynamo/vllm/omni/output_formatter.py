@@ -36,8 +36,11 @@ logger = logging.getLogger(__name__)
 class TextFormatter:
     """Formats LLM text output as OpenAI chat completion chunks."""
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self, model_name: str, system_fingerprint: str | None = None
+    ) -> None:
         self._model_name = model_name
+        self._system_fingerprint = system_fingerprint
 
     def format(
         self,
@@ -57,6 +60,7 @@ class TextFormatter:
             "created": int(time.time()),
             "object": "chat.completion.chunk",
             "model": self._model_name,
+            "system_fingerprint": self._system_fingerprint,
             "choices": [
                 {
                     "index": 0,
@@ -432,9 +436,10 @@ class OutputFormatter:
         media_fs: Any = None,
         media_http_url: Optional[str] = None,
         default_fps: int = 16,
+        system_fingerprint: str | None = None,
     ) -> None:
         self._formatters: Dict[str, Any] = {
-            "text": TextFormatter(model_name),
+            "text": TextFormatter(model_name, system_fingerprint=system_fingerprint),
             "image": DiffusionFormatter(
                 model_name, media_fs, media_http_url, default_fps
             ),

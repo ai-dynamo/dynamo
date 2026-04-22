@@ -323,6 +323,7 @@ mod tests {
             index: None,
             disaggregated_params: None,
             completion_usage: None,
+            system_fingerprint: None,
             engine_data: None,
         })
     }

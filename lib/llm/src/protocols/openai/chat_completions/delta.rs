@@ -353,6 +353,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         self.usage.completion_tokens += token_length;
 
+        if let Some(fp) = &delta.system_fingerprint {
+            self.system_fingerprint = Some(fp.clone());
+        }
+
         // If backend provides completion_usage, use it to update usage stats
         // This is critical for prompt embeddings where prompt_tokens comes from
         // the embedding sequence length computed by the worker

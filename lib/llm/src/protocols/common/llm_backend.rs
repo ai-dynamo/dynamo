@@ -107,6 +107,10 @@ pub struct BackendOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Backend system fingerprint for tracking backend configuration changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+
     /// Opaque engine data passed through from the backend worker to the response.
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +177,10 @@ pub struct LLMEngineOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
 
+    /// Backend system fingerprint for tracking backend configuration changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+
     /// Opaque engine data passed through from the backend worker to the response.
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,6 +204,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            system_fingerprint: None,
             engine_data: None,
         }
     }
@@ -216,6 +225,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            system_fingerprint: None,
             engine_data: None,
         }
     }
@@ -236,6 +246,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            system_fingerprint: None,
             engine_data: None,
         }
     }
@@ -256,6 +267,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            system_fingerprint: None,
             engine_data: None,
         }
     }

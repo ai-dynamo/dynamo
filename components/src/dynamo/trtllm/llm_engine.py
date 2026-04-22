@@ -10,6 +10,7 @@ and feature gap details.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import re
 from collections.abc import AsyncGenerator
@@ -98,9 +99,19 @@ class TrtllmLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
+    def _compute_system_fingerprint(self) -> str:
+        llm = getattr(self._engine, "llm", None)
+        if llm is not None:
+            args = getattr(llm, "args", None)
+            if args is not None and hasattr(args, "json"):
+                digest = hashlib.sha256(args.json().encode()).hexdigest()[:10]
+                return f"fp_{digest}"
+        return "fp_unknown"
+
     async def start(self) -> EngineConfig:
         self._engine = TensorRTLLMEngine(self.engine_args)
         await self._engine.initialize()
+        self.system_fingerprint = self._compute_system_fingerprint()
 
         return EngineConfig(
             model=self.model_name,
@@ -152,7 +163,8 @@ class TrtllmLLMEngine(LLMEngine):
                 output = res.outputs[0]
                 next_total = len(output.token_ids)
                 out: GenerateChunk = {
-                    "token_ids": output.token_ids[num_output_tokens_so_far:]
+                    "token_ids": output.token_ids[num_output_tokens_so_far:],
+                    "system_fingerprint": self.system_fingerprint,
                 }
 
                 if output.finish_reason:

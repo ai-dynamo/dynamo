@@ -3,6 +3,7 @@
 
 import asyncio
 import dataclasses
+import hashlib
 import importlib
 import inspect
 import json
@@ -719,9 +720,29 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             SGLangEngineQuiesceController(engine) if engine is not None else None
         )
         self._quiesce_lock = asyncio.Lock()
+        self.system_fingerprint = self._compute_system_fingerprint()
 
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
+
+    def _compute_system_fingerprint(self) -> str:
+        if self.engine is not None:
+            try:
+                import dataclasses as _dc
+                import sglang as _sgl
+
+                info = {
+                    **_dc.asdict(self.engine.tokenizer_manager.server_args),
+                    **self.engine._scheduler_init_result.scheduler_infos[0],
+                    "version": _sgl.__version__,
+                }
+                digest = hashlib.sha256(
+                    json.dumps(info, sort_keys=True, default=str).encode()
+                ).hexdigest()[:10]
+                return f"fp_{digest}"
+            except Exception as e:
+                logging.warning("Failed to compute system fingerprint: %s", e)
+        return "fp_unknown"
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:

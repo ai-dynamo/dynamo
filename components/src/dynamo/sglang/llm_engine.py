@@ -9,6 +9,8 @@ and feature gap details.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sys
 from collections.abc import AsyncGenerator
@@ -61,8 +63,27 @@ class SglangLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
+    def _compute_system_fingerprint(self) -> str:
+        if self.engine is not None:
+            try:
+                import dataclasses as _dc
+
+                info = {
+                    **_dc.asdict(self.engine.tokenizer_manager.server_args),
+                    **self.engine._scheduler_init_result.scheduler_infos[0],
+                    "version": sgl.__version__,
+                }
+                digest = hashlib.sha256(
+                    json.dumps(info, sort_keys=True, default=str).encode()
+                ).hexdigest()[:10]
+                return f"fp_{digest}"
+            except Exception:
+                pass
+        return "fp_unknown"
+
     async def start(self) -> EngineConfig:
         self.engine = sgl.Engine(server_args=self.server_args)
+        self.system_fingerprint = self._compute_system_fingerprint()
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -112,7 +133,7 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: GenerateChunk = {"token_ids": []}
+            out: GenerateChunk = {"token_ids": [], "system_fingerprint": self.system_fingerprint}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 

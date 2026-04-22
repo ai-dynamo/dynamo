@@ -134,6 +134,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "token_ids": [],
             "text": None,
             "finish_reason": None,
+            "system_fingerprint": self.system_fingerprint,
             "disaggregated_params": bootstrap_info,
         }
 

@@ -414,6 +414,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
+
+        self.system_fingerprint = self._compute_system_fingerprint()
+
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
         # bootstrap creates a fresh TCPStore per scale operation and stores it
         # in engine_client._coord_store.  When two callers race through
@@ -484,6 +487,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             receiver=self.embedding_receiver,
             embedding_cache_manager=self.embedding_cache_manager,
         )
+
+    def _compute_system_fingerprint(self) -> str:
+        vllm_config = getattr(self.engine_client, "vllm_config", None)
+        if vllm_config and hasattr(vllm_config, "compute_hash"):
+            return f"fp_{vllm_config.compute_hash()}"
+        return "fp_unknown"
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -1655,7 +1664,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                 output = res.outputs[0]
                 next_total_toks = len(output.token_ids)
-                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                out = {
+                    "token_ids": output.token_ids[num_output_tokens_so_far:],
+                    "system_fingerprint": self.system_fingerprint,
+                }
 
                 # Extract logprobs for new tokens if available
                 tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -1966,6 +1978,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "created": int(time.time()),
                         "object": "chat.completion.chunk",
                         "model": "unknown",
+                        "system_fingerprint": self.system_fingerprint,
                         "choices": [choice_data],
                     }
 
@@ -2137,6 +2150,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 )
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
+                    "system_fingerprint": self.system_fingerprint,
                     "disaggregated_params": self._build_disaggregated_params(
                         res.kv_transfer_params,
                         embedding_params,

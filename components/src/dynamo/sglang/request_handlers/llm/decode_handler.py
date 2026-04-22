@@ -416,6 +416,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+                out["system_fingerprint"] = self.system_fingerprint
 
                 # Extract logprobs for new tokens if available
                 (
@@ -508,6 +509,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "created": int(time.time()),
                     "choices": [choice_data],
                     "model": self.config.server_args.served_model_name,
+                    "system_fingerprint": self.system_fingerprint,
                     "object": "chat.completion.chunk",
                 }
                 routed_experts = res["meta_info"].get("routed_experts")

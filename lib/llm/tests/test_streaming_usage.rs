@@ -110,6 +110,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            system_fingerprint: None,
             engine_data: None,
         },
         BackendOutput {
@@ -124,6 +125,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            system_fingerprint: None,
             engine_data: None,
         },
         BackendOutput {
@@ -147,6 +149,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 completion_tokens_details: None,
             }),
             disaggregated_params: None,
+            system_fingerprint: None,
             engine_data: None,
         },
     ]
