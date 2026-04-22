@@ -31,6 +31,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+ROUTER_DISCOVERY_ENDPOINT = "router-discovery"
+
 
 class StandaloneRouterHandler:
     """Handles routing requests to workers using KV-aware routing."""
@@ -50,6 +52,8 @@ class StandaloneRouterHandler:
         self.aic_perf_config = aic_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
+        self.router_discovery_endpoint = None
+        self._router_discovery_registered = False
 
     async def initialize(self):
         """Initialize the KV router for workers."""
@@ -68,17 +72,41 @@ class StandaloneRouterHandler:
                 f"{namespace}.{component}.{endpoint}"
             )
             self.worker_client = await worker_endpoint.client()
-
-            self.kv_router = KvRouter(
-                endpoint=worker_endpoint,
-                block_size=self.block_size,
-                kv_router_config=self.kv_router_config,
-                aic_perf_config=self.aic_perf_config,
+            self.router_discovery_endpoint = self.runtime.endpoint(
+                f"{namespace}.{component}.{ROUTER_DISCOVERY_ENDPOINT}"
             )
+            await self.router_discovery_endpoint.register_endpoint_instance()
+            self._router_discovery_registered = True
+
+            try:
+                self.kv_router = KvRouter(
+                    endpoint=worker_endpoint,
+                    block_size=self.block_size,
+                    kv_router_config=self.kv_router_config,
+                    aic_perf_config=self.aic_perf_config,
+                )
+            except Exception:
+                await self.shutdown()
+                raise
 
         except Exception as e:
             logger.error(f"Failed to initialize KvRouter: {e}")
             raise
+
+    async def shutdown(self):
+        """Remove the router discovery registration when the standalone router exits."""
+        if (
+            self.router_discovery_endpoint is None
+            or not self._router_discovery_registered
+        ):
+            return
+
+        try:
+            await self.router_discovery_endpoint.unregister_endpoint_instance()
+        except Exception as e:
+            logger.warning("Failed to unregister router discovery endpoint: %s", e)
+        finally:
+            self._router_discovery_registered = False
 
     async def generate(self, request):
         """
@@ -222,6 +250,7 @@ async def worker(runtime: DistributedRuntime):
         logger.error(f"Failed to serve endpoint: {e}")
         raise
     finally:
+        await handler.shutdown()
         logger.info("Standalone Router Service shutting down")
 
 
