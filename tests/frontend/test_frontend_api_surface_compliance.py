@@ -63,8 +63,9 @@ OPENRESPONSES_SHA = "fa29df5"
 _RETRY_COUNT = 3
 _RETRY_BACKOFF_INITIAL_S = 2.0
 
-# Env keys forwarded into codex/claude subprocesses. These agents run with tool
-# permissions (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`),
+# Env keys forwarded into codex/claude subprocesses. These agents run with
+# narrowly-scoped tool permissions (codex: `-s read-only` +
+# `approval_policy=never`; claude: `--allowedTools "Bash(ls)" "Bash(ls:*)"`),
 # and even against a local model they may emit telemetry; inheriting the whole
 # CI environment would expose `GITHUB_TOKEN`, AWS creds, registry credentials,
 # etc. Keep to a minimal allowlist covering only what the runtime needs:
@@ -628,9 +629,9 @@ def _run_codex_exec_smoke(
 
     # Isolate HOME for codex the same way we do for claude below. CODEX_HOME
     # scopes codex's own state, but the agent still invokes a shell tool under
-    # `--dangerously-bypass-approvals-and-sandbox`, which inherits HOME for
-    # any shell/helper reads and writes. Point it at `codex_home` so nothing
-    # escapes `tmp_path`.
+    # `-s read-only` with `approval_policy=never`, which inherits HOME for
+    # any shell/helper reads. Point it at `codex_home` so nothing escapes
+    # `tmp_path`.
     extra_env = {
         "CODEX_HOME": str(codex_home),
         "HOME": str(codex_home),
@@ -647,9 +648,12 @@ def _run_codex_exec_smoke(
         COMPLIANCE_MODEL,
         "-c",
         "model_provider=local",
+        "-c",
+        "approval_policy=never",
         "exec",
+        "-s",
+        "read-only",
         "What files exist in the current working directory? Use your shell tool to run ls and report each filename verbatim from the output.",
-        "--dangerously-bypass-approvals-and-sandbox",
     ]
     result = subprocess.run(
         cmd,
@@ -723,9 +727,11 @@ def _run_claude_exec_smoke(
         str(claude_cli),
         "--model",
         COMPLIANCE_MODEL,
-        "--dangerously-skip-permissions",
         "-p",
         "What files exist in the current working directory? Use your shell tool to run ls and report each filename verbatim from the output.",
+        "--allowedTools",
+        "Bash(ls)",
+        "Bash(ls:*)",
     ]
     result = subprocess.run(
         cmd,
