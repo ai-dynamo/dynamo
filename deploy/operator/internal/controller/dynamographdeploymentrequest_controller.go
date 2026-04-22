@@ -1042,42 +1042,41 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 	return errors.Join(errs...)
 }
 
-// validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
+// validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling.
+// Attempt DCGM discovery first; falls back to node-label discovery.
 func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
-	// Check if user provided hardware info in the typed spec
+	// Check if user provided hardware info in the typed spec.
 	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
 		dgdr.Spec.Hardware.VRAMMB != nil ||
 		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
 
-	// If manual config is provided, validation passes
+	// If manual config is provided, validation passes.
 	if hasManualConfig {
 		return nil
 	}
 
-	isNamespaceScoped := r.Config.Namespace.Restricted != ""
-	if isNamespaceScoped {
-		return fmt.Errorf(
-			"GPU hardware info required but cannot be auto-discovered." +
-				"\n\nOptions to resolve:" +
-				"\n\n1. Re-enable GPU discovery (if it was disabled during Helm install):" +
-				"\n   helm upgrade ... --set dynamo-operator.gpuDiscovery.enabled=true" +
-				"\n\n2. Add hardware config to spec.hardware:" +
-				"\n   numGpusPerNode: 8" +
-				"\n   gpuSku: \"H100-SXM5-80GB\"" +
-				"\n   vramMb: 81920")
+	// DCGM exporter is a cluster-level Service — reachable from any namespace.
+	if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache); err == nil {
+		return nil
+	} else {
+		logger.Info("DCGM discovery unavailable", "error", err.Error())
 	}
 
-	_, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
-	if err == nil {
-		// GPU discovery is available, validation passes
-		return nil
+	// Node-label fallback
+	if ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+		if _, err := gpu.DiscoverGPUs(ctx, r.APIReader); err == nil {
+			return nil
+		} else {
+			logger.Info("Node-label discovery unavailable", "error", err.Error())
+		}
 	}
-	// Refine the logger message
-	reason := GetGPUDiscoveryFailureReason(err)
-	logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
-	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode")
+
+	return fmt.Errorf(
+		"GPU hardware info required but auto-discovery failed. " +
+			"Verify DCGM exporter is reachable from the operator's namespace, " +
+			"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 }
 
 // GetGPUDiscoveryFailureReason classifies a GPU discovery error and
@@ -1437,6 +1436,15 @@ func marshalDGDRSpec(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (strin
 
 // enrichHardwareFromDiscovery fills in hardware fields that the user didn't set.
 // Called before marshalDGDRSpec(). Mutates dgdr.Spec.Hardware in-place (memory only, not persisted).
+//
+// Discovery is attempted whenever any required field (GPUSKU, VRAMMB, NumGPUsPerNode) is absent,
+// regardless of whether other fields are already set. This prevents a nil-pointer panic that
+// occurred when hasManualConfig was true (at least one field set) but gpuInfo was never populated
+// because discovery was gated on !hasManualConfig, yet the enrichment code below still
+// dereferenced gpuInfo for whichever fields were still nil.
+//
+// DCGM is tried first; node-label discovery (DiscoverGPUs) is used as a fallback to support
+// environments such as vCluster where DCGM sockets are exclusive to the host cluster.
 func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	if dgdr.Spec.Hardware == nil {
 		dgdr.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{}
@@ -1447,36 +1455,38 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
-	var gpuInfo *gpu.GPUInfo
 	logger := log.FromContext(ctx)
-	// Check if user provided hardware info in the typed spec
-	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
-		dgdr.Spec.Hardware.VRAMMB != nil ||
-		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
-	if !hasManualConfig {
 
+	// Attempt discovery only when at least one required field is missing.
+	needsDiscovery := hw.GPUSKU == "" || hw.VRAMMB == nil || hw.NumGPUsPerNode == nil
+
+	var gpuInfo *gpu.GPUInfo
+	if needsDiscovery {
 		logger.Info("Attempting GPU discovery for profiling job")
 		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
 		if err != nil {
-			// This path is expected for namespace-restricted operators without node read permissions
-			// Refine the logger message
 			reason := GetGPUDiscoveryFailureReason(err)
-			logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
+			logger.Info("DCGM discovery failed, falling back to node-label discovery",
 				"reason", reason, "error", err.Error())
-			return err
-		} else {
-			gpuInfo = discoveredInfo
-			logger.Info("GPU discovery completed successfully",
-				"gpusPerNode", gpuInfo.GPUsPerNode,
-				"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-				"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
-				"model", gpuInfo.Model,
-				"vramMiB", gpuInfo.VRAMPerGPU,
-				"system", gpuInfo.System,
-				"cloudprovider", gpuInfo.CloudProvider)
+			discoveredInfo, err = gpu.DiscoverGPUs(ctx, r.APIReader)
+			if err != nil {
+				logger.Info("Node-label discovery also failed", "error", err.Error())
+				return err
+			}
 		}
+		gpuInfo = discoveredInfo
+		logger.Info("GPU discovery completed successfully",
+			"gpusPerNode", gpuInfo.GPUsPerNode,
+			"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+			"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+			"model", gpuInfo.Model,
+			"vramMiB", gpuInfo.VRAMPerGPU,
+			"system", gpuInfo.System,
+			"cloudprovider", gpuInfo.CloudProvider)
 	}
-	if hw.GPUSKU == "" {
+
+	// Enrich only the fields that are still missing
+	if hw.GPUSKU == "" && gpuInfo != nil {
 		if gpuInfo.System != "" {
 			hw.GPUSKU = gpuInfo.System
 		} else {
@@ -1484,15 +1494,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 			hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
 		}
 	}
-	if hw.VRAMMB == nil {
+	if hw.VRAMMB == nil && gpuInfo != nil {
 		vram := float64(gpuInfo.VRAMPerGPU)
 		hw.VRAMMB = &vram
 	}
-	if hw.NumGPUsPerNode == nil {
+	if hw.NumGPUsPerNode == nil && gpuInfo != nil {
 		n := int32(gpuInfo.GPUsPerNode)
 		hw.NumGPUsPerNode = &n
 	}
-	if hw.TotalGPUs == nil {
+	if hw.TotalGPUs == nil && gpuInfo != nil {
 		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
 		// Will be removed once a fix is in the Profiler/AIC.
 		const defaultMaxAutoGPUs = int32(32)
