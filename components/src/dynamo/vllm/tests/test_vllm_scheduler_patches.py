@@ -43,9 +43,15 @@ def _req(req_id: str, *, finished: bool = False, status=None):
 
 @pytest.fixture
 def no_op_original(monkeypatch):
+    from vllm.v1.core.sched.scheduler import Scheduler
+
     import dynamo.vllm.scheduler_patches as sp
 
-    monkeypatch.setattr(sp, "_original_reset_prefix_cache", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        Scheduler,
+        sp._DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR,
+        lambda *a, **kw: True,
+    )
 
 
 def test_reset_force_frees_finished_and_records_ignore(scheduler, no_op_original):
@@ -96,13 +102,18 @@ def test_update_drops_ignored_signals_for_both_directions(scheduler):
     assert getattr(scheduler, _IGNORE_LATE_KV_XFER_ATTR) == set()
 
 
-def test_update_drops_unknown_req_id(scheduler):
+def test_update_drops_unknown_req_id_without_consuming_ignore(scheduler):
     # Defensive branch: any req_id missing from self.requests (even
-    # without an ignore-set entry) is dropped instead of asserting.
+    # without an ignore-set entry) is dropped instead of asserting. Unknown
+    # req_ids must not consume unrelated ignore markers.
+    from dynamo.vllm.scheduler_patches import _IGNORE_LATE_KV_XFER_ATTR
+
+    setattr(scheduler, _IGNORE_LATE_KV_XFER_ATTR, {"still-late"})
     scheduler._update_from_kv_xfer_finished(
         SimpleNamespace(finished_recving=[], finished_sending=["never-seen"])
     )
     scheduler._free_blocks.assert_not_called()
+    assert getattr(scheduler, _IGNORE_LATE_KV_XFER_ATTR) == {"still-late"}
 
 
 def test_update_preserves_live_finished_sending(scheduler):
@@ -133,16 +144,40 @@ def test_module_patches_are_installed():
 
 
 def test_patch_is_idempotent_on_reimport():
-    # Without the _DYNAMO_PATCHED_MARKER guard, a reimport would capture
-    # the already-patched method as "original" and infinite-recurse.
+    # Reimport must keep the true original stored on Scheduler while rebinding
+    # Scheduler methods to the current module's wrappers.
     import importlib
 
     from vllm.v1.core.sched.scheduler import Scheduler
 
     import dynamo.vllm.scheduler_patches as sp
 
-    patched_reset = Scheduler.reset_prefix_cache
-    patched_update = Scheduler._update_from_kv_xfer_finished
+    original_reset = getattr(Scheduler, sp._DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR)
     importlib.reload(sp)
-    assert Scheduler.reset_prefix_cache is patched_reset
-    assert Scheduler._update_from_kv_xfer_finished is patched_update
+    assert Scheduler.reset_prefix_cache is sp._reset_prefix_cache_with_delay_free
+    assert (
+        Scheduler._update_from_kv_xfer_finished is sp._update_from_kv_xfer_finished_safe
+    )
+    assert (
+        getattr(Scheduler, sp._DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR)
+        is original_reset
+    )
+
+
+def test_reloaded_wrapper_uses_class_stored_original(monkeypatch):
+    import importlib
+
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    import dynamo.vllm.scheduler_patches as sp
+
+    monkeypatch.setattr(
+        Scheduler,
+        sp._DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR,
+        lambda *a, **kw: True,
+    )
+
+    importlib.reload(sp)
+
+    scheduler = MagicMock(spec=Scheduler)
+    assert sp._reset_prefix_cache_with_delay_free(scheduler) is True

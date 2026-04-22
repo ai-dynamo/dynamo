@@ -26,9 +26,10 @@ from vllm.v1.request import RequestStatus
 
 logger = logging.getLogger(__name__)
 
-# Guards against editable-install double-import, which would otherwise
-# capture the already-patched method as the "original" and recurse.
+# Guards against editable-install double-import. The original method is stored
+# on Scheduler so importlib.reload can rebind this module's wrapper safely.
 _DYNAMO_PATCHED_MARKER = "_dynamo_scheduler_patched"
+_DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR = "_dynamo_original_reset_prefix_cache"
 
 # Per-Scheduler set of req_ids force-freed by reset_prefix_cache; consumed
 # by _update_from_kv_xfer_finished to drop the corresponding late signals.
@@ -74,7 +75,8 @@ def _reset_prefix_cache_with_delay_free(
         self.finished_recving_kv_req_ids.clear()
         self.failed_recving_kv_req_ids.clear()
 
-    return _original_reset_prefix_cache(self, reset_running_requests, reset_connector)
+    original = getattr(Scheduler, _DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR)
+    return original(self, reset_running_requests, reset_connector)
 
 
 def _update_from_kv_xfer_finished_safe(self: Scheduler, kv_connector_output) -> None:
@@ -84,8 +86,10 @@ def _update_from_kv_xfer_finished_safe(self: Scheduler, kv_connector_output) -> 
     ignore = _get_ignore_set(self)
 
     for req_id in kv_connector_output.finished_recving or ():
-        if req_id in ignore or req_id not in self.requests:
+        if req_id in ignore:
             ignore.discard(req_id)
+            continue
+        if req_id not in self.requests:
             continue
         req = self.requests[req_id]
         if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -95,17 +99,29 @@ def _update_from_kv_xfer_finished_safe(self: Scheduler, kv_connector_output) -> 
             self._free_blocks(req)
 
     for req_id in kv_connector_output.finished_sending or ():
-        if req_id in ignore or req_id not in self.requests:
+        if req_id in ignore:
             ignore.discard(req_id)
+            continue
+        if req_id not in self.requests:
             continue
         self._free_blocks(self.requests[req_id])
 
 
-if not getattr(Scheduler, _DYNAMO_PATCHED_MARKER, False):
-    _original_reset_prefix_cache = Scheduler.reset_prefix_cache
+def _install_scheduler_patches() -> None:
+    original = getattr(Scheduler, _DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR, None)
+    if original is None:
+        current_reset_prefix_cache = Scheduler.reset_prefix_cache
+        original = getattr(current_reset_prefix_cache, "__globals__", {}).get(
+            "_original_reset_prefix_cache", current_reset_prefix_cache
+        )
+        setattr(Scheduler, _DYNAMO_ORIGINAL_RESET_PREFIX_CACHE_ATTR, original)
+
     Scheduler.reset_prefix_cache = _reset_prefix_cache_with_delay_free
     Scheduler._update_from_kv_xfer_finished = _update_from_kv_xfer_finished_safe
     setattr(Scheduler, _DYNAMO_PATCHED_MARKER, True)
+
+
+_install_scheduler_patches()
 
 
 class PatchedAsyncScheduler(AsyncScheduler):
