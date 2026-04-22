@@ -64,6 +64,5 @@ For configuration details, see the [FlexKV Integration Guide](../../integrations
 ## See Also
 
 - **[KVBM Design](../../design-docs/kvbm-design.md)**: Architecture and design of Dynamo's built-in KV cache offloading
-- **[KV-Aware Routing](../../components/router/router-guide.md)**: Routing requests based on KV cache state
+- **[Routing Concepts](../../components/router/router-concepts.md)**: Routing requests based on KV cache state
 - **[Disaggregated Serving](../../design-docs/disagg-serving.md)**: Prefill/decode separation architecture
-

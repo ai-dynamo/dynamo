@@ -30,6 +30,16 @@ The migration limit is configured at the **frontend** level and applies globally
 - Set via `--migration-limit` flag on the frontend
 - Applies to all models served by the frontend
 
+### Max Sequence Length Configuration
+
+The max sequence length setting controls how long the migration system will cache token state for a request. Once the total sequence length (prompt + generated tokens) exceeds this limit, migration is disabled for that request and token tracking stops:
+
+- Default behavior: no limit (`--migration-max-seq-len` unset)
+- Set via `--migration-max-seq-len` flag or `DYN_MIGRATION_MAX_SEQ_LEN` environment variable on the frontend
+- Prevents unbounded memory growth from caching long sequences
+- Boundary: exactly at the limit is still migratable; only strictly exceeding it disables migration
+- The check runs both at request initialization (prompt length) and during generation (prompt + output tokens)
+
 ## Token State Tracking and Request Migration
 
 The core of the migration system is the ability to preserve and continue partial generations through token state management. This ensures that when a worker fails mid-generation, the new worker can seamlessly continue from the exact point of failure.
@@ -118,19 +128,36 @@ The migration system exposes Prometheus metrics to monitor migration activity. T
   - Labels:
     - `model`: The model name being served
     - `migration_type`: Either `new_request` (initial connection failure) or `ongoing_request` (mid-stream disconnection)
+- `dynamo_frontend_model_migration_max_seq_len_exceeded_total`: Counter tracking the number of times migration was disabled because the sequence length exceeded the configured `--migration-max-seq-len`
+  - Labels:
+    - `model`: The model name being served
 
 **Example metrics output:**
-```
+```text
 dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
+dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2
 ```
 
 These metrics can be used to:
 - Monitor worker reliability and failure patterns
 - Alert on excessive migration rates indicating infrastructure issues
 - Track the effectiveness of fault tolerance mechanisms
+- Monitor how often `--migration-max-seq-len` is being reached, which may indicate the limit needs adjustment
 
 For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
+
+## Known Limitations
+
+### Guided Decoding (Structured Output)
+
+Request migration is **not supported** for requests that use guided decoding (structured output / JSON schema). When a worker fails mid-stream during a guided-decoding request, the error is propagated to the client instead of attempting migration.
+
+**Why:** Inference backends initialize the guided-decoding finite state machine (FSM) fresh for every new request and only advance it on newly-generated tokens, not on context/prompt tokens. When a partially-completed request is migrated to a new worker, the new worker replays the already-generated tokens as context but starts the FSM from the schema root. This mismatch between the token state and FSM state produces corrupted output — typically duplicated or nested JSON.
+
+This limitation applies equally to all backends (vLLM, SGLang, TRT-LLM).
+
+**Future path:** Supporting migration for guided-decoding requests would require serializing and restoring the FSM state across workers, or replaying prior output tokens through the FSM on the new worker. This is tracked as a future enhancement.
 
 ## Operational Impact
 

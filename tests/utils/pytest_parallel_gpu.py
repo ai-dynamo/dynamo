@@ -59,6 +59,8 @@ class _TestEntry:
     timeout: float
     requested_vllm_kv_cache_bytes: int | None = None
     requested_sglang_kv_tokens: int | None = None
+    requested_trtllm_kv_tokens: int | None = None
+    requested_trtllm_vram_gib: float | None = None
     skip_reason: str | None = None
     w_id: int = 0
     assigned_gpu: int | None = None
@@ -117,6 +119,10 @@ def _fmt_req(test: _TestEntry) -> str:
     """Format the resource request value for display."""
     if test.requested_sglang_kv_tokens is not None:
         return f"req_kv_tokens={int(test.requested_sglang_kv_tokens)}"
+    if test.requested_trtllm_kv_tokens is not None:
+        return f"req_kv_tokens={int(test.requested_trtllm_kv_tokens)}"
+    if test.requested_trtllm_vram_gib is not None:
+        return f"req_vram={test.requested_trtllm_vram_gib:.1f} GiB"
     if test.requested_vllm_kv_cache_bytes is not None:
         gib = int(test.requested_vllm_kv_cache_bytes) / (1024**3)
         return f"req_kv={gib:.2f} GiB"
@@ -347,6 +353,8 @@ def run_parallel(
                 requested_vllm_kv_cache_bytes=m.get("requested_vllm_kv_cache_bytes"),
                 timeout=m.get("timeout", 600),
                 requested_sglang_kv_tokens=m.get("requested_sglang_kv_tokens"),
+                requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
+                requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
                 skip_reason=m.get("skip_reason"),
             )
         )
@@ -367,19 +375,19 @@ def run_parallel(
         for t in tests
         if t.requested_vllm_kv_cache_bytes is None
         and t.requested_sglang_kv_tokens is None
+        and t.requested_trtllm_kv_tokens is None
+        and t.requested_trtllm_vram_gib is None
         and t.profiled_gib > 0
     ]
     if no_kv:
         _print(
-            f"\nERROR: {len(no_kv)} test(s) lack a requested_vllm_kv_cache_bytes "
-            f"or requested_sglang_kv_tokens marker and cannot run in parallel:"
+            f"\nERROR: {len(no_kv)} test(s) lack a requested_vllm_kv_cache_bytes, "
+            f"requested_sglang_kv_tokens, requested_trtllm_kv_tokens, "
+            f"or requested_trtllm_vram_gib marker and cannot run in parallel:"
         )
         for t in no_kv:
             _print(f"  {t.name}")
-        _print(
-            "\nAdd the appropriate marker via profile_pytest.py --kv-bytes, "
-            "then rerun."
-        )
+        _print("\nAdd the appropriate marker via profile_pytest.py, " "then rerun.")
         return 1
 
     # Identify tests in metadata that exceed the VRAM budget
@@ -502,6 +510,13 @@ def run_parallel(
             env["_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"] = str(
                 int(test.requested_sglang_kv_tokens)
             )
+        elif test.requested_trtllm_kv_tokens is not None:
+            env["_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"] = str(
+                int(test.requested_trtllm_kv_tokens)
+            )
+        elif test.requested_trtllm_vram_gib is not None:
+            gib_to_bytes = int(test.requested_trtllm_vram_gib * 1024**3)
+            env["_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES"] = str(gib_to_bytes)
         elif test.requested_vllm_kv_cache_bytes is not None:
             env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(
                 int(test.requested_vllm_kv_cache_bytes)
@@ -705,7 +720,8 @@ def run_parallel(
                 gi = entry.assigned_gpu
                 assert gi is not None
                 is_vllm = (
-                    entry.requested_sglang_kv_tokens is None and entry.profiled_gib > 0
+                    entry.requested_vllm_kv_cache_bytes is not None
+                    and entry.profiled_gib > 0
                 )
 
                 # Per-GPU vLLM stagger — only between vLLM tests on the

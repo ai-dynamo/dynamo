@@ -18,7 +18,7 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_P
 python -m dynamo.frontend &
 
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-# TODO: use build_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
+# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model "$MODEL" \

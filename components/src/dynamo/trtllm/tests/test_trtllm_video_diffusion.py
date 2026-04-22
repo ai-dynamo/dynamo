@@ -46,14 +46,19 @@ class TestModality:
     """Tests for the Modality enum and its helper methods."""
 
     def test_modality_values_exist(self):
-        """Test that TEXT, MULTIMODAL, and VIDEO_DIFFUSION exist."""
+        """Test that TEXT, MULTIMODAL, VIDEO_DIFFUSION, and IMAGE_DIFFUSION exist."""
         assert Modality.TEXT.value == "text"
         assert Modality.MULTIMODAL.value == "multimodal"
         assert Modality.VIDEO_DIFFUSION.value == "video_diffusion"
+        assert Modality.IMAGE_DIFFUSION.value == "image_diffusion"
 
     def test_is_diffusion_true_for_video_diffusion(self):
         """Test that VIDEO_DIFFUSION returns True for is_diffusion."""
         assert Modality.is_diffusion(Modality.VIDEO_DIFFUSION) is True
+
+    def test_is_diffusion_true_for_image_diffusion(self):
+        """Test that IMAGE_DIFFUSION returns True for is_diffusion."""
+        assert Modality.is_diffusion(Modality.IMAGE_DIFFUSION) is True
 
     def test_is_diffusion_false_for_text(self):
         """Test that TEXT returns False for is_diffusion."""
@@ -74,6 +79,10 @@ class TestModality:
     def test_is_llm_false_for_video_diffusion(self):
         """Test that VIDEO_DIFFUSION returns False for is_llm."""
         assert Modality.is_llm(Modality.VIDEO_DIFFUSION) is False
+
+    def test_is_llm_false_for_image_diffusion(self):
+        """Test that IMAGE_DIFFUSION returns False for is_llm."""
+        assert Modality.is_llm(Modality.IMAGE_DIFFUSION) is False
 
 
 # =============================================================================
@@ -168,6 +177,7 @@ class MockDiffusionConfig:
     default_width: int = 832
     default_height: int = 480
     default_num_frames: int = 81
+    default_num_images_per_prompt: int = 1
     default_fps: int = 24
     default_seconds: int = 4
     max_width: int = 4096
@@ -194,7 +204,7 @@ class TestVideHandlerParseSize:
     def setup_method(self):
         """Set up mock handler for each test."""
         # Import here to avoid issues if handler has complex imports
-        from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
@@ -274,7 +284,7 @@ class TestVideoHandlerComputeNumFrames:
 
     def setup_method(self):
         """Set up mock handler for each test."""
-        from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
@@ -643,7 +653,7 @@ class TestVideoHandlerConcurrency:
 
     def _make_handler(self):
         """Create a VideoGenerationHandler with mock engine and config."""
-        from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
@@ -659,7 +669,7 @@ class TestVideoHandlerConcurrency:
         )
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.get_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.get_fs",
             return_value=MagicMock(),
         ):
             handler = VideoGenerationHandler(
@@ -696,10 +706,10 @@ class TestVideoHandlerConcurrency:
             requests = [self._make_request() for _ in range(3)]
 
             with patch(
-                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+                "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
                 return_value=b"fake_mp4_bytes",
             ), patch(
-                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+                "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
                 return_value="http://fake/video.mp4",
             ):
                 await asyncio.gather(
@@ -726,7 +736,7 @@ class TestVideoHandlerResponseFormats:
 
     def _make_handler(self):
         """Create a handler with mocked engine and fs."""
-        from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
@@ -746,7 +756,7 @@ class TestVideoHandlerResponseFormats:
         )
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.get_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.get_fs",
             return_value=MagicMock(),
         ):
             handler = VideoGenerationHandler(
@@ -768,10 +778,10 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
             return_value=b"fake_mp4",
         ), patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
             return_value="https://cdn.example.com/media/videos/test.mp4",
         ) as mock_upload:
             results = []
@@ -800,7 +810,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
             return_value=b"fake_mp4_bytes",
         ):
             results = []
@@ -832,10 +842,10 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
             return_value=b"fake_mp4",
         ), patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
             return_value="https://cdn.example.com/media/videos/test.mp4",
         ) as mock_upload:
             results = []

@@ -74,14 +74,18 @@ def _make_handler(
     """Construct a handler with BaseWorkerHandler.__init__ bypassed."""
     if config is None:
         config = _make_config()
+    model_config = MagicMock(enable_prompt_embeds=True)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
-        return mod.DecodeWorkerHandler(
+        handler = mod.DecodeWorkerHandler(
             runtime=MagicMock(),
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
+            model_config=model_config,
             encode_worker_client=encode_worker_client,
         )
+    handler.model_config = model_config
+    return handler
 
 
 def _make_raw_frontend_request(image_urls: list[str] | None = None) -> dict:
@@ -317,14 +321,17 @@ def _make_decode_handler(
 ) -> mod.DecodeWorkerHandler:
     """Construct a DecodeWorkerHandler with mocked internals."""
     config = _make_config(model=model, disaggregation_mode=disaggregation_mode)
+    model_config = MagicMock(enable_prompt_embeds=True)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
             runtime=MagicMock(),
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
+            model_config=model_config,
         )
     handler.config = config
+    handler.model_config = model_config
     handler.enable_multimodal = True
     handler.image_loader = MagicMock()
     handler.embedding_loader = None
@@ -401,8 +408,6 @@ class TestDecodeWorkerMultimodalBranching:
             model="llava-hf/llava-1.5-7b-hf",
             disaggregation_mode="DECODE",
         )
-        # Return an error from _build_prompt_from_request so we don't need
-        # to mock the full engine — just verify we get past the decode guard.
         handler._build_prompt_from_request = MagicMock(
             return_value=(None, None, {"status": "error", "message": "test stop"})
         )
@@ -464,14 +469,17 @@ def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler
     config = _make_config(
         model=model, is_prefill_worker=True, disaggregation_mode="PREFILL"
     )
+    model_config = MagicMock(enable_prompt_embeds=True)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.PrefillWorkerHandler(
             runtime=MagicMock(),
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
+            model_config=model_config,
         )
     handler.config = config
+    handler.model_config = model_config
     return handler
 
 
@@ -487,25 +495,85 @@ class TestBuildEmbeddingParams:
                 "image_grid_thw": torch.tensor([[1, 16, 16]]),
             }
         }
-        result = handler._build_embedding_params(mm_data)
+        result = handler._build_embedding_params(mm_data, [1, 2, 3])
 
         assert result is not None
         assert "image_grid_thw" in result
         assert "embeddings_shape" in result
         assert result["embeddings_shape"] == [1, 256, 1024]
 
-    def test_pil_image_list_non_qwen_returns_none(self):
-        """PIL image list for non-Qwen model -> returns None."""
+    def test_pil_image_qwen_computes_grid(self):
+        """PIL image for Qwen VL with grid params -> computes valid embedding_params."""
+        from PIL import Image
+
+        from dynamo.vllm.multimodal_utils.models.qwen import QwenGridParams
+
+        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
+        # Qwen3-VL: patch=16, merge=2, factor=32
+        handler._qwen_grid_params = QwenGridParams(
+            patch_size=16,
+            merge_size=2,
+            factor=32,
+            min_pixels=65536,
+            max_pixels=16777216,
+            vision_hidden_dim=2048,
+        )
+
+        img = Image.new("RGB", (640, 480))
+        result = handler._build_embedding_params({"image": img}, [1, 2, 3])
+
+        assert result is not None
+        assert result["image_grid_thw"] == [[1, 30, 40]]
+        # total_tokens = 1*30*40 // 4 = 300
+        assert result["embeddings_shape"] == [300, 2048]
+
+    def test_pil_multi_image_qwen_computes_grid(self):
+        """Multiple PIL images for Qwen VL -> computes combined embedding_params."""
+        from PIL import Image
+
+        from dynamo.vllm.multimodal_utils.models.qwen import QwenGridParams
+
+        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
+        handler._qwen_grid_params = QwenGridParams(
+            patch_size=16,
+            merge_size=2,
+            factor=32,
+            min_pixels=65536,
+            max_pixels=16777216,
+            vision_hidden_dim=2048,
+        )
+
+        imgs = [Image.new("RGB", (640, 480)), Image.new("RGB", (320, 320))]
+        result = handler._build_embedding_params({"image": imgs}, [1, 2, 3])
+
+        assert result is not None
+        assert len(result["image_grid_thw"]) == 2
+        assert result["image_grid_thw"][0] == [1, 30, 40]
+        assert result["embeddings_shape"][1] == 2048
+
+    def test_pil_image_qwen_params_unavailable_returns_none(self):
+        """Qwen VL with no grid params -> returns None (fallback)."""
+        from PIL import Image
+
+        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
+        handler._qwen_grid_params = None
+
+        img = Image.new("RGB", (640, 480))
+        result = handler._build_embedding_params({"image": img}, [1, 2, 3])
+        assert result is None
+
+    def test_pil_image_list_llava_returns_expanded_prompt_token_ids(self):
+        """PIL image list for LLaVA model -> returns expanded prompt token ids."""
         handler = _make_prefill_handler(model="llava-hf/llava-1.5-7b-hf")
         mm_data = {"image": [MagicMock()]}
 
-        result = handler._build_embedding_params(mm_data)
-        assert result is None
+        result = handler._build_embedding_params(mm_data, [1, 2, 3])
+        assert result["expanded_prompt_token_ids"] == [1, 2, 3]
 
     def test_no_image_data_returns_none(self):
         """No image data -> returns None."""
         handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
         mm_data = {}
 
-        result = handler._build_embedding_params(mm_data)
+        result = handler._build_embedding_params(mm_data, [1, 2, 3])
         assert result is None

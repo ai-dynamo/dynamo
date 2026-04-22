@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
-    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
-    TOKENIZE_SECONDS,
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
+    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
@@ -235,6 +235,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
 
@@ -267,7 +268,7 @@ impl OpenAIPreprocessor {
             .with_context(|| "Failed to gather multimodal data")?;
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["preprocess"])
+            .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
@@ -332,15 +333,20 @@ impl OpenAIPreprocessor {
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
                 allowed_worker_ids: None,
+                session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA.
+            // Ensure routing hints exist when we have LoRA,
+            // even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
                 ..Default::default()
             }));
         }
+
+        // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
     }
@@ -413,12 +419,14 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<String>,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
+        let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
         let Some(messages) = request.typed_messages() else {
             return Ok(());
         };
+        let has_media_loader = self.media_loader.is_some();
+
         for message in messages.iter() {
             let content_parts = match message {
                 ChatCompletionRequestMessage::User(u) => match &u.content {
@@ -427,31 +435,33 @@ impl OpenAIPreprocessor {
                 },
                 _ => continue,
             };
-            // Iterate over content parts
             for content_part in content_parts.iter() {
-                let (type_str, url) = match content_part {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                        ("image_url".to_string(), image_part.image_url.url.clone())
-                    }
-                    ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                        ("video_url".to_string(), video_part.video_url.url.clone())
-                    }
-                    ChatCompletionRequestUserMessageContentPart::AudioUrl(audio_part) => {
-                        ("audio_url".to_string(), audio_part.audio_url.url.clone())
-                    }
-                    _ => continue,
-                };
-
-                if self.media_loader.is_some() {
-                    fetch_tasks.push((type_str, content_part.clone()));
-                    continue;
+                if has_media_loader {
+                    let type_str = match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
+                        _ => continue,
+                    };
+                    fetch_tasks.push((type_str.to_string(), content_part));
+                } else {
+                    let (type_str, url) = match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                            ("image_url", p.image_url.url.clone())
+                        }
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
+                            ("video_url", p.video_url.url.clone())
+                        }
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
+                            ("audio_url", p.audio_url.url.clone())
+                        }
+                        _ => continue,
+                    };
+                    media_map
+                        .entry(type_str.to_string())
+                        .or_default()
+                        .push(MultimodalData::Url(url));
                 }
-
-                //Fallback: ust pass the URL through
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Url(url));
             }
         }
 
@@ -674,6 +684,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &NvCreateEmbeddingRequest,
     ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
@@ -1453,6 +1464,8 @@ impl
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+
         // unpack the request
         let (mut request, context) = request.into_parts();
 
@@ -1509,6 +1522,9 @@ impl
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
         let annotations_stream = stream::iter(annotations);
+
+        // End preprocess stage before handing off to downstream (route/dispatch).
+        drop(_stage_guard);
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;

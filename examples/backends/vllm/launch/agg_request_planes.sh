@@ -50,7 +50,10 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 export DYN_REQUEST_PLANE=$REQUEST_PLANE
 echo "Using request plane mode: $REQUEST_PLANE"
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+# Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB peak VRAM
+# Profiler/test framework overrides via env
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=1119388000}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving + Request Planes (1 GPU)" "$MODEL" "$HTTP_PORT"

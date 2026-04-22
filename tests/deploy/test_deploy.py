@@ -145,6 +145,13 @@ async def test_deployment(
     framework = deployment_target.framework
     profile = deployment_target.profile
 
+    # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
+    # transfer.  Prefill workers crash in NixlWrapper.create_backend.
+    if framework == "vllm" and profile in ("disagg", "disagg_router"):
+        pytest.skip(
+            "NIXL_ERR_BACKEND: CI cluster lacks RDMA/UCX for inter-pod KV transfer"
+        )
+
     model = next((s.model for s in deployment_spec.services if s.model), None)
     if not model:
         pytest.fail(

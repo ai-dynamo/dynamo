@@ -85,10 +85,11 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in the workload namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+
+> **Note:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
 
 **Key Configuration Notes:**
-- If your cluster uses namespace restrictions, ensure `dynamo-operator.namespaceRestriction.enabled=true` is set during installation
 - Adjust version tags to match your cluster's available Dynamo versions
 - If you encounter operator compatibility issues (e.g., unsupported MPI arguments), consult your cluster administrator or the Dynamo troubleshooting documentation
 
@@ -825,7 +826,7 @@ VllmPrefillWorker:
 
 ## Conclusion
 
-This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit. For further details on tuning the KV router, see the [Tuning Guidelines](../components/router/router-guide.md#tuning-guidelines).
+This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit. For further details on tuning the KV router, see [Tuning Guidelines](../components/router/router-configuration.md#tuning-guidelines).
 
 For questions or issues, consult the [Dynamo documentation](https://github.com/ai-dynamo/dynamo) or open an issue on GitHub.
 

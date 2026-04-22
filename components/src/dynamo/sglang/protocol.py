@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from dynamo.common.multimodal import TransferRequest
+from dynamo.common.protocols.image_protocol import ImageNvExt
 
 TokenIdType = int
 
@@ -143,18 +144,13 @@ class DisaggSglangMultimodalRequest(BaseModel):
 # ============================================================================
 
 
-class NvExt(BaseModel):
-    """NVIDIA extensions for image generation"""
-
-    negative_prompt: Optional[str] = None
-    num_inference_steps: Optional[int] = 50
-    guidance_scale: float = 7.5
-    seed: Optional[int] = None
-    annotations: Optional[list[str]] = None
-
-
 class CreateImageRequest(BaseModel):
-    """OpenAI /v1/images/generations compatible request"""
+    """OpenAI /v1/images/generations and /v1/images/edits compatible request.
+
+    Generation params (seed, guidance_scale, num_inference_steps, negative_prompt)
+    are specified under ``nvext``.  SGLang-specific defaults (guidance_scale=7.5,
+    num_inference_steps=50) are applied in the handler, not the model.
+    """
 
     prompt: str
     model: str  # e.g. "stabilityai/stable-diffusion-3.5-medium"
@@ -163,9 +159,9 @@ class CreateImageRequest(BaseModel):
     quality: Optional[str] = "standard"  # standard, hd
     response_format: Optional[str] = "url"  # url or b64_json
     user: Optional[str] = None
+    input_reference: Optional[str] = None  # For I2I/TI2I - image path/url
 
-    # NVIDIA extensions nested under nvext
-    nvext: Optional[NvExt] = None
+    nvext: Optional[ImageNvExt] = None
 
 
 class ImageData(BaseModel):

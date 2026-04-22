@@ -80,8 +80,12 @@ spec:
   model: Qwen/Qwen3-0.6B
 
   # Container image for the profiling job — must match your installed platform version.
-  # This is the same dynamo-frontend image used by the deployed inference service.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${RELEASE_VERSION}"
+  #   Dynamo >= 1.1.0: use the dedicated planner/profiler image (dynamo-planner).
+  #     Planner/profiler runtime deps (kubernetes_asyncio, pmdarima, prophet,
+  #     aiconfigurator, ...) ship only in this image; the frontend and backend
+  #     runtime images do not.
+  #   Dynamo <  1.1.0: use the dynamo-frontend image you deploy with.
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:${RELEASE_VERSION}"
 ```
 
 Apply it (uses `envsubst` to substitute the `RELEASE_VERSION` shell variable into the YAML):
@@ -95,7 +99,7 @@ envsubst < qwen3-first-model.yaml | kubectl apply -f - -n ${NAMESPACE}
 | Field | Required | Default | Purpose |
 |---|---|---|---|
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
-| `image` | No | — | Container image for the profiling job (`dynamo-frontend`) |
+| `image` | No | — | Container image for the profiling job. For Dynamo ≥ 1.1.0 this must be the `dynamo-planner` image; for earlier versions it is the `dynamo-frontend` image. |
 | `backend` | No | `auto` | Inference engine (`auto`, `vllm`, `sglang`, `trtllm`) |
 | `searchStrategy` | No | `rapid` | Profiling depth — `rapid` (~30s, AIC simulation) or `thorough` (2–4h, real GPUs) |
 | `autoApply` | No | `true` | Automatically create and start the deployment after profiling |
@@ -107,7 +111,7 @@ For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 [Profiler Guide](../components/profiler/profiler-guide.md).
 
 > [!IMPORTANT]
-> If you are using a **namespace-scoped operator** with GPU discovery disabled, you must also
+> If you are using a **namespace-scoped operator** (deprecated) with GPU discovery disabled, you must also
 > provide explicit hardware info or the DGDR will be rejected at admission:
 >
 > ```yaml
@@ -119,8 +123,10 @@ For the full spec reference, see the [DGDR API Reference](api-reference.md) and
 >     vramMb: 81920
 > ```
 >
-> See the [installation guide](installation-guide.md#gpu-discovery-for-dynamographdeploymentrequests-with-namespace-scoped-operators)
+> See the [installation guide](installation-guide.md#gpu-discovery-for-dynamographdeploymentrequests-deprecated-namespace-scoped-mode)
 > for details.
+>
+> **Note:** Namespace-scoped mode is deprecated. Use cluster-wide mode for new deployments.
 
 ## Step 3: Monitor Profiling Progress
 
@@ -269,7 +275,7 @@ kubectl describe dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
 
 Common causes: no available GPU nodes, image pull failure (check image tag; NGC credentials are
 optional but may be needed if you hit rate limits pulling from public NGC), missing `hardware`
-config for a namespace-scoped operator.
+config for a namespace-scoped operator (deprecated).
 
 > [!TIP]
 > **GPU node taints** are a frequent cause of pods staying `Pending`. Many clusters (including

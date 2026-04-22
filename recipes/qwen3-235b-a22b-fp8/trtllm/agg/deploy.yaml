@@ -24,6 +24,7 @@ data:
       max_batch_size: 128
     disable_overlap_scheduler: false
     print_iter_log: false
+    # DEEPGEMM requires Blackwell (SM100+). Remove moe_config block to run on Hopper (SM90).
     moe_config:
       backend: DEEPGEMM
       max_num_tokens: 8192

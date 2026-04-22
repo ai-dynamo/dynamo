@@ -73,7 +73,7 @@ runs:
         kubectl config get-contexts
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: '3.12'
         cache: 'pip'
@@ -96,6 +96,10 @@ runs:
         DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
         TEST_NAME: ${{ inputs.test_name }}
         EXTRA_PYTEST_ARGS: ${{ inputs.extra_pytest_args }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: deploy_${{ inputs.profile }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
       run: |
         mkdir -p test-results
 
@@ -121,6 +125,7 @@ runs:
           -v -s \
           --durations=10 \
           --junitxml=test-results/pytest_deploy_${TEST_NAME}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --alluredir=test-results/allure-results \
           --log-cli-level=INFO
 
     - name: Cleanup Deployment
@@ -184,3 +189,12 @@ runs:
         path: ${{ github.workspace }}/test-output/
         if-no-files-found: warn
         retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      if: always()
+      with:
+        name: allure-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore

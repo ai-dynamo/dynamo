@@ -11,6 +11,13 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 
+# Total runtime ~0.67s — no need for parallel marker.
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
+
 
 class TestMultimodalEmbeddingCacheManagerBasicOperations:
     """Tests for basic get/set operations."""

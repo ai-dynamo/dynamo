@@ -7,7 +7,7 @@ use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionRequestMessage,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
-    FunctionName,
+    FunctionName, FunctionType,
 };
 
 /// Helper to extract text from ChatCompletionMessageContent
@@ -134,6 +134,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        engine_data: None,
     }
 }
 
@@ -172,7 +173,7 @@ async fn test_named_tool_choice_parses_json() {
     let tool_call = &tool_calls[0];
     assert_eq!(tool_call.index, 0);
     assert!(tool_call.id.as_ref().unwrap().starts_with("call-"));
-    assert_eq!(tool_call.r#type, Some(ChatCompletionToolType::Function));
+    assert_eq!(tool_call.r#type, Some(FunctionType::Function));
     assert_eq!(
         tool_call.function.as_ref().unwrap().name.as_deref(),
         Some("get_weather")
@@ -213,7 +214,7 @@ async fn test_required_tool_choice_parses_json_array() {
 
     assert_eq!(tool_calls[0].index, 0);
     assert!(tool_calls[0].id.as_ref().unwrap().starts_with("call-"));
-    assert_eq!(tool_calls[0].r#type, Some(ChatCompletionToolType::Function));
+    assert_eq!(tool_calls[0].r#type, Some(FunctionType::Function));
     assert_eq!(
         tool_calls[0].function.as_ref().unwrap().name.as_deref(),
         Some("search")
@@ -230,7 +231,7 @@ async fn test_required_tool_choice_parses_json_array() {
 
     assert_eq!(tool_calls[1].index, 1);
     assert!(tool_calls[1].id.as_ref().unwrap().starts_with("call-"));
-    assert_eq!(tool_calls[1].r#type, Some(ChatCompletionToolType::Function));
+    assert_eq!(tool_calls[1].r#type, Some(FunctionType::Function));
     assert_eq!(
         tool_calls[1].function.as_ref().unwrap().name.as_deref(),
         Some("summarize")
@@ -302,6 +303,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            engine_data: None,
         };
 
         let response = generator
@@ -369,6 +371,7 @@ async fn test_streaming_required_tool_parallel() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            engine_data: None,
         };
 
         let response = generator
@@ -438,6 +441,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        engine_data: None,
     };
 
     let response = generator

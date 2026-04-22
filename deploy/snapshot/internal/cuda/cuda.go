@@ -8,11 +8,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
+	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
@@ -24,6 +25,14 @@ const (
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+type CheckpointPhaseTimings struct {
+	TotalDuration time.Duration
+}
+
+type RestorePhaseTimings struct {
+	TotalDuration time.Duration
+}
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
 // PodResources (nvidia.com/gpu entries in GetDevices()).
@@ -93,6 +102,45 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 		}
 	}
 	return uuids, nil
+}
+
+// DiscoverGPUUUIDs resolves GPU UUIDs according to the pod's allocation mode:
+// DRA-backed pods use the DRA API, classic nvidia.com/gpu pods use PodResources,
+// and nvidia-smi remains the last fallback for either path.
+func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
+	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
+	fallbackReason := "DRA API returned no GPU UUIDs"
+	if err != nil {
+		log.Error(
+			err,
+			"DRA API GPU UUID lookup failed, trying other discovery paths",
+			"pod", podNamespace+"/"+podName,
+			"has_nvidia_dra_allocation", hasNVIDIADRAAllocation,
+		)
+		gpuUUIDs = nil
+		fallbackReason = "DRA API GPU UUID lookup failed"
+	}
+	if len(gpuUUIDs) > 0 {
+		return gpuUUIDs, nil
+	}
+	if !hasNVIDIADRAAllocation {
+		gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
+		if err != nil {
+			return nil, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
+		}
+		if len(gpuUUIDs) > 0 {
+			return gpuUUIDs, nil
+		}
+		fallbackReason = "PodResources API returned no GPU UUIDs"
+	}
+
+	log.Info(fallbackReason+", falling back to nvidia-smi", "pid", pid)
+	gpuUUIDs, err = GetGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid)
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
+	}
+	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDs)
+	return gpuUUIDs, nil
 }
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
@@ -174,38 +222,52 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 
 // LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) error {
+func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
+	var timings CheckpointPhaseTimings
+
+	start := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := lock(ctx, pid, log); err != nil {
-			return err
+			timings.TotalDuration = time.Since(start)
+			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
 		if err := checkpoint(ctx, pid, log); err != nil {
-			return err
+			timings.TotalDuration = time.Since(start)
+			return timings, err
 		}
 	}
+	timings.TotalDuration = time.Since(start)
 
-	return nil
+	return timings, nil
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) error {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
+	var timings RestorePhaseTimings
+
+	start := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			return err
+			timings.TotalDuration = time.Since(start)
+			return timings, err
 		}
 	}
+
 	for _, pid := range cudaPIDs {
 		if err := unlock(ctx, pid, log); err != nil {
+			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue
 			}
-			return err
+			return timings, err
 		}
 	}
-	return nil
+	timings.TotalDuration = time.Since(start)
+
+	return timings, nil
 }

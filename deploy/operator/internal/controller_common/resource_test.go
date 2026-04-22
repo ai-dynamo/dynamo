@@ -646,11 +646,13 @@ func TestCopySpec(t *testing.T) {
 
 func TestGetResourcesConfig(t *testing.T) {
 	tests := []struct {
-		name             string
-		resources        *v1alpha1.Resources
-		expectedGPULimit corev1.ResourceName
-		expectedGPUValue string
-		expectError      bool
+		name               string
+		resources          *v1alpha1.Resources
+		expectedGPULimit   corev1.ResourceName
+		expectedGPUValue   string
+		expectedGPURequest corev1.ResourceName
+		expectedGPUReqVal  string
+		expectError        bool
 	}{
 		{
 			name: "limits.gpu defined with no gpuType",
@@ -675,6 +677,45 @@ func TestGetResourcesConfig(t *testing.T) {
 			expectedGPUValue: "8",
 			expectError:      false,
 		},
+		{
+			name: "requests.gpu defined with no gpuType",
+			resources: &v1alpha1.Resources{
+				Requests: &v1alpha1.ResourceItem{
+					GPU: "4",
+				},
+			},
+			expectedGPURequest: corev1.ResourceName(consts.KubeResourceGPUNvidia),
+			expectedGPUReqVal:  "4",
+			expectError:        false,
+		},
+		{
+			name: "requests.gpu defined with custom gpuType",
+			resources: &v1alpha1.Resources{
+				Requests: &v1alpha1.ResourceItem{
+					GPU:     "8",
+					GPUType: "gpu.custom-type.com/test",
+				},
+			},
+			expectedGPURequest: corev1.ResourceName("gpu.custom-type.com/test"),
+			expectedGPUReqVal:  "8",
+			expectError:        false,
+		},
+		{
+			name: "both limits.gpu and requests.gpu defined",
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
+					GPU: "8",
+				},
+				Requests: &v1alpha1.ResourceItem{
+					GPU: "8",
+				},
+			},
+			expectedGPULimit:   corev1.ResourceName(consts.KubeResourceGPUNvidia),
+			expectedGPUValue:   "8",
+			expectedGPURequest: corev1.ResourceName(consts.KubeResourceGPUNvidia),
+			expectedGPUReqVal:  "8",
+			expectError:        false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -690,11 +731,20 @@ func TestGetResourcesConfig(t *testing.T) {
 
 			g.Expect(err).To(gomega.BeNil())
 			g.Expect(result).ToNot(gomega.BeNil())
-			g.Expect(result.Limits).ToNot(gomega.BeNil())
 
-			gpuQuantity, exists := result.Limits[tt.expectedGPULimit]
-			g.Expect(exists).To(gomega.BeTrue(), "GPU resource %s should exist in limits", tt.expectedGPULimit)
-			g.Expect(gpuQuantity.String()).To(gomega.Equal(tt.expectedGPUValue))
+			if tt.expectedGPULimit != "" {
+				g.Expect(result.Limits).ToNot(gomega.BeNil())
+				gpuQuantity, exists := result.Limits[tt.expectedGPULimit]
+				g.Expect(exists).To(gomega.BeTrue(), "GPU resource %s should exist in limits", tt.expectedGPULimit)
+				g.Expect(gpuQuantity.String()).To(gomega.Equal(tt.expectedGPUValue))
+			}
+
+			if tt.expectedGPURequest != "" {
+				g.Expect(result.Requests).ToNot(gomega.BeNil())
+				gpuQuantity, exists := result.Requests[tt.expectedGPURequest]
+				g.Expect(exists).To(gomega.BeTrue(), "GPU resource %s should exist in requests", tt.expectedGPURequest)
+				g.Expect(gpuQuantity.String()).To(gomega.Equal(tt.expectedGPUReqVal))
+			}
 		})
 	}
 }
@@ -767,6 +817,119 @@ func TestAppendUniqueImagePullSecrets(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			result := AppendUniqueImagePullSecrets(tt.existing, tt.additional)
 			g.Expect(result).To(gomega.Equal(tt.expected))
+		})
+	}
+}
+
+func TestGetSpecChangeResult_ConfigMap(t *testing.T) {
+	baseHash := func(t *testing.T, obj client.Object) string {
+		t.Helper()
+		h, err := GetSpecHash(obj)
+		if err != nil {
+			t.Fatalf("GetSpecHash: %v", err)
+		}
+		return h
+	}
+
+	baseCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+		Data:       map[string]string{"script.py": "print('v1')"},
+	}
+
+	tests := []struct {
+		name        string
+		current     client.Object
+		desired     client.Object
+		needsUpdate bool
+	}{
+		{
+			name: "same ConfigMap data does not need update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			needsUpdate: false,
+		},
+		{
+			name: "changed ConfigMap data needs update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v2')"},
+			},
+			needsUpdate: true,
+		},
+		{
+			name: "metadata-only change does not need update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "different-name", Namespace: "ns", Labels: map[string]string{"foo": "bar"}},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			needsUpdate: false,
+		},
+		{
+			name: "added key needs update",
+			current: func() client.Object {
+				cm := baseCM.DeepCopy()
+				cm.Annotations = map[string]string{
+					NvidiaAnnotationHashKey:       baseHash(t, baseCM),
+					NvidiaAnnotationGenerationKey: "1",
+				}
+				cm.Generation = 1
+				return cm
+			}(),
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')", "extra.py": "pass"},
+			},
+			needsUpdate: true,
+		},
+		{
+			name: "no hash annotation needs update (pre-upgrade resource)",
+			current: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			desired: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns"},
+				Data:       map[string]string{"script.py": "print('v1')"},
+			},
+			needsUpdate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			result, err := GetSpecChangeResult(tt.current, tt.desired)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.needsUpdate))
 		})
 	}
 }

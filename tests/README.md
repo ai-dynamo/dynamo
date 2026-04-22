@@ -55,6 +55,7 @@ dynamo/
 ├── tests/                          # End-to-end and cross-component tests
 │   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
 │   ├── kvbm_integration/           # KVBM integration tests
+│   ├── gpu_memory_service/         # GPU Memory Service E2E tests
 │   ├── fault_tolerance/            # Fault tolerance, migration, cancellation
 │   ├── deploy/                     # Deployment tests
 │   ├── frontend/                   # Frontend HTTP/gRPC tests
@@ -83,20 +84,21 @@ dynamo/
 
 **Python tests** (`pytest`):
 
-| Type              | Description                              | Location                                     |
-|-------------------|------------------------------------------|----------------------------------------------|
-| Unit              | Single function/class, isolated          | `components/src/dynamo/<component>/tests/`   |
-| Integration       | Interactions between modules/services    | `components/src/dynamo/<component>/tests/`   |
-| End-to-End        | User workflows, CLI, API                 | `tests/serve/`, `tests/deploy/`, etc.        |
-| KVBM Integration  | KV block manager integration             | `tests/kvbm_integration/`                    |
-| Router            | Router E2E with backends                 | `tests/router/`                              |
-| Planner           | Planner unit + integration tests         | `components/src/dynamo/planner/tests/`       |
-| Frontend          | Frontend HTTP/gRPC tests                 | `tests/frontend/`                            |
-| Profiler          | Profiler unit + integration tests        | `components/src/dynamo/profiler/tests/`      |
-| Global Planner    | Global planner unit tests                | `components/src/dynamo/global_planner/tests/`|
-| Fault Tolerance   | Chaos, migration, cancellation           | `tests/fault_tolerance/`                     |
-| Deployment        | Deployment validation                    | `tests/deploy/`                              |
-| Benchmark         | Performance/load                         | `benchmarks/`                                |
+| Type               | Description                           | Location                                      |
+|--------------------|---------------------------------------|-----------------------------------------------|
+| Unit               | Single function/class, isolated       | `components/src/dynamo/<component>/tests/`    |
+| Integration        | Interactions between modules/services | `components/src/dynamo/<component>/tests/`    |
+| End-to-End         | User workflows, CLI, API              | `tests/serve/`, `tests/deploy/`, etc.         |
+| KVBM Integration   | KV block manager integration          | `tests/kvbm_integration/`                     |
+| GPU Memory Service | GPU Memory Service E2E                | `tests/gpu_memory_service/`                   |
+| Router             | Router E2E with backends              | `tests/router/`                               |
+| Planner            | Planner unit + integration tests      | `components/src/dynamo/planner/tests/`        |
+| Frontend           | Frontend HTTP/gRPC tests              | `tests/frontend/`                             |
+| Profiler           | Profiler unit + integration tests     | `components/src/dynamo/profiler/tests/`       |
+| Global Planner     | Global planner unit tests             | `components/src/dynamo/global_planner/tests/` |
+| Fault Tolerance    | Chaos, migration, cancellation        | `tests/fault_tolerance/`                      |
+| Deployment         | Deployment validation                 | `tests/deploy/`                               |
+| Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
 ---
 
@@ -111,12 +113,14 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
+| Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
 | SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
+| TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
+| TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
@@ -147,6 +151,33 @@ def test_sglang_aggregated():
     ...
 ```
 
+### Example (TRT-LLM with token cap)
+```python
+@pytest.mark.pre_merge
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(3.9)   # actual nvidia-smi peak at recommended token count
+@pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
+@pytest.mark.timeout(300)
+@pytest.mark.trtllm
+def test_trtllm_aggregated():
+    ...
+```
+
+### Example (TRT-LLM diffusion — no KV cache)
+```python
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.trtllm
+# Diffusion models don't use KV cache, so requested_trtllm_kv_tokens doesn't apply
+# and requested_trtllm_vram_gib (KvCacheConfig.max_gpu_total_bytes) has no effect —
+# the VRAM is model weights + activations. Only profiled_vram_gib is meaningful.
+@pytest.mark.profiled_vram_gib(17.1)  # actual nvidia-smi peak
+@pytest.mark.timeout(600)
+def test_trtllm_video_diffusion():
+    ...
+```
+
 ### VRAM Markers and Filtering
 
 Markers differ by engine:
@@ -159,6 +190,12 @@ Markers differ by engine:
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi at the recommended token count. Used for `--max-vram-gib` filtering and scheduler budget.
 - **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. SGLang's default `--mem-fraction-static` is never overridden; the token cap is the sole allocation control. Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
 
+**TRT-LLM** uses token-based control (text models) or byte-based control (diffusion models):
+- **`profiled_vram_gib(N)`** — actual peak from nvidia-smi. Used for `--max-vram-gib` filtering and scheduler budget.
+- **`requested_trtllm_kv_tokens(N)`** — max KV cache tokens for text models. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON. Deterministic and parallel-safe.
+- **`requested_trtllm_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion). Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args` JSON. Note: diffusion models don't use KV cache, so this parameter may have no effect — `profiled_vram_gib` alone is sufficient for scheduler budget tracking.
+- TRT-LLM requires JSON merging for `--override-engine-args`, handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args`).
+
 `--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N. Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
 
 ### GPU-Parallel Execution
@@ -168,8 +205,9 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
 1. **VRAM budget**: xdist has no GPU memory awareness — two 20 GiB tests on a 48 GiB GPU will OOM.
 2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
 3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
-   - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe.
-   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe.
+   - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_vllm_gpu_mem_args` in `gpu_utils.sh`.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_sglang_gpu_mem_args` in `gpu_utils.sh`.
+   - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 ```bash
 # Dry-run: preview which tests fit and the GPU plan
@@ -475,6 +513,22 @@ Long-running tests **must** have an explicit timeout. A test that hangs (e.g., w
 
 - If a test exceeds its time budget (see [Test Types and Locations](#test-types-and-locations)), profile it with `pytest --durations=0` and consider mocking heavy dependencies, using a smaller model checkpoint, or moving it to a nightly/weekly pipeline with `@pytest.mark.slow`.
 
+### Pipeline Time Budgets
+
+Each lifecycle marker corresponds to a CI pipeline with an aggregate wall-clock budget. When adding or marking a test, the pipeline it lands in must continue to fit under its budget:
+
+| Marker       | Pipeline budget | Rationale                                                                 |
+|--------------|-----------------|---------------------------------------------------------------------------|
+| `pre_merge`  | < 30 min        | Runs on every PR; fast feedback is required to keep developers unblocked. |
+| `post_merge` | < 1 hr          | Runs after merge to `main`; catches regressions quickly without gating PRs.|
+| `nightly`    | < 3 hr          | Runs once per day; covers longer integration and multi-GPU scenarios.     |
+
+Guidance when adding a test:
+
+- Pick the **lightest** lifecycle marker the test can live in. A test that only needs to run daily should not be marked `pre_merge`.
+- Before marking a new test `pre_merge`, check the test's expected runtime and confirm the pre-merge pipeline still fits under 30 min. If it wouldn't, move the test to `post_merge` or `nightly`, or shrink it (mock heavy dependencies, smaller checkpoint, fewer cases).
+- If a pipeline is already near its budget, prefer downgrading existing slow tests (`pre_merge` → `post_merge`, `post_merge` → `nightly`) over adding more.
+
 ### Time Budget Industry Practices
 
 Our per-test time targets are informed by widely adopted test size classifications:
@@ -508,18 +562,38 @@ The profiler automatically detects the engine type and uses the appropriate bina
 
 - **vLLM**: bisects `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` (bytes) → `--kv-cache-memory-bytes`. Finds the minimum KV cache bytes where the test passes, applies a 2x safety factor. Outputs `profiled_vram_gib` and `requested_vllm_kv_cache_bytes` markers.
 - **SGLang**: bisects `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` (token count) → `--max-total-tokens`. Finds the minimum KV cache tokens where the test passes, applies a 2x safety factor, then runs a final probe at the safe token count to measure the actual VRAM. Outputs `profiled_vram_gib` and `requested_sglang_kv_tokens` markers.
+- **TRT-LLM**: bisects `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (token count) → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON. Same logic as SGLang (token-based bisection, 2x safety). Outputs `profiled_vram_gib` and `requested_trtllm_kv_tokens` markers. For non-text models (video/image diffusion) that don't use KV cache, use `--no-find-min-vram` for a single-pass VRAM measurement — binary search won't work because the model doesn't log KV token allocation.
 
-**Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
+**Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_vllm_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
 
-**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
+
+**Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
+
+**Requirement (all engines):** Do not hardcode `CUDA_VISIBLE_DEVICES` in launch scripts. The profiler and parallel test runner set `CUDA_VISIBLE_DEVICES` to pin each test to a specific GPU. A script that overrides this (e.g. `CUDA_VISIBLE_DEVICES=0`) will ignore the assignment and land on the wrong GPU. Instead, inherit from the environment with a default:
+
+```bash
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+```
+
+Then pass the variable to each worker: `CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python3 -m dynamo.vllm ...`. For multi-GPU scripts that assign distinct GPUs per worker, use named env vars with defaults (e.g. `PREFILL_CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_VISIBLE_DEVICES:-0}"`).
 
 ### Engine-specific mapping
 
-Launch scripts call `build_gpu_mem_args` (from `examples/common/gpu_utils.sh`) which checks env var overrides and returns the appropriate CLI flags:
+Launch scripts call engine-specific functions from `examples/common/gpu_utils.sh` which check env var overrides and return the appropriate CLI flags:
 
 ```bash
-GPU_MEM_ARGS=$(build_gpu_mem_args sglang)
+# vLLM
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+python -m dynamo.vllm --model "$MODEL" $GPU_MEM_ARGS &
+
+# SGLang
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 python -m dynamo.sglang --model-path "$MODEL" $GPU_MEM_ARGS &
+
+# TRT-LLM (requires JSON merging, separate function)
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+python -m dynamo.trtllm --model-path "$MODEL" ${OVERRIDE_JSON:+--override-engine-args "$OVERRIDE_JSON"} &
 ```
 
 Env vars control engine allocation during profiling and parallel test execution:
@@ -536,7 +610,19 @@ Env vars control engine allocation during profiling and parallel test execution:
 |---------|----------------------------------|-------|
 | SGLang  | `--max-total-tokens N`           | Token-based KV cache cap |
 
-Both use absolute caps (bytes and tokens) — deterministic and independent of current free memory, which is critical for parallel test execution. See `examples/common/gpu_utils.md`.
+**`_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`** (integer) — TRT-LLM text models:
+
+| Engine  | Returned JSON                                          | Notes |
+|---------|--------------------------------------------------------|-------|
+| TRT-LLM | `{"kv_cache_config": {"max_tokens": N}}`              | Token-based KV cache cap via `--override-engine-args` |
+
+**`_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`** (integer) — TRT-LLM non-text models:
+
+| Engine  | Returned JSON                                                    | Notes |
+|---------|------------------------------------------------------------------|-------|
+| TRT-LLM | `{"kv_cache_config": {"max_gpu_total_bytes": N}}`               | Byte-based cap via `--override-engine-args`. For diffusion models. |
+
+All use absolute caps — deterministic and independent of current free memory, which is critical for parallel test execution. See `examples/common/gpu_utils.md`.
 
 ### Usage
 
@@ -549,6 +635,12 @@ python tests/utils/profile_pytest.py --gpu 1 tests/serve/test_vllm.py::test_serv
 
 # SGLang: binary search for minimum KV cache tokens (automatic)
 python tests/utils/profile_pytest.py tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -xvs
+
+# TRT-LLM: binary search for minimum KV cache tokens (text models)
+python tests/utils/profile_pytest.py tests/serve/test_trtllm.py::test_deployment[aggregated-2] -xvs
+
+# TRT-LLM: single-pass for diffusion models (no KV cache, binary search won't work)
+python tests/utils/profile_pytest.py --no-find-min-vram tests/serve/test_trtllm.py::test_deployment[video_diffusion-2] -xvs
 
 # Single-pass profiling (no binary search, just measure one run using default RAM)
 python tests/utils/profile_pytest.py --no-find-min-vram tests/serve/test_vllm.py::test_serve_deployment[aggregated]
@@ -623,6 +715,36 @@ MINIMUM KV TOKENS RESULT
   Peak VRAM       : 3.7 GiB (at 96 tokens)
   @pytest.mark.profiled_vram_gib(3.7)
   @pytest.mark.requested_sglang_kv_tokens(96),  # KV cache cap (2x safety over min=48)
+========================================================================
+```
+
+### Example output (TRT-LLM — token-based bisection)
+
+```bash
+========================================================================
+FIND MINIMUM KV TOKENS (TensorRT-LLM) (binary search)
+========================================================================
+  GPU total : 48.0 GiB
+  GPU free  : 47.1 GiB  (in use: 0.9 GiB)
+  Test      : tests/serve/test_trtllm.py::test_deployment[aggregated-2] -xvs
+
+  [probe 1] Validation run (no token cap, default fraction)
+  [PASS] peak 41.3 GiB, wall 48s, max_tokens=41472 (TensorRT-LLM), iter took 56s
+  ...
+  [probe 6/12] tokens=1296
+  [PASS] tokens=1296, peak 3.7 GiB, wall 46s, iter took 54s
+  [EARLY STOP] Peak VRAM stable for last 3 probes
+  [final probe] Measuring VRAM at safe_tokens=2592
+  [PASS] tokens=2592, peak 3.9 GiB, wall 46s
+
+========================================================================
+MINIMUM KV TOKENS RESULT (TensorRT-LLM)
+========================================================================
+  Minimum tokens  : 1296 (raw bisection result)
+  Recommended     : 2592 (2x safety)
+  Peak VRAM       : 3.9 GiB (at 2592 tokens)
+  @pytest.mark.profiled_vram_gib(3.9)
+  @pytest.mark.requested_trtllm_kv_tokens(2592),  # KV cache cap (2x safety over min=1296)
 ========================================================================
 ```
 

@@ -65,6 +65,9 @@ class NvCreateImageRequest(BaseModel):
     moderation: Optional[str] = None
     """Content moderation level: auto or low."""
 
+    input_reference: Optional[str] = None
+    """Optional image reference that guides generation (for I2I)."""
+
     nvext: Optional[ImageNvExt] = None
     """NVIDIA extensions."""
 
@@ -72,7 +75,7 @@ class NvCreateImageRequest(BaseModel):
 class ImageData(BaseModel):
     """Individual image data in a response.
 
-    Matches the flattened Rust Image enum in lib/async-openai/src/types/image.rs.
+    Matches the flattened Rust Image enum in lib/protocols/src/types/mod.rs.
     """
 
     url: Optional[str] = None

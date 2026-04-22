@@ -16,7 +16,7 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 | ------------------------ | ---------- | ------------- |
 | **Image**                | Yes        | Yes           |
 | **Video**                | Yes        | Yes           |
-| **Audio** (Experimental) | Yes        | Yes           |
+| **Audio**                | Yes        | No            |
 
 ### Supported URL Formats
 
@@ -144,50 +144,42 @@ bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct
 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
 
-## Audio Serving (Experimental)
+## Audio Serving
 
-### Audio Aggregated Serving
+Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded by the backend worker via vLLM's `AudioMediaIO` at native sample rate — vLLM's model-specific processor handles resampling and feature extraction internally. Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
 
-**Components:**
+### Aggregated Serving
 
-- workers: [AudioEncodeWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/audio_encode_worker.py) for decoding audio into embeddings, and [VllmPDWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
-- frontend: HTTP endpoint to handle incoming requests.
+Use the same aggregated multimodal launcher with an audio-capable model:
 
-**Workflow:**
+```bash
+pip install 'vllm[audio]'  # installs librosa and other audio dependencies
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_multimodal.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
+```
 
 ```mermaid
 flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --audio_url--> audio_encode_worker
-  audio_encode_worker --> processor
-  audio_encode_worker --embeddings--> pd_worker
-  pd_worker --> audio_encode_worker
+  HTTP --> frontend
+  frontend --> HTTP
+  frontend --audio_url--> vllm_worker
+  vllm_worker --> frontend
 ```
 
-**Launch:**
-
-```bash
-pip install 'vllm[audio]' accelerate # multimodal audio models dependency
-cd $DYNAMO_HOME/examples/multimodal
-bash launch/audio_agg.sh
-```
-
-**Client:**
+**Audio request:**
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-      "model": "Qwen/Qwen2-Audio-7B-Instruct",
+      "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
       "messages": [
         {
           "role": "user",
           "content": [
             {
               "type": "text",
-              "text": "What is recited in the audio?"
+              "text": "What sound is this?"
             },
             {
               "type": "audio_url",
@@ -198,36 +190,9 @@ curl http://localhost:8000/v1/chat/completions \
           ]
         }
       ],
-      "max_tokens": 6000,
-      "temperature": 0.8,
+      "max_tokens": 100,
       "stream": false
     }' | jq
-```
-
-### Audio Disaggregated Serving
-
-**Workflow:**
-
-For the Qwen2-Audio model, audio embeddings are only required during the prefill stage. The AudioEncodeWorker is connected directly to the prefill worker.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --audio_url--> audio_encode_worker
-  audio_encode_worker --> processor
-  audio_encode_worker --embeddings--> prefill_worker
-  prefill_worker --> audio_encode_worker
-  prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
-```
-
-**Launch:**
-
-```bash
-pip install 'vllm[audio]' accelerate # multimodal audio models dependency
-cd $DYNAMO_HOME/examples/multimodal
-bash launch/audio_disagg.sh
 ```
 
 ## Embedding Cache

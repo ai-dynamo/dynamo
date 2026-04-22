@@ -23,6 +23,8 @@ use std::{
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{EventWarningKind, PreBoundEventCounters};
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
 /// A shared reference to a [`RadixBlock`].
@@ -68,6 +70,14 @@ impl RadixBlock {
             workers: FxHashSet::default(),
             block_hash: Some(block_hash),
             recent_uses: VecDeque::new(),
+        }
+    }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.workers.remove(&worker);
+        if self.workers.is_empty() {
+            self.children.clear();
         }
     }
 }
@@ -243,26 +253,9 @@ impl RadixTree {
                 let borrow = block.borrow();
                 let child_count = borrow.workers.len();
 
-                if child_count < active_count {
-                    // Workers dropped out. Record scores for those that left.
-                    // Score = matched_depth (number of nodes they were present at).
-                    for worker in &active {
-                        if !borrow.workers.contains(worker) {
-                            scores.scores.insert(*worker, matched_depth);
-                        }
-                    }
-                    active.clone_from(&borrow.workers);
-                    active_count = child_count;
-                } else if child_count > active_count {
-                    // Stale entries: child retains workers already removed from
-                    // an ancestor. Fall back to full membership check.
-                    active.retain(|w| {
-                        if borrow.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
-                        }
+                if child_count != active_count {
+                    reconcile_active_workers(&mut active, &borrow.workers, |worker| {
+                        scores.scores.insert(worker, matched_depth);
                     });
                     active_count = active.len();
                 }
@@ -321,6 +314,14 @@ impl RadixTree {
     ///
     /// * `event` - The `RouterEvent` to apply.
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+        self.apply_event_with_counters(event, None)
+    }
+
+    pub(crate) fn apply_event_with_counters(
+        &mut self,
+        event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
+    ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
@@ -353,6 +354,7 @@ impl RadixTree {
                 };
 
                 let mut needs_worker_insert = false;
+                let mut duplicate_store = !op.blocks.is_empty();
 
                 // In each iteration we lock the parent and insert the worker
                 // deferred from the previous iteration, avoiding a second
@@ -360,8 +362,8 @@ impl RadixTree {
                 for block_data in op.blocks {
                     let mut parent_mut = current.borrow_mut();
 
-                    if needs_worker_insert {
-                        parent_mut.workers.insert(worker);
+                    if needs_worker_insert && parent_mut.workers.insert(worker) {
+                        duplicate_store = false;
                     }
                     needs_worker_insert = true;
 
@@ -369,6 +371,7 @@ impl RadixTree {
                         Some(block) => {
                             // Verify our simplifying assumption: block_hash is uniform across workers
                             if block.borrow().block_hash != Some(block_data.block_hash) {
+                                duplicate_store = false;
                                 tracing::warn!(
                                     expected = ?block_data.block_hash,
                                     actual = ?block.borrow().block_hash,
@@ -378,6 +381,7 @@ impl RadixTree {
                             block.clone()
                         }
                         None => {
+                            duplicate_store = false;
                             let new_block = worker_lookup
                                 .get(&block_data.block_hash)
                                 .cloned()
@@ -408,15 +412,22 @@ impl RadixTree {
                         return Err(KvCacheEventError::InvalidBlockSequence);
                     }
 
-                    worker_lookup.insert(block_data.block_hash, child.clone());
+                    match worker_lookup.insert(block_data.block_hash, child.clone()) {
+                        Some(existing) if Rc::ptr_eq(&existing, &child) => {}
+                        _ => duplicate_store = false,
+                    }
 
                     drop(parent_mut);
                     current = child;
                 }
 
                 // Insert worker into the last child.
-                if needs_worker_insert {
-                    current.borrow_mut().workers.insert(worker);
+                if needs_worker_insert && current.borrow_mut().workers.insert(worker) {
+                    duplicate_store = false;
+                }
+
+                if duplicate_store && let Some(counters) = counters {
+                    counters.inc_warning(EventWarningKind::DuplicateStore);
                 }
 
                 Ok(())
@@ -445,12 +456,7 @@ impl RadixTree {
                         }
                     };
 
-                    let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        // if no workers are using this block, that is true for all children
-                        guard.children.clear();
-                    }
+                    entry.borrow_mut().drop_worker(worker);
                     // remove the block from the worker's lookup table
                     worker_lookup.remove(&block);
                 }
@@ -478,11 +484,7 @@ impl RadixTree {
         for worker in workers {
             if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
                 for (_, block) in blocks {
-                    block.borrow_mut().workers.remove(&worker);
-                    // If no workers are using this block, that is true for all children
-                    if block.borrow().workers.is_empty() {
-                        block.borrow_mut().children.clear();
-                    }
+                    block.borrow_mut().drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -501,10 +503,7 @@ impl RadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(blocks) = self.lookup.remove(&key) {
             for (_, block) in blocks {
-                block.borrow_mut().workers.remove(&key);
-                if block.borrow().workers.is_empty() {
-                    block.borrow_mut().children.clear();
-                }
+                block.borrow_mut().drop_worker(key);
             }
         }
     }
@@ -562,6 +561,7 @@ impl RadixTree {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
                             parent_hash,
+                            start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash,
                                 mm_extra_info: None,

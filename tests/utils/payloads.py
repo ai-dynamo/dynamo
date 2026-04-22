@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import logging
 import math
 import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import requests
@@ -241,11 +243,14 @@ class ToolCallingChatPayload(ChatPayload):
         self.expected_tool_name = expected_tool_name
 
     def validate(self, response, content: str) -> None:
-        """Validate that tool calls exist in the response."""
-        # First run the standard validation
-        super().validate(response, content)
+        """Validate that tool calls exist in the response.
 
-        # Then validate tool calls specifically
+        Skips the parent's expected_response substring check because tool call
+        responses produce structured JSON arguments, not natural-language text.
+        The expected_response keywords are instead matched against the
+        concatenated tool call arguments so callers can still assert that the
+        model "understood" the input (e.g. expected_response=["purple"]).
+        """
         response_data = response.json()
         choices = response_data.get("choices", [])
         assert choices, "Response missing choices"
@@ -257,13 +262,16 @@ class ToolCallingChatPayload(ChatPayload):
         logger.info(f"Tool calls detected: {len(tool_calls)} call(s)")
 
         # Validate tool call structure
+        all_args = []
         for i, tc in enumerate(tool_calls):
             assert "function" in tc, f"Tool call {i} missing 'function' field"
             function = tc.get("function", {})
             assert "name" in function, f"Tool call {i} missing function name"
             assert "arguments" in function, f"Tool call {i} missing function arguments"
+            args_str = function.get("arguments", "")
+            all_args.append(args_str)
             logger.info(
-                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
+                f"  [{i}] Function: {function.get('name')}, Args: {args_str[:100]}..."
             )
 
         # If expected tool name is provided, validate it
@@ -273,6 +281,24 @@ class ToolCallingChatPayload(ChatPayload):
                 self.expected_tool_name in tool_names
             ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+        # Check expected_response keywords against tool call arguments (OR logic)
+        if self.expected_response:
+            combined_args = " ".join(all_args).lower()
+            found = [kw for kw in self.expected_response if kw.lower() in combined_args]
+            if not found:
+                logger.error(
+                    f"VALIDATION FAILED - Expected to find at least one of "
+                    f"{self.expected_response} in tool call arguments"
+                )
+                logger.error(f"Tool call arguments: {combined_args}")
+                raise AssertionError(
+                    f"Expected content not found in tool call arguments. "
+                    f"Expected at least one of: {self.expected_response}. "
+                    f"Tool call arguments: {combined_args}"
+                )
+            else:
+                logger.info(f"Found expected keywords in tool args: {found}")
 
 
 @dataclass
@@ -1152,6 +1178,29 @@ class SGLangMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for SGLang disaggregated workers.
+
+    Disagg workers (prefill/decode) expose fewer sglang:* metrics than
+    aggregated workers because each only runs half the scheduler pipeline.
+    Observed: ~14 unique sglang:* metrics vs ~25 for aggregated.
+    """
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        checks = super()._get_backend_specific_checks()
+        for check in checks:
+            if check.name == "sglang:*":
+                check.validator = lambda value: len(set(value)) >= 10
+                check.error_msg = lambda name, value: (
+                    f"Expected at least 10 unique sglang:* metrics, but found only {len(set(value))}"
+                )
+                check.success_msg = lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 10)"
+                )
+        return checks
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
@@ -1270,3 +1319,105 @@ def completions_response_handler(response):
 
 def chat_completions_response_handler(response):
     return ChatPayload.extract_content(response)
+
+
+@dataclass
+class ImageGenerationPayload(BasePayload):
+    """Payload for /v1/images/generations endpoint (diffusion image generation)."""
+
+    endpoint: str = "/v1/images/generations"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in image response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Image response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
+
+
+@dataclass
+class VideoGenerationPayload(BasePayload):
+    """Payload for /v1/videos endpoint (diffusion video generation)."""
+
+    endpoint: str = "/v1/videos"
+    timeout: int = 600
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "completed", (
+            f"Video generation not completed. Status: {result.get('status')}, "
+            f"Error: {result.get('error', 'none')}"
+        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"
+
+    def validate(self, response: Any, content: str) -> None:
+        assert content, "Video response content is empty"
+        if self.expected_response and not any(
+            expected.lower() in content.lower() for expected in self.expected_response
+        ):
+            raise AssertionError(
+                f"Expected at least one of {self.expected_response} in {content!r}"
+            )
+
+
+@dataclass
+class I2VPayload(VideoGenerationPayload):
+    """Payload for image-to-video via /v1/videos with input_reference."""
+
+    def __post_init__(self):
+        from PIL import Image
+
+        image_buffer = BytesIO()
+        Image.new("RGB", (64, 64), color="red").save(image_buffer, format="PNG")
+        image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        self.body["input_reference"] = f"data:image/png;base64,{image_b64}"
+
+
+@dataclass
+class AudioSpeechPayload(BasePayload):
+    """Payload for /v1/audio/speech endpoint."""
+
+    endpoint: str = "/v1/audio/speech"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "audio" in content_type:
+            audio_bytes = response.content
+            assert len(audio_bytes) > 100, (
+                f"Audio response too small ({len(audio_bytes)} bytes), "
+                f"likely not valid audio"
+            )
+            return f"binary_audio_{len(audio_bytes)}_bytes"
+        result = response.json()
+        assert (
+            result.get("status") != "failed"
+        ), f"Audio generation failed: {result.get('error', 'unknown')}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in audio response"
+        entry = result["data"][0]
+        if "url" in entry and entry["url"]:
+            return entry["url"]
+        assert entry.get("b64_json"), "Audio response b64_json is empty"
+        return "b64_audio_returned"

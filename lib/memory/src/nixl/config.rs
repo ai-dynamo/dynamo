@@ -10,8 +10,6 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use dynamo_config::parse_bool;
-
 /// Configuration for NIXL backends.
 ///
 /// Supports extracting backend configurations from environment variables:
@@ -82,7 +80,7 @@ impl NixlBackendConfig {
 
                 // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true)
                 let backend_name = remainder.to_uppercase();
-                match parse_bool(&value) {
+                match crate::parse_bool(&value) {
                     Ok(true) => {
                         backends.insert(backend_name, HashMap::new());
                     }

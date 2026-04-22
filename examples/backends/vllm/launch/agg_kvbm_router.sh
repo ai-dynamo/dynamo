@@ -24,7 +24,7 @@ python -m dynamo.frontend \
 # run workers with KVBM enabled
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
-# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
+# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56001 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56002 \
 CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \

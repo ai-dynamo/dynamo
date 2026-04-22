@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -9,18 +10,23 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/featuregate"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	VLLMPort                 = "6379"
-	dataParallelRPCPort      = "13445"
-	tensorParallelSizeFlag   = "--tensor-parallel-size"
-	pipelineParallelSizeFlag = "--pipeline-parallel-size"
-	dataParallelSizeFlag     = "--data-parallel-size"
+	VLLMPort                  = "6379"
+	dataParallelRPCPort       = "13445"
+	tensorParallelSizeFlag    = "--tensor-parallel-size"
+	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
+	dataParallelSizeFlag      = "--data-parallel-size"
+	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+	enableElasticEPFlag       = "--enable-elastic-ep"
 )
 
-type VLLMBackend struct{}
+type VLLMBackend struct {
+	ParentGraphDeploymentName string
+}
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	isMultinode := numberOfNodes > 1
@@ -78,44 +84,173 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	}
 }
 
+const (
+	waitLeaderConfigMapSuffix = "wait-leader-script"
+	waitLeaderScriptKey       = "wait-for-leader.py"
+	waitLeaderVolumeName      = "wait-leader-script"
+	waitLeaderMountPath       = "/scripts"
+)
+
+// WaitLeaderScript is the Python script that verifies leader pod health via
+// the K8s API before attempting a TCP connection. It reads LEADER_HOST and
+// LEADER_PORT from environment variables so the script content is generic.
+const WaitLeaderScript = `import socket, time, json, ssl, urllib.request, os
+
+SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+host = os.environ["LEADER_HOST"]
+port = int(os.environ["LEADER_PORT"])
+
+def _k8s_ctx():
+    return ssl.create_default_context(cafile=f"{SA}/ca.crt")
+
+def _k8s_headers():
+    token = open(f"{SA}/token").read()
+    return {"Authorization": f"Bearer {token}"}
+
+def _k8s_api():
+    ns = open(f"{SA}/namespace").read()
+    return f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
+
+def leader_pod_is_healthy():
+    try:
+        ip = socket.gethostbyname(host)
+    except socket.gaierror:
+        return False, "DNS resolution failed", None, None
+    try:
+        req = urllib.request.Request(
+            f"{_k8s_api()}?fieldSelector=status.podIP={ip}",
+            headers=_k8s_headers(),
+        )
+        resp = json.loads(urllib.request.urlopen(req, context=_k8s_ctx(), timeout=5).read())
+        pods = resp.get("items", [])
+        if not pods:
+            return False, f"no pod found with IP {ip}", None, ip
+        pod = pods[0]
+        name = pod["metadata"].get("name", "unknown")
+        uid = pod["metadata"].get("uid", "unknown")
+        phase = pod.get("status", {}).get("phase")
+        deletion_ts = pod["metadata"].get("deletionTimestamp")
+        info = f"ip={ip} pod={name} uid={uid} phase={phase} deletionTimestamp={deletion_ts}"
+        if deletion_ts:
+            return False, f"pod {name} is terminating", info, ip
+        if phase != "Running":
+            return False, f"pod {name} phase is {phase}", info, ip
+        return True, "", info, ip
+    except Exception as e:
+        # Fall back to TCP-only when the API is unavailable (e.g. 403 no RBAC)
+        return True, f"K8s API unavailable ({e}), falling back to TCP", f"ip={ip}", ip
+
+print(f"Waiting for leader master port at {host}:{port}...", flush=True)
+time.sleep(5)
+start = time.monotonic()
+last_status = start
+last_err = ""
+while True:
+    healthy, reason, pod_info, leader_ip = leader_pod_is_healthy()
+    if healthy:
+        try:
+            s = socket.create_connection((leader_ip, port), timeout=2)
+            s.close()
+            elapsed = time.monotonic() - start
+            print(f"Leader master port ready (waited {elapsed:.1f}s) [{pod_info}]", flush=True)
+            break
+        except Exception as e:
+            last_err = f"tcp: {type(e).__name__}: {e} [{pod_info}]"
+    else:
+        last_err = f"{reason} [{pod_info}]" if pod_info else reason
+    now = time.monotonic()
+    if now - last_status >= 30:
+        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last: {last_err})", flush=True)
+        last_status = now
+    time.sleep(5)
+`
+
+// k8sVarPattern matches Kubernetes $(VAR) env-var expansion syntax.
+var k8sVarPattern = regexp.MustCompile(`\$\((\w+)\)`)
+
+// k8sToShellVarSyntax converts Kubernetes $(VAR) references to shell ${VAR}
+// so that variables can be expanded by a shell at runtime. Plain $VAR
+// references (e.g. from LWS) are already valid shell syntax and left as-is.
+func k8sToShellVarSyntax(s string) string {
+	return k8sVarPattern.ReplaceAllString(s, `${$1}`)
+}
+
+// GetWaitLeaderConfigMapName returns the ConfigMap name for a given DGD.
+func GetWaitLeaderConfigMapName(dgdName string) string {
+	return fmt.Sprintf("%s-%s", dgdName, waitLeaderConfigMapSuffix)
+}
+
+// GenerateWaitLeaderConfigMap creates a ConfigMap containing the wait-for-leader
+// Python script. One ConfigMap is created per DGD and owned by the DGD.
+func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      GetWaitLeaderConfigMapName(dgdName),
+			Namespace: namespace,
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
+			},
+		},
+		Data: map[string]string{
+			waitLeaderScriptKey: WaitLeaderScript,
+		},
+	}
+}
+
 func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	if numberOfNodes <= 1 || role != RoleWorker || !shouldUseMpBackend(component.Annotations) {
 		return
 	}
 
-	if len(podSpec.Containers) == 0 {
+	// Elastic EP workers use a Ray cluster, not the MP coordinator. The worker
+	// command (injected by injectElasticEPRayLaunchFlags) already contains an
+	// inline health gate that polls DynamoSystemPort (9090) before joining Ray.
+	// The MP init container waits on VLLMMpMasterPort (29500), which never opens
+	// in the elastic EP path — injecting it would cause the worker to hang forever.
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		if hasFlag(getExpandedArgs(component.ExtraPodSpec.MainContainer), enableElasticEPFlag) {
+			return
+		}
+	}
+
+	if len(podSpec.Containers) == 0 || b.ParentGraphDeploymentName == "" {
 		return
 	}
 
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	mainImage := podSpec.Containers[0].Image
+	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
-	waitScript := fmt.Sprintf(`import socket, time
-host, port = "%s", %s
-print(f"Waiting for leader master port at {host}:{port}...", flush=True)
-start = time.monotonic()
-last_status = start
-last_err = ""
-while True:
-    try:
-        s = socket.create_connection((host, port), timeout=2)
-        s.close()
-        elapsed = time.monotonic() - start
-        print(f"Leader master port ready (waited {elapsed:.1f}s)", flush=True)
-        break
-    except Exception as e:
-        last_err = f"{type(e).__name__}: {e}"
-    now = time.monotonic()
-    if now - last_status >= 30:
-        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last error: {last_err})", flush=True)
-        last_status = now
-    time.sleep(2)
-`, leaderHostname, commonconsts.VLLMMpMasterPort)
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: waitLeaderVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: cmName,
+				},
+			},
+		},
+	})
 
+	// Use sh -c so the shell expands variable references at runtime.
+	// Grove/LWS env vars are appended to init containers AFTER our env
+	// vars, so Kubernetes $(VAR) expansion (which is order-dependent)
+	// cannot resolve them. The shell sees all env vars regardless of
+	// definition order.
+	shellHostname := k8sToShellVarSyntax(leaderHostname)
 	initContainer := corev1.Container{
-		Name:    "wait-for-leader-mp",
-		Image:   mainImage,
-		Command: []string{"python3", "-c", waitScript},
+		Name:  "wait-for-leader-mp",
+		Image: mainImage,
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
+			shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      waitLeaderVolumeName,
+				MountPath: waitLeaderMountPath,
+				ReadOnly:  true,
+			},
+		},
 	}
 
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
@@ -131,6 +266,18 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
 	} else if needsDistributed {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
+	} else if hasFlag(expandedArgs, enableElasticEPFlag) {
+		// Elastic EP requires a single Ray cluster spanning all nodes.
+		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
+		// explicitly incompatible with elastic EP — vLLM raises NotImplementedError
+		// if both are present. Instead we set up a cross-node Ray cluster:
+		//   Leader: ray start --head --block & <tcp-poll-ray-ready> && <vllm cmd>
+		//   Worker: <poll /live until 200> && ray start --address=<leader>:6379 --block
+		// Note: --data-parallel-size-local is intentionally NOT injected. With the
+		// worker's health-gate delaying its Ray join until dynamo.vllm is fully ready,
+		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
+		// so vLLM naturally places all initial DP workers on the leader node.
+		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
 	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
 	} else {
@@ -227,6 +374,97 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }
 
+// injectElasticEPRayLaunchFlags sets up a cross-node Ray cluster for elastic EP.
+//
+// Elastic EP requires --data-parallel-backend ray so that vLLM's Ray executor
+// manages dynamic worker lifecycle. It is explicitly incompatible with
+// --data-parallel-hybrid-lb (the operator's normal multinode DP path), because
+// elastic EP needs a single API server and core client to coordinate scale up/down.
+//
+// We reuse the Ray TP/PP topology: leader starts the Ray head and runs vLLM,
+// workers join the Ray cluster and expose their GPUs as idle resources.
+//
+// Worker health-gate: the worker deliberately waits until the leader's /live
+// endpoint (DynamoSystemPort 9090) returns HTTP 200 before joining Ray. This is
+// critical for correct DP placement:
+//   - Port 9090 (system status server) opens EARLY in vLLM startup, before
+//     create_dp_placement_groups runs.
+//   - GET /live returns 503 during initialization and 200 only after the engine
+//     is fully ready (create_dp_placement_groups done, model loaded).
+//   - If the worker joins Ray before /live → 200, vLLM's create_dp_placement_groups
+//     sees all cluster GPUs (leader + worker) and creates too many placement groups,
+//     causing: "AssertionError: Created N DP placement groups, expected dp_size".
+//   - Waiting for HTTP 200 ensures the worker joins AFTER placement groups are
+//     set, so the leader's GPUs hold all initial DP workers (warm standby).
+//
+// Note: --data-parallel-size-local is intentionally NOT injected. With the
+// health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
+// naturally places all --data-parallel-size workers on the leader node.
+//
+// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
+// Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+	switch role {
+	case RoleLeader:
+		quotedCmd := make([]string, len(container.Command))
+		for i, tok := range container.Command {
+			quotedCmd[i] = shellQuoteForBashC(tok)
+		}
+		quotedArgs := make([]string, len(container.Args))
+		for i, arg := range container.Args {
+			quotedArgs[i] = shellQuoteForBashC(arg)
+		}
+		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
+		// An unbounded `until` loop would spin forever if `ray start --head` crashes
+		// silently or the port never opens.
+		container.Args = []string{fmt.Sprintf(
+			`ray start --head --port=%s --block & `+
+				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s %s`,
+			VLLMPort,
+			VLLMPort,
+			strings.Join(quotedCmd, " "),
+			strings.Join(quotedArgs, " "),
+		)}
+	case RoleWorker:
+		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+		// Health-gate: poll GET /live on DynamoSystemPort (9090) until HTTP 200.
+		// /live returns 503 during vLLM initialization and 200 when the engine is
+		// fully ready. This ensures the worker joins Ray AFTER create_dp_placement_groups
+		// has run (which requires only the leader's GPUs to be in the cluster).
+		// Uses Python's urllib (always available) instead of curl.
+		// Prerequisite: DYN_SYSTEM_ENABLED=true must be set on the leader pod so
+		// that the Dynamo system server listens on port 9090. The operator injects
+		// this env var unconditionally via component_worker.go.
+		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
+		// Without a bound, a permanently broken leader leaves the worker looping
+		// forever with no Kubernetes liveness probe to detect it (probes are removed
+		// at the UpdatePodSpec level for elastic EP workers).
+		healthGate := fmt.Sprintf(
+			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+				`2>/dev/null; do `+
+				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
+				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
+			leaderHostname, commonconsts.DynamoSystemPort,
+		)
+		container.Args = []string{fmt.Sprintf(
+			"%s && ray start --address=%s:%s --block",
+			healthGate, leaderHostname, VLLMPort,
+		)}
+	}
+	container.Command = []string{"/bin/sh", "-c"}
+}
+
+// hasFlag returns true if flag exists in expandedArgs.
+func hasFlag(expandedArgs []string, flag string) bool {
+	for _, arg := range expandedArgs {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
 func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
@@ -245,27 +483,17 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 	var flags []string
 	needsShell := false
 
-	// Helper to check if flag already exists in args
-	hasFlag := func(flag string) bool {
-		for _, arg := range expandedArgs {
-			if arg == flag {
-				return true
-			}
-		}
-		return false
-	}
-
 	switch role {
 	case RoleLeader:
 		// Leader runs API server + coordinator + local engines
 		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
 		flags = []string{"--data-parallel-hybrid-lb"}
 		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag("--data-parallel-size") {
-			flags = append(flags, "--data-parallel-size", strconv.FormatInt(totalDPSize, 10))
+		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
+			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
 		}
 		flags = append(flags,
-			"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
+			dataParallelSizeLocalFlag, strconv.FormatInt(dataParallelSizeLocal, 10),
 			"--data-parallel-start-rank", "0",
 			"--data-parallel-address", leaderHostname,
 			"--data-parallel-rpc-port", dataParallelRPCPort,
@@ -280,11 +508,11 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 		flags = []string{"--data-parallel-hybrid-lb"}
 		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag("--data-parallel-size") {
-			flags = append(flags, "--data-parallel-size", strconv.FormatInt(totalDPSize, 10))
+		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
+			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
 		}
 		flags = append(flags,
-			"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
+			dataParallelSizeLocalFlag, strconv.FormatInt(dataParallelSizeLocal, 10),
 			"--data-parallel-start-rank", startRank,
 			"--data-parallel-address", leaderHostname,
 			"--data-parallel-rpc-port", dataParallelRPCPort,

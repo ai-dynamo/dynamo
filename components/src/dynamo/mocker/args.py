@@ -55,14 +55,14 @@ def resolve_planner_profile_data(
     Raises:
         FileNotFoundError: If path doesn't contain valid profile data in any supported format.
     """
+    if planner_profile_data is None:
+        return ProfileDataResult(npz_path=None, tmpdir=None)
+
     from .utils.planner_profiler_perf_data_converter import (
         convert_profile_results_to_npz,
         is_mocker_format_npz,
         is_profile_results_dir,
     )
-
-    if planner_profile_data is None:
-        return ProfileDataResult(npz_path=None, tmpdir=None)
 
     # Case 1: Already a mocker-format NPZ file
     if is_mocker_format_npz(planner_profile_data):
@@ -284,6 +284,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help="AIC system name (e.g., 'h200_sxm'). Used with --aic-perf-model.",
+    )
+    parser.add_argument(
+        "--aic-backend",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang", "trtllm"],
+        help="AIC backend name used for perf database lookups. When unset, "
+        "falls back to --engine-type. Set this to decouple the AIC perf model "
+        "from the simulated engine type (e.g. simulate with vllm while using "
+        "trtllm AIC data).",
     )
     parser.add_argument(
         "--aic-backend-version",

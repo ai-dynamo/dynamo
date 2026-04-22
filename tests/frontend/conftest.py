@@ -226,6 +226,8 @@ class MockerWorkerProcess(ManagedProcess):
         system_port: int,
         speedup_ratio: int = 100,
         worker_id: str = "mocker-worker",
+        extra_args: list = None,
+        extra_env: dict = None,
     ):
         self.worker_id = worker_id
         self.frontend_port = frontend_port
@@ -245,6 +247,10 @@ class MockerWorkerProcess(ManagedProcess):
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
+        if extra_env:
+            env.update(extra_env)
+        if extra_args:
+            command.extend(extra_args)
 
         log_dir = f"{request.node.name}_{worker_id}"
 

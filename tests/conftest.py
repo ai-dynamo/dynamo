@@ -12,6 +12,12 @@ from typing import Generator, Optional
 import pytest
 from filelock import FileLock
 
+from tests.hf_cache import (
+    _apply_models_dir_env,
+    _disable_offline_with_mistral_patch,
+    _enable_offline_with_mistral_patch,
+    _restore_models_dir_env,
+)
 from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -24,6 +30,7 @@ from tests.utils.port_utils import (
 from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
+
 
 # Typed stash keys for GPU-parallel config (avoids setting unknown attrs on Config)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
@@ -75,6 +82,51 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Show which tests would run vs skip based on --max-vram-gib, then exit.",
     )
+    # -------------------------------------------------------------------------
+    # Model cache options
+    # -------------------------------------------------------------------------
+    # NOTE: if you add a new option here, also add it to the forwarding list
+    # in pytest_runtestloop (search for "opt_name, cli_flag" in this file).
+    parser.addoption(
+        "--models-dir",
+        type=str,
+        default=None,
+        help=(
+            "Path to a pre-populated HuggingFace cache (read-only safe). "
+            "Enables HF_HUB_OFFLINE mode and skips predownload fixtures. "
+            "See .ai/pytest-guidelines.md for full details."
+        ),
+    )
+
+
+def pytest_runtest_setup(item):
+    """Add Allure labels and parameters from CI environment."""
+    try:
+        import allure
+    except ImportError:
+        return
+
+    env_params = {
+        "framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "test_type": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_params.items():
+        if value:
+            allure.dynamic.parameter(name, value)
+
+    # Labels used by allurerc.mjs plugin filters for the unified dashboard.
+    # Use "dynamo_" prefix to avoid collision with allure-pytest's built-in
+    # "framework" label (which is always set to "pytest").
+    env_labels = {
+        "dynamo_workflow": os.environ.get("DYNAMO_TEST_WORKFLOW"),
+        "dynamo_framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "dynamo_platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "dynamo_testType": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_labels.items():
+        if value:
+            allure.dynamic.label(name, value)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -96,9 +148,18 @@ logging.basicConfig(
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Detect GPUs for --max-vram-gib planning and parallel execution."""
+    """Configure session: validate --models-dir and detect GPUs for --max-vram-gib."""
+    models_dir = config.getoption("--models-dir", default=None)
+    if models_dir and not Path(models_dir).is_dir():
+        pytest.exit(
+            f"--models-dir: directory does not exist: {models_dir}",
+            returncode=2,
+        )
+
     vram_limit = config.getoption("max_vram_gib", default=None)
     if vram_limit is None:
+        return
+    if config.option.collectonly:
         return
     # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
     # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
@@ -194,6 +255,9 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
         val = config.getoption(opt_name, default=None)
         if val is not None:
             extra_args.extend([cli_flag, str(val)])
+    models_dir = config.getoption("--models-dir", default=None)
+    if models_dir is not None:
+        extra_args.extend(["--models-dir", str(models_dir)])
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
@@ -241,9 +305,10 @@ def download_models(model_list=None, ignore_weights=False):
     if model_list is None:
         model_list = TEST_MODELS
 
-    # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
-    if hf_token:
+    # Check for HF_TOKEN in environment. snapshot_download() picks it up
+    # automatically via huggingface_hub's token resolution (HF_TOKEN env var →
+    # ~/.cache/huggingface/token), so we don't pass it explicitly.
+    if os.environ.get("HF_TOKEN", "").strip():
         logging.info("HF_TOKEN found in environment")
     else:
         logging.warning(
@@ -279,14 +344,12 @@ def download_models(model_list=None, ignore_weights=False):
                 # Download everything except weight files
                 snapshot_download(
                     repo_id=model_id,
-                    token=hf_token,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
                     repo_id=model_id,
-                    token=hf_token,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
@@ -301,97 +364,44 @@ def download_models(model_list=None, ignore_weights=False):
         )
 
 
-def _enable_offline_with_mistral_patch():
-    """Set HF_HUB_OFFLINE=1 and work around a transformers 4.57.3 regression.
-
-    transformers 4.57.3 (PR #42389) introduced _patch_mistral_regex which calls
-    huggingface_hub.model_info() unconditionally for every tokenizer load — even
-    non-Mistral models with fully cached weights. This API call fails when
-    HF_HUB_OFFLINE=1.
-
-    Since tests launch TRT-LLM workers as subprocesses that inherit env vars but
-    not in-process monkey-patches, we inject the fix via a sitecustomize.py on
-    PYTHONPATH so every subprocess auto-applies it at startup.
-
-    Upstream bug: https://github.com/huggingface/transformers/issues/44843
-
-    TODO: Remove this workaround once transformers ships a fix and TRT-LLM (or
-    any other dependency) upgrades to that fixed version.
-    """
-    os.environ["HF_HUB_OFFLINE"] = "1"
-
-    # Apply the patch in this process
-    try:
-        from huggingface_hub.errors import OfflineModeIsEnabled
-        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-        original = PreTrainedTokenizerBase._patch_mistral_regex
-
-        @classmethod  # type: ignore[misc]
-        def _safe_patch(cls, tokenizer, *args, **kwargs):
-            try:
-                return original.__func__(cls, tokenizer, *args, **kwargs)
-            except OfflineModeIsEnabled:
-                return tokenizer
-
-        PreTrainedTokenizerBase._patch_mistral_regex = _safe_patch
-    except (ImportError, AttributeError):
-        return  # transformers version without _patch_mistral_regex — nothing to do
-
-    # Write a sitecustomize.py so subprocesses also get the patch.
-    # Use a per-worker dir under xdist to avoid write races.
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
-    patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
-    os.makedirs(patch_dir, exist_ok=True)
-    with open(os.path.join(patch_dir, "sitecustomize.py"), "w") as f:
-        f.write(
-            "import os\n"
-            "if os.environ.get('HF_HUB_OFFLINE') == '1':\n"
-            "    try:\n"
-            "        from transformers.tokenization_utils_base import"
-            " PreTrainedTokenizerBase as _T\n"
-            "        from huggingface_hub.errors import"
-            " OfflineModeIsEnabled as _E\n"
-            "        _orig = _T._patch_mistral_regex\n"
-            "        @classmethod\n"
-            "        def _safe(cls, tokenizer, *a, **kw):\n"
-            "            try:\n"
-            "                return _orig.__func__(cls, tokenizer, *a, **kw)\n"
-            "            except _E:\n"
-            "                return tokenizer\n"
-            "        _T._patch_mistral_regex = _safe\n"
-            "    except (ImportError, AttributeError):\n"
-            "        pass\n"
-        )
-    pythonpath = os.environ.get("PYTHONPATH", "")
-    os.environ["PYTHONPATH"] = f"{patch_dir}:{pythonpath}" if pythonpath else patch_dir
-    logging.info(
-        "Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround "
-        "(see https://github.com/huggingface/transformers/issues/44843)"
-    )
-
-
-def _disable_offline_with_mistral_patch():
-    """Undo _enable_offline_with_mistral_patch."""
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
-    patch_dir = os.path.join(tempfile.gettempdir(), f"dynamo_test_hf_patch_{worker_id}")
-    pythonpath = os.environ.get("PYTHONPATH", "")
-    os.environ["PYTHONPATH"] = pythonpath.replace(f"{patch_dir}:", "").replace(
-        patch_dir, ""
-    )
-
-
 _download_lock_path = os.path.join(tempfile.gettempdir(), "pytest_model_download.lock")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _models_dir_env(pytestconfig):
+    """Set up HF env vars for --models-dir mode. No-op when flag is absent.
+
+    Session-scoped: runs once per worker process. Under pytest-xdist each worker
+    applies and restores env vars independently — there is no cross-worker
+    coordination needed since env vars are process-local.
+    """
+    models_dir = pytestconfig.getoption("--models-dir")
+    if not models_dir:
+        yield
+        return
+    orig = _apply_models_dir_env(models_dir)
+    try:
+        yield
+    finally:
+        _restore_models_dir_env(orig)
+
+
 @pytest.fixture(scope="session")
-def predownload_models(pytestconfig):
+def predownload_models(pytestconfig, _models_dir_env):
     """Fixture wrapper around download_models for models used in collected tests.
 
     Uses a file lock so that under xdist, only one worker downloads at a time
     and the rest reuse the HuggingFace cache.
+
+    When --models-dir is passed, _models_dir_env has already set up HF env vars;
+    this fixture simply yields without downloading.
+
+    _models_dir_env is declared as a dependency to ensure HF env vars are
+    configured before any download attempt, even though its yielded value is unused.
     """
+    if pytestconfig.getoption("--models-dir"):
+        yield
+        return
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
@@ -408,11 +418,20 @@ def predownload_models(pytestconfig):
 
 
 @pytest.fixture(scope="session")
-def predownload_tokenizers(pytestconfig):
+def predownload_tokenizers(pytestconfig, _models_dir_env):
     """Fixture wrapper around download_models for tokenizers used in collected tests.
 
     Uses a file lock so that under xdist, only one worker downloads at a time.
+
+    When --models-dir is passed, _models_dir_env has already set up HF env vars;
+    this fixture simply yields without downloading.
+
+    _models_dir_env is declared as a dependency to ensure HF env vars are
+    configured before any download attempt, even though its yielded value is unused.
     """
+    if pytestconfig.getoption("--models-dir"):
+        yield
+        return
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
@@ -482,8 +501,9 @@ def pytest_collection_modifyitems(config, items):
     #   - Tests whose profiled VRAM exceeds the limit are removed
     #   - Tests WITHOUT a VRAM marker are also removed (unknown VRAM = unsafe)
     # Using deselect (not skip) so they never reach the xdist scheduler.
+    # Skip all VRAM logic during --collect-only (just listing tests).
     vram_limit = config.getoption("--max-vram-gib", default=None)
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         keep = []
         deselected = []
         for item in items:
@@ -497,7 +517,7 @@ def pytest_collection_modifyitems(config, items):
             items[:] = keep
 
     # Write test metadata for the GPU orchestrator to read.
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         # Delayed: see vram_utils pynvml note in pytest_configure
         from tests.utils.vram_utils import print_gpu_plan, write_test_meta
 

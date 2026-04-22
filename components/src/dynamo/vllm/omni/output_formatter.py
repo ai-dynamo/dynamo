@@ -17,7 +17,18 @@ import uuid
 from io import BytesIO
 from typing import Any, Dict, Optional
 
+import numpy as np
+import soundfile as sf
+import torch
+from diffusers.utils.export_utils import export_to_video
+
+from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
+from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
+from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.output_modalities import RequestType
+from dynamo.common.utils.video_utils import normalize_video_frames
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +103,6 @@ class DiffusionFormatter:
         )
         if not images:
             return None
-        from dynamo.common.utils.output_modalities import RequestType
 
         if request_type == RequestType.VIDEO_GENERATION:
             return await self._encode_video(
@@ -108,12 +118,6 @@ class DiffusionFormatter:
     async def _encode_video(
         self, images: list, request_id: str, fps: int
     ) -> Dict[str, Any] | None:
-        from diffusers.utils.export_utils import export_to_video
-
-        from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
-        from dynamo.common.storage import upload_to_fs
-        from dynamo.common.utils.video_utils import normalize_video_frames
-
         try:
             start_time = time.time()
             frame_list = normalize_video_frames(images)
@@ -157,9 +161,6 @@ class DiffusionFormatter:
         request_type: Any,
         response_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
-        from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
-        from dynamo.common.utils.output_modalities import RequestType
-
         if not images:
             return _error_chunk(request_id, self._model_name, "No images generated")
 
@@ -209,8 +210,6 @@ class DiffusionFormatter:
     async def _prepare_images(
         self, images: list, request_id: str, response_format: Optional[str] = None
     ) -> list:
-        from dynamo.common.storage import upload_to_fs
-
         outlist = []
         for img in images:
             buf = BytesIO()
@@ -239,12 +238,10 @@ class AudioFormatter:
     def __init__(
         self, model_name: str, media_fs: Any, media_http_url: Optional[str]
     ) -> None:
-        from dynamo.common.protocols.audio_protocol import AudioData
-
         self._model_name = model_name
         self._media_fs = media_fs
         self._media_http_url = media_http_url
-        self._AudioData = AudioData
+        self._AudioData = AudioData  # stored for use in format()
 
     async def format(
         self, stage_output: Any, request_id: str, **ctx: Any
@@ -284,8 +281,6 @@ class AudioFormatter:
             )
 
             if response_format == "url":
-                from dynamo.common.storage import upload_to_fs
-
                 ext = encode_fmt if encode_fmt != "opus" else "ogg"
                 url = await upload_to_fs(
                     self._media_fs,
@@ -298,8 +293,6 @@ class AudioFormatter:
                 audio_data_obj = self._AudioData(
                     b64_json=base64.b64encode(audio_bytes).decode()
                 )
-
-            from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 
             return NvAudioSpeechResponse(
                 id=request_id,
@@ -317,9 +310,6 @@ class AudioFormatter:
             return self._error_response(request_id, str(e))
 
     def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
-        import numpy as np
-        import torch
-
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
         if audio_val is None:
@@ -350,8 +340,6 @@ class AudioFormatter:
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
     ) -> tuple:
-        import soundfile as sf
-
         if speed != 1.0:
             try:
                 import librosa
@@ -381,8 +369,6 @@ class AudioFormatter:
         return buf.getvalue(), media_type
 
     def _error_response(self, request_id: str, error: str) -> Dict[str, Any]:
-        from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
-
         return NvAudioSpeechResponse(
             id=request_id,
             model=self._model_name,

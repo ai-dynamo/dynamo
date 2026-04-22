@@ -5,7 +5,6 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
 
 import pytest
 
@@ -26,38 +25,9 @@ from tests.utils.payload_builder import (
     metric_payload_default,
     multimodal_payload_default,
 )
-from tests.utils.payloads import BasePayload
+from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class VideoGenerationPayload(BasePayload):
-    """Payload for /v1/videos endpoint (TRT-LLM video diffusion)."""
-
-    endpoint: str = "/v1/videos"
-    timeout: int = 300
-
-    def response_handler(self, response: Any) -> str:
-        response.raise_for_status()
-        result = response.json()
-        assert result.get("status") == "completed", (
-            f"Video generation not completed. Status: {result.get('status')}, "
-            f"Error: {result.get('error', 'none')}"
-        )
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
-        assert len(result["data"]) > 0, "Empty data in video response"
-        entry = result["data"][0]
-        if "url" in entry:
-            assert entry["url"], "Video response url is empty"
-            return entry["url"]
-        assert entry.get("b64_json"), "Video response b64_json is empty"
-        return "b64_video_returned"
-
-    def validate(self, response: Any, content: str) -> None:
-        assert content, "Video response content is empty"
 
 
 @dataclass
@@ -80,19 +50,45 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.9 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),  # actual nvidia-smi peak 3.9 GiB
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(
                 300
             ),  # 3x measured time (44.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
+        ],
+    ),
+    "aggregated_unified": TRTLLMConfig(
+        name="aggregated_unified",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
+            pytest.mark.timeout(300),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "disaggregated": TRTLLMConfig(
@@ -112,16 +108,22 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450"
+            ),
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 6.6 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.skip(reason="unstable"),
-            pytest.mark.timeout(
-                480
-            ),  # 3x measured time (103.66s) + download time (150s)
+            pytest.mark.profiled_vram_gib(6.6),  # actual nvidia-smi peak 6.6 GiB
+            pytest.mark.requested_trtllm_kv_tokens(
+                512
+            ),  # KV cache cap (2x safety over min=256)
+            pytest.mark.timeout(432),  # ~6x profiled wall time 72s
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=10,
+        health_check_workers=True,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -137,9 +139,19 @@ trtllm_configs = {
         name="aggregated_logprobs",
         directory=trtllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge, pytest.mark.trtllm],
+        marks=[
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.8 GiB
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.8),  # actual nvidia-smi peak 3.8 GiB
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
+            pytest.mark.timeout(300),  # 3x measured time (~44s) + download time (150s)
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
         request_payloads=[
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
             chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
@@ -224,6 +236,9 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_multimodal_router.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2608"
+            ),
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
@@ -299,12 +314,12 @@ trtllm_configs = {
     ),
     # LLaVA raw-embeddings E/PD test
     # Validates the raw-embeddings code path where pre-computed vision embeddings
-    # (.pt tensor file) are sent via file:// URL instead of a raw image URL.
+    # (.safetensors file) are sent via file:// URL instead of a raw image URL.
     #
     # Flow:
     #   1. Launch script generates embeddings using standalone HF vision encoder
     #   2. Encode + Aggregated PD workers start for LLaVA
-    #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.pt
+    #   3. Test sends chat/completions request with file:///tmp/llava_embeddings.safetensors
     #
     # Uses gpu_2: encode worker on GPU 0, PD worker on GPU 1.
     # The 7B LLaVA model requires two GPUs because both encode and PD workers
@@ -330,7 +345,7 @@ trtllm_configs = {
         delayed_start=180,
         request_payloads=[
             multimodal_payload_default(
-                image_url="file:///tmp/llava_embeddings.pt",
+                image_url="file:///tmp/llava_embeddings.safetensors",
                 text="Describe what this image shows.",
                 expected_response=["bench", "person", "image", "picture"],
             )
@@ -360,9 +375,17 @@ trtllm_configs = {
             "17",
         ],
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 17.1 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
+            # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
+            # doesn't apply.  requested_trtllm_vram_gib maps to
+            # KvCacheConfig.max_gpu_total_bytes which has no effect on the
+            # diffusion engine itself, but the parallel scheduler requires one
+            # of the KV/VRAM markers to accept the test.  We set it to the
+            # profiled peak so the scheduler's VRAM budget is accurate.
+            pytest.mark.profiled_vram_gib(17.1),  # actual nvidia-smi peak 17.1 GiB
+            pytest.mark.requested_trtllm_vram_gib(17.1),
             pytest.mark.timeout(
                 600
             ),  # Video generation is slow even at small resolution
@@ -370,7 +393,7 @@ trtllm_configs = {
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=300,
-        delayed_start=60,  # Model loading takes time
+        delayed_start=5,
         request_payloads=[
             VideoGenerationPayload(
                 body={
@@ -384,11 +407,100 @@ trtllm_configs = {
                         "seed": 42,
                     },
                 },
+                timeout=300,
                 repeat_count=1,
                 expected_response=[],
                 expected_log=[],
             ),
         ],
+    ),
+    # TensorRT-LLM image diffusion test using Flux.1-dev model.
+    # Validates the end-to-end image generation pipeline (frontend → worker → /v1/images/generations).
+    # Uses --skip-warmup (warmup at default resolution OOMs on 22 GB L4 GPU),
+    # --disable-torch-compile, and small default resolution (256x256)
+    # to fit within CI GPU memory constraints.
+    "image_diffusion": TRTLLMConfig(
+        name="image_diffusion",
+        directory=trtllm_dir,
+        script_name="agg_image_diffusion.sh",
+        script_args=[
+            "--skip-warmup",
+            "--disable-torch-compile",
+            "--default-height",
+            "256",
+            "--default-width",
+            "256",
+            "--default-num-images-per-prompt",
+            "1",
+        ],
+        marks=[
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 20.0 GiB
+            pytest.mark.trtllm,
+            pytest.mark.pre_merge,
+            # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
+            # doesn't apply.  requested_trtllm_vram_gib maps to
+            # KvCacheConfig.max_gpu_total_bytes which has no effect on the
+            # diffusion engine itself, but the parallel scheduler requires one
+            # of the KV/VRAM markers to accept the test.  We set it to the
+            # profiled peak so the scheduler's VRAM budget is accurate.
+            pytest.mark.profiled_vram_gib(
+                20.0
+            ),  # actual nvidia-smi peak 20.0 GiB [gluo FIXME] reprofil as new model is used
+            pytest.mark.requested_trtllm_vram_gib(20.0),
+            pytest.mark.timeout(
+                600
+            ),  # Image generation is slow even at small resolution
+        ],
+        model="black-forest-labs/FLUX.2-klein-4B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=300,
+        delayed_start=5,
+        request_payloads=[
+            ImageGenerationPayload(
+                body={
+                    "prompt": "A golden retriever running on a beach",
+                    "size": "256x256",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 10,
+                        "guidance_scale": 5.0,
+                        "seed": 42,
+                    },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    # Aggregated multimodal with --frontend-decoding enabled.
+    # Verifies image URL inference works when images are decoded by the Rust
+    # MediaDecoder in the frontend instead of the Python backend.
+    "aggregated_multimodal_frontend_decoding": TRTLLMConfig(
+        name="aggregated_multimodal_frontend_decoding",
+        directory=trtllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(900),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
+            "DYN_TRTLLM_FRONTEND_DECODING": "true",
+        },
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",

@@ -61,11 +61,18 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        // Custom buckets for inference workloads: retain sub-second resolution for
+        // fast operations, extend well beyond the default 10s ceiling to capture
+        // long-running generation requests that can last minutes.
+        let request_duration_buckets = vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0,
+            300.0, 600.0,
+        ];
         let request_duration = metrics.create_histogram(
             work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
-            None,
+            Some(request_duration_buckets),
         )?;
 
         let inflight_requests = metrics.create_intgauge(
@@ -304,8 +311,13 @@ where
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
+        let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
+            let is_error = resp.err().is_some();
+            if is_error {
+                saw_error_response = true;
+            }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,
@@ -340,6 +352,12 @@ where
                         .inc();
                 }
                 break;
+            } else if !is_error {
+                // Only notify on non-error chunks — error responses don't prove
+                // the engine is healthy and should not reset the canary timer.
+                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                    notifier.notify_one();
+                }
             }
         }
         if send_complete_final {
@@ -363,9 +381,11 @@ where
                         .inc();
                 }
             }
-            // Notify the health check manager that the stream has finished.
-            // This resets the timer, delaying the next canary health check.
-            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+            // Only notify on stream completion if no error responses were seen
+            if let (false, Some(notifier)) = (
+                saw_error_response,
+                self.endpoint_health_check_notifier.get(),
+            ) {
                 notifier.notify_one();
             }
         }

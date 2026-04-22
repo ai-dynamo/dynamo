@@ -145,13 +145,15 @@ type LeaderElectionConfiguration struct {
 
 // NamespaceConfiguration determines operator namespace mode.
 type NamespaceConfiguration struct {
-	// Restricted is the namespace to restrict to. Empty = cluster-wide mode.
+	// Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.
+	// Use cluster-wide mode (leave Restricted empty) instead.
 	Restricted string `json:"restricted"`
-	// Scope holds namespace scope lease settings (namespace-restricted mode only)
+	// Deprecated: Scope is only used in namespace-restricted mode, which is deprecated.
 	Scope NamespaceScopeConfiguration `json:"scope"`
 }
 
-// NamespaceScopeConfiguration holds lease settings for namespace-restricted mode.
+// Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
+// mode and will be removed in a future release.
 type NamespaceScopeConfiguration struct {
 	// LeaseDuration is the duration of namespace scope marker lease before expiration
 	// +kubebuilder:default="30s"
@@ -243,9 +245,6 @@ type MPIConfiguration struct {
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
-	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
-	// +kubebuilder:default="/tmp/ready-for-checkpoint"
-	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
 	// Deprecated: Storage is retained for compatibility and ignored by the
 	// current snapshot flow. Snapshot storage is discovered from the
 	// snapshot-agent DaemonSet instead.
@@ -307,6 +306,16 @@ const (
 	DiscoveryBackendKubernetes DiscoveryBackend = "kubernetes"
 	// DiscoveryBackendEtcd is the etcd discovery backend
 	DiscoveryBackendEtcd DiscoveryBackend = "etcd"
+)
+
+// KubeDiscoveryMode is the kube discovery identity granularity.
+type KubeDiscoveryMode string
+
+const (
+	// KubeDiscoveryModePod is the default: one identity per pod.
+	KubeDiscoveryModePod KubeDiscoveryMode = "pod"
+	// KubeDiscoveryModeContainer: each container registers independently with the discovery plane.
+	KubeDiscoveryModeContainer KubeDiscoveryMode = "container"
 )
 
 // GPUConfiguration holds GPU discovery settings.

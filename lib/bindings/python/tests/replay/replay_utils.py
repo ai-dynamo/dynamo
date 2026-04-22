@@ -86,7 +86,7 @@ def _router_config_payload():
         "router_prune_target_ratio": 0.8,
         "router_enable_cache_control": False,
         "skip_initial_worker_wait": False,
-        "remote_indexer_component": None,
+        "use_remote_indexer": False,
     }
 
 

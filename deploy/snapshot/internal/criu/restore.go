@@ -71,7 +71,7 @@ func ExecuteRestore(
 	defer closeFiles(inheritedFiles)
 
 	notify := &restoreNotify{log: log}
-	log.Info("Executing go-criu Restore call")
+	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
 		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
@@ -88,7 +88,7 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 	if err != nil {
 		return nil, err
 	}
-	log.Info("Generated external mount map set", "ext_mount_count", len(extMounts))
+	log.V(1).Info("Generated external mount map set", "ext_mount_count", len(extMounts))
 
 	settings := m.CRIUDump.CRIU
 	criuOpts := &criurpc.CriuOpts{
@@ -137,7 +137,7 @@ func buildRestoreExtMounts(m *types.CheckpointManifest) ([]*criurpc.ExtMountMap,
 
 func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*os.File {
 	if len(stdioFDs) == 0 {
-		log.Info("No stdio FD descriptors in manifest, skipping inherit-fd setup")
+		log.V(1).Info("No stdio FD descriptors in manifest, skipping inherit-fd setup")
 		return nil
 	}
 
@@ -161,7 +161,7 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 		c.AddInheritFd(target, f)
 	}
 
-	log.Info("Registered inherited stdio pipes", "count", len(openFiles))
+	log.V(1).Info("Registered inherited stdio pipes", "count", len(openFiles))
 	return openFiles
 }
 

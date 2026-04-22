@@ -12,6 +12,14 @@ from transformers import AutoTokenizer
 
 from dynamo.frontend.prepost import _prepare_request
 
+# Needs vllm packages (gpu_1 container).  No need for parallel marker.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 MODEL = "Qwen/Qwen3-0.6B"
 
 TOOL_REQUEST = {

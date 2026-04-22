@@ -21,13 +21,10 @@ pub use dynamo_memory::numa::*;
 )]
 pub fn is_numa_enabled() -> bool {
     // Global kill switch always wins
-    if is_numa_disabled() {
+    if dynamo_memory::numa::is_numa_disabled() {
         return false;
     }
-    matches!(
-        std::env::var("DYN_KVBM_ENABLE_NUMA").as_deref(),
-        Ok("1" | "true" | "yes")
-    )
+    dynamo_config::env_is_truthy("DYN_KVBM_ENABLE_NUMA")
 }
 
 #[cfg(test)]

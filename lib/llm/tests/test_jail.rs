@@ -2493,7 +2493,7 @@ mod parallel_jail_tests {
 
             assert_eq!(
                 tool_call.r#type,
-                Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                Some(dynamo_protocols::types::FunctionType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );
@@ -2585,6 +2585,96 @@ mod parallel_jail_tests {
                 "get_current_weather",
                 json!({"city": "Orlando", "state": "FL", "unit": "fahrenheit"}),
             ),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+    }
+
+    /// Regression test for issue #6822:
+    /// Hermes-style parallel tool calls in a single chunk must produce N tool call
+    /// results, not 1 call + trailing raw XML text.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_hermes() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        // Two parallel calls arrive in one streaming chunk (hermes uses JSON inside tags).
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>\n\
+{\"name\": \"get_current_weather\", \"arguments\": {\"city\": \"Dallas\", \"state\": \"TX\"}}\n\
+</tool_call>\n\
+<tool_call>\n\
+{\"name\": \"get_current_weather\", \"arguments\": {\"city\": \"Orlando\", \"state\": \"FL\"}}\n\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            (
+                "get_current_weather",
+                json!({"city": "Dallas", "state": "TX"}),
+            ),
+            (
+                "get_current_weather",
+                json!({"city": "Orlando", "state": "FL"}),
+            ),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        // Verify that raw XML does not leak as text content (the original bug).
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression test for issue #6822:
+    /// Qwen3Coder-style parallel tool calls in a single chunk must produce N tool
+    /// call results (identical format to hermes, different parser name).
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_qwen3_coder() {
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>\n\
+<function=search>\n\
+<parameter=query>Rust async</parameter>\n\
+</function>\n\
+</tool_call>\n\
+<tool_call>\n\
+<function=search>\n\
+<parameter=query>Python async</parameter>\n\
+</function>\n\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("search", json!({"query": "Rust async"})),
+            ("search", json!({"query": "Python async"})),
         ];
 
         validate_parallel_streaming_tool_calls(&results, &expected_calls);

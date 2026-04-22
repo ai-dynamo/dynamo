@@ -18,7 +18,6 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 - ✅ **Shared certificate infrastructure** - All webhook types use the same TLS certificates
 - ✅ **Automatic certificate generation and rotation** - Built-in cert-controller, no manual management required
 - ✅ **cert-manager integration** - Optional integration for custom PKI or organizational certificate policies
-- ✅ **Multi-operator support** - Lease-based coordination for cluster-wide and namespace-restricted deployments
 - ✅ **Immutability enforcement** - Critical fields protected via CEL validation rules
 
 ### Current Webhook Types
@@ -165,7 +164,7 @@ webhook:
       values: ["disabled"]
 ```
 
-**Note:** For **namespace-restricted operators**, the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
+**Note:** For **namespace-restricted operators** (deprecated), the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
 
 ---
 
@@ -335,7 +334,9 @@ helm install dynamo-platform . -n <namespace> -f values.yaml
 
 ---
 
-## Multi-Operator Deployments
+## Multi-Operator Deployments (DEPRECATED)
+
+> **DEPRECATED:** Namespace-restricted mode and multi-operator deployments are deprecated and will be removed in a future release. Use a single cluster-wide operator instead.
 
 The operator supports running both **cluster-wide** and **namespace-restricted** instances simultaneously using a **lease-based coordination mechanism**.
 
@@ -640,9 +641,7 @@ helm upgrade <release> dynamo-platform -n <namespace>
 ### Multi-Tenant Deployments
 
 1. ✅ **Deploy one cluster-wide operator** for platform-wide validation
-2. ✅ **Deploy namespace-restricted operators** for tenant-specific namespaces
-3. ✅ **Monitor lease health** to ensure coordination works correctly
-4. ✅ **Use unique release names** per namespace to avoid naming conflicts
+2. ~~Deploy namespace-restricted operators for tenant-specific namespaces~~ (**DEPRECATED** - use cluster-wide mode instead)
 
 ---
 

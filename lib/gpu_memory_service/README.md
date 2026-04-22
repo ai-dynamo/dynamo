@@ -65,7 +65,7 @@ The GMS server runs as an independent process that manages GPU memory without ev
 
 The server consists of three main components:
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and exports shareable file descriptors (`cuMemExportToShareableHandle`). Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
+1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and eagerly exports one shareable file descriptor (`cuMemExportToShareableHandle`) per allocation. Later export RPCs `dup()` that cached FD instead of calling back into CUDA again. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
@@ -106,14 +106,15 @@ sequenceDiagram
         C->>S: AllocateRequest(size, tag)
         S->>GPU: cuMemCreate(size)
         GPU-->>S: handle
+        S->>GPU: cuMemExportToShareableHandle(handle)
+        GPU-->>S: cached fd
         S-->>C: AllocateResponse(allocation_id)
     end
 
     %% Export/Import (Both Writer and Reader)
     Note over C,GPU: Both Writer and Reader: Export and map
     C->>S: ExportAllocationRequest(allocation_id)
-    S->>GPU: cuMemExportToShareableHandle(handle)
-    GPU-->>S: fd
+    S->>S: dup(cached fd)
     S-->>C: Response + fd (via SCM_RIGHTS)
 
     C->>GPU: cuMemImportFromShareableHandle(fd)
@@ -194,6 +195,8 @@ flowchart LR
 - `RW_CONNECT` starts a fresh RW layout build.
 - `RW_COMMIT` publishes the current layout; it does not create another one.
 - `RW_ABORT` discards the current RW layout and returns the system to `EMPTY`.
+- `RW -> EMPTY` does not require allocating a new layout first; it happens immediately when the writer drops the session before commit.
+- There is no RPC that clears the active RW layout while keeping the same writer session alive. To abandon a partially built RW layout, the writer must disconnect or call `abort()`, and any later RW build starts from a fresh `RW_CONNECT`.
 - Allocations and metadata live in one flat store that is cleared on `RW_CONNECT` and `RW_ABORT`.
 - RO requests are served only from the committed layout, while RW requests mutate only the active layout.
 - Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) operate on that single live store. This is safe because the FSM prevents RW and RO sessions from coexisting.
@@ -386,10 +389,16 @@ sequenceDiagram
         S-->>C: HandshakeResponse(granted=RO, committed=true)
         Note over P: Subsequent process - import from GMS
     else RW held by another
-        S->>S: Wait until a committed layout becomes available
-        S->>S: Then grant RO from COMMITTED
-        S-->>C: HandshakeResponse(granted=RO, committed=true)
-        Note over P: Wait for writer to publish committed weights
+        S->>S: Wait for current writer to either commit or abort
+        alt current writer commits
+            S->>S: Grant RO from COMMITTED
+            S-->>C: HandshakeResponse(granted=RO, committed=true)
+            Note over P: Import published weights
+        else current writer aborts
+            S->>S: Grant RW from EMPTY
+            S-->>C: HandshakeResponse(granted=RW, committed=false)
+            Note over P: Previous writer gave up; this process becomes the writer
+        end
     end
 ```
 
@@ -529,7 +538,7 @@ GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `
 When `--load-format gms` is set:
 
 1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
-2. The engine uses `RW_OR_RO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed layout and then get RO to import published weights.
+2. The engine uses `RW_OR_RO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. If another writer is already active, later clients wait until that writer either commits or aborts; after a commit they get RO to import published weights, and after an abort one of them can become the new RW writer.
 3. Both weights and KV cache are managed by GMS, but they use separate tags:
    - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit)
    - `kv_cache`: separate RW-only tag for mutable KV-cache memory
@@ -565,9 +574,9 @@ python -m dynamo.sglang \
 ```
 
 The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
-- Weights (`"weights"` / `"model_weights"` tags) use the `weights` GMS tag
+- Weights (`"weights"`) use the `weights` GMS tag
 - KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS tag
-- Other tags still use the default torch mempool implementation
+- Other tags are not supported in GMS mode
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
 ### Shadow Engine Failover (Sleep / Wake)

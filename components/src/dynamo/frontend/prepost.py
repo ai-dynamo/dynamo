@@ -80,6 +80,7 @@ def _prepare_request(
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
+    enable_auto_tool_choice: bool = False,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -103,7 +104,11 @@ def _prepare_request(
         request_for_sampling = ChatCompletionRequest.model_validate(request)
 
     tool_parser: ToolParser | None = None
-    if tool_parser_class and request_for_sampling.tools:
+    # With enable_auto_tool_choice the model may emit tool calls even when the
+    # client did not supply an explicit `tools` list, so we activate the parser
+    # whenever the tool_parser_class is available.
+    has_tools = bool(request_for_sampling.tools)
+    if tool_parser_class and (has_tools or enable_auto_tool_choice):
         if request_for_sampling.tool_choice != "none":
             tool_parser = tool_parser_class(tokenizer)
             request_for_sampling = tool_parser.adjust_request(request_for_sampling)
@@ -163,6 +168,7 @@ async def preprocess_chat_request(
     renderer,
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
+    enable_auto_tool_choice: bool = False,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -175,6 +181,7 @@ async def preprocess_chat_request(
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        enable_auto_tool_choice=enable_auto_tool_choice,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)

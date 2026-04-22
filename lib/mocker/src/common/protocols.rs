@@ -13,7 +13,24 @@ use validator::Validate;
 use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::KvCacheEvent;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, SequenceHash, Token};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
+
+/// Metadata marker type for kvbm-logical blocks in the mocker's G1 pool.
+#[derive(Clone, Debug)]
+pub struct G1;
+
+/// Eviction strategy for the kvbm-logical inactive pool.
+///
+/// `Lineage` is the default and matches kvbm-logical's own default — it evicts
+/// leaf blocks first, which subsumes the preemption-priority behaviour that the
+/// mocker's old `LRUEvictor::push_front` provided.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum MockerEvictionBackend {
+    Lru,
+    MultiLru,
+    #[default]
+    Lineage,
+}
 
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
@@ -80,6 +97,59 @@ impl KvEventPublishers {
     }
 }
 
+/// Per-iteration forward pass snapshot, mirroring the Python `ForwardPassMetrics`
+/// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
+///
+/// Produced by the scheduler core after each `execute_pass_internal()` call.
+/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
+/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardPassSnapshot {
+    // -- scheduled requests (executed this iteration) --
+    pub num_prefill_requests: u32,
+    pub sum_prefill_tokens: u64,
+    pub var_prefill_length: f64,
+    pub sum_prefill_kv_tokens: u64,
+    pub num_decode_requests: u32,
+    pub sum_decode_kv_tokens: u64,
+    pub var_decode_kv_tokens: f64,
+    // -- queued requests (waiting, not scheduled) --
+    pub num_queued_prefill: u32,
+    pub sum_queued_prefill_tokens: u64,
+    pub var_queued_prefill_length: f64,
+    pub num_queued_decode: u32,
+    pub sum_queued_decode_kv_tokens: u64,
+    pub var_queued_decode_kv_tokens: f64,
+    // -- timing --
+    pub wall_time_secs: f64,
+}
+
+/// Trait for publishing forward pass metrics snapshots.
+/// This abstracts the FPM publishing pipeline so mocker schedulers remain generic.
+pub trait FpmSink: Send + Sync {
+    fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()>;
+}
+
+/// Optional FPM sink used by schedulers.
+/// Wraps `Option<Arc<dyn FpmSink>>` for ergonomic passing and no-op default behavior.
+#[derive(Clone, Default)]
+pub struct FpmPublisher {
+    sink: Option<Arc<dyn FpmSink>>,
+}
+
+impl FpmPublisher {
+    pub fn new(sink: Option<Arc<dyn FpmSink>>) -> Self {
+        Self { sink }
+    }
+
+    pub fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
+        if let Some(sink) = &self.sink {
+            sink.publish(snapshot)?;
+        }
+        Ok(())
+    }
+}
+
 pub type NumBlocks = usize;
 
 /// Represents different block movement operations in the cache
@@ -89,12 +159,20 @@ pub enum MoveBlock {
     Use(
         Vec<UniqueBlock>,
         Vec<BlockHash>,
+        Vec<PositionalLineageHash>,
         Option<Vec<Vec<u32>>>,
         Option<UniqueBlock>,
     ),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),
+    Promote(
+        Uuid,
+        SequenceHash,
+        Option<u64>,
+        BlockHash,
+        PositionalLineageHash,
+        Option<Vec<u32>>,
+    ),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
