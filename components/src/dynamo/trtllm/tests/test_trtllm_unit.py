@@ -416,7 +416,6 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
         "lock_path:/tmp/failover.lock",
         "owner:None",
         "owner:engine-0",
-        "lock_acquire:engine-1",
         "get_llm_engine",
         "engine_enter",
         "serve_cancelled",

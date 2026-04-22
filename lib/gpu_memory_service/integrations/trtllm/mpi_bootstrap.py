@@ -19,6 +19,7 @@ is patched before TRT-LLM invokes it.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -38,12 +39,14 @@ _PROPAGATED_ENV_VARS: tuple[str, ...] = (
     _ENABLED_ENV,
     "DYN_GMS_SHADOW_MODE",
     "ENGINE_ID",
+    "FAILOVER_LOCK_PATH",
     "GMS_SOCKET_DIR",
 )
 
 _extra_config_json: Optional[str] = None
 _bootstrap_installed = False
 _executor_finalize_hook_installed = False
+_shadow_activation_fd: int | None = None
 
 
 def set_extra_config(extra: "dict[str, Any] | None") -> None:
@@ -56,8 +59,57 @@ def _delay_commit_until_engine_init(extra: "dict[str, Any] | None") -> bool:
     return bool(extra and extra.get("gms_delay_commit_until_engine_init") is True)
 
 
+def _is_shadow_standby() -> bool:
+    return (
+        os.environ.get("DYN_GMS_SHADOW_MODE") == "1"
+        and os.environ.get("ENGINE_ID", "0") != "0"
+    )
+
+
+def _get_mpi_rank_and_comm() -> tuple[int, object | None]:
+    try:
+        from mpi4py import MPI  # type: ignore[import-not-found]
+
+        return MPI.COMM_WORLD.Get_rank(), MPI.COMM_WORLD
+    except Exception:
+        return 0, None
+
+
+def _wait_for_shadow_activation() -> None:
+    """Block standby after RO weight import, before KV/executor init.
+
+    This mirrors the flock semantics used at the parent layer, but keeps the
+    wait inside TRT-LLM's synchronous executor-construction path without
+    changing the generic async failover-lock helper.
+    """
+    global _shadow_activation_fd
+
+    if not _is_shadow_standby():
+        return
+
+    rank, comm = _get_mpi_rank_and_comm()
+    if rank == 0 and _shadow_activation_fd is None:
+        shadow_engine_id = os.environ.get("ENGINE_ID", "0")
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        logger.info(
+            "[Shadow] Standby RO import complete, rank0 waiting for failover lock before KV init"
+        )
+
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"engine-{shadow_engine_id}".encode())
+        _shadow_activation_fd = fd
+
+        logger.info("[Shadow] Standby rank0 acquired failover lock, continuing KV init")
+
+    if comm is not None:
+        comm.Barrier()
+
+
 def install_executor_finalize_hook() -> None:
-    """Finalize delayed TRT-LLM GMS publishes in MPI children before start_worker()."""
+    """Finalize delayed publishes and gate standby after RO import in MPI children."""
     global _executor_finalize_hook_installed
     if _executor_finalize_hook_installed:
         return
@@ -73,9 +125,15 @@ def install_executor_finalize_hook() -> None:
     original_create_py_executor_instance = (
         _py_executor_creator.create_py_executor_instance
     )
+    original_pytorch_model_engine = _py_executor_creator.PyTorchModelEngine
 
     @wraps(original_create_py_executor)
     def patched_create_py_executor(*args, **kwargs):
+        def gated_pytorch_model_engine(*engine_args, **engine_kwargs):
+            model_engine = original_pytorch_model_engine(*engine_args, **engine_kwargs)
+            _wait_for_shadow_activation()
+            return model_engine
+
         def patched_create_py_executor_instance(*instance_args, **instance_kwargs):
             executor = original_create_py_executor_instance(
                 *instance_args, **instance_kwargs
@@ -98,12 +156,17 @@ def install_executor_finalize_hook() -> None:
             executor.start_worker = patched_start_worker
             return executor
 
-        _py_executor_creator.create_py_executor_instance = (
-            patched_create_py_executor_instance
-        )
+        if _delay_commit_until_engine_init(
+            json.loads(_extra_config_json) if _extra_config_json else None
+        ):
+            _py_executor_creator.create_py_executor_instance = (
+                patched_create_py_executor_instance
+            )
+        _py_executor_creator.PyTorchModelEngine = gated_pytorch_model_engine
         try:
             return original_create_py_executor(*args, **kwargs)
         finally:
+            _py_executor_creator.PyTorchModelEngine = original_pytorch_model_engine
             _py_executor_creator.create_py_executor_instance = (
                 original_create_py_executor_instance
             )
@@ -138,8 +201,9 @@ def worker_init_hook(env_snapshot: dict, extra_config_json: Optional[str]) -> No
     from gpu_memory_service.integrations.trtllm import setup_gms
 
     extra = json.loads(extra_config_json) if extra_config_json else None
+    set_extra_config(extra)
     setup_gms(extra)
-    if _delay_commit_until_engine_init(extra):
+    if _delay_commit_until_engine_init(extra) or _is_shadow_standby():
         install_executor_finalize_hook()
     logger.info(
         "[GMS] MPI worker init hook applied (pid=%d rank=%d)", os.getpid(), rank

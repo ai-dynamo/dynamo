@@ -569,8 +569,6 @@ async def init_llm_worker(
         startup_lock = FlockFailoverLock(failover_lock_path)
         while await startup_lock.owner() != "engine-0":
             await asyncio.sleep(0.1)
-        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
-        logging.info("[Shadow] Lock acquired, starting engine init")
 
     try:
         async with get_llm_engine(

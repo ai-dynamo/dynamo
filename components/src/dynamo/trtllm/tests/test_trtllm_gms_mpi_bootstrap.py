@@ -30,6 +30,21 @@ def stubbed_env(monkeypatch):
     captured_kwargs: dict = {}
     call_log: list[str] = []
 
+    class FakeComm:
+        def __init__(self):
+            self.rank = 0
+
+        def Get_rank(self):
+            return self.rank
+
+        def Barrier(self):
+            call_log.append(f"barrier:{self.rank}")
+
+    fake_comm = FakeComm()
+
+    class FakeMPI:
+        COMM_WORLD = fake_comm
+
     class FakeMPIPoolExecutor:
         def __init__(self, **kwargs):
             captured_kwargs.update(kwargs)
@@ -43,6 +58,7 @@ def stubbed_env(monkeypatch):
     mpi4py_futures_module = types.ModuleType("mpi4py.futures")
     mpi4py_futures_module.MPIPoolExecutor = FakeMPIPoolExecutor
     mpi4py_module.futures = mpi4py_futures_module
+    mpi4py_module.MPI = FakeMPI
 
     trtllm_module = types.ModuleType("tensorrt_llm")
     trtllm_llmapi_module = types.ModuleType("tensorrt_llm.llmapi")
@@ -52,6 +68,8 @@ def stubbed_env(monkeypatch):
     trtllm_pyexecutor_creator_module = types.ModuleType(
         "tensorrt_llm._torch.pyexecutor.py_executor_creator"
     )
+    torch_module = types.ModuleType("torch")
+    torch_module.cuda = types.SimpleNamespace(empty_cache=lambda: None)
 
     class FakePyExecutor:
         def __init__(self, name: str = "executor"):
@@ -59,6 +77,10 @@ def stubbed_env(monkeypatch):
 
         def start_worker(self):
             call_log.append(f"start_worker:{self.name}")
+
+    class FakePyTorchModelEngine:
+        def __init__(self, *args, **kwargs):
+            call_log.append("model_engine_init")
 
     def fake_create_py_executor_instance(*args, name: str = "executor", **kwargs):
         return FakePyExecutor(name)
@@ -70,6 +92,7 @@ def stubbed_env(monkeypatch):
         return executor
 
     trtllm_pyexecutor_creator_module.PyExecutor = FakePyExecutor
+    trtllm_pyexecutor_creator_module.PyTorchModelEngine = FakePyTorchModelEngine
     trtllm_pyexecutor_creator_module.create_py_executor_instance = (
         fake_create_py_executor_instance
     )
@@ -83,6 +106,7 @@ def stubbed_env(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "mpi4py", mpi4py_module)
     monkeypatch.setitem(sys.modules, "mpi4py.futures", mpi4py_futures_module)
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
     monkeypatch.setitem(sys.modules, "tensorrt_llm", trtllm_module)
     monkeypatch.setitem(sys.modules, "tensorrt_llm.llmapi", trtllm_llmapi_module)
     monkeypatch.setitem(
@@ -106,6 +130,7 @@ def stubbed_env(monkeypatch):
     bootstrap._bootstrap_installed = False
     bootstrap._extra_config_json = None
     bootstrap._executor_finalize_hook_installed = False
+    bootstrap._shadow_activation_fd = None
 
     yield {
         "bootstrap": bootstrap,
@@ -113,6 +138,7 @@ def stubbed_env(monkeypatch):
         "captured_kwargs": captured_kwargs,
         "py_executor_creator": trtllm_pyexecutor_creator_module,
         "call_log": call_log,
+        "fake_comm": fake_comm,
     }
 
 
@@ -151,6 +177,7 @@ def test_start_mpi_pool_injects_initializer_and_extra_config(stubbed_env, monkey
     monkeypatch.setenv("DYN_GMS_TRTLLM_ENABLED", "1")
     monkeypatch.setenv("DYN_GMS_SHADOW_MODE", "1")
     monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/failover.lock")
     monkeypatch.setenv("TRTLLM_FOO", "bar")
     monkeypatch.setenv("TLLM_BAZ", "qux")
 
@@ -167,12 +194,14 @@ def test_start_mpi_pool_injects_initializer_and_extra_config(stubbed_env, monkey
         "DYN_GMS_TRTLLM_ENABLED": "1",
         "DYN_GMS_SHADOW_MODE": "1",
         "ENGINE_ID": "1",
+        "FAILOVER_LOCK_PATH": "/tmp/failover.lock",
     }
     assert extra_config_json == '{"gms_read_only": true}'
     # TRTLLM_* / TLLM_* vars plus propagated env must flow through executor env=.
     assert captured_kwargs["env"]["TRTLLM_FOO"] == "bar"
     assert captured_kwargs["env"]["TLLM_BAZ"] == "qux"
     assert captured_kwargs["env"]["DYN_GMS_TRTLLM_ENABLED"] == "1"
+    assert captured_kwargs["env"]["FAILOVER_LOCK_PATH"] == "/tmp/failover.lock"
 
 
 def test_worker_init_hook_restores_env_and_calls_setup_gms(stubbed_env, monkeypatch):
@@ -299,9 +328,64 @@ def test_worker_init_hook_skips_child_finalize_hook_without_delay_flag(
     fake_finalize.assert_not_called()
 
 
-def test_worker_init_hook_is_picklable():
+def test_worker_init_hook_standby_gates_after_model_engine_before_kv_build(
+    stubbed_env, monkeypatch
+):
+    bootstrap = stubbed_env["bootstrap"]
+    py_executor_creator = stubbed_env["py_executor_creator"]
+    call_log = stubbed_env["call_log"]
+
+    def fake_create_py_executor(*args, **kwargs):
+        call_log.append("create_py_executor")
+        py_executor_creator.PyTorchModelEngine()
+        call_log.append("after_model_engine")
+        py_executor_creator.create_py_executor_instance(name="final")
+        call_log.append("after_kv_build")
+        return object()
+
+    py_executor_creator.create_py_executor = fake_create_py_executor
+
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
+    fake_setup_gms = MagicMock(
+        side_effect=lambda extra: call_log.append(f"setup:{extra}")
+    )
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_shadow_activation",
+        lambda: call_log.append("wait_for_activation"),
+    )
+
+    env_snapshot = {
+        "DYN_GMS_TRTLLM_ENABLED": "1",
+        "DYN_GMS_SHADOW_MODE": "1",
+        "ENGINE_ID": "1",
+        "FAILOVER_LOCK_PATH": "/tmp/failover.lock",
+    }
+    bootstrap.worker_init_hook(env_snapshot, '{"gms_read_only": true}')
+
+    py_executor_creator.create_py_executor()
+
+    assert fake_setup_gms.call_count == 1
+    assert call_log == [
+        "setup:{'gms_read_only': True}",
+        "create_py_executor",
+        "model_engine_init",
+        "wait_for_activation",
+        "after_model_engine",
+        "after_kv_build",
+    ]
+
+
+def test_worker_init_hook_is_picklable(monkeypatch):
     """mpi4py.futures requires the initializer to be picklable-by-reference."""
     import pickle
+    import types
+
+    torch_module = types.ModuleType("torch")
+    torch_module.cuda = types.SimpleNamespace(empty_cache=lambda: None)
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
 
     from gpu_memory_service.integrations.trtllm.mpi_bootstrap import worker_init_hook
 
