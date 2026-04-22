@@ -82,9 +82,10 @@ frontend. The flag must match the engine on the worker.
 
 ## Which option should I pick?
 
-1. **Does Dynamo have a parser for your model?** Check the per-model matrix
-   below. If yes, use **option A**. This is the default path: Rust parsing on
-   the frontend, KV-routable, lowest latency.
+1. **Does Dynamo have a parser for your model?** Check the per-model tables in
+   [Tool Calling](tool-calling.md) and [Reasoning](reasoning.md). If yes, use
+   **option A**. This is the default path: Rust parsing on the frontend,
+   KV-routable, lowest latency.
 
 2. **Does the upstream engine have a parser but Dynamo doesn't?** Use
    **option B** (vLLM) or **option C** (SGLang). Still KV-routable.
