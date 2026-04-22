@@ -660,6 +660,7 @@ mod router_events {
 
         assert_eq!(prompt_hashes.len(), 6);
         assert!(harness.ok_count(METRIC_EVENT_STORED) >= 2);
+        harness.assert_no_event_warnings();
         harness.shutdown();
     }
 
@@ -679,6 +680,7 @@ mod router_events {
 
         assert_eq!(full_hashes.len(), 6);
         assert!(harness.ok_count(METRIC_EVENT_STORED) >= 2);
+        harness.assert_no_event_warnings();
         harness.shutdown();
     }
 
@@ -823,6 +825,7 @@ mod router_events {
 
         assert!(saw_remove);
         harness.assert_no_event_errors();
+        harness.assert_no_event_warnings();
         harness.shutdown();
     }
 

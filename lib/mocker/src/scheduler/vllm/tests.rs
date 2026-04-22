@@ -466,6 +466,7 @@ mod router_events {
         assert!(saw_store);
         assert!(harness.ok_count(METRIC_EVENT_STORED) > 0);
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        harness.assert_no_event_warnings();
         harness.shutdown();
     }
 
@@ -514,6 +515,7 @@ mod router_events {
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
         assert!(saw_remove);
         assert!(harness.ok_count(METRIC_EVENT_REMOVED) > 0);
+        harness.assert_no_event_warnings();
         harness.shutdown();
     }
 }
