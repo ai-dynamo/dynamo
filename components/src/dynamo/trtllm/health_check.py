@@ -15,6 +15,9 @@ from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
+# Marker key set on health-check probe requests.
+HEALTH_CHECK_KEY = "_HEALTH_CHECK"
+
 
 def _get_bos_token_id_from_tokenizer(tokenizer) -> int:
     """
@@ -67,7 +70,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
         bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
 
         self.default_payload = {
-            "_HEALTH_CHECK": True,
+            HEALTH_CHECK_KEY: True,
             "token_ids": [bos_token_id],
             "stop_conditions": {
                 "max_tokens": 1,

@@ -4,7 +4,7 @@
 import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import HEALTH_CHECK_KEY, TrtllmHealthCheckPayload
 
 pytestmark = [
     pytest.mark.unit,
@@ -24,7 +24,7 @@ pytestmark = [
 )
 def test_payload_shape(mode, expect_disagg):
     payload = TrtllmHealthCheckPayload(disaggregation_mode=mode).to_dict()
-    assert payload["_HEALTH_CHECK"] is True
+    assert payload[HEALTH_CHECK_KEY] is True
     if expect_disagg:
         assert payload["disaggregated_params"] == {
             "request_type": "context_and_generation"

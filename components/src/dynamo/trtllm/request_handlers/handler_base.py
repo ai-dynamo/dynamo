@@ -41,6 +41,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.health_check import HEALTH_CHECK_KEY
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -699,7 +700,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Canary probe: use its pre-built disagg params (skip prefill_result decode).
         if self.disaggregation_mode == DisaggregationMode.DECODE and request.get(
-            "_HEALTH_CHECK"
+            HEALTH_CHECK_KEY
         ):
             return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
 
