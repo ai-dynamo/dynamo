@@ -38,7 +38,8 @@ ARG FLEXKV_REF=main
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     export LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-} && \
+    pip install cython && \
     git clone --depth 1 --branch ${FLEXKV_REF} https://github.com/taco-project/FlexKV.git /tmp/FlexKV && \
     cd /tmp/FlexKV && \
-    pip install . && \
+    pip install --no-build-isolation . && \
     rm -rf /tmp/FlexKV
