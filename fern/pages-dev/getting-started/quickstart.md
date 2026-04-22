@@ -88,7 +88,8 @@ to run processes in background. Example: `python3 -m dynamo.frontend --discovery
 
 ```bash
 # Start the OpenAI compatible frontend (default port is 8000)
-# --discovery-backend file avoids needing etcd (frontend and workers must share a disk)
+# --discovery-backend file avoids needing etcd. Frontend and workers must share a disk.
+# The event plane automatically defaults to ZMQ (no NATS required) with this backend.
 python3 -m dynamo.frontend --discovery-backend file
 ```
 
