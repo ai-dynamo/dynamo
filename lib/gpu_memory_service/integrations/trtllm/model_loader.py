@@ -36,6 +36,8 @@ _model_loader_patched = False
 _gms_enabled = False
 _gms_lock_mode = RequestedLockType.RW_OR_RO
 _last_imported_weights_bytes: int = 0
+_delay_commit_until_engine_init = False
+_pending_gms_write: tuple["GMSClientMemoryManager", torch.nn.Module] | None = None
 
 
 def set_gms_enabled(enabled: bool) -> None:
@@ -48,12 +50,35 @@ def set_gms_lock_mode(mode: RequestedLockType) -> None:
     _gms_lock_mode = mode
 
 
+def set_delay_commit_until_engine_init(enabled: bool) -> None:
+    global _delay_commit_until_engine_init
+    _delay_commit_until_engine_init = enabled
+
+
 def get_gms_lock_mode() -> RequestedLockType:
     return _gms_lock_mode
 
 
 def get_imported_weights_bytes() -> int:
     """Return total bytes of weights imported/published by the last model load."""
+    return _last_imported_weights_bytes
+
+
+def finalize_pending_gms_write() -> int:
+    """Publish a delayed TRT-LLM GMS writer mapping in the current process."""
+    global _last_imported_weights_bytes, _pending_gms_write
+
+    if _pending_gms_write is None:
+        logger.debug("[GMS] TRT-LLM delayed publish: no pending writer in this process")
+        return 0
+
+    gms_client, model = _pending_gms_write
+    _pending_gms_write = None
+    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
+    logger.info(
+        "[GMS] TRT-LLM RW: published %.2f GiB after delayed engine-init finalize",
+        _last_imported_weights_bytes / (1 << 30),
+    )
     return _last_imported_weights_bytes
 
 
@@ -153,8 +178,8 @@ def _gms_load_inner(
 def _load_rw(
     self, checkpoint_dir, checkpoint_loader, gms_client, device_index, original_load
 ):
-    """RW path: load weights from disk into the GMS memory pool, then commit."""
-    global _last_imported_weights_bytes
+    """RW path: load weights from disk into the GMS memory pool, then publish."""
+    global _last_imported_weights_bytes, _pending_gms_write
 
     target_device = torch.device("cuda", device_index)
 
@@ -164,6 +189,18 @@ def _load_rw(
         )
         _move_untracked_params(model, gms_client, target_device)
         torch.cuda.empty_cache()
+
+    if _delay_commit_until_engine_init:
+        if _pending_gms_write is not None:
+            raise RuntimeError(
+                "TRT-LLM delayed GMS publish already pending in this process"
+            )
+        _pending_gms_write = (gms_client, model)
+        logger.warning(
+            "[GMS] TRT-LLM delayed weight publish enabled; deferring finalize_gms_write() "
+            "until engine init completes. Weights stay mapped RW in this process."
+        )
+        return model, moe_load_balancer
 
     _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
 

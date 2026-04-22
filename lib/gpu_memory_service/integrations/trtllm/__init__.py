@@ -24,8 +24,10 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode as _resolve_lock_mode,
 )
 from gpu_memory_service.integrations.trtllm.model_loader import (
+    finalize_pending_gms_write,
     get_gms_lock_mode,
     patch_model_loader,
+    set_delay_commit_until_engine_init,
     set_gms_enabled,
     set_gms_lock_mode,
 )
@@ -36,16 +38,22 @@ from gpu_memory_service.integrations.trtllm.mpi_bootstrap import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["setup_gms", "get_gms_lock_mode"]
+__all__ = ["setup_gms", "get_gms_lock_mode", "finalize_pending_gms_write"]
 
 
 def setup_gms(model_loader_extra_config: dict[str, Any] | None = None) -> None:
     """Set up GMS integration for TensorRT-LLM. Call once before creating the engine."""
     extra = model_loader_extra_config or {}
     lock_mode = _resolve_lock_mode(extra)
+    delay_commit_until_engine_init = extra.get(
+        "gms_delay_commit_until_engine_init", False
+    )
+    if not isinstance(delay_commit_until_engine_init, bool):
+        raise ValueError("gms_delay_commit_until_engine_init must be a boolean")
 
     set_gms_enabled(True)
     set_gms_lock_mode(lock_mode)
+    set_delay_commit_until_engine_init(delay_commit_until_engine_init)
 
     patch_empty_cache()
     patch_model_loader()
@@ -57,4 +65,8 @@ def setup_gms(model_loader_extra_config: dict[str, Any] | None = None) -> None:
     set_extra_config(extra)
     install_mpi_worker_bootstrap()
 
-    logger.info("[GMS] TensorRT-LLM integration enabled (mode=%s)", lock_mode)
+    logger.info(
+        "[GMS] TensorRT-LLM integration enabled (mode=%s, delay_commit_until_engine_init=%s)",
+        lock_mode,
+        delay_commit_until_engine_init,
+    )
