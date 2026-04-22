@@ -238,95 +238,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
             "Options: xgrammar, llguidance.",
         )
 
+        # --- Diffusion Options ---
+        self._add_diffusion_arguments(parser)
+        self._add_diffusion_request_arguments(parser)
+
+    def _add_diffusion_arguments(self, parser: argparse.ArgumentParser) -> None:
         diffusion_group = parser.add_argument_group(
             "Diffusion Options [Experimental]",
-            "Options for video_diffusion modality",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-height",
-            env_var="DYN_TRTLLM_DEFAULT_HEIGHT",
-            default=480,
-            arg_type=int,
-            help="Default video/image height in pixels.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-width",
-            env_var="DYN_TRTLLM_DEFAULT_WIDTH",
-            default=832,
-            arg_type=int,
-            help="Default video/image width in pixels.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-num-frames",
-            env_var="DYN_TRTLLM_DEFAULT_NUM_FRAMES",
-            default=81,
-            arg_type=int,
-            help="Default number of frames for video generation.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-num-inference-steps",
-            env_var="DYN_TRTLLM_DEFAULT_NUM_INFERENCE_STEPS",
-            default=50,
-            arg_type=int,
-            help="Default number of inference steps.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-guidance-scale",
-            env_var="DYN_TRTLLM_DEFAULT_GUIDANCE_SCALE",
-            default=5.0,
-            arg_type=float,
-            help="Default CFG guidance scale.",
-        )
-
-        add_argument(
-            diffusion_group,
-            flag_name="--torch-dtype",
-            env_var="DYN_TRTLLM_TORCH_DTYPE",
-            default="bfloat16",
-            choices=["bfloat16", "float16", "float32"],
-            help="Torch dtype for model loading. bfloat16 recommended for Ampere+ GPUs.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--revision",
-            env_var="DYN_TRTLLM_REVISION",
-            default=None,
-            help="HuggingFace Hub revision (branch, tag, or commit SHA) for model download.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--enable-teacache",
-            env_var="DYN_TRTLLM_ENABLE_TEACACHE",
-            default=False,
-            help="Enable TeaCache optimization for faster generation.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--teacache-use-ret-steps",
-            env_var="DYN_TRTLLM_TEACACHE_USE_RET_STEPS",
-            default=True,
-            help="Use retention steps for TeaCache.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--teacache-thresh",
-            env_var="DYN_TRTLLM_TEACACHE_THRESH",
-            default=0.2,
-            arg_type=float,
-            help="TeaCache threshold.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--attn-backend",
-            env_var="DYN_TRTLLM_ATTN_BACKEND",
-            default="VANILLA",
-            choices=["VANILLA", "TRTLLM"],
-            help="Attention backend for diffusion models. VANILLA = PyTorch SDPA, TRTLLM = TensorRT-LLM kernels.",
+            "Generic options for diffusion pipeline",
         )
         add_argument(
             diffusion_group,
@@ -352,6 +271,43 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             diffusion_group,
+            flag_name="--enable-teacache",
+            env_var="DYN_TRTLLM_ENABLE_TEACACHE",
+            default=False,
+            help="Enable TeaCache optimization for faster generation.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--teacache-use-ret-steps",
+            env_var="DYN_TRTLLM_TEACACHE_USE_RET_STEPS",
+            default=True,
+            help="Use retention steps for TeaCache.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--teacache-thresh",
+            env_var="DYN_TRTLLM_TEACACHE_THRESH",
+            default=0.2,
+            arg_type=float,
+            help="TeaCache threshold.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--torch-dtype",
+            env_var="DYN_TRTLLM_TORCH_DTYPE",
+            default="bfloat16",
+            choices=["bfloat16", "float16", "float32"],
+            help="Torch dtype for model loading. bfloat16 recommended for Ampere+ GPUs.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--revision",
+            env_var="DYN_TRTLLM_REVISION",
+            default=None,
+            help="HuggingFace Hub revision (branch, tag, or commit SHA) for model download.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
             flag_name="--disable-torch-compile",
             env_var="DYN_TRTLLM_DISABLE_TORCH_COMPILE",
             default=False,
@@ -366,31 +322,18 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             diffusion_group,
-            flag_name="--fuse-qkv",
-            env_var="DYN_TRTLLM_FUSE_QKV",
-            default=True,
-            help="Enable QKV fusion for transformer attention layers.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
             flag_name="--enable-cuda-graph",
             env_var="DYN_TRTLLM_ENABLE_CUDA_GRAPH",
             default=False,
             help="Enable CUDA graph capture for transformer forward passes. Mutually exclusive with torch.compile.",
         )
-        add_negatable_bool_argument(
+        add_argument(
             diffusion_group,
-            flag_name="--enable-layerwise-nvtx-marker",
-            env_var="DYN_TRTLLM_ENABLE_LAYERWISE_NVTX_MARKER",
-            default=False,
-            help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--skip-warmup",
-            env_var="DYN_TRTLLM_SKIP_WARMUP",
-            default=False,
-            help="Skip warmup inference during initialization.",
+            flag_name="--attn-backend",
+            env_var="DYN_TRTLLM_ATTN_BACKEND",
+            default="VANILLA",
+            choices=["VANILLA", "TRTLLM"],
+            help="Attention backend for diffusion models. VANILLA = PyTorch SDPA, TRTLLM = TensorRT-LLM kernels.",
         )
         add_argument(
             diffusion_group,
@@ -442,6 +385,27 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             diffusion_group,
+            flag_name="--fuse-qkv",
+            env_var="DYN_TRTLLM_FUSE_QKV",
+            default=True,
+            help="Enable QKV fusion for transformer attention layers.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--enable-layerwise-nvtx-marker",
+            env_var="DYN_TRTLLM_ENABLE_LAYERWISE_NVTX_MARKER",
+            default=False,
+            help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--skip-warmup",
+            env_var="DYN_TRTLLM_SKIP_WARMUP",
+            default=False,
+            help="Skip warmup inference during initialization.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
             flag_name="--enable-async-cpu-offload",
             env_var="DYN_TRTLLM_ENABLE_ASYNC_CPU_OFFLOAD",
             default=False,
@@ -457,6 +421,65 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "Valid values: transformer, vae, text_encoder, tokenizer, scheduler, "
                 "image_encoder, image_processor."
             ),
+        )
+
+    def _add_diffusion_request_arguments(self, parser: argparse.ArgumentParser) -> None:
+        # Check TRTLLM's DiffusionRequest for list of fields, note that
+        # we only add the fields that can be set in request, otherwise we use
+        # TRTLLM's default values by not setting them at all.
+        diffusion_request_group = parser.add_argument_group(
+            "Diffusion Request Options [Experimental]",
+            "Options to set default values for video/image generation requests",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-height",
+            env_var="DYN_TRTLLM_DEFAULT_HEIGHT",
+            default=480,
+            arg_type=int,
+            help="Default video/image height in pixels.",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-width",
+            env_var="DYN_TRTLLM_DEFAULT_WIDTH",
+            default=832,
+            arg_type=int,
+            help="Default video/image width in pixels.",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-num-inference-steps",
+            env_var="DYN_TRTLLM_DEFAULT_NUM_INFERENCE_STEPS",
+            default=50,
+            arg_type=int,
+            help="Default number of inference steps.",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-guidance-scale",
+            env_var="DYN_TRTLLM_DEFAULT_GUIDANCE_SCALE",
+            default=5.0,
+            arg_type=float,
+            help="Default CFG guidance scale.",
+        )
+        # Video specific args
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-num-frames",
+            env_var="DYN_TRTLLM_DEFAULT_NUM_FRAMES",
+            default=81,
+            arg_type=int,
+            help="Default number of frames for video generation.",
+        )
+        # Image specific args
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-num-images-per-prompt",
+            env_var="DYN_TRTLLM_DEFAULT_NUM_IMAGES_PER_PROMPT",
+            default=1,
+            arg_type=int,
+            help="Default number of images per prompt for image generation.",
         )
 
 
@@ -495,6 +518,7 @@ class DynamoTrtllmConfig(ConfigBase):
     default_height: int
     default_width: int
     default_num_frames: int
+    default_num_images_per_prompt: int
     default_num_inference_steps: int
     default_guidance_scale: float
     torch_dtype: str
