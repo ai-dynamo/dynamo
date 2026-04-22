@@ -70,11 +70,10 @@ on:
         default: 30
       dind_as_sidecar:
         description: >-
-          'true' runs pytest inside a container with DinD sidecar and xdist workers
-          (-n parallel_mode). 'false' runs pytest sequentially with --cpus/--memory
-          limits and no xdist. Leave default 'true' unless the test suite needs
-          sequential execution (e.g. shared-port NATS/ETCD fixtures that don't
-          support parallel workers).
+          'true' runs pytest with pytest-xdist (-n cpu_parallel_mode). 'false'
+          ignores cpu_parallel_mode, runs pytest without xdist, and applies
+          --cpus/--memory limits on docker run. Default 'true' matches how the
+          vllm/sglang/trtllm CPU tests run.
         required: false
         type: string
         default: 'true'

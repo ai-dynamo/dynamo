@@ -446,13 +446,12 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_only_test_timeout_minutes: 30
-      cpu_parallel_mode: '4'
+      # 'none' runs pytest with `-n 0` (xdist loaded, 0 workers) = single-process
+      # sequential. Real xdist parallelism is blocked until the bindings conftest
+      # supports ENABLE_ISOLATED_ETCD_AND_NATS=1 + pytest-forked; right now 4
+      # workers race on the fixed NATS port 4222.
+      cpu_parallel_mode: 'none'
       run_gpu_tests: false
-      # Dynamo's bindings conftest shares a single NATS/ETCD instance on fixed
-      # ports (ENABLE_ISOLATED_ETCD_AND_NATS defaults to 0), so xdist parallel
-      # workers race on port 4222 and fail with "Connection refused". Run
-      # pytest sequentially inside the container instead.
-      dind_as_sidecar: 'false'
     secrets: inherit
 
   dynamo-test-sequential:
@@ -473,7 +472,6 @@ jobs:
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
-      dind_as_sidecar: 'false'  # sequential — shared NATS/ETCD ports, see dynamo-test-parallel
     secrets: inherit
 
   dynamo-test-gpu:

@@ -156,11 +156,10 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_only_test_timeout_minutes: 30
-      cpu_parallel_mode: '4'
+      # 'none' = `-n 0`, single-process. Bindings conftest fixed-port NATS/ETCD
+      # can't handle xdist workers yet — see pr.yaml for detail.
+      cpu_parallel_mode: 'none'
       run_gpu_tests: false
-      # Dynamo's bindings conftest shares a single NATS/ETCD instance on fixed
-      # ports, so xdist parallel workers race on port 4222. Run sequentially.
-      dind_as_sidecar: 'false'
     secrets: inherit
 
   dynamo-test-sequential:
@@ -180,7 +179,6 @@ jobs:
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
-      dind_as_sidecar: 'false'  # sequential — shared NATS/ETCD ports, see dynamo-test-parallel
     secrets: inherit
 
   dynamo-test-gpu:
