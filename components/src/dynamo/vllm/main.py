@@ -685,7 +685,7 @@ async def register_vllm_model(
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)
-        media_fetcher.allow_direct_port(True)
+        media_fetcher.allow_direct_port(False)
 
     await register_model(
         model_input,

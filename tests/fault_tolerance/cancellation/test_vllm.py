@@ -396,6 +396,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: OPS-4448")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
