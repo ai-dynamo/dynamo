@@ -698,10 +698,9 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
-        # Canary probe: use its pre-built disagg params (skip prefill_result decode).
-        if self.disaggregation_mode == DisaggregationMode.DECODE and request.get(
-            HEALTH_CHECK_KEY
-        ):
+        # Canary probe: use its pre-built disagg params (skip prefill_result decode
+        # and skip the mode-specific request_type overrides).
+        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
             return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
 
         # PREFILL mode: setup context_only params

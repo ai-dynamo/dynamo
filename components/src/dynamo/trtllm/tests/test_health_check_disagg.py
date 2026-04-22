@@ -18,7 +18,7 @@ pytestmark = [
     "mode,expect_disagg",
     [
         (DisaggregationMode.AGGREGATED, False),
-        (DisaggregationMode.PREFILL, False),
+        (DisaggregationMode.PREFILL, True),
         (DisaggregationMode.DECODE, True),
     ],
 )

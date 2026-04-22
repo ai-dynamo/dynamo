@@ -58,8 +58,8 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
     TRT-LLM-specific health check payload.
 
     Provides TRT-LLM defaults and inherits environment override support from base class.
-    For DECODE workers, adds disaggregated_params so the handler runs it as a local
-    prefill+decode (no transceiver, no prefill peer required).
+    For PREFILL and DECODE workers, adds disaggregated_params so the handler runs
+    the probe as a local prefill+decode (no transceiver, no peer required).
     """
 
     def __init__(
@@ -90,7 +90,10 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
                 "seed": None,
             },
         }
-        if disaggregation_mode == DisaggregationMode.DECODE:
+        if disaggregation_mode in (
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+        ):
             self.default_payload["disaggregated_params"] = {
                 "request_type": "context_and_generation"
             }
