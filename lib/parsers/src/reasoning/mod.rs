@@ -168,12 +168,10 @@ impl ReasoningParserType {
                 )),
             },
             ReasoningParserType::KimiK25 => ReasoningParserWrapper {
-                parser: Box::new(BasicReasoningParser::new(
-                    "<think>".into(),
-                    "</think>".into(),
-                    true,
-                    true,
-                )),
+                parser: Box::new(
+                    BasicReasoningParser::new("<think>".into(), "</think>".into(), true, true)
+                        .with_tool_start_token("<|tool_calls_section_begin|>"),
+                ),
             },
             ReasoningParserType::Mistral => ReasoningParserWrapper {
                 parser: Box::new(BasicReasoningParser::new(
