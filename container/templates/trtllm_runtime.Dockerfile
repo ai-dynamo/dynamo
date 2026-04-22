@@ -133,6 +133,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ibverbs-utils \
         libibumad3 \
         libibverbs1 \
+        # io_uring headers/libs for KVBM builds and runtime support
+        liburing-dev \
         libnuma1 \
         numactl \
         librdmacm1 \

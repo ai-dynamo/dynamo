@@ -157,6 +157,20 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         libuuid-devel \
         zlib-devel
 
+# Build liburing from source because manylinux's liburing-devel is too old
+# for nixl 0.10.1's io_uring feature checks.
+ARG LIBURING_VERSION
+RUN set -eux; \
+    cd /tmp; \
+    curl --retry 3 -LO "https://github.com/axboe/liburing/archive/refs/tags/liburing-${LIBURING_VERSION}.tar.gz"; \
+    tar xf "liburing-${LIBURING_VERSION}.tar.gz"; \
+    cd "liburing-liburing-${LIBURING_VERSION}"; \
+    ./configure --prefix=/usr/local --cc="${CC:-gcc}" --cxx="${CXX:-g++}"; \
+    make -j"$(nproc)" library; \
+    make install; \
+    ldconfig; \
+    rm -rf /tmp/liburing-*
+
 # Build hwloc >= 2.3 from source (RHEL8 ships 2.2 which lacks hwloc_location API
 # required by nixl v1.0.x libfabric topology code)
 ARG HWLOC_VERSION=2.12.0

@@ -113,6 +113,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
         libnuma1 librdmacm1 ibverbs-providers \
+        # io_uring headers/libs for KVBM builds and runtime support
+        liburing-dev \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
         g++ \
