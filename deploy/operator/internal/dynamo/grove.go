@@ -3,6 +3,7 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -240,25 +241,188 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 }
 
 // specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
-// to a Grove TopologyConstraint, extracting only the PackDomain.
+// to a Grove TopologyConstraint, preserving the topology profile when the
+// Grove API exposes it.
 func specToGroveTopologyConstraint(tc *v1alpha1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
-	if tc == nil || tc.PackDomain == "" {
+	if tc == nil || (tc.PackDomain == "" && strings.TrimSpace(tc.TopologyProfile) == "") {
 		return nil
 	}
-	return &grovev1alpha1.TopologyConstraint{
-		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	constraint := &grovev1alpha1.TopologyConstraint{}
+	if tc.PackDomain != "" {
+		constraint.PackDomain = grovev1alpha1.TopologyDomain(tc.PackDomain)
 	}
+	setOptionalStringField(constraint, "TopologyProfile", tc.TopologyProfile)
+	return constraint
 }
 
-// toGroveTopologyConstraint converts a service-level TopologyConstraint
-// to a Grove TopologyConstraint.
-func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
-	if tc == nil || tc.PackDomain == "" {
+// toGroveTopologyConstraint converts a service-level TopologyConstraint to a
+// Grove TopologyConstraint and carries the inherited deployment topology
+// profile when the Grove API supports it.
+func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint, inherited *v1alpha1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil {
 		return nil
 	}
-	return &grovev1alpha1.TopologyConstraint{
-		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	inheritedProfile := ""
+	if inherited != nil {
+		inheritedProfile = inherited.TopologyProfile
 	}
+	if tc.PackDomain == "" && strings.TrimSpace(inheritedProfile) == "" {
+		return nil
+	}
+	constraint := &grovev1alpha1.TopologyConstraint{}
+	if tc.PackDomain != "" {
+		constraint.PackDomain = grovev1alpha1.TopologyDomain(tc.PackDomain)
+	}
+	setOptionalStringField(constraint, "TopologyProfile", inheritedProfile)
+	return constraint
+}
+
+func setOptionalStringField(target any, fieldName, value string) {
+	if value == "" {
+		return
+	}
+	v := reflect.ValueOf(target)
+	if !v.IsValid() || v.Kind() != reflect.Pointer || v.IsNil() {
+		return
+	}
+	field := v.Elem().FieldByName(fieldName)
+	if !field.IsValid() || !field.CanSet() || field.Kind() != reflect.String {
+		return
+	}
+	field.SetString(value)
+}
+
+func getOptionalStringField(target any, fieldName string) string {
+	return extractNamedStringField(reflect.ValueOf(target), fieldName)
+}
+
+func setReuseReservationRef(target any, refName string) {
+	if refName == "" {
+		return
+	}
+	assignReuseReservationRef(reflect.ValueOf(target), refName)
+}
+
+func assignReuseReservationRef(v reflect.Value, refName string) bool {
+	if !v.IsValid() {
+		return false
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return false
+		}
+		return assignReuseReservationRef(v.Elem(), refName)
+	}
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+
+	field := v.FieldByName("ReuseReservationRef")
+	if field.IsValid() && field.CanSet() {
+		if setReferenceField(field, refName) {
+			return true
+		}
+	}
+
+	if spec := v.FieldByName("Spec"); spec.IsValid() && spec.CanAddr() {
+		if assignReuseReservationRef(spec.Addr(), refName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func setReferenceField(field reflect.Value, refName string) bool {
+	switch field.Kind() {
+	case reflect.String:
+		field.SetString(refName)
+		return true
+	case reflect.Pointer:
+		if field.Type().Elem().Kind() == reflect.String {
+			value := reflect.New(field.Type().Elem())
+			value.Elem().SetString(refName)
+			field.Set(value)
+			return true
+		}
+		value := reflect.New(field.Type().Elem())
+		if setReferenceField(value.Elem(), refName) {
+			field.Set(value)
+			return true
+		}
+	case reflect.Struct:
+		nameField := field.FieldByName("Name")
+		if nameField.IsValid() && nameField.CanSet() && nameField.Kind() == reflect.String {
+			nameField.SetString(refName)
+			return true
+		}
+	}
+	return false
+}
+
+// ExtractReservationRef returns the first reservation reference found on a
+// Grove object, preferring status fields over spec/template fields.
+func ExtractReservationRef(target any) string {
+	v := reflect.ValueOf(target)
+	for _, container := range []string{"Status", "Spec", "Template"} {
+		if ref := extractNamedStringField(v, container, "ReservationRef"); ref != "" {
+			return ref
+		}
+	}
+	for _, fieldName := range []string{"ReservationRef", "ReuseReservationRef"} {
+		if ref := extractNamedStringField(v, fieldName); ref != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
+func extractNamedStringField(v reflect.Value, path ...string) string {
+	if !v.IsValid() || len(path) == 0 {
+		return ""
+	}
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return ""
+	}
+
+	field := v.FieldByName(path[0])
+	if !field.IsValid() {
+		return ""
+	}
+	if len(path) == 1 {
+		return referenceFieldValue(field)
+	}
+	return extractNamedStringField(field, path[1:]...)
+}
+
+func referenceFieldValue(field reflect.Value) string {
+	if !field.IsValid() {
+		return ""
+	}
+	for field.Kind() == reflect.Pointer {
+		if field.IsNil() {
+			return ""
+		}
+		field = field.Elem()
+	}
+	if !field.IsValid() {
+		return ""
+	}
+	switch field.Kind() {
+	case reflect.String:
+		return strings.TrimSpace(field.String())
+	case reflect.Struct:
+		if nameField := field.FieldByName("Name"); nameField.IsValid() {
+			return referenceFieldValue(nameField)
+		}
+	}
+	return ""
 }
 
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default

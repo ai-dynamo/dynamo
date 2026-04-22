@@ -40,6 +40,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -1358,6 +1359,156 @@ func propagateDGDSpecMetadata(annotations, labels map[string]string, component *
 	}
 }
 
+const (
+	autoComputeDomainClaimName = "compute-domain-channel"
+)
+
+type GroveGB200AutoConfig struct {
+	ComputeDomainName         string
+	ComputeDomainTemplateName string
+	TotalNodes                int32
+	Services                  map[string]struct{}
+}
+
+func DetectGroveGB200AutoConfig(ctx context.Context, kubeClient ctrlclient.Reader, runtimeConfig *controller_common.RuntimeConfig, dgd *v1alpha1.DynamoGraphDeployment) (*GroveGB200AutoConfig, error) {
+	if kubeClient == nil || runtimeConfig == nil || !runtimeConfig.GroveEnabled || !runtimeConfig.DRAEnabled || dgd == nil {
+		return nil, nil
+	}
+
+	gpuInfo, err := gpu.DiscoverGPUs(ctx, kubeClient)
+	if err != nil {
+		return nil, err
+	}
+	if !gpuInfo.IsGB200NVL72() {
+		return nil, nil
+	}
+
+	services := make(map[string]struct{})
+	var totalNodes int32
+	for serviceName, component := range dgd.Spec.Services {
+		if component == nil || !componentRequestsGPU(component) || componentHasComputeDomainOverride(component) {
+			continue
+		}
+		nodes := component.GetNumberOfNodes()
+		if nodes <= 0 {
+			nodes = 1
+		}
+		replicas := int32(1)
+		if component.Replicas != nil && *component.Replicas > 0 {
+			replicas = *component.Replicas
+		}
+		services[serviceName] = struct{}{}
+		totalNodes += nodes * replicas
+	}
+	if len(services) == 0 || totalNodes <= 1 {
+		return nil, nil
+	}
+
+	return &GroveGB200AutoConfig{
+		ComputeDomainName:         fmt.Sprintf("%s-compute-domain", dgd.Name),
+		ComputeDomainTemplateName: fmt.Sprintf("%s-compute-domain-channel", dgd.Name),
+		TotalNodes:                totalNodes,
+		Services:                  services,
+	}, nil
+}
+
+func componentRequestsGPU(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil || component.Resources == nil {
+		return false
+	}
+	for _, item := range []*v1alpha1.ResourceItem{component.Resources.Limits, component.Resources.Requests} {
+		if item != nil && strings.TrimSpace(item.GPU) != "" && strings.TrimSpace(item.GPU) != "0" {
+			return true
+		}
+	}
+	return false
+}
+
+func applyGroveGB200AutoConfig(component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, autoConfig *GroveGB200AutoConfig) {
+	if component == nil || autoConfig == nil {
+		return
+	}
+	if _, ok := autoConfig.Services[serviceName]; !ok {
+		return
+	}
+
+	component.Envs = MergeEnvs([]corev1.EnvVar{
+		{Name: "NCCL_MNNVL_ENABLE", Value: "1"},
+		{Name: "NCCL_CUMEM_ENABLE", Value: "1"},
+	}, component.Envs)
+
+	if componentHasComputeDomainOverride(component) {
+		return
+	}
+
+	if component.Resources == nil {
+		component.Resources = &v1alpha1.Resources{}
+	}
+	if !hasContainerResourceClaim(component.Resources.Claims, autoComputeDomainClaimName) {
+		component.Resources.Claims = append(component.Resources.Claims, corev1.ResourceClaim{Name: autoComputeDomainClaimName})
+	}
+
+	if component.ExtraPodSpec == nil {
+		component.ExtraPodSpec = &v1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{}}
+	} else if component.ExtraPodSpec.PodSpec == nil {
+		component.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
+	}
+	if !hasPodResourceClaim(component.ExtraPodSpec.PodSpec.ResourceClaims, autoComputeDomainClaimName, autoConfig.ComputeDomainTemplateName) {
+		component.ExtraPodSpec.PodSpec.ResourceClaims = append(component.ExtraPodSpec.PodSpec.ResourceClaims, corev1.PodResourceClaim{
+			Name:                      autoComputeDomainClaimName,
+			ResourceClaimTemplateName: ptr.To(autoConfig.ComputeDomainTemplateName),
+		})
+	}
+}
+
+func componentHasComputeDomainOverride(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil {
+		return false
+	}
+	if component.Resources != nil {
+		for _, claim := range component.Resources.Claims {
+			if strings.Contains(claim.Name, "compute-domain") {
+				return true
+			}
+		}
+	}
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
+		for _, claim := range component.ExtraPodSpec.PodSpec.ResourceClaims {
+			if strings.Contains(claim.Name, "compute-domain") {
+				return true
+			}
+			if claim.ResourceClaimTemplateName != nil && strings.Contains(*claim.ResourceClaimTemplateName, "compute-domain") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasContainerResourceClaim(claims []corev1.ResourceClaim, name string) bool {
+	for _, claim := range claims {
+		if claim.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPodResourceClaim(claims []corev1.PodResourceClaim, name, templateName string) bool {
+	for _, claim := range claims {
+		if claim.Name != name {
+			continue
+		}
+		if claim.ResourceClaimTemplateName == nil {
+			return templateName == ""
+		}
+		if *claim.ResourceClaimTemplateName == templateName {
+			return true
+		}
+	}
+	return false
+}
+
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
@@ -1368,6 +1519,8 @@ func GenerateGrovePodCliqueSet(
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
+	existingReservationRefs map[string]string,
+	autoGB200Config *GroveGB200AutoConfig,
 	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
@@ -1398,11 +1551,23 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
+	if autoGB200Config == nil {
+		var err error
+		autoGB200Config, err = DetectGroveGB200AutoConfig(ctx, kubeClient, runtimeConfig, dynamoDeployment)
+		if err != nil {
+			autoGB200Config = nil
+		}
+	}
+
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
 	discoveryContext := NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
+		if component == nil {
+			continue
+		}
+		component = component.DeepCopy()
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
@@ -1417,6 +1582,8 @@ func GenerateGrovePodCliqueSet(
 			}
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(discoveryBackend)
 		}
+
+		applyGroveGB200AutoConfig(component, serviceName, autoGB200Config)
 
 		// Get checkpoint info for this service if available
 		var checkpointInfo *checkpoint.CheckpointInfo
@@ -1477,7 +1644,10 @@ func GenerateGrovePodCliqueSet(
 			// For multinode services, the constraint goes on the PCSG instead;
 			// child cliques inherit from PCSG and should NOT have explicit constraints.
 			if !isMultinode {
-				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
+				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint, dynamoDeployment.Spec.TopologyConstraint)
+				if existingReservationRefs != nil {
+					setReuseReservationRef(clique, existingReservationRefs[serviceName])
+				}
 			}
 			labels, err := generateLabels(component, dynamoDeployment, serviceName, discoveryContext)
 			if err != nil {
@@ -1519,13 +1689,17 @@ func GenerateGrovePodCliqueSet(
 		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes)
 
 		if isMultinode {
-			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
+			scalingGroup := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(serviceName),
 				CliqueNames:        cliqueNames,
 				Replicas:           component.Replicas,
 				MinAvailable:       ptr.To(int32(1)),
-				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
-			})
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, dynamoDeployment.Spec.TopologyConstraint),
+			}
+			if existingReservationRefs != nil {
+				setReuseReservationRef(&scalingGroup, existingReservationRefs[serviceName])
+			}
+			scalingGroups = append(scalingGroups, scalingGroup)
 		}
 	}
 	if len(scalingGroups) > 0 {

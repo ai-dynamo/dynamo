@@ -163,6 +163,38 @@ type GPUInfo struct {
 	NVLinkLinks      int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
 }
 
+// IsGB200NVL72 reports whether the discovered cluster shape looks like a
+// GB200 multi-node NVLink system that requires MNNVL / IMEX setup.
+//
+// The check intentionally errs on the side of being conservative:
+//   - the SKU must resolve to GB200 SXM
+//   - the cluster must contain more than one GPU node
+//   - NVLink evidence must be present (explicit interconnect or link count),
+//     or the node shape must match the common 8xGB200 SXM footprint
+func (i *GPUInfo) IsGB200NVL72() bool {
+	if i == nil {
+		return false
+	}
+
+	system := i.System
+	if system == "" {
+		system = InferHardwareSystem(i.Model)
+	}
+	if system != nvidiacomv1beta1.GPUSKUTypeGB200SXM {
+		return false
+	}
+	if i.NodesWithGPUs <= 1 {
+		return false
+	}
+	if strings.EqualFold(i.Interconnect, LabelNVLink) || i.NVLinkLinks > 0 {
+		return true
+	}
+
+	// Fall back to the typical NVL72 node shape when DCGM link detail is not
+	// available but the cluster clearly looks like multi-node GB200 SXM.
+	return i.GPUsPerNode >= 8
+}
+
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
 
 type gpuCacheEntry struct {

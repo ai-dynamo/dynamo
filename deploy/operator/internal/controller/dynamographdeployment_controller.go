@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -37,6 +38,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
@@ -82,6 +85,16 @@ type DynamoGraphDeploymentReconciler struct {
 	RBACManager           rbacManager
 }
 
+const (
+	groveComputeDomainAPIVersion         = "resource.nvidia.com/v1beta1"
+	groveComputeDomainKind               = "ComputeDomain"
+	groveComputeDomainChannelKind        = "ComputeDomainChannelConfig"
+	groveComputeDomainChannelDriver      = "compute-domain.nvidia.com"
+	groveComputeDomainChannelRequestName = "channel"
+	groveComputeDomainChannelDeviceClass = "compute-domain-default-channel.nvidia.com"
+	groveComputeDomainAllocationMode     = "Single"
+)
+
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
@@ -96,6 +109,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=resource.nvidia.com,resources=computedomains,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
@@ -561,7 +575,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	}
 
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
+	existingReservationRefs, err := r.getExistingReservationRefsPCS(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "failed to get existing Grove reservation refs")
+		return nil, fmt.Errorf("failed to get existing Grove reservation refs: %w", err)
+	}
+
+	autoGB200Config, err := dynamo.DetectGroveGB200AutoConfig(ctx, r.Client, r.RuntimeConfig, dynamoDeployment)
+	if err != nil {
+		logger.V(1).Info("skipping GB200 auto-configuration", "error", err.Error())
+		autoGB200Config = nil
+	}
+
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, existingReservationRefs, autoGB200Config, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
@@ -611,6 +637,153 @@ func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsPCS(ctx c
 		}
 	}
 	return restartAnnotations, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) getExistingReservationRefsPCS(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
+	reservationRefs := make(map[string]string)
+	for serviceName, component := range dgd.Spec.Services {
+		if component == nil {
+			continue
+		}
+		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
+		if component.GetNumberOfNodes() > 1 {
+			pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
+			err := r.Client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: dgd.Namespace}, pcsg)
+			if err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return nil, fmt.Errorf("failed to get PodCliqueScalingGroup %s: %w", resourceName, err)
+			}
+			if ref := dynamo.ExtractReservationRef(pcsg); ref != "" {
+				reservationRefs[serviceName] = ref
+			}
+			continue
+		}
+
+		clique := &grovev1alpha1.PodClique{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: dgd.Namespace}, clique)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to get PodClique %s: %w", resourceName, err)
+		}
+		if ref := dynamo.ExtractReservationRef(clique); ref != "" {
+			reservationRefs[serviceName] = ref
+		}
+	}
+	return reservationRefs, nil
+}
+
+func generateGroveGB200ClaimTemplate(name, namespace string) (*resourcev1.ResourceClaimTemplate, error) {
+	channelConfig, err := json.Marshal(map[string]string{
+		"apiVersion":     groveComputeDomainAPIVersion,
+		"kind":           groveComputeDomainChannelKind,
+		"allocationMode": groveComputeDomainAllocationMode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal compute domain channel config: %w", err)
+	}
+
+	return &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: resourcev1.ResourceClaimTemplateSpec{
+			Spec: resourcev1.ResourceClaimSpec{
+				Devices: resourcev1.DeviceClaim{
+					Config: []resourcev1.DeviceClaimConfiguration{{
+						Requests: []string{groveComputeDomainChannelRequestName},
+						DeviceConfiguration: resourcev1.DeviceConfiguration{
+							Opaque: &resourcev1.OpaqueDeviceConfiguration{
+								Driver:     groveComputeDomainChannelDriver,
+								Parameters: runtime.RawExtension{Raw: channelConfig},
+							},
+						},
+					}},
+					Requests: []resourcev1.DeviceRequest{{
+						Name: groveComputeDomainChannelRequestName,
+						Exactly: &resourcev1.ExactDeviceRequest{
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           1,
+							DeviceClassName: groveComputeDomainChannelDeviceClass,
+						},
+					}},
+				},
+			},
+		},
+	}, nil
+}
+
+func desiredGroveGB200ComputeDomain(namespace string, autoConfig *dynamo.GroveGB200AutoConfig) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{Object: map[string]any{}}
+	obj.SetAPIVersion(groveComputeDomainAPIVersion)
+	obj.SetKind(groveComputeDomainKind)
+	obj.SetNamespace(namespace)
+	obj.SetName(autoConfig.ComputeDomainName)
+	obj.Object["spec"] = map[string]any{
+		"numNodes": int64(autoConfig.TotalNodes),
+		"channel": map[string]any{
+			"allocationMode": groveComputeDomainAllocationMode,
+			"resourceClaimTemplate": map[string]any{
+				"name": autoConfig.ComputeDomainTemplateName,
+			},
+		},
+	}
+	return obj
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileGroveGB200AutoConfigResources(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, autoConfig *dynamo.GroveGB200AutoConfig) error {
+	computeDomainName := fmt.Sprintf("%s-compute-domain", dgd.Name)
+	claimTemplateName := fmt.Sprintf("%s-compute-domain-channel", dgd.Name)
+	if autoConfig != nil {
+		computeDomainName = autoConfig.ComputeDomainName
+		claimTemplateName = autoConfig.ComputeDomainTemplateName
+	}
+
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		if autoConfig == nil {
+			return &resourcev1.ResourceClaimTemplate{ObjectMeta: metav1.ObjectMeta{Name: claimTemplateName, Namespace: dgd.Namespace}}, true, nil
+		}
+		return generateGroveGB200ClaimTemplate(claimTemplateName, dgd.Namespace)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync ComputeDomain ResourceClaimTemplate: %w", err)
+	}
+
+	computeDomain := &unstructured.Unstructured{}
+	computeDomain.SetAPIVersion(groveComputeDomainAPIVersion)
+	computeDomain.SetKind(groveComputeDomainKind)
+	key := types.NamespacedName{Name: computeDomainName, Namespace: dgd.Namespace}
+
+	if autoConfig == nil {
+		err := r.Client.Get(ctx, key, computeDomain)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get ComputeDomain %s: %w", computeDomainName, err)
+		}
+		if err := r.Delete(ctx, computeDomain); err != nil {
+			return fmt.Errorf("failed to delete ComputeDomain %s: %w", computeDomainName, err)
+		}
+		return nil
+	}
+
+	desired := desiredGroveGB200ComputeDomain(dgd.Namespace, autoConfig)
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, computeDomain, func() error {
+		if computeDomain.Object == nil {
+			computeDomain.Object = map[string]any{}
+		}
+		computeDomain.Object["spec"] = desired.Object["spec"]
+		return ctrl.SetControllerReference(dgd, computeDomain, r.Scheme())
+	})
+	if err != nil {
+		return fmt.Errorf("failed to reconcile ComputeDomain %s: %w", computeDomainName, err)
+	}
+	return nil
 }
 
 // reconcileGroveScaling handles scaling operations for Grove resources based on service replica changes
@@ -683,6 +856,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
 			}
 		}
+	}
+
+	autoGB200Config, err := dynamo.DetectGroveGB200AutoConfig(ctx, r.Client, r.RuntimeConfig, dynamoDeployment)
+	if err != nil {
+		logger.V(1).Info("skipping GB200 auto-configuration resource sync", "error", err.Error())
+		autoGB200Config = nil
+	} else if err := r.reconcileGroveGB200AutoConfigResources(ctx, dynamoDeployment, autoGB200Config); err != nil {
+		logger.Error(err, "failed to reconcile GB200 auto-configuration resources")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile GB200 auto-configuration resources: %w", err)
 	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)

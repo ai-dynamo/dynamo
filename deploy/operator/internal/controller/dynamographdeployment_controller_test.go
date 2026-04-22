@@ -26,12 +26,15 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -2468,6 +2471,44 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}
+}
+
+func TestReconcileGroveGB200AutoConfigResources(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, resourcev1.AddToScheme(s))
+
+	dgd := &v1alpha1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"}}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(s).Build(),
+		Recorder: record.NewFakeRecorder(10),
+	}
+	autoConfig := &dynamo.GroveGB200AutoConfig{
+		ComputeDomainName:         "test-dgd-compute-domain",
+		ComputeDomainTemplateName: "test-dgd-compute-domain-channel",
+		TotalNodes:                9,
+	}
+
+	err := reconciler.reconcileGroveGB200AutoConfigResources(context.Background(), dgd, autoConfig)
+	require.NoError(t, err)
+
+	claimTemplate := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, reconciler.Get(context.Background(), types.NamespacedName{Name: autoConfig.ComputeDomainTemplateName, Namespace: dgd.Namespace}, claimTemplate))
+	assert.Equal(t, autoConfig.ComputeDomainTemplateName, claimTemplate.Name)
+
+	computeDomain := &unstructured.Unstructured{}
+	computeDomain.SetAPIVersion(groveComputeDomainAPIVersion)
+	computeDomain.SetKind(groveComputeDomainKind)
+	require.NoError(t, reconciler.Get(context.Background(), types.NamespacedName{Name: autoConfig.ComputeDomainName, Namespace: dgd.Namespace}, computeDomain))
+	numNodes, found, err := unstructured.NestedInt64(computeDomain.Object, "spec", "numNodes")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, int64(autoConfig.TotalNodes), numNodes)
+
+	err = reconciler.reconcileGroveGB200AutoConfigResources(context.Background(), dgd, nil)
+	require.NoError(t, err)
+	assert.Error(t, reconciler.Get(context.Background(), types.NamespacedName{Name: autoConfig.ComputeDomainTemplateName, Namespace: dgd.Namespace}, claimTemplate))
+	assert.Error(t, reconciler.Get(context.Background(), types.NamespacedName{Name: autoConfig.ComputeDomainName, Namespace: dgd.Namespace}, computeDomain))
 }
 
 func TestPropagateTopologyCondition(t *testing.T) {

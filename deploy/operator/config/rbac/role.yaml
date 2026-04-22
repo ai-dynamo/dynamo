@@ -255,6 +255,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - resource.nvidia.com
+  resources:
+  - computedomains
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - resource.k8s.io
   resources:
   - resourceclaimtemplates

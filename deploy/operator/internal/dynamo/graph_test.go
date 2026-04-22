@@ -39,8 +39,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ptr "k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
@@ -3788,7 +3791,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3849,7 +3852,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -4954,7 +4957,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -6588,6 +6591,217 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 	}
 }
 
+func TestGenerateGrovePodCliqueSet_ReuseReservationRefs(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Decode": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+					Multinode: &v1alpha1.MultinodeSpec{
+						NodeCount: 2,
+					},
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+		nil,
+		nil,
+		nil,
+		map[string]string{
+			"Frontend": "frontend-reservation",
+			"Decode":   "decode-reservation",
+		},
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	var frontendClique *grovev1alpha1.PodCliqueTemplateSpec
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Name == "frontend" {
+			frontendClique = clique
+			break
+		}
+	}
+	require.NotNil(t, frontendClique)
+	assert.Equal(t, "frontend-reservation", ExtractReservationRef(frontendClique))
+
+	require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	assert.Equal(t, "decode-reservation", ExtractReservationRef(&pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]))
+}
+
+func TestDetectGroveGB200AutoConfig(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Auto": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(2)),
+					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "4"},
+					},
+				},
+				"Manual": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "4"},
+						Claims: []corev1.ResourceClaim{{Name: autoComputeDomainClaimName}},
+					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{ResourceClaims: []corev1.PodResourceClaim{{
+						Name:                      autoComputeDomainClaimName,
+						ResourceClaimTemplateName: ptr.To("manual-template"),
+					}}}},
+				},
+			},
+		},
+	}
+
+	autoConfig, err := DetectGroveGB200AutoConfig(context.Background(), newGB200DiscoveryClient(t), &controller_common.RuntimeConfig{GroveEnabled: true, DRAEnabled: true}, dgd)
+	require.NoError(t, err)
+	require.NotNil(t, autoConfig)
+	assert.Equal(t, int32(4), autoConfig.TotalNodes)
+	assert.Equal(t, map[string]struct{}{"Auto": {}}, autoConfig.Services)
+}
+
+func TestGenerateGrovePodCliqueSet_GB200AutoConfig(t *testing.T) {
+	tests := []struct {
+		name                  string
+		service               *v1alpha1.DynamoComponentDeploymentSharedSpec
+		wantClaimTemplateName string
+		wantMNNVLEnable       string
+		wantCUMEMEnable       string
+		wantDetectAutoConfig  bool
+	}{
+		{
+			name: "auto injects compute domain claim and envs",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "4"},
+				},
+			},
+			wantClaimTemplateName: "test-dgd-compute-domain-channel",
+			wantMNNVLEnable:       "1",
+			wantCUMEMEnable:       "1",
+			wantDetectAutoConfig:  true,
+		},
+		{
+			name: "manual compute domain configuration wins",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+				Envs:          []corev1.EnvVar{{Name: "NCCL_MNNVL_ENABLE", Value: "0"}},
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "4"},
+					Claims: []corev1.ResourceClaim{{Name: autoComputeDomainClaimName}},
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{ResourceClaims: []corev1.PodResourceClaim{{
+					Name:                      autoComputeDomainClaimName,
+					ResourceClaimTemplateName: ptr.To("manual-template"),
+				}}}},
+			},
+			wantClaimTemplateName: "manual-template",
+			wantMNNVLEnable:       "0",
+			wantCUMEMEnable:       "",
+			wantDetectAutoConfig:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{"Worker": tt.service.DeepCopy()},
+				},
+			}
+
+			autoConfig, err := DetectGroveGB200AutoConfig(context.Background(), newGB200DiscoveryClient(t), &controller_common.RuntimeConfig{GroveEnabled: true, DRAEnabled: true}, dgd)
+			require.NoError(t, err)
+			if tt.wantDetectAutoConfig {
+				require.NotNil(t, autoConfig)
+			} else {
+				assert.Nil(t, autoConfig)
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				dgd,
+				&configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{GroveEnabled: true, DRAEnabled: true},
+				newGB200DiscoveryClient(t),
+				nil,
+				nil,
+				nil,
+				nil,
+				autoConfig,
+				nil,
+			)
+			require.NoError(t, err)
+			require.Len(t, pcs.Spec.Template.Cliques, 1)
+
+			clique := pcs.Spec.Template.Cliques[0]
+			require.NotEmpty(t, clique.Spec.PodSpec.Containers)
+			container := clique.Spec.PodSpec.Containers[0]
+
+			assert.Equal(t, tt.wantMNNVLEnable, envValue(container.Env, "NCCL_MNNVL_ENABLE"))
+			assert.Equal(t, tt.wantCUMEMEnable, envValue(container.Env, "NCCL_CUMEM_ENABLE"))
+			require.NotEmpty(t, clique.Spec.PodSpec.ResourceClaims)
+			assert.Equal(t, tt.wantClaimTemplateName, ptr.Deref(clique.Spec.PodSpec.ResourceClaims[0].ResourceClaimTemplateName, ""))
+		})
+	}
+}
+
+func newGB200DiscoveryClient(t *testing.T) client.Client {
+	t.Helper()
+	s := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(s))
+	return fake.NewClientBuilder().WithScheme(s).WithObjects(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gb200-1", Labels: map[string]string{
+			"nvidia.com/gpu.count":   "8",
+			"nvidia.com/gpu.product": "GB200-SXM",
+			"nvidia.com/gpu.memory":  "196608",
+		}}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gb200-2", Labels: map[string]string{
+			"nvidia.com/gpu.count":   "8",
+			"nvidia.com/gpu.product": "GB200-SXM",
+			"nvidia.com/gpu.memory":  "196608",
+		}}},
+	).Build()
+}
+
+func envValue(envs []corev1.EnvVar, name string) string {
+	for _, env := range envs {
+		if env.Name == name {
+			return env.Value
+		}
+	}
+	return ""
+}
+
 func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 	restartTimestamp := "2024-01-05T10:00:00Z"
 
@@ -6783,7 +6997,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -7462,7 +7676,7 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		},
 	}
 
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 
 	// PCS object-level metadata
@@ -7525,12 +7739,15 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 
 	tests := []struct {
-		name              string
-		deployment        *v1alpha1.DynamoGraphDeployment
-		wantPCSTemplateTC *grovev1alpha1.TopologyConstraint
-		wantCliqueTC      map[string]*grovev1alpha1.TopologyConstraint // clique name -> expected TC
-		wantPCSGTC        map[string]*grovev1alpha1.TopologyConstraint // pcsg name -> expected TC
-		wantPCSGCount     int
+		name                   string
+		deployment             *v1alpha1.DynamoGraphDeployment
+		wantPCSTemplateTC      *grovev1alpha1.TopologyConstraint
+		wantCliqueTC           map[string]*grovev1alpha1.TopologyConstraint // clique name -> expected TC
+		wantPCSGTC             map[string]*grovev1alpha1.TopologyConstraint // pcsg name -> expected TC
+		wantPCSTemplateProfile string
+		wantCliqueProfiles     map[string]string
+		wantPCSGProfiles       map[string]string
+		wantPCSGCount          int
 	}{
 		{
 			name: "no topology constraints - PCS has no TC, cliques have no TC",
@@ -7578,10 +7795,42 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
 				PackDomain: grovev1alpha1.TopologyDomain("zone"),
 			},
+			wantPCSTemplateProfile: "test-topology",
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
 			},
-			wantPCSGCount: 0,
+			wantCliqueProfiles: map[string]string{"worker": "test-topology"},
+			wantPCSGCount:      0,
+		},
+		{
+			name: "profile-only spec with service pack domain propagates topology profile",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC:      &grovev1alpha1.TopologyConstraint{},
+			wantPCSTemplateProfile: "test-topology",
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+			},
+			wantCliqueProfiles: map[string]string{"worker": "test-topology"},
+			wantPCSGCount:      0,
 		},
 		{
 			name: "multinode service with topology constraints - TC on PCS template and PCSG, not clique",
@@ -7612,6 +7861,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
 				PackDomain: grovev1alpha1.TopologyDomain("zone"),
 			},
+			wantPCSTemplateProfile: "test-topology",
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker-ldr": nil,
 				"worker-wkr": nil,
@@ -7619,7 +7869,8 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
 			},
-			wantPCSGCount: 1,
+			wantPCSGProfiles: map[string]string{"worker": "test-topology"},
+			wantPCSGCount:    1,
 		},
 	}
 
@@ -7635,6 +7886,8 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				&RestartState{},
 				nil,
 				nil,
+				nil,
+				nil,
 			)
 			assert.NoError(t, err)
 			assert.NotNil(t, pcs)
@@ -7645,6 +7898,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			} else {
 				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
 				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+				assert.Equal(t, tt.wantPCSTemplateProfile, getOptionalStringField(pcs.Spec.Template.TopologyConstraint, "TopologyProfile"))
 			}
 
 			// Verify clique-level TopologyConstraints (exhaustive)
@@ -7662,6 +7916,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				} else {
 					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
 					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+					assert.Equal(t, tt.wantCliqueProfiles[clique.Name], getOptionalStringField(clique.TopologyConstraint, "TopologyProfile"), "clique %q: topologyProfile mismatch", clique.Name)
 				}
 			}
 			for expectedName := range tt.wantCliqueTC {
@@ -7686,6 +7941,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					} else {
 						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
 						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+						assert.Equal(t, tt.wantPCSGProfiles[pcsg.Name], getOptionalStringField(pcsg.TopologyConstraint, "TopologyProfile"), "PCSG %q: topologyProfile mismatch", pcsg.Name)
 					}
 				}
 			}

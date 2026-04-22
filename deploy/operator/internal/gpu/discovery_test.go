@@ -510,6 +510,61 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 	}
 }
 
+func TestGPUInfoIsGB200NVL72(t *testing.T) {
+	tests := []struct {
+		name string
+		info *GPUInfo
+		want bool
+	}{
+		{
+			name: "multi-node GB200 with explicit NVLink",
+			info: &GPUInfo{
+				System:        nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+				NodesWithGPUs: 18,
+				GPUsPerNode:   8,
+				Interconnect:  LabelNVLink,
+			},
+			want: true,
+		},
+		{
+			name: "multi-node GB200 with NVLink link count fallback",
+			info: &GPUInfo{
+				Model:         "GB200-SXM",
+				NodesWithGPUs: 9,
+				GPUsPerNode:   8,
+				NVLinkLinks:   18,
+			},
+			want: true,
+		},
+		{
+			name: "single-node GB200 should not enable auto MNNVL",
+			info: &GPUInfo{
+				System:        nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+				NodesWithGPUs: 1,
+				GPUsPerNode:   8,
+				Interconnect:  LabelNVLink,
+			},
+			want: false,
+		},
+		{
+			name: "non-GB200 cluster should not enable auto MNNVL",
+			info: &GPUInfo{
+				System:        nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				NodesWithGPUs: 8,
+				GPUsPerNode:   8,
+				Interconnect:  LabelNVLink,
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.info.IsGB200NVL72())
+		})
+	}
+}
+
 func TestNormalize(t *testing.T) {
 	tests := []struct {
 		name     string
