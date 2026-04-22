@@ -18,7 +18,7 @@ import pytest
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_port, deallocate_ports
 
 # Customized utils for migration tests
 from .utils import DynamoFrontendProcess, run_migration_test
@@ -95,106 +95,127 @@ class DynamoWorkerProcess(ManagedProcess):
         disagg_mode: str | None = None,
     ):
         self.worker_id = worker_id
-        self.system_port = allocate_port(9100)
         self.disagg_mode = disagg_mode
+        self.system_port: int | None = None
+        self.disaggregation_bootstrap_port: int | None = None
+        self.prefill_port: int | None = None
+        self._allocated_ports: list[int] = []
 
-        command = [
-            "python3",
-            "-m",
-            "dynamo.sglang",
-            "--model-path",
-            FAULT_TOLERANCE_MODEL_NAME,
-            "--served-model-name",
-            FAULT_TOLERANCE_MODEL_NAME,
-            "--trust-remote-code",
-            "--page-size",
-            "16",
-            "--tp",
-            "1",
-            "--mem-fraction-static",
-            "0.3",
-            "--context-length",
-            "8192",
-        ]
-        if disagg_mode is None:
-            # Aggregated
-            command.append("--skip-tokenizer-init")
-        else:
-            # Disaggregated
-            command.extend(
-                [
-                    "--disaggregation-mode",
-                    disagg_mode,
-                    "--disaggregation-bootstrap-port",
-                    f"1234{worker_id[-1]}",
-                    "--host",
-                    "0.0.0.0",
-                    "--disaggregation-transfer-backend",
-                    "nixl",
-                ]
-            )
-            if disagg_mode == "prefill":
-                command.extend(["--port", "40000"])
-
-        # Set environment variables
-        env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
-
-        env["DYN_LOG"] = "debug"
-        # Disable canary health check - these tests expect full control over requests
-        # sent to the workers where canary health check intermittently sends dummy
-        # requests to workers interfering with the test process which may cause
-        # intermittent failures
-        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
-        env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = str(self.system_port)
-        env["DYN_HTTP_PORT"] = str(frontend_port)
-
-        # Disable backend shutdown grace period for all migration tests
-        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
-
-        # Configure health check based on worker type
-        health_check_urls = [
-            (f"http://localhost:{self.system_port}/health", self.is_ready)
-        ]
-        if disagg_mode is None or disagg_mode == "decode":
-            health_check_urls.append(
-                (f"http://localhost:{frontend_port}/v1/models", check_models_api)
-            )
-
-        # TODO: Have the managed process take a command name explicitly to distinguish
-        #       between processes started with the same command.
-        log_dir = f"{request.node.name}_{worker_id}"
-
-        # Clean up any existing log directory from previous runs
         try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+            self.system_port = allocate_port(9100)
+            self._allocated_ports.append(self.system_port)
 
-        super().__init__(
-            command=command,
-            env=env,
-            health_check_urls=health_check_urls,
-            timeout=300,
-            display_output=True,
-            terminate_all_matching_process_names=False,
-            stragglers=["SGLANG:EngineCore"],
-            straggler_commands=["-m dynamo.sglang"],
-            log_dir=log_dir,
-        )
+            command = [
+                "python3",
+                "-m",
+                "dynamo.sglang",
+                "--model-path",
+                FAULT_TOLERANCE_MODEL_NAME,
+                "--served-model-name",
+                FAULT_TOLERANCE_MODEL_NAME,
+                "--trust-remote-code",
+                "--page-size",
+                "16",
+                "--tp",
+                "1",
+                "--mem-fraction-static",
+                "0.3",
+                "--context-length",
+                "8192",
+            ]
+            if disagg_mode is None:
+                # Aggregated
+                command.append("--skip-tokenizer-init")
+            else:
+                self.disaggregation_bootstrap_port = allocate_port(12340)
+                self._allocated_ports.append(self.disaggregation_bootstrap_port)
+
+                # Disaggregated
+                command.extend(
+                    [
+                        "--disaggregation-mode",
+                        disagg_mode,
+                        "--disaggregation-bootstrap-port",
+                        str(self.disaggregation_bootstrap_port),
+                        "--host",
+                        "0.0.0.0",
+                        "--disaggregation-transfer-backend",
+                        "nixl",
+                    ]
+                )
+                if disagg_mode == "prefill":
+                    self.prefill_port = allocate_port(24000)
+                    self._allocated_ports.append(self.prefill_port)
+                    command.extend(["--port", str(self.prefill_port)])
+
+            # Set environment variables
+            env = os.environ.copy()
+            env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+
+            env["DYN_LOG"] = "debug"
+            # Disable canary health check - these tests expect full control over requests
+            # sent to the workers where canary health check intermittently sends dummy
+            # requests to workers interfering with the test process which may cause
+            # intermittent failures
+            env["DYN_HEALTH_CHECK_ENABLED"] = "false"
+            env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+            env["DYN_SYSTEM_PORT"] = str(self.system_port)
+            env["DYN_HTTP_PORT"] = str(frontend_port)
+
+            # Disable backend shutdown grace period for all migration tests
+            env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
+
+            # Configure health check based on worker type
+            health_check_urls = [
+                (f"http://localhost:{self.system_port}/health", self.is_ready)
+            ]
+            if disagg_mode is None or disagg_mode == "decode":
+                health_check_urls.append(
+                    (f"http://localhost:{frontend_port}/v1/models", check_models_api)
+                )
+
+            # TODO: Have the managed process take a command name explicitly to distinguish
+            #       between processes started with the same command.
+            log_dir = f"{request.node.name}_{worker_id}"
+
+            # Clean up any existing log directory from previous runs
+            try:
+                shutil.rmtree(log_dir)
+                logger.info(f"Cleaned up existing log directory: {log_dir}")
+            except FileNotFoundError:
+                # Directory doesn't exist, which is fine
+                pass
+
+            super().__init__(
+                command=command,
+                env=env,
+                health_check_urls=health_check_urls,
+                timeout=300,
+                display_output=True,
+                terminate_all_matching_process_names=False,
+                stragglers=["SGLANG:EngineCore"],
+                straggler_commands=["-m dynamo.sglang"],
+                log_dir=log_dir,
+            )
+        except Exception:
+            self._release_ports()
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when worker exits."""
+        """Release allocated ports when worker exits."""
         try:
-            # system_port is a required parameter, always set in __init__
-            deallocate_port(self.system_port)
+            self._release_ports()
         except Exception as e:
-            logging.warning(f"Failed to release SGLang worker port: {e}")
+            logging.warning(f"Failed to release SGLang worker ports: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def _release_ports(self) -> None:
+        if not self._allocated_ports:
+            return
+
+        deallocate_ports(self._allocated_ports)
+        self._allocated_ports = []
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
