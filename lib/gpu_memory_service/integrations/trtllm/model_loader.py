@@ -178,17 +178,147 @@ def _gms_load_inner(
 def _load_rw(
     self, checkpoint_dir, checkpoint_loader, gms_client, device_index, original_load
 ):
-    """RW path: load weights from disk into the GMS memory pool, then publish."""
+    """RW path: preserve TRT-LLM's native split and place only weights in GMS."""
     global _last_imported_weights_bytes, _pending_gms_write
 
+    import tensorrt_llm._torch.pyexecutor.model_loader as _trt_loader
+
+    del original_load
+
+    config = self._load_and_validate_config(checkpoint_dir, checkpoint_loader)
+    load_format = self.llm_args.load_format
     target_device = torch.device("cuda", device_index)
 
-    with gms_use_mem_pool("weights", target_device):
-        model, moe_load_balancer = original_load(
-            self, checkpoint_dir, checkpoint_loader
+    with _trt_loader.timing(
+        "Model init total"
+    ), _trt_loader.maybe_create_moe_load_balancer(
+        config, self.mapping
+    ) as moe_load_balancer:
+        try:
+            config_copy = copy.deepcopy(config)
+            with _trt_loader.MetaInitMode():
+                model = _trt_loader.AutoModelForCausalLM.from_config(config_copy)
+            config = config_copy
+            is_meta_init = True
+        except Exception:
+            logger.info("Fallback to regular model init", exc_info=True)
+            model = _trt_loader.AutoModelForCausalLM.from_config(config)
+            is_meta_init = False
+
+        memo = {}
+
+        def allocate_buffer_on_cuda(t: torch.Tensor, memo=memo):
+            if t not in memo:
+                if t.device == torch.device("meta"):
+                    cuda_t = torch.empty_like(t, device="cuda")
+                else:
+                    cuda_t = t.cuda()
+                memo[t] = cuda_t
+                memo[cuda_t] = cuda_t
+            return memo[t]
+
+        _trt_loader._apply_to_buffers_only(model, allocate_buffer_on_cuda)
+
+        need_initialized_weights = load_format not in (
+            _trt_loader.LoadFormat.AUTO,
+            _trt_loader.LoadFormat.DUMMY,
         )
-        _move_untracked_params(model, gms_client, target_device)
-        torch.cuda.empty_cache()
+
+        def allocate_weights_on_cuda(t: torch.Tensor, memo=memo):
+            if t not in memo:
+                cuda_t = torch.empty_like(t, device="cuda")
+                if t.device != torch.device("meta") and (
+                    need_initialized_weights or is_meta_init
+                ):
+                    cuda_t.copy_(t)
+                memo[t] = cuda_t
+                memo[cuda_t] = cuda_t
+            return memo[t]
+
+        with gms_use_mem_pool("weights", target_device):
+            model._apply(allocate_weights_on_cuda)
+
+        model.to("cuda")
+        del memo
+
+        rank_model_storage = _trt_loader.get_rank_model_storage(model)
+        logger.info(
+            "Use %.2f GB for model weights.",
+            rank_model_storage / (1024**3),
+        )
+
+        if load_format == _trt_loader.LoadFormat.AUTO:
+            if hasattr(model, "llm_checkpoint_dir"):
+                weights = checkpoint_loader.load_weights(
+                    model.llm_checkpoint_dir, mapping=self.mapping
+                )
+            else:
+                weights = checkpoint_loader.load_weights(
+                    checkpoint_dir, mapping=self.mapping
+                )
+
+            self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
+                model, config
+            )
+            self._call_load_weights(model.load_weights, weights, self.weight_mapper)
+
+            if (
+                self.spec_config is not None
+                and self.spec_config.spec_dec_mode.need_load_draft_weights()
+            ):
+                weights = checkpoint_loader.load_weights(
+                    self.spec_config.speculative_model,
+                    mapping=self.mapping,
+                )
+
+                draft_model_arch = model.draft_config.pretrained_config.architectures[0]
+                draft_weight_mapper = _trt_loader.AutoCheckpointMapper.get(
+                    checkpoint_loader.checkpoint_format,
+                    draft_model_arch,
+                )
+                draft_weight_mapper.init_model_and_config(
+                    model.draft_model, model.draft_config
+                )
+
+                self._call_load_weights(
+                    model.load_draft_weights,
+                    weights,
+                    draft_weight_mapper,
+                )
+
+        elif load_format == _trt_loader.LoadFormat.DUMMY:
+            self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
+                model, config
+            )
+            _trt_loader.initialize_dummy_weights(model)
+            if (
+                self.spec_config is not None
+                and self.spec_config.spec_dec_mode.need_load_draft_weights()
+            ):
+                model.draft_model.load_weights_from_target_model(model)
+
+        elif load_format == _trt_loader.LoadFormat.VISION_ONLY:
+            logger.info(
+                "LoadFormat.VISION_ONLY: skipping weight loading; using preloaded vision weights."
+            )
+
+        else:
+            raise NotImplementedError(f"No load support for load format: {load_format}")
+
+        for module in model.modules():
+            if hasattr(module, "post_load_weights") and not getattr(
+                module, "_weights_removed", False
+            ):
+                module.post_load_weights()
+
+        if isinstance(moe_load_balancer, _trt_loader.MoeLoadBalancer):
+            moe_load_balancer.register_weight_slots_after_to_cuda()
+            moe_load_balancer.finalize_model()
+
+        _move_untracked_params(model, gms_client, device_index)
+        torch.cuda.current_stream().synchronize()
+
+    torch.cuda.empty_cache()
 
     if _delay_commit_until_engine_init:
         if _pending_gms_write is not None:
@@ -312,40 +442,43 @@ def _ptr_in_gms(gms_client: "GMSClientMemoryManager", ptr: int) -> bool:
 def _move_untracked_params(
     model: torch.nn.Module,
     gms_client: "GMSClientMemoryManager",
-    target_device: torch.device,
+    device_index: int,
 ) -> None:
-    """Move CUDA parameters that were allocated outside the GMS pool into it.
+    """Move CUDA parameters that still live outside GMS into GMS-backed mappings.
 
-    TRT-LLM may allocate some parameters outside the pluggable-allocator scope.
-    This ensures all weight tensors end up tracked by GMS before we commit.
+    TRT-LLM's native load split should keep non-weight CUDA tensors outside GMS.
+    This is a late mop-up for parameters that were replaced or allocated after
+    the main weight-allocation block.
     """
     from gpu_memory_service.client.torch.module import _iter_module_tensors
     from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 
-    device_index = (
-        torch.cuda.current_device()
-        if target_device.index is None
-        else int(target_device.index)
-    )
-    seen: set[int] = set()
+    storage_bases: dict[int, int] = {}
 
     with torch.no_grad():
         for _name, tensor, tensor_type in _iter_module_tensors(model):
             if tensor_type != "parameter" or tensor is None or not tensor.is_cuda:
                 continue
-            storage_ptr = tensor.storage().data_ptr()
-            if storage_ptr in seen:
-                continue
-            seen.add(storage_ptr)
 
-            if _ptr_in_gms(gms_client, int(tensor.data_ptr())):
+            storage_ptr = int(tensor.storage().data_ptr())
+            data_ptr = int(tensor.data_ptr())
+
+            if _ptr_in_gms(gms_client, data_ptr):
                 continue
 
-            # Allocate a new mapping and copy the tensor into it
-            nbytes = _storage_nbytes(tensor)
-            base_va = gms_client.create_mapping(size=nbytes, tag="weights")
+            base_va = storage_bases.get(storage_ptr)
+            if base_va is None:
+                base_va = int(
+                    gms_client.create_mapping(
+                        size=_parameter_storage_nbytes(tensor),
+                        tag="weights",
+                    )
+                )
+                storage_bases[storage_ptr] = base_va
+
+            offset_bytes = data_ptr - storage_ptr
             replacement = _tensor_from_pointer(
-                int(base_va),
+                base_va + offset_bytes,
                 list(tensor.shape),
                 list(tensor.stride()),
                 tensor.dtype,
@@ -353,6 +486,19 @@ def _move_untracked_params(
             )
             replacement.copy_(tensor)
             tensor.data = replacement
+
+
+def _parameter_storage_nbytes(tensor: torch.Tensor) -> int:
+    storage = tensor.untyped_storage() if hasattr(tensor, "untyped_storage") else None
+    if storage is None:
+        storage = tensor.storage()
+
+    nbytes = getattr(storage, "nbytes", None)
+    if callable(nbytes):
+        return int(nbytes())
+    if nbytes is not None:
+        return int(nbytes)
+    return _storage_nbytes(tensor)
 
 
 def _storage_nbytes(tensor: torch.Tensor) -> int:
