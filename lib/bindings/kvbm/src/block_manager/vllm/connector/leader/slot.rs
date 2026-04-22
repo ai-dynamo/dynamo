@@ -403,6 +403,7 @@ pub struct VllmConnectorSlot {
 }
 
 impl VllmConnectorSlot {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         request_id: String,
         tokens: Tokens,
@@ -447,6 +448,7 @@ impl VllmConnectorSlot {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     fn new_for_test(
         request_id: String,
         tokens: Tokens,
