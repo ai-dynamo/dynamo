@@ -15,6 +15,7 @@ use dynamo_llm::{
         config::should_bypass_cpu_cache,
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
+        metrics_kvbm::KvbmMetrics,
     },
     tokens::TokenBlock,
 };
@@ -178,8 +179,8 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
-    /// KVBM metrics for exposing cache hit rates
-    #[allow(dead_code)]
+    /// KVBM metrics. Cloned into each slot so the slot can increment the
+    /// desync counter on connector-protocol block reporting gaps.
     kvbm_metrics: KvbmMetrics,
     /// Minimum priority threshold for host offload filtering (read once at init)
     offload_min_priority: u32,
@@ -289,6 +290,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
             self.offload_min_priority,
+            self.kvbm_metrics.clone(),
         );
         self.slots
             .lock()
@@ -394,6 +396,10 @@ pub struct VllmConnectorSlot {
     /// Stored block priorities from previous apply_scheduler_output calls.
     /// Used as fallback when priorities=None in subsequent chunked prefill iterations.
     stored_block_priorities: HashMap<BlockId, u32>,
+
+    /// Metrics handle — used to increment `kvbm_slot_desync_total` when the
+    /// connector protocol fails to report a block allocation the engine needs.
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl VllmConnectorSlot {
@@ -405,6 +411,7 @@ impl VllmConnectorSlot {
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
         offload_min_priority: u32,
+        kvbm_metrics: KvbmMetrics,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -435,6 +442,7 @@ impl VllmConnectorSlot {
             offload_min_priority,
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
+            kvbm_metrics,
         }
     }
 
@@ -447,6 +455,7 @@ impl VllmConnectorSlot {
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
         offload_min_priority: u32,
+        kvbm_metrics: KvbmMetrics,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
@@ -473,6 +482,7 @@ impl VllmConnectorSlot {
             offload_min_priority,
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
+            kvbm_metrics,
         }
     }
 
@@ -729,15 +739,40 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        // we should have enough device blocks to cover the newly scheduled tokens
+        // Invariant: blocks registered via update_state_after_alloc() and
+        // cached_request.new_block_ids deltas must cover every token the
+        // engine is about to compute. If the invariant breaks, the upstream
+        // KvCacheConnectorScheduler protocol did not report a block that was
+        // allocated by the engine (typically a decode-continuation block
+        // allocated between scheduler_output builds). Historically this was
+        // `assert!`, which panicked the scheduler thread and wedged the worker
+        // on the first offending iter; now we soft-degrade: skip KVBM offload
+        // evaluation for this request, advance bookkeeping, and surface the
+        // event via `kvbm_slot_desync_total` + a warn log. One skipped offload
+        // is a degraded cache hit, not corruption — losing the engine costs
+        // far more than losing KVBM for one request.
         let next_position = self.current_position + num_scheduled_tokens;
-        assert!(
-            next_position <= self.device_blocks.len() * self.block_size,
-            "next_position: {} > device_blocks.len() {} * block_size {}",
-            next_position,
-            self.device_blocks.len(),
-            self.block_size
-        );
+        if next_position > self.device_blocks.len() * self.block_size {
+            self.kvbm_metrics.slot_desync_total.inc();
+            tracing::warn!(
+                request_id = %self.request_id,
+                next_position,
+                num_computed_tokens,
+                num_scheduled_tokens,
+                current_position = self.current_position,
+                evaluated_blocks = self.evaluated_blocks,
+                device_blocks_len = self.device_blocks.len(),
+                block_size = self.block_size,
+                device_blocks = ?self.device_blocks,
+                "KVBM slot desync: engine scheduled tokens beyond registered \
+                 device blocks. Skipping KVBM offload evaluation for this iter. \
+                 Typically indicates the KvCacheConnectorScheduler did not \
+                 report a decode-continuation block allocation via \
+                 cached_request.new_block_ids."
+            );
+            self.current_position = next_position;
+            return Ok(());
+        }
 
         if next_position > self.sequence.total_tokens() {
             // vllm stopped providing tokens, so we are done
@@ -1878,12 +1913,19 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
 mod connector_tests {
     use super::*;
     use crate::block_manager::cache_stats::CacheStatsTracker;
+    use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
     use dynamo_llm::tokens::{SaltHash, Tokens};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
     const BLOCK_SIZE: usize = 32;
     const SALT_HASH: SaltHash = 12345;
+
+    fn test_metrics() -> KvbmMetrics {
+        // `create_endpoint = false` skips the HTTP server; the Prometheus
+        // registry is fresh per call so test counters don't collide.
+        KvbmMetrics::new(&KvbmMetricsRegistry::default(), false, 0)
+    }
 
     /// Creates a test slot with `num_tokens` tokens and the given priority threshold.
     /// Returns the slot and the receiving end of the transfer channel for inspecting offload requests.
@@ -1905,6 +1947,7 @@ mod connector_tests {
             xfer_tx,
             cache_stats,
             offload_min_priority,
+            test_metrics(),
         );
         (slot, xfer_rx)
     }
@@ -2266,5 +2309,50 @@ mod connector_tests {
 
         assert_eq!(slot.num_device_blocks_allocated(), 7);
         assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test: desync is surfaced via counter + warn, does not panic.
+    // Reproduces the condition that previously fired `assert!` at slot.rs:734
+    // (see GH issue): scheduler tells us to write past the last registered
+    // device block without reporting the new allocation. The slot must
+    // soft-degrade (skip offload, advance position, bump counter) instead of
+    // taking out the scheduler thread.
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_slot_desync_soft_degrades() {
+        let num_tokens = 96; // 3 blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        // Register one block via the prefill path. current_position advances
+        // to 32 after this applies.
+        slot.append_mutable_device_blocks(&[100]).unwrap();
+        slot.apply_scheduler_output(&[], &[], 0, BLOCK_SIZE, None)
+            .unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 1);
+        let baseline = slot.kvbm_metrics.slot_desync_total.get();
+
+        // Simulate decode crossing the boundary: engine schedules 1 token at
+        // position 32 but never reported a second block. Pre-fix this would
+        // panic with "next_position: 33 > device_blocks.len() 1 * block_size 32";
+        // post-fix the call returns Ok, bumps the counter, advances position.
+        slot.apply_scheduler_output(&[9999], &[], 31, 1, None)
+            .unwrap();
+
+        assert_eq!(
+            slot.kvbm_metrics.slot_desync_total.get() - baseline,
+            1,
+            "slot_desync_total should increment exactly once per desync"
+        );
+        assert_eq!(
+            slot.num_device_blocks_allocated(),
+            1,
+            "desync path must not synthesize phantom blocks"
+        );
+        assert_eq!(
+            slot.current_position, 33,
+            "current_position must advance past the skipped region so \
+             subsequent iters stay coherent"
+        );
     }
 }

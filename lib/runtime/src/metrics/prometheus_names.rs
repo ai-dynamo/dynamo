@@ -470,6 +470,15 @@ pub mod kvbm {
 
     /// Number of failed object storage write operations (blocks)
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
+
+    /// Count of KVBM slot desyncs — engine scheduled tokens beyond the blocks
+    /// reported via the KvCacheConnectorScheduler protocol. Each increment is
+    /// one offload opportunity skipped because an upstream block allocation
+    /// was not visible in `cached_request.new_block_ids` at schedule time
+    /// (typically a decode-continuation block). Baseline for a healthy
+    /// deployment is 0; any non-zero value means KVBM is degraded for that
+    /// request but the engine continues to serve it.
+    pub const SLOT_DESYNC_TOTAL: &str = "slot_desync_total";
 }
 
 /// Router per-request metrics (component-scoped via `MetricsHierarchy`).

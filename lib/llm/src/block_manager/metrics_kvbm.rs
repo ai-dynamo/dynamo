@@ -7,7 +7,7 @@ use dynamo_runtime::metrics::prometheus_names::{
         DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OBJECT_CACHE_HIT_RATE,
         OBJECT_READ_FAILURES, OBJECT_WRITE_FAILURES, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H,
         OFFLOAD_BLOCKS_D2O, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
-        ONBOARD_BLOCKS_O2D,
+        ONBOARD_BLOCKS_O2D, SLOT_DESYNC_TOTAL,
     },
     sanitize_prometheus_name,
 };
@@ -57,6 +57,11 @@ pub struct KvbmMetrics {
 
     // number of failed object storage write operations (blocks)
     pub object_write_failures: IntCounter,
+
+    // number of slot desyncs — one per skipped offload due to an upstream
+    // block-allocation reporting gap in the KvCacheConnectorScheduler
+    // protocol. See SLOT_DESYNC_TOTAL in prometheus_names.rs for semantics.
+    pub slot_desync_total: IntCounter,
 
     shutdown_notify: Option<Arc<Notify>>,
 }
@@ -154,6 +159,14 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
+        let slot_desync_total = mr
+            .create_intcounter(
+                SLOT_DESYNC_TOTAL,
+                "Count of KVBM slot desyncs — connector-protocol block reporting \
+                 gaps that caused an offload opportunity to be skipped",
+                &[],
+            )
+            .unwrap();
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
@@ -170,6 +183,7 @@ impl KvbmMetrics {
                 object_cache_hit_rate,
                 object_read_failures,
                 object_write_failures,
+                slot_desync_total,
                 shutdown_notify: None,
             };
         }
@@ -232,6 +246,7 @@ impl KvbmMetrics {
             object_cache_hit_rate,
             object_read_failures,
             object_write_failures,
+            slot_desync_total,
             shutdown_notify: Some(notify),
         }
     }
