@@ -48,6 +48,7 @@ _extra_config_json: Optional[str] = None
 _bootstrap_installed = False
 _executor_finalize_hook_installed = False
 _shadow_activation_fd: int | None = None
+_comm_task_bootstrapped = False
 
 
 def set_extra_config(extra: "dict[str, Any] | None") -> None:
@@ -472,6 +473,22 @@ def worker_init_hook(env_snapshot: dict, extra_config_json: Optional[str]) -> No
     )
 
 
+def run_bootstrapped_mpi_task(
+    env_snapshot: dict,
+    extra_config_json: Optional[str],
+    task,
+    *args,
+    **kwargs,
+):
+    """Ensure MPICommSession tasks see the same bootstrap as MPIPool workers."""
+
+    global _comm_task_bootstrapped
+    if not _comm_task_bootstrapped:
+        worker_init_hook(env_snapshot, extra_config_json)
+        _comm_task_bootstrapped = True
+    return task(*args, **kwargs)
+
+
 def install_mpi_worker_bootstrap() -> None:
     """Monkey-patch MpiPoolSession to run worker_init_hook in every child. Idempotent."""
     global _bootstrap_installed
@@ -486,6 +503,7 @@ def install_mpi_worker_bootstrap() -> None:
         ) from exc
 
     MpiPoolSession = _mpi_session.MpiPoolSession
+    MpiCommSession = getattr(_mpi_session, "MpiCommSession", None)
 
     def _patched_start_mpi_pool(self) -> None:
         assert not self.mpi_pool, "MPI session already started"
@@ -512,7 +530,28 @@ def install_mpi_worker_bootstrap() -> None:
         )
 
     MpiPoolSession._start_mpi_pool = _patched_start_mpi_pool
+    if MpiCommSession is not None:
+        original_submit = MpiCommSession.submit
+
+        @wraps(original_submit)
+        def _patched_submit(self, task, *args, **kwargs):
+            env_snapshot = {
+                key: os.environ[key]
+                for key in _PROPAGATED_ENV_VARS
+                if key in os.environ
+            }
+            return original_submit(
+                self,
+                run_bootstrapped_mpi_task,
+                env_snapshot,
+                _extra_config_json,
+                task,
+                *args,
+                **kwargs,
+            )
+
+        MpiCommSession.submit = _patched_submit
     _bootstrap_installed = True
     logger.info(
-        "[GMS] Patched TensorRT-LLM MpiPoolSession._start_mpi_pool to bootstrap GMS in MPI workers"
+        "[GMS] Patched TensorRT-LLM MPI sessions to bootstrap GMS in MPI workers"
     )
