@@ -11,12 +11,16 @@ from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 from tests.utils.port_utils import allocate_port, deallocate_port
 
+# Port hint for image server; actual allocation deferred to httpserver_listen_address
+# fixture to avoid TOCTOU races (module import happens minutes before first bind).
+_IMAGE_SERVER_PORT_HINT = 8765
+
 # Shared constants for multimodal testing
-IMAGE_SERVER_PORT = allocate_port(8765)
 MULTIMODAL_IMG_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
 )
-MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+# Placeholder URL; updated with the real allocated port by httpserver_listen_address.
+MULTIMODAL_IMG_URL = f"http://localhost:{_IMAGE_SERVER_PORT_HINT}/llm-graphic.png"
 
 
 # Git LFS pointer files start with "version "; serve a real PNG when the asset is not pulled.
@@ -43,8 +47,16 @@ def get_multimodal_test_image_bytes() -> bytes:
 
 @pytest.fixture(scope="session")
 def httpserver_listen_address():
-    yield ("127.0.0.1", IMAGE_SERVER_PORT)
-    deallocate_port(IMAGE_SERVER_PORT)
+    import tests.serve.conftest as _self_module
+
+    port = allocate_port(_IMAGE_SERVER_PORT_HINT)
+    # Update the module-level URL so tests that read MULTIMODAL_IMG_URL
+    # after fixture setup see the real allocated port.
+    _self_module.MULTIMODAL_IMG_URL = (
+        f"http://localhost:{port}/llm-graphic.png"
+    )
+    yield ("127.0.0.1", port)
+    deallocate_port(port)
 
 
 @pytest.fixture(scope="function")
