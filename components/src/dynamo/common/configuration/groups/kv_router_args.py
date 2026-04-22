@@ -3,7 +3,7 @@
 
 """Shared KV router configuration ArgGroup.
 
-Defines the 17 KvRouterConfig parameters once so that both
+Defines the shared KvRouterConfig parameters once so that both
 ``dynamo.frontend`` and ``dynamo.router`` can reuse them without duplication.
 Field names on ``KvRouterConfigBase`` match the ``KvRouterConfig`` Python
 constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
@@ -33,6 +33,10 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
+    "router_sharding_mode",
+    "router_shard_prefix_depth",
+    "router_num_shards",
+    "router_shard_assignment_policy",
     "router_enable_cache_control",
     "router_queue_policy",
     "remote_indexer_component",
@@ -40,7 +44,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
 
 
 class KvRouterConfigBase(ConfigBase):
-    """Mixin carrying the 17 KvRouterConfig fields."""
+    """Mixin carrying the shared KvRouterConfig fields."""
 
     overlap_score_weight: float
     router_temperature: float
@@ -57,6 +61,10 @@ class KvRouterConfigBase(ConfigBase):
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
+    router_sharding_mode: str
+    router_shard_prefix_depth: int
+    router_num_shards: int
+    router_shard_assignment_policy: str
     router_enable_cache_control: bool
     router_queue_policy: str
     remote_indexer_component: Optional[str]
@@ -67,7 +75,7 @@ class KvRouterConfigBase(ConfigBase):
 
 
 class KvRouterArgGroup(ArgGroup):
-    """CLI arguments for the 17 KvRouterConfig parameters."""
+    """CLI arguments for the shared KvRouterConfig parameters."""
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
@@ -245,6 +253,51 @@ class KvRouterArgGroup(ArgGroup):
                 "--no-router-kv-events is set."
             ),
             arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--router-sharding-mode",
+            env_var="DYN_ROUTER_SHARDING_MODE",
+            default="single",
+            help=(
+                "KV Router: Indexer sharding mode. 'single' keeps the default local radix tree. "
+                "'branch' enables branch-key sharding across multiple radix-tree shards."
+            ),
+            arg_type=str,
+            choices=["single", "branch"],
+        )
+        add_argument(
+            g,
+            flag_name="--router-shard-prefix-depth",
+            env_var="DYN_ROUTER_SHARD_PREFIX_DEPTH",
+            default=4,
+            help=(
+                "KV Router: Number of prefix blocks used to derive the branch-routing key "
+                "when --router-sharding-mode=branch is enabled."
+            ),
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--router-num-shards",
+            env_var="DYN_ROUTER_NUM_SHARDS",
+            default=4,
+            help=(
+                "KV Router: Number of radix-tree shards to maintain when branch sharding is enabled."
+            ),
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--router-shard-assignment-policy",
+            env_var="DYN_ROUTER_SHARD_ASSIGNMENT_POLICY",
+            default="fnv",
+            help=(
+                "KV Router: Shard assignment policy for branch sharding. 'fnv' hashes the first K "
+                "local block hashes with FNV-1a and maps the result to a shard."
+            ),
+            arg_type=str,
+            choices=["fnv"],
         )
         add_negatable_bool_argument(
             g,

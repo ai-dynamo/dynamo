@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use dynamo_kv_router::{ConcurrentRadixTree, ThreadPoolIndexer};
+use dynamo_kv_router::{BranchShardedIndexer, ConcurrentRadixTree, ThreadPoolIndexer};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
@@ -130,6 +130,10 @@ pub enum Indexer {
     /// Has the ability to persist and snapshot states.
     KvIndexer(KvIndexer),
 
+    /// Branch-key sharded radix tree. Conversations are assigned to a shard by
+    /// hashing the first K local block hashes of the request prefix.
+    BranchSharded(BranchShardedIndexer),
+
     /// Concurrent radix tree with a thread pool for event processing.
     /// Uses sticky worker routing for per-worker event serialization.
     /// Does not support TTL/pruning.
@@ -191,6 +195,23 @@ impl Indexer {
             )));
         }
 
+        let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+        let cancellation_token = component.drt().primary_token();
+
+        if kv_router_config.branch_sharding_enabled() {
+            return Ok(Indexer::BranchSharded(
+                BranchShardedIndexer::new_with_frequency(
+                    cancellation_token,
+                    kv_router_config.router_num_shards as usize,
+                    kv_router_config.router_shard_prefix_depth,
+                    None,
+                    block_size,
+                    kv_indexer_metrics,
+                    None,
+                ),
+            ));
+        }
+
         if kv_router_config.router_event_threads > 1 {
             return Ok(Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
                 ConcurrentRadixTree::new(),
@@ -198,9 +219,6 @@ impl Indexer {
                 block_size,
             ))));
         }
-
-        let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
-        let cancellation_token = component.drt().primary_token();
 
         Ok(Indexer::KvIndexer(KvIndexer::new_with_frequency(
             cancellation_token,
@@ -217,6 +235,7 @@ impl Indexer {
     ) -> Result<OverlapScores, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
+            Indexer::BranchSharded(indexer) => indexer.find_matches(sequence).await,
             Indexer::Concurrent(tpi) => tpi.find_matches(sequence).await,
             Indexer::Remote(remote) => remote.find_matches(sequence).await.map_err(|e| {
                 tracing::warn!(error = %e, "Remote indexer query failed");
@@ -229,6 +248,7 @@ impl Indexer {
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::BranchSharded(indexer) => indexer.dump_events().await,
             Indexer::Concurrent(tpi) => tpi.dump_events().await,
             Indexer::Remote(_) => Ok(Vec::new()),
             Indexer::None => {
@@ -250,6 +270,11 @@ impl Indexer {
                     .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
+            Indexer::BranchSharded(indexer) => {
+                indexer
+                    .process_routing_decision_for_request(tokens_with_hashes, worker)
+                    .await
+            }
             Indexer::Concurrent(tpi) => {
                 tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
@@ -266,6 +291,7 @@ impl Indexer {
                     tracing::warn!("Failed to send event to indexer: {e}");
                 }
             }
+            Indexer::BranchSharded(indexer) => indexer.apply_event(event).await,
             Indexer::Concurrent(tpi) => tpi.apply_event(event).await,
             Indexer::Remote(_) => {} // standalone indexer gets events directly
             Indexer::None => {}
@@ -278,6 +304,9 @@ impl Indexer {
                 if let Err(e) = indexer.remove_worker_sender().send(worker_id).await {
                     tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
                 }
+            }
+            Indexer::BranchSharded(indexer) => {
+                KvIndexerInterface::remove_worker(indexer, worker_id).await;
             }
             Indexer::Concurrent(tpi) => {
                 KvIndexerInterface::remove_worker(tpi.as_ref(), worker_id).await;
@@ -298,6 +327,7 @@ impl Indexer {
                 }
                 resp_rx.await.unwrap_or_default()
             }
+            Indexer::BranchSharded(indexer) => indexer.get_workers().await.unwrap_or_default(),
             Indexer::Concurrent(tpi) => tpi.backend().get_workers(),
             Indexer::Remote(_) => Vec::new(),
             Indexer::None => Vec::new(),

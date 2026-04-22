@@ -1868,6 +1868,7 @@ async fn test_frequency(variant: &str) {
 // KvIndexerMetrics tests
 // ============================================================================
 
+#[cfg(feature = "metrics")]
 #[test]
 fn test_increment_event_applied() {
     let metrics = KvIndexerMetrics::new_unregistered();

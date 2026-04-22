@@ -54,7 +54,7 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(2.0), router_event_threads=4, router_enable_cache_control=false, router_queue_policy="fcfs", remote_indexer_component=None))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(2.0), router_event_threads=4, router_sharding_mode="single", router_shard_prefix_depth=4, router_num_shards=4, router_shard_assignment_policy="fnv", router_enable_cache_control=false, router_queue_policy="fcfs", remote_indexer_component=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
@@ -72,6 +72,10 @@ impl KvRouterConfig {
         router_prune_target_ratio: f64,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
+        router_sharding_mode: &str,
+        router_shard_prefix_depth: u32,
+        router_num_shards: u32,
+        router_shard_assignment_policy: &str,
         router_enable_cache_control: bool,
         router_queue_policy: &str,
         remote_indexer_component: Option<String>,
@@ -93,6 +97,18 @@ impl KvRouterConfig {
                 router_prune_target_ratio,
                 router_queue_threshold,
                 router_event_threads,
+                router_sharding_mode: router_sharding_mode.parse().unwrap_or_else(|_| {
+                    panic!("invalid router_sharding_mode: {router_sharding_mode:?}")
+                }),
+                router_shard_prefix_depth,
+                router_num_shards,
+                router_shard_assignment_policy: router_shard_assignment_policy
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "invalid router_shard_assignment_policy: {router_shard_assignment_policy:?}"
+                        )
+                    }),
                 router_enable_cache_control,
                 router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
                     panic!("invalid router_queue_policy: {router_queue_policy:?}")

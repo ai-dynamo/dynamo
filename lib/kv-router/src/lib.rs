@@ -40,9 +40,12 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
-pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
+pub use config::{
+    KvRouterConfig, RouterConfigOverride, RouterQueuePolicy, RouterShardAssignmentPolicy,
+    RouterShardingMode,
+};
 pub use event_sink::EventSink;
-pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
+pub use indexer::{BranchShardedIndexer, MaybeError, SyncIndexer, ThreadPoolIndexer};
 #[cfg(feature = "bench")]
 pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
 pub use nested_map::PositionalIndexer;

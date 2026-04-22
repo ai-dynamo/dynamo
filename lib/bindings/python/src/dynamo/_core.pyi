@@ -1117,8 +1117,13 @@ class KvRouterConfig:
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = 2.0,
         router_event_threads: int = 4,
+        router_sharding_mode: str = "single",
+        router_shard_prefix_depth: int = 4,
+        router_num_shards: int = 4,
+        router_shard_assignment_policy: str = "fnv",
         router_enable_cache_control: bool = False,
         router_queue_policy: str = "fcfs",
+        remote_indexer_component: Optional[str] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1149,11 +1154,22 @@ class KvRouterConfig:
                 Set to None to disable queueing (all requests go directly to the scheduler).
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
+            router_sharding_mode: KV indexer sharding mode (default: "single").
+                "single": keep the default local radix tree.
+                "branch": enable branch-key sharding across multiple radix-tree shards.
+            router_shard_prefix_depth: Number of prefix blocks used for branch-key routing
+                when branch sharding is enabled (default: 4).
+            router_num_shards: Number of radix-tree shards to maintain when branch sharding
+                is enabled (default: 4).
+            router_shard_assignment_policy: Branch shard assignment policy (default: "fnv").
+                "fnv": hash the first K local block hashes with FNV-1a and map the result to a shard.
             router_enable_cache_control: Enable cache control (PIN with TTL) via the worker's
                 cache_control service mesh endpoint (default: False).
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+            remote_indexer_component: Optional component name of a standalone KV indexer to use
+                for overlap scoring (default: None).
         """
         ...
 

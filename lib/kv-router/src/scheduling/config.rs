@@ -42,6 +42,65 @@ impl FromStr for RouterQueuePolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterShardingMode {
+    #[default]
+    Single,
+    Branch,
+}
+
+impl fmt::Display for RouterShardingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Single => f.write_str("single"),
+            Self::Branch => f.write_str("branch"),
+        }
+    }
+}
+
+impl FromStr for RouterShardingMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "single" => Ok(Self::Single),
+            "branch" => Ok(Self::Branch),
+            _ => Err(format!(
+                "unknown sharding mode: {s:?}, expected 'single' or 'branch'"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouterShardAssignmentPolicy {
+    #[default]
+    Fnv,
+}
+
+impl fmt::Display for RouterShardAssignmentPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fnv => f.write_str("fnv"),
+        }
+    }
+}
+
+impl FromStr for RouterShardAssignmentPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fnv" => Ok(Self::Fnv),
+            _ => Err(format!(
+                "unknown shard assignment policy: {s:?}, expected 'fnv'"
+            )),
+        }
+    }
+}
+
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
 pub struct RouterConfigOverride {
@@ -120,6 +179,23 @@ pub struct KvRouterConfig {
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
+    /// KV indexer sharding mode. "single" keeps the default local radix tree,
+    /// while "branch" enables the branch-key sharded indexer.
+    pub router_sharding_mode: RouterShardingMode,
+
+    /// Number of prefix blocks used to derive the branch-routing key when
+    /// branch sharding is enabled.
+    #[validate(range(min = 1))]
+    pub router_shard_prefix_depth: u32,
+
+    /// Number of radix-tree shards to maintain when branch sharding is enabled.
+    #[validate(range(min = 1))]
+    pub router_num_shards: u32,
+
+    /// Branch shard assignment policy. "fnv" hashes the first K local block
+    /// hashes with FNV-1a and maps the result to a shard.
+    pub router_shard_assignment_policy: RouterShardAssignmentPolicy,
+
     /// Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint.
     /// When true, the router creates a cache_control client and honors nvext.cache_control on
     /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
@@ -157,6 +233,10 @@ impl Default for KvRouterConfig {
             router_prune_target_ratio: 0.8,
             router_queue_threshold: Some(2.0),
             router_event_threads: 4,
+            router_sharding_mode: RouterShardingMode::Single,
+            router_shard_prefix_depth: 4,
+            router_num_shards: 4,
+            router_shard_assignment_policy: RouterShardAssignmentPolicy::Fnv,
             router_enable_cache_control: false,
             router_queue_policy: RouterQueuePolicy::default(),
             remote_indexer_component: None,
@@ -179,6 +259,17 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     if config.router_track_output_blocks && !config.router_track_active_blocks {
         return Err(ValidationError::new(
             "router_track_output_blocks requires router_track_active_blocks=true",
+        ));
+    }
+    if config.router_sharding_mode == RouterShardingMode::Branch && !config.use_kv_events {
+        return Err(ValidationError::new(
+            "branch sharding requires use_kv_events=true",
+        ));
+    }
+    if config.router_sharding_mode == RouterShardingMode::Branch && config.router_event_threads > 1
+    {
+        return Err(ValidationError::new(
+            "branch sharding is incompatible with router_event_threads > 1",
         ));
     }
     Ok(())
@@ -230,5 +321,36 @@ impl KvRouterConfig {
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_weight > 0.0
+    }
+
+    pub fn branch_sharding_enabled(&self) -> bool {
+        self.router_sharding_mode == RouterShardingMode::Branch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_sharding_requires_kv_events() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_sharding_mode: RouterShardingMode::Branch,
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn branch_sharding_disables_thread_pool_mode() {
+        let config = KvRouterConfig {
+            router_event_threads: 2,
+            router_sharding_mode: RouterShardingMode::Branch,
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
     }
 }
