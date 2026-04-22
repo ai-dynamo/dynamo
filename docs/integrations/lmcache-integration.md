@@ -10,6 +10,38 @@ LMCache is a high-performance KV cache layer that supercharges LLM serving by en
 
 This document describes how LMCache is integrated into Dynamo's vLLM backend to provide enhanced performance and memory efficiency.
 
+## Installation Notes
+
+The Dynamo vLLM runtime expects LMCache to come from the underlying vLLM container or Python environment. As of vLLM `v0.19.1`, the upstream `vllm/vllm-openai` CUDA 12 x86_64 image includes a working LMCache wheel. The CUDA 13 x86_64 image includes `lmcache`, but its compiled `lmcache.c_ops` extension is linked against `libcudart.so.12`, while the image provides CUDA 13. LMCache also does not currently publish aarch64 wheels, so a wheel install is not enough for arm64/aarch64 containers.
+
+For CUDA 13 or arm64/aarch64 images, build LMCache from source in a dev image or temporary builder stage that matches the runtime image's Python, PyTorch, and CUDA stack, then install the resulting wheel into the runtime image. Follow the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html), and keep build isolation disabled so the build does not pull a different torch stack:
+
+```bash
+git clone --depth 1 --branch v0.4.3 https://github.com/LMCache/LMCache.git /tmp/lmcache
+cd /tmp/lmcache
+
+# In the dev/builder image, install matching CUDA development headers first.
+# Example Debian package names for CUDA 13.0 images:
+apt-get update
+apt-get install -y --no-install-recommends \
+  build-essential \
+  libcublas-dev-13-0 \
+  libcusolver-dev-13-0 \
+  libcusparse-dev-13-0
+
+uv pip install --system --requirement requirements/build.txt
+
+# Choose architectures supported by the CUDA toolkit in the image.
+export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"
+CUDA_HOME=/usr/local/cuda \
+uv build --wheel --no-build-isolation --out-dir /tmp/lmcache-wheel
+
+# In the runtime image, install the wheel without changing the base dependency solve.
+uv pip install --system --no-deps --force-reinstall /tmp/lmcache-wheel/lmcache-*.whl
+```
+
+Once LMCache publishes compatible CUDA 13 and/or aarch64 wheels, prefer those wheels over a source build.
+
 ## Aggregated Serving
 
 ### Configuration
@@ -205,4 +237,3 @@ vLLM v1 uses `prometheus_client.multiprocess` and stores intermediate metric val
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
 - [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
 - [LMCache Observability Guide](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Metrics and monitoring details
-

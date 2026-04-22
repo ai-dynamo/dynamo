@@ -5,6 +5,7 @@ import base64
 import dataclasses
 import logging
 import os
+import platform
 import random
 from dataclasses import dataclass, field
 from typing import Optional
@@ -45,14 +46,18 @@ def _is_cuda13() -> bool:
     return v.startswith("13")
 
 
-def _xfail_lmcache_cuda13():
+def _is_aarch64() -> bool:
+    arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
+    return arch in ("aarch64", "arm64")
+
+
+def _xfail_unsupported_lmcache_container():
     return pytest.mark.xfail(
-        _is_cuda13(),
+        _is_cuda13() or _is_aarch64(),
         reason=(
-            "Upstream vllm/vllm-openai CUDA 13 images do not currently provide "
-            "working LMCache c_ops: x86_64 links libcudart.so.12, and LMCache "
-            "does not publish aarch64 wheels yet; expected to be fixed by "
-            "LMCache 0.4.4"
+            "Upstream vllm/vllm-openai containers only provide working LMCache "
+            "c_ops for CUDA 12 on x86_64 today; CUDA 13 links the CUDA 12 "
+            "runtime, and LMCache does not publish aarch64 wheels yet"
         ),
         strict=False,
     )
@@ -172,7 +177,7 @@ vllm_configs = {
         script_name="agg_lmcache.sh",
         marks=[
             pytest.mark.lmcache,
-            _xfail_lmcache_cuda13(),
+            _xfail_unsupported_lmcache_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -195,7 +200,7 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.lmcache,
-            _xfail_lmcache_cuda13(),
+            _xfail_unsupported_lmcache_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(

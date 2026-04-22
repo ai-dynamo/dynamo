@@ -68,7 +68,7 @@ RUN set -eu; \
     NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' | sort | tail -n 1)"; \
     test -n "${NIXL_SITE_DIR}"; \
     ln -sfn "${NIXL_SITE_DIR}" "${NIXL_PREFIX}"; \
-    CUDA_RUNTIME_SITE_LIB="$(find "${SITE_PACKAGES}/nvidia" -maxdepth 2 -type f -name 'libcudart.so.*' | sort | tail -n 1)"; \
+    CUDA_RUNTIME_SITE_LIB="$(find "${SITE_PACKAGES}/nvidia" -maxdepth 3 -type f -name 'libcudart.so.*' | sort | tail -n 1)"; \
     test -n "${CUDA_RUNTIME_SITE_LIB}"; \
     ln -sfn "$(dirname "${CUDA_RUNTIME_SITE_LIB}")" "${CUDA_RUNTIME_LIB_DIR}"
 
