@@ -104,8 +104,8 @@ Dynamo components discover each other through a shared backend. Two options are 
 
 | Backend | When to Use | Setup |
 |---|---|---|
-| **File** | Single machine, local development | No setup -- pass `--discovery-backend file` to all components |
-| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified) |
+| **File** | Single machine, local development | No setup -- pass `--discovery-backend file` to all components. The event plane automatically defaults to ZMQ (no NATS required). |
+| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified). The event plane defaults to NATS. |
 
 This guide uses `--discovery-backend file`. For etcd setup, see [Service Discovery](../kubernetes/service-discovery.md).
 
