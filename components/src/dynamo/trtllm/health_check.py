@@ -87,7 +87,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             },
         }
         if disaggregation_mode == DisaggregationMode.DECODE:
-            self.default_payload["_CANARY_HEALTH_CHECK"] = True
+            self.default_payload["_HEALTH_CHECK"] = True
             self.default_payload["disaggregated_params"] = {
                 "request_type": "context_and_generation"
             }

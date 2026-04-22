@@ -699,7 +699,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Canary probe: use its pre-built disagg params (skip prefill_result decode).
         if self.disaggregation_mode == DisaggregationMode.DECODE and request.get(
-            "_CANARY_HEALTH_CHECK"
+            "_HEALTH_CHECK"
         ):
             return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
 

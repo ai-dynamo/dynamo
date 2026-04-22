@@ -24,7 +24,7 @@ pytestmark = [
 )
 def test_payload_marks_only_decode(mode, expect_canary):
     payload = TrtllmHealthCheckPayload(disaggregation_mode=mode).to_dict()
-    assert bool(payload.get("_CANARY_HEALTH_CHECK")) is expect_canary
+    assert bool(payload.get("_HEALTH_CHECK")) is expect_canary
     if expect_canary:
         assert payload["disaggregated_params"] == {
             "request_type": "context_and_generation"
