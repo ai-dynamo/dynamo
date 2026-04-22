@@ -595,6 +595,7 @@ async def init_llm_worker(
         logging.info("[Shadow] Primary acquired startup lock, starting engine init")
 
     if shadow_standby:
+        register_endpoint_after_delegate = True
         startup_generate_proxy = _DeferredGenerateProxy(
             health_check_payload,
             waiting_message="Shadow standby is waiting for failover lock",
@@ -603,6 +604,7 @@ async def init_llm_worker(
             startup_generate_proxy.generate,
             metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
+            discoverable=False,
         )
         await asyncio.sleep(0)
         if startup_serve_task.done():
@@ -625,12 +627,11 @@ async def init_llm_worker(
             startup_generate_proxy.generate,
             metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
+            discoverable=False,
         )
         await asyncio.sleep(0)
         if startup_serve_task.done():
             await startup_serve_task
-
-        await endpoint.unregister_endpoint_instance()
 
         logging.info(
             "[DEP16] Active startup proxy is serving health checks before engine init"
@@ -639,7 +640,7 @@ async def init_llm_worker(
             "[DEP16] Skipping runtime primary startup lock reacquire during multinode active startup"
         )
         logging.info(
-            "[DEP16] Startup proxy unregistered from discovery until real handler is ready"
+            "[DEP16] Startup proxy stays out of discovery until real handler is ready"
         )
 
     try:

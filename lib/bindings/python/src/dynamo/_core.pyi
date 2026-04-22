@@ -129,7 +129,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None, discoverable: bool = True) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -140,6 +140,10 @@ class Endpoint:
             metrics_labels: Optional list of metrics labels to add to the metrics
             health_check_payload: Optional dict containing the health check request payload
                                   that will be used to verify endpoint health
+            discoverable: Whether to publish the endpoint to discovery immediately.
+                            When False, request-plane serving and health checks still start,
+                            but clients will not discover the endpoint until
+                            register_endpoint_instance() is called later.
         """
         ...
 

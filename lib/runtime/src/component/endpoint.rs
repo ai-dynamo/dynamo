@@ -66,6 +66,10 @@ pub struct EndpointConfig {
     #[builder(default = "true")]
     graceful_shutdown: bool,
 
+    /// Whether to register this endpoint instance in the discovery plane.
+    #[builder(default = "true")]
+    discoverable: bool,
+
     /// Health check payload for this endpoint
     /// This payload will be sent to the endpoint during health checks
     /// to verify it's responding properly
@@ -96,8 +100,14 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            metrics_labels,
+            graceful_shutdown,
+            discoverable,
+            health_check_payload,
+        ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -234,31 +244,38 @@ impl EndpointConfigBuilder {
             anyhow::Ok(())
         });
 
-        // Register this endpoint instance in the discovery plane
-        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
-        // consistent registration/discovery across the system.
-        let discovery = endpoint.drt().discovery();
+        if discoverable {
+            // Register this endpoint instance in the discovery plane.
+            // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
+            // consistent registration/discovery across the system.
+            let discovery = endpoint.drt().discovery();
 
-        // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+            // Build transport for discovery service based on request plane mode
+            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
-        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-            transport,
-            device_type: endpoint_device_type(),
-        };
+            let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                transport,
+                device_type: endpoint_device_type(),
+            };
 
-        if let Err(e) = discovery.register(discovery_spec).await {
-            tracing::error!(
+            if let Err(e) = discovery.register(discovery_spec).await {
+                tracing::error!(
+                    %endpoint_id,
+                    error = %e,
+                    "Unable to register service for discovery"
+                );
+                endpoint_shutdown_token.cancel();
+                anyhow::bail!(
+                    "Unable to register service for discovery. Check discovery service status"
+                );
+            }
+        } else {
+            tracing::debug!(
                 %endpoint_id,
-                error = %e,
-                "Unable to register service for discovery"
-            );
-            endpoint_shutdown_token.cancel();
-            anyhow::bail!(
-                "Unable to register service for discovery. Check discovery service status"
+                "Skipping initial endpoint discovery registration"
             );
         }
 

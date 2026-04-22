@@ -832,7 +832,7 @@ impl DistributedRuntime {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, discoverable = true))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -840,6 +840,7 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        discoverable: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -881,9 +882,11 @@ impl Endpoint {
         builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
+        let discoverable = discoverable.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder
                 .graceful_shutdown(graceful_shutdown)
+                .discoverable(discoverable)
                 .start()
                 .await
                 .map_err(to_pyerr)?;
