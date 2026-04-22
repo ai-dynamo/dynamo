@@ -255,17 +255,14 @@ class AudioFormatter:
             return self._error_response(request_id, "No audio generated")
 
         response_format = ctx.get("response_format")
+        output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
 
         try:
             start_time = time.time()
             audio_np, sample_rate = self._extract_audio_tensor(mm_output)
 
-            encode_fmt = (
-                "wav"
-                if response_format in (None, "url", "b64_json")
-                else response_format
-            )
+            encode_fmt = "wav" if output_format is None else output_format
             assert encode_fmt is not None
             audio_bytes, media_type = await asyncio.to_thread(
                 self._encode_audio, audio_np, sample_rate, encode_fmt, speed
@@ -288,10 +285,11 @@ class AudioFormatter:
                     audio_bytes,
                     self._media_http_url,
                 )
-                audio_data_obj = self._AudioData(url=url)
+                audio_data_obj = self._AudioData(output_format=encode_fmt, url=url)
             else:
                 audio_data_obj = self._AudioData(
-                    b64_json=base64.b64encode(audio_bytes).decode()
+                    output_format=encode_fmt,
+                    b64_json=base64.b64encode(audio_bytes).decode(),
                 )
 
             return NvAudioSpeechResponse(

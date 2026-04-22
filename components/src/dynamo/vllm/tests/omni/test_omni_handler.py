@@ -65,6 +65,7 @@ class TestEngineInputs:
         assert ei.fps == 0
         assert ei.sampling_params_list is None
         assert ei.response_format is None
+        assert ei.output_format is None
 
 
 class TestBuildEngineInputs:

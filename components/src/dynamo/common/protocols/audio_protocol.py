@@ -33,6 +33,12 @@ class NvCreateAudioSpeechRequest(BaseModel):
     voice: Optional[str] = None
     """Voice/speaker name (e.g., 'vivian', 'ryan', 'aiden')."""
 
+    data_source: Optional[str] = None
+    """How the generated data should be returned: 'url' or 'b64_json' (default: 'b64_json').
+    Note that in image and video generation, the 'response_format' is the equivalent of
+    this field. However, in audio generation, OpenAI specifies the 'response_format'
+    to be used for output format."""
+
     response_format: Optional[
         Literal["wav", "pcm", "flac", "mp3", "aac", "opus"]
     ] = "wav"
@@ -64,11 +70,14 @@ class NvCreateAudioSpeechRequest(BaseModel):
 class AudioData(BaseModel):
     """Audio data in response."""
 
+    output_format: str
+    """Actual codec used for this audio: 'wav', 'mp3', 'pcm', 'flac', 'aac', 'opus'."""
+
     url: Optional[str] = None
-    """URL of the generated audio (if response_format is 'url')."""
+    """URL of the generated audio (if data_source is 'url')."""
 
     b64_json: Optional[str] = None
-    """Base64-encoded audio data."""
+    """Base64-encoded audio data (if data_source is 'b64_json')."""
 
 
 class NvAudioSpeechResponse(BaseModel):

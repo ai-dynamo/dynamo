@@ -28,7 +28,14 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
-    /// Output format: "wav", "mp3", "pcm", "flac", "aac", "opus"
+    /// How the generated data should be returned: "url" or "b64_json" (default: "b64_json")
+    /// Note that in image and video generation, the 'response_format' is the equivalent of
+    /// this field. However, in audio generation, OpenAI specifies the 'response_format'
+    /// to be used for output format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_source: Option<String>,
+
+    /// Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
@@ -73,11 +80,14 @@ pub struct NvCreateAudioSpeechRequest {
 /// Audio data in response
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AudioData {
-    /// URL of the generated audio (if response_format is "url")
+    /// Actual codec used for this audio: "wav", "mp3", "pcm", "flac", "aac", "opus"
+    pub output_format: String,
+
+    /// URL of the generated audio (if data_source is "url")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
-    /// Base64-encoded audio data
+    /// Base64-encoded audio data (if data_source is "b64_json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
 }

@@ -2433,7 +2433,6 @@ async fn audio_speech(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let response_format = request.response_format.clone();
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
@@ -2494,13 +2493,14 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If response contains b64_json audio data, decode and return as binary
+    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
+    // decode and return binary with content-type from AudioData.output_format.
     // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
     if let Some(first) = response.data.first()
         && let Some(b64) = &first.b64_json
         && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
     {
-        let content_type = match response_format.as_deref().unwrap_or("wav") {
+        let content_type = match first.output_format.as_str() {
             "mp3" => "audio/mpeg",
             "flac" => "audio/flac",
             "pcm" => "audio/pcm",
