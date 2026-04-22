@@ -24,20 +24,15 @@ from .engine_args import (
     _build_candidate_engine_args,
     _build_router_config,
 )
-from .logging import (
-    ensure_dynamo_logging,
-    log_agg_state_finish,
-    log_agg_state_start,
-    log_dense_state_finish,
-    log_dense_state_start,
-)
+from .logging import ensure_dynamo_logging, log_state_finish, log_state_start
 from .models import (
     DenseAggReplayState,
     DenseReplayState,
+    ReplayConstraints,
+    ReplayObjective,
     SyntheticReplayWorkload,
     TraceReplayWorkload,
 )
-from .scoring import _violation_penalty
 
 
 def _run_replay_for_state(
@@ -127,7 +122,8 @@ def _evaluate_state(
     model: str,
     backend: str,
     system: str,
-    constraints: Mapping[str, float],
+    objective: ReplayObjective,
+    constraints: ReplayConstraints,
     cache: dict[DenseReplayState, dict[str, Any]],
 ) -> dict[str, Any]:
     ensure_dynamo_logging()
@@ -135,7 +131,7 @@ def _evaluate_state(
     if cached is not None:
         return cached
 
-    log_dense_state_start(state)
+    log_state_start(state)
 
     prefill_args = _build_candidate_engine_args(
         base_args=base_prefill_engine_args,
@@ -168,8 +164,8 @@ def _evaluate_state(
 
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
-    score = throughput
-    penalty = _violation_penalty(report, constraints, total_gpus_used)
+    score = objective.score(report)
+    penalty = constraints.violation_penalty(report, total_gpus_used)
     feasible = penalty == 0.0
     record = {
         **report,
@@ -177,10 +173,11 @@ def _evaluate_state(
         "total_gpus_used": total_gpus_used,
         "output_throughput_tok_s": throughput,
         "score": score,
+        "objective": objective.value,
         "feasible": feasible,
         "violation_penalty": penalty,
     }
-    log_dense_state_finish(
+    log_state_finish(
         state=state,
         report=report,
         constraints=constraints,
@@ -201,7 +198,8 @@ def _evaluate_agg_state(
     model: str,
     backend: str,
     system: str,
-    constraints: Mapping[str, float],
+    objective: ReplayObjective,
+    constraints: ReplayConstraints,
     cache: dict[DenseAggReplayState, dict[str, Any]],
 ) -> dict[str, Any]:
     ensure_dynamo_logging()
@@ -209,7 +207,7 @@ def _evaluate_agg_state(
     if cached is not None:
         return cached
 
-    log_agg_state_start(state)
+    log_state_start(state)
 
     engine_args = _build_agg_candidate_engine_args(
         base_args=base_engine_args,
@@ -232,8 +230,8 @@ def _evaluate_agg_state(
 
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
-    score = throughput
-    penalty = _violation_penalty(report, constraints, total_gpus_used)
+    score = objective.score(report)
+    penalty = constraints.violation_penalty(report, total_gpus_used)
     feasible = penalty == 0.0
     record = {
         **report,
@@ -241,10 +239,11 @@ def _evaluate_agg_state(
         "total_gpus_used": total_gpus_used,
         "output_throughput_tok_s": throughput,
         "score": score,
+        "objective": objective.value,
         "feasible": feasible,
         "violation_penalty": penalty,
     }
-    log_agg_state_finish(
+    log_state_finish(
         state=state,
         report=report,
         constraints=constraints,
@@ -274,6 +273,7 @@ def _evaluate_state_from_json_payloads(payload: Mapping[str, Any]) -> dict[str, 
         model=payload["model"],
         backend=payload["backend"],
         system=payload["system"],
+        objective=payload["objective"],
         constraints=payload["constraints"],
         cache={},
     )
@@ -294,6 +294,7 @@ def _evaluate_agg_state_from_json_payloads(
         model=payload["model"],
         backend=payload["backend"],
         system=payload["system"],
+        objective=payload["objective"],
         constraints=payload["constraints"],
         cache={},
     )
@@ -309,7 +310,8 @@ def _evaluate_states(
     model: str,
     backend: str,
     system: str,
-    constraints: Mapping[str, float],
+    objective: ReplayObjective,
+    constraints: ReplayConstraints,
     cache: dict[DenseReplayState, dict[str, Any]],
     max_parallel_evals: int,
     executor: Executor | None = None,
@@ -340,6 +342,7 @@ def _evaluate_states(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=constraints,
                 cache=cache,
             )
@@ -360,6 +363,7 @@ def _evaluate_states(
             "model": model,
             "backend": backend,
             "system": system,
+            "objective": objective,
             "constraints": constraints,
         }
         for state in uncached_states
@@ -388,7 +392,8 @@ def _evaluate_agg_states(
     model: str,
     backend: str,
     system: str,
-    constraints: Mapping[str, float],
+    objective: ReplayObjective,
+    constraints: ReplayConstraints,
     cache: dict[DenseAggReplayState, dict[str, Any]],
     max_parallel_evals: int,
     executor: Executor | None = None,
@@ -418,6 +423,7 @@ def _evaluate_agg_states(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=constraints,
                 cache=cache,
             )
@@ -436,6 +442,7 @@ def _evaluate_agg_states(
             "model": model,
             "backend": backend,
             "system": system,
+            "objective": objective,
             "constraints": constraints,
         }
         for state in uncached_states

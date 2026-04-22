@@ -11,7 +11,7 @@ from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 from dynamo.llm import MockEngineArgs
 
-from .models import SyntheticReplayWorkload, TraceReplayWorkload
+from .models import ReplayConstraints, SyntheticReplayWorkload, TraceReplayWorkload
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
 
@@ -31,11 +31,7 @@ def compare_aic_and_replay_disagg(
     constraints: Mapping[str, float] | None = None,
     max_parallel_evals: int = 1,
 ) -> dict[str, Any]:
-    ttft_constraint = None if constraints is None else constraints.get("mean_ttft_ms")
-    tpot_constraint = None if constraints is None else constraints.get("mean_tpot_ms")
-    request_latency_constraint = (
-        None if constraints is None else constraints.get("mean_e2e_latency_ms")
-    )
+    aic_constraints = ReplayConstraints.from_mapping(constraints, max_total_gpus)
     aic_task = TaskConfig(
         serving_mode="disagg",
         model_path=model,
@@ -44,13 +40,7 @@ def compare_aic_and_replay_disagg(
         total_gpus=max_total_gpus,
         isl=isl,
         osl=osl,
-        ttft=None if ttft_constraint is None else float(ttft_constraint),
-        tpot=None if tpot_constraint is None else float(tpot_constraint),
-        request_latency=(
-            None
-            if request_latency_constraint is None
-            else float(request_latency_constraint)
-        ),
+        **aic_constraints.aic_task_kwargs(),
     )
     aic_result = TaskRunner().run(aic_task)
     aic_df = aic_result.get("pareto_df", pd.DataFrame())

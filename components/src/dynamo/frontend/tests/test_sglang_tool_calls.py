@@ -467,6 +467,50 @@ class TestSingleChunkFallback:
         assert choice["finish_reason"] == "tool_calls"
 
 
+class TestMalformedToolCalls:
+    def test_incomplete_arguments_are_not_emitted(self):
+        class DummyTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "".join(chr(x) for x in token_ids)
+
+        class DummyToolCall:
+            def __init__(self, tool_index, name, parameters):
+                self.tool_index = tool_index
+                self.name = name
+                self.parameters = parameters
+
+        class DummyParser:
+            def parse_stream_chunk(self, text):
+                return "", [DummyToolCall(0, "get_weather", '{"city": "Paris"')]
+
+            def has_tool_call(self, text):
+                return "<tool_call>" in text
+
+            def parse_non_stream(self, text):
+                return "", []
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=DummyTokenizer(),
+            tool_call_parser=DummyParser(),
+            reasoning_parser=None,
+        )
+
+        malformed = (
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "Paris"}\n</tool_call>'
+        )
+        choice = post.process_output(
+            {
+                "token_ids": [ord(c) for c in malformed],
+                "finish_reason": "stop",
+            }
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "stop"
+        assert choice.get("delta", {}).get("tool_calls", []) == []
+
+
 # ---------------------------------------------------------------------------
 # JsonArrayParser path (tool_choice="required" / named function)
 # ---------------------------------------------------------------------------

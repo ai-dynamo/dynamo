@@ -90,7 +90,11 @@ def assemble_final_config(
        planner config so the planner runs AIC interpolation at bootstrap
        if the endpoint is unavailable.
     4. **Profile data** — attach interpolation-data ConfigMap when mocker
-       or planner-thorough is enabled.
+       or planner-thorough is enabled. The ConfigMap is only emitted when
+       the picked config is disaggregated AND the interpolation NPZ files
+       were produced on disk; rapid-mode deployments never emit it (the
+       planner uses AIC in-process or ``get_perf_metrics`` instead), and
+       agg picks skip interpolation entirely.
     """
     if not dgd_config:
         return dgd_config
@@ -519,6 +523,19 @@ def build_aic_interpolation_spec(
     * ``pre_deployment_sweeping_mode`` is not ``Rapid``
     * picks are missing
     * ``resolved_backend`` is not one AIC supports
+
+    .. note::
+        The spec only carries ``prefill_pick`` + ``decode_pick``, so the
+        caller in ``profile_sla.py`` gates this on a disaggregated pick
+        (``is_disagg_config``). When rapid AIC picks an aggregated config
+        and the override to disagg fails, ``aic_spec`` is ``None`` and the
+        planner has no AIC fallback — it relies solely on the
+        ``get_perf_metrics`` endpoint (``DYN_BENCHMARK_MODE``).
+
+        TODO: extend ``AICInterpolationSpec`` with an ``agg_pick`` so
+        throughput-scaling on an aggregated deployment has a matching
+        AIC bootstrap path (planner + mocker + thorough NPZ). Tracking
+        via the wider agg+throughput-scaling rework.
     """
     planner = (
         dgdr.features.planner  # type: ignore[union-attr]

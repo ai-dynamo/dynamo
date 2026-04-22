@@ -495,6 +495,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ##################################
 ##### wheel_builder ##############
 ##################################
+{% if "nixl_ref" in context[framework] %}
 # Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
 # Runtime templates COPY from this stage.
 
@@ -626,3 +627,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+{% else %}
+# SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
+# build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo
+# wheels and build tools from a common wheel_builder stage name.
+# SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
+# absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
+FROM runtime_wheel_builder AS wheel_builder
+{% endif %}
