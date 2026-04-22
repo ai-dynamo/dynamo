@@ -1,0 +1,294 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kv-cache-tester-flexkv
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        imagePullSecrets:
+        - name: ngc-secret
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - kv-cache-tester-flexkv-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv-runtime
+          imagePullPolicy: Always
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: HF_HOME
+            value: /models
+          volumeMounts:
+          - mountPath: /models
+            name: shared-model-cache
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+      replicas: 1
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        imagePullSecrets:
+        - name: ngc-secret
+        mainContainer:
+          # Alternative --kv-transfer-config values (commented — replace the active one below to switch):
+          # NIXL only:
+          # --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model "${MODEL_NAME}" \
+              --served-model-name "Qwen/Qwen3-8B" \
+              --tensor-parallel-size 4 \
+              --max-model-len 32768 \
+              --max-num-seqs 128 \
+              --max-num-batched-tokens 16384 \
+              --enable-chunked-prefill \
+              --gpu-memory-utilization 0.75 \
+              --enable-prefix-caching \
+              --trust-remote-code \
+              --is-prefill-worker \
+              --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' 2>&1 | tee -a /workspace/prefill-flexkv.log
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv-runtime
+          imagePullPolicy: Always
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: NCCL_DEBUG
+            value: INFO
+          # MNNVL disabled: AWS GB200 nodes don't expose /dev/nvidia-caps-imex-channels,
+          # so NCCL's MNNVL handshake fails with "CUDA 800 operation not permitted".
+          # Single-node TP works fine over NVLink without it.
+          - name: NCCL_MNNVL_ENABLE
+            value: "0"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_NVLS_ENABLE
+            value: "1"
+          - name: NVIDIA_GDRCOPY
+            value: "1"
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: "0"
+          # NCCL_SOCKET_IFNAME / GLOO_SOCKET_IFNAME with value "eth0" crash Gloo init
+          # on AWS EKS hostNetwork pods — the host's primary NIC is not named "eth0".
+          # Leaving unset so NCCL/Gloo auto-select the correct interface.
+          # - name: NCCL_SOCKET_IFNAME
+          #   value: eth0
+          # - name: GLOO_SOCKET_IFNAME
+          #   value: eth0
+          - name: NCCL_STORE_TIMEOUT
+            value: "7200"
+          - name: ENROOT_ALLOW_DEV
+            value: "yes"
+          - name: NCCL_GRAPH_MIXING_SUPPORT
+            value: "0"
+          - name: MODEL_NAME
+            value: /models/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+          - name: HF_HOME
+            value: /models
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: "[\"generate\"]"
+          - name: DYN_LOG
+            value: "debug"
+          - name: VLLM_LOGGING_LEVEL
+            value: "DEBUG"
+          - name: DYNAMO_USE_FLEXKV
+            value: "1"
+          - name: FLEXKV_CPU_CACHE_GB
+            value: "30"
+          - name: FLEXKV_SERVER_RECV_PORT
+            value: "ipc:///tmp/flexkv_server_0"
+          - name: UCX_IB_ENABLE
+            value: "n"
+          - name: UCX_TLS
+            value: "tcp,sm,cuda_copy"
+          # - name: FLEXKV_SSD_CACHE_GB
+          #   value: "500"
+          # - name: FLEXKV_SSD_CACHE_DIR
+          #   value: "/tmp/flexkv_ssd_cache"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add: ["SYS_PTRACE", "IPC_LOCK"]
+          volumeMounts:
+          - mountPath: /models
+            name: shared-model-cache
+            readOnly: true
+          - mountPath: /dev/infiniband
+            name: dev-infiniband
+          - mountPath: /run/udev
+            name: udev
+            readOnly: true
+          workingDir: /workspace/
+        hostNetwork: true
+        hostIPC: true
+        dnsPolicy: ClusterFirstWithHostNet
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - hostPath:
+            path: /dev/infiniband
+            type: Directory
+          name: dev-infiniband
+        - hostPath:
+            path: /run/udev
+            type: Directory
+          name: udev
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        imagePullSecrets:
+        - name: ngc-secret
+        mainContainer:
+          # Alternative --kv-transfer-config values (commented — replace the active one below to switch):
+          # NIXL only:
+          # --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model "${MODEL_NAME}" \
+              --served-model-name "Qwen/Qwen3-8B" \
+              --tensor-parallel-size 4 \
+              --max-model-len 32768 \
+              --max-num-seqs 128 \
+              --max-num-batched-tokens 16384 \
+              --enable-chunked-prefill \
+              --gpu-memory-utilization 0.75 \
+              --enable-prefix-caching \
+              --trust-remote-code \
+              --is-decode-worker \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' 2>&1 | tee -a /workspace/decode-flexkv.log
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv-runtime
+          imagePullPolicy: Always
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: NCCL_DEBUG
+            value: INFO
+          # MNNVL disabled: AWS GB200 nodes don't expose /dev/nvidia-caps-imex-channels,
+          # so NCCL's MNNVL handshake fails with "CUDA 800 operation not permitted".
+          # Single-node TP works fine over NVLink without it.
+          - name: NCCL_MNNVL_ENABLE
+            value: "0"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_NVLS_ENABLE
+            value: "1"
+          - name: NVIDIA_GDRCOPY
+            value: "1"
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: "0"
+          # NCCL_SOCKET_IFNAME / GLOO_SOCKET_IFNAME with value "eth0" crash Gloo init
+          # on AWS EKS hostNetwork pods — the host's primary NIC is not named "eth0".
+          # Leaving unset so NCCL/Gloo auto-select the correct interface.
+          # - name: NCCL_SOCKET_IFNAME
+          #   value: eth0
+          # - name: GLOO_SOCKET_IFNAME
+          #   value: eth0
+          - name: NCCL_STORE_TIMEOUT
+            value: "7200"
+          - name: ENROOT_ALLOW_DEV
+            value: "yes"
+          - name: NCCL_GRAPH_MIXING_SUPPORT
+            value: "0"
+          - name: MODEL_NAME
+            value: /models/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+          - name: HF_HOME
+            value: /models
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: "[\"generate\"]"
+          - name: DYN_LOG
+            value: "debug"
+          - name: VLLM_LOGGING_LEVEL
+            value: "DEBUG"
+          - name: UCX_IB_ENABLE
+            value: "n"
+          - name: UCX_TLS
+            value: "tcp,sm,cuda_copy"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add: ["SYS_PTRACE", "IPC_LOCK"]
+          volumeMounts:
+          - mountPath: /models
+            name: shared-model-cache
+            readOnly: true
+          - mountPath: /dev/infiniband
+            name: dev-infiniband
+          - mountPath: /run/udev
+            name: udev
+            readOnly: true
+          workingDir: /workspace/
+        hostNetwork: true
+        hostIPC: true
+        dnsPolicy: ClusterFirstWithHostNet
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - hostPath:
+            path: /dev/infiniband
+            type: Directory
+          name: dev-infiniband
+        - hostPath:
+            path: /run/udev
+            type: Directory
+          name: udev
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

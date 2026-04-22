@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Layers FlexKV on top of the standard Dynamo vLLM runtime image.
+#
+# Build:
+#   # First build the base dynamo vllm image (if you don't already have one):
+#   docker build -f container/rendered.Dockerfile -t dynamo:latest-vllm .
+#
+#   # Then layer FlexKV on top:
+#   docker build -f container/Dockerfile.flexkv -t dynamo:latest-vllm-flexkv .
+#
+# Usage:
+#   See examples/backends/vllm/deploy/disagg_flexkv.yaml
+#   or  examples/backends/vllm/launch/agg_flexkv.sh
+
+ARG BASE_IMAGE=dynamo:latest-vllm
+
+FROM ${BASE_IMAGE}
+
+USER root
+
+# Install FlexKV system dependencies:
+#   liburing-dev  — io_uring support for async disk I/O (SSD offloading)
+#   libxxhash-dev — fast hashing for block identification
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        liburing-dev \
+        libxxhash-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+USER dynamo
+
+# Install FlexKV Python package
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install flexkv
