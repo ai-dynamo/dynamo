@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
-use registry::WorkerRegistry;
+use registry::{RecoveryResult, WorkerRegistry};
 use server::{AppState, create_router};
 
 pub struct IndexerConfig {
@@ -149,8 +149,8 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
 async fn wait_for_min_initial_workers(
     registry: &WorkerRegistry,
     cancel_token: &CancellationToken,
+    min_initial_workers: usize,
 ) -> anyhow::Result<()> {
-    let min_initial_workers = min_initial_workers_from_env()?;
     if min_initial_workers == 0 {
         return Ok(());
     }
@@ -177,6 +177,16 @@ async fn run_common(
     config: &IndexerConfig,
     registry: &Arc<WorkerRegistry>,
     cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    let min_initial_workers = min_initial_workers_from_env()?;
+    run_common_with_startup(config, registry, cancel_token, min_initial_workers).await
+}
+
+async fn run_common_with_startup(
+    config: &IndexerConfig,
+    registry: &Arc<WorkerRegistry>,
+    cancel_token: CancellationToken,
+    min_initial_workers: usize,
 ) -> anyhow::Result<()> {
     if let Some(ref workers_str) = config.workers {
         let block_size = config.block_size.ok_or_else(|| {
@@ -209,19 +219,49 @@ async fn run_common(
         })
         .unwrap_or_default();
 
-    if !peers.is_empty() {
-        match recovery::recover_from_peers(&peers, registry).await {
-            Ok(true) => tracing::info!("P2P recovery completed"),
-            Ok(false) => tracing::warn!("no reachable peers, starting with empty state"),
-            Err(e) => tracing::warn!(error = %e, "P2P recovery failed, starting with empty state"),
-        }
-        for peer in &peers {
-            registry.register_peer(peer.clone());
-        }
+    for peer in &peers {
+        registry.register_peer(peer.clone());
     }
 
-    wait_for_min_initial_workers(registry, &cancel_token).await?;
-    registry.signal_ready();
+    registry.configure_startup(min_initial_workers, !peers.is_empty());
+    if peers.is_empty() && min_initial_workers == 0 {
+        registry.signal_ready();
+    } else {
+        let startup_registry = registry.clone();
+        let startup_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            if !peers.is_empty() {
+                let result = match recovery::recover_from_peers(&peers, &startup_registry).await {
+                    Ok(true) => {
+                        tracing::info!("P2P recovery completed");
+                        RecoveryResult::Succeeded
+                    }
+                    Ok(false) => {
+                        tracing::warn!("no reachable peers, starting with empty state");
+                        RecoveryResult::NoReachablePeers
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "P2P recovery failed, starting with empty state");
+                        RecoveryResult::Failed
+                    }
+                };
+                startup_registry.complete_recovery(result);
+            }
+
+            if let Err(error) = wait_for_min_initial_workers(
+                &startup_registry,
+                &startup_cancel,
+                min_initial_workers,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, "startup readiness gate ended before completion");
+                return;
+            }
+
+            startup_registry.signal_ready();
+        });
+    }
 
     #[cfg(feature = "metrics")]
     let prom_registry = {
@@ -287,5 +327,69 @@ mod tests {
         assert!(validate_zmq_endpoint("tcp://:5558").is_err());
         assert!(validate_zmq_endpoint("udp://host:5558").is_err());
         assert!(validate_zmq_endpoint("not-an-endpoint").is_err());
+    }
+
+    #[tokio::test]
+    async fn run_common_exposes_ready_while_waiting_for_min_workers() {
+        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+
+        let registry = Arc::new(WorkerRegistry::new(1));
+        let cancel_token = CancellationToken::new();
+        let config = IndexerConfig {
+            block_size: None,
+            port,
+            threads: 1,
+            workers: None,
+            model_name: "test-model".to_string(),
+            tenant_id: "default".to_string(),
+            peers: None,
+        };
+
+        let registry_for_task = registry.clone();
+        let cancel_for_task = cancel_token.clone();
+        let server = tokio::spawn(async move {
+            run_common_with_startup(&config, &registry_for_task, cancel_for_task, 1).await
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let base_url = format!("http://127.0.0.1:{port}");
+
+        let mut health_ok = false;
+        for _ in 0..20 {
+            match client.get(format!("{base_url}/health")).send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::OK => {
+                    health_ok = true;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        assert!(health_ok, "HTTP server never became reachable");
+
+        let ready_response = client
+            .get(format!("{base_url}/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            ready_response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let ready_body: serde_json::Value = ready_response.json().await.unwrap();
+        assert_eq!(
+            ready_body,
+            serde_json::json!({
+                "ready": false,
+                "reason": "waiting_for_min_initial_workers"
+            })
+        );
+
+        cancel_token.cancel();
+        server.await.unwrap().unwrap();
     }
 }

@@ -113,6 +113,72 @@ pub struct WorkerInfo {
     listeners: HashMap<u32, ListenerInfo>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadyReason {
+    RecoveringFromPeer,
+    WaitingForMinInitialWorkers,
+    ListenersPending,
+    ListenersFailed,
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryResult {
+    Succeeded,
+    NoReachablePeers,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ReadinessSnapshot {
+    pub ready: bool,
+    pub reason: ReadyReason,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RecoverySnapshot {
+    pub enabled: bool,
+    pub in_progress: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<RecoveryResult>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkerCountSnapshot {
+    pub required_initial: usize,
+    pub registered: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ListenerCountSnapshot {
+    pub pending: usize,
+    pub active: usize,
+    pub paused: usize,
+    pub failed: usize,
+}
+
+impl ListenerCountSnapshot {
+    fn from_counts(counts: [usize; 4]) -> Self {
+        Self {
+            pending: counts[ListenerStatus::Pending.metric_index()],
+            active: counts[ListenerStatus::Active.metric_index()],
+            paused: counts[ListenerStatus::Paused.metric_index()],
+            failed: counts[ListenerStatus::Failed.metric_index()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatusSnapshot {
+    pub ready: bool,
+    pub reason: ReadyReason,
+    pub recovery: RecoverySnapshot,
+    pub workers: WorkerCountSnapshot,
+    pub listeners: ListenerCountSnapshot,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ListenerControlError {
     #[error("instance {instance_id} not found")]
@@ -144,6 +210,15 @@ struct ListenerRuntime {
     last_error: Option<String>,
     cancel_token: Option<CancellationToken>,
     generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StartupState {
+    recovery_enabled: bool,
+    recovery_in_progress: bool,
+    recovery_last_result: Option<RecoveryResult>,
+    min_initial_workers: usize,
+    startup_gate_open: bool,
 }
 
 pub struct ListenerRecord {
@@ -317,6 +392,7 @@ pub struct WorkerRegistry {
     num_threads: usize,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
+    startup: Mutex<StartupState>,
 }
 
 impl WorkerRegistry {
@@ -330,15 +406,61 @@ impl WorkerRegistry {
             num_threads,
             ready_tx,
             ready_rx,
+            startup: Mutex::new(StartupState::default()),
         }
     }
 
+    pub fn configure_startup(&self, min_initial_workers: usize, recovery_enabled: bool) {
+        let mut startup = self.startup.lock();
+        startup.min_initial_workers = min_initial_workers;
+        startup.recovery_enabled = recovery_enabled;
+        startup.recovery_in_progress = recovery_enabled;
+        startup.recovery_last_result = None;
+        startup.startup_gate_open = false;
+    }
+
+    pub fn complete_recovery(&self, result: RecoveryResult) {
+        let mut startup = self.startup.lock();
+        startup.recovery_in_progress = false;
+        startup.recovery_last_result = Some(result);
+    }
+
     pub fn signal_ready(&self) {
+        self.startup.lock().startup_gate_open = true;
         let _ = self.ready_tx.send(true);
     }
 
     pub fn ready_rx(&self) -> watch::Receiver<bool> {
         self.ready_rx.clone()
+    }
+
+    pub fn readiness_snapshot(&self) -> ReadinessSnapshot {
+        let snapshot = self.status_snapshot();
+        ReadinessSnapshot {
+            ready: snapshot.ready,
+            reason: snapshot.reason,
+        }
+    }
+
+    pub fn status_snapshot(&self) -> StatusSnapshot {
+        let startup = *self.startup.lock();
+        let registered_workers = self.workers.len();
+        let listener_counts = self.listener_counts();
+        let reason = Self::ready_reason(startup, registered_workers, &listener_counts);
+        StatusSnapshot {
+            ready: reason == ReadyReason::Ready,
+            reason,
+            recovery: RecoverySnapshot {
+                enabled: startup.recovery_enabled,
+                in_progress: startup.recovery_in_progress,
+                last_result: startup.recovery_last_result,
+            },
+            workers: WorkerCountSnapshot {
+                required_initial: startup.min_initial_workers,
+                registered: registered_workers,
+            },
+            listeners: listener_counts,
+        }
     }
 
     pub fn register_peer(&self, url: String) {
@@ -723,6 +845,58 @@ impl WorkerRegistry {
 
         self.indexers.remove(key);
     }
+
+    fn listener_counts(&self) -> ListenerCountSnapshot {
+        let mut counts = [0_usize; 4];
+        for entry in self.workers.iter() {
+            for record in entry.value().listeners.values() {
+                counts[record.status().metric_index()] += 1;
+            }
+        }
+        ListenerCountSnapshot::from_counts(counts)
+    }
+
+    fn ready_reason(
+        startup: StartupState,
+        registered_workers: usize,
+        listener_counts: &ListenerCountSnapshot,
+    ) -> ReadyReason {
+        if startup.recovery_in_progress {
+            ReadyReason::RecoveringFromPeer
+        } else if !startup.startup_gate_open && registered_workers < startup.min_initial_workers {
+            ReadyReason::WaitingForMinInitialWorkers
+        } else if listener_counts.failed > 0 {
+            ReadyReason::ListenersFailed
+        } else if listener_counts.pending > 0 {
+            ReadyReason::ListenersPending
+        } else {
+            ReadyReason::Ready
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_listener_status_for_test(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        status: ListenerStatus,
+        last_error: Option<&str>,
+    ) {
+        let entry = self
+            .workers
+            .get(&instance_id)
+            .unwrap_or_else(|| panic!("worker {instance_id} not found"));
+        let record = entry
+            .listeners
+            .get(&dp_rank)
+            .unwrap_or_else(|| panic!("worker {instance_id} dp_rank {dp_rank} not found"));
+        let mut runtime = record.runtime.lock();
+        runtime.status = status;
+        runtime.last_error = last_error.map(str::to_string);
+        if matches!(status, ListenerStatus::Failed | ListenerStatus::Paused) {
+            runtime.cancel_token = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -895,5 +1069,91 @@ mod tests {
             !registry.watermarks.contains_key(&(1, 0)),
             "watermark should be removed after deregister_all_tenants"
         );
+    }
+
+    #[test]
+    fn readiness_snapshot_reports_recovery_before_worker_gate() {
+        let registry = test_registry();
+        registry.configure_startup(2, true);
+
+        let snapshot = registry.readiness_snapshot();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.reason, ReadyReason::RecoveringFromPeer);
+
+        registry.complete_recovery(RecoveryResult::Succeeded);
+
+        let snapshot = registry.readiness_snapshot();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.reason, ReadyReason::WaitingForMinInitialWorkers);
+
+        let status = registry.status_snapshot();
+        assert_eq!(status.recovery.last_result, Some(RecoveryResult::Succeeded));
+        assert_eq!(status.workers.required_initial, 2);
+        assert_eq!(status.workers.registered, 0);
+    }
+
+    #[tokio::test]
+    async fn readiness_snapshot_reports_listener_pending_and_ready() {
+        let registry = test_registry();
+        registry.configure_startup(1, false);
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15563".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = registry.readiness_snapshot();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.reason, ReadyReason::ListenersPending);
+
+        registry.signal_ready();
+
+        let snapshot = registry.readiness_snapshot();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.reason, ReadyReason::ListenersPending);
+
+        registry.force_listener_status_for_test(1, 0, ListenerStatus::Active, None);
+
+        let snapshot = registry.readiness_snapshot();
+        assert!(snapshot.ready);
+        assert_eq!(snapshot.reason, ReadyReason::Ready);
+    }
+
+    #[tokio::test]
+    async fn readiness_snapshot_reports_listener_failures() {
+        let registry = test_registry();
+        registry.configure_startup(0, false);
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15564".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        registry.force_listener_status_for_test(1, 0, ListenerStatus::Failed, Some("boom"));
+
+        let snapshot = registry.readiness_snapshot();
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.reason, ReadyReason::ListenersFailed);
+
+        let status = registry.status_snapshot();
+        assert_eq!(status.listeners.failed, 1);
+        assert_eq!(status.listeners.pending, 0);
     }
 }

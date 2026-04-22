@@ -377,6 +377,20 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!(result)))
 }
 
+async fn handle_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let snapshot = state.registry.readiness_snapshot();
+    let status = if snapshot.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(snapshot))
+}
+
+async fn handle_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (StatusCode::OK, Json(state.registry.status_snapshot()))
+}
+
 async fn handle_health() -> StatusCode {
     StatusCode::OK
 }
@@ -413,6 +427,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
         .route("/peers", get(list_peers))
+        .route("/ready", get(handle_ready))
+        .route("/status", get(handle_status))
         .route("/health", get(handle_health));
 
     let router = router
@@ -437,10 +453,27 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use super::super::registry::{ListenerStatus, RecoveryResult};
     use super::*;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
+    use serde_json::Value;
     use tower::ServiceExt;
+
+    fn test_app() -> (Arc<WorkerRegistry>, Router) {
+        let registry = Arc::new(WorkerRegistry::new(1));
+        let app = create_router(Arc::new(AppState {
+            registry: registry.clone(),
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+        (registry, app)
+    }
+
+    async fn json_body(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
 
     fn oversized_query_body() -> String {
         let mut body = String::from(r#"{"token_ids":["#);
@@ -460,11 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_rejects_request_bodies_over_limit() {
-        let app = create_router(Arc::new(AppState {
-            registry: Arc::new(WorkerRegistry::new(1)),
-            #[cfg(feature = "metrics")]
-            prom_registry: prometheus::Registry::new(),
-        }));
+        let (_, app) = test_app();
 
         let response = app
             .oneshot(
@@ -479,5 +508,178 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn ready_endpoint_reports_recovery_in_progress() {
+        let (registry, app) = test_app();
+        registry.configure_startup(2, true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = json_body(response).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"ready": false, "reason": "recovering_from_peer"})
+        );
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_reports_worker_gate_and_listener_counts() {
+        let (registry, app) = test_app();
+        registry.configure_startup(2, false);
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:16557".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = json_body(response).await;
+        assert_eq!(body["ready"], Value::Bool(false));
+        assert_eq!(
+            body["reason"],
+            Value::String("waiting_for_min_initial_workers".to_string())
+        );
+        assert_eq!(
+            body["workers"],
+            serde_json::json!({"required_initial": 2, "registered": 1})
+        );
+        assert_eq!(
+            body["listeners"],
+            serde_json::json!({"pending": 1, "active": 0, "paused": 0, "failed": 0})
+        );
+        assert_eq!(
+            body["recovery"],
+            serde_json::json!({"enabled": false, "in_progress": false})
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_endpoint_reports_listener_failure_after_startup() {
+        let (registry, app) = test_app();
+        registry.configure_startup(0, false);
+        registry.signal_ready();
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:16558".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        registry.force_listener_status_for_test(1, 0, ListenerStatus::Failed, Some("boom"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = json_body(response).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"ready": false, "reason": "listeners_failed"})
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_endpoint_reports_ready_and_health_stays_ok() {
+        let (registry, app) = test_app();
+        registry.configure_startup(0, true);
+        registry.complete_recovery(RecoveryResult::Succeeded);
+        registry.signal_ready();
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:16559".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        registry.force_listener_status_for_test(1, 0, ListenerStatus::Active, None);
+
+        let ready_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready_response.status(), StatusCode::OK);
+        let ready_body = json_body(ready_response).await;
+        assert_eq!(
+            ready_body,
+            serde_json::json!({"ready": true, "reason": "ready"})
+        );
+
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_body = json_body(status_response).await;
+        assert_eq!(
+            status_body["recovery"]["last_result"],
+            Value::String("succeeded".to_string())
+        );
+
+        let health_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health_response.status(), StatusCode::OK);
     }
 }

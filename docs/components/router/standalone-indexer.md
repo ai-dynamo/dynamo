@@ -133,9 +133,64 @@ Leave it unset or set it to `0` to disable the startup wait.
 
 ## HTTP API
 
+### `GET /ready` — Readiness check
+
+Returns a compact readiness snapshot. The HTTP status is `200 OK` when ready and
+`503 Service Unavailable` otherwise.
+
+```bash
+curl http://localhost:8090/ready
+```
+
+```json
+{
+  "ready": false,
+  "reason": "waiting_for_min_initial_workers"
+}
+```
+
+`reason` is one of:
+
+- `recovering_from_peer`
+- `waiting_for_min_initial_workers`
+- `listeners_pending`
+- `listeners_failed`
+- `ready`
+
+### `GET /status` — Startup and listener snapshot
+
+Returns a small JSON snapshot for deploy tooling and debugging.
+
+```bash
+curl http://localhost:8090/status
+```
+
+```json
+{
+  "ready": false,
+  "reason": "listeners_pending",
+  "recovery": {
+    "enabled": true,
+    "in_progress": false,
+    "last_result": "succeeded"
+  },
+  "workers": {
+    "required_initial": 2,
+    "registered": 2
+  },
+  "listeners": {
+    "pending": 1,
+    "active": 1,
+    "paused": 0,
+    "failed": 0
+  }
+}
+```
+
 ### `GET /health` — Liveness check
 
-Returns `200 OK` unconditionally.
+Returns `200 OK` unconditionally, even while `/ready` is still reporting a startup gate.
+Use `/health` for liveness and `/ready` for traffic-gating decisions.
 
 ```bash
 curl http://localhost:8090/health
