@@ -87,6 +87,17 @@ def stubbed_env(monkeypatch):
             call_log.append("model_engine_init")
 
     class FakeKvCacheCreator:
+        def __init__(self):
+            self._max_num_tokens = 8192
+            self._max_batch_size = 8
+            self._dummy_reqs = None
+            self._model_engine = None
+            self._draft_model_engine = None
+            self._llm_args = types.SimpleNamespace(max_num_tokens=8192)
+
+        def try_prepare_estimation(self):
+            return True
+
         def build_managers(self, _resources, estimating_kv_cache):
             call_log.append(f"build_managers:{estimating_kv_cache}")
 
@@ -352,14 +363,73 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
     py_executor_creator = stubbed_env["py_executor_creator"]
     call_log = stubbed_env["call_log"]
 
-    model_engine = types.SimpleNamespace(max_num_tokens=8192)
-    draft_model_engine = types.SimpleNamespace(max_num_tokens=4096)
+    model_llm_args = types.SimpleNamespace(max_num_tokens=8192, cuda_graph_config=None)
+    draft_llm_args = types.SimpleNamespace(max_num_tokens=4096, cuda_graph_config=None)
+    model_engine = types.SimpleNamespace(
+        max_num_tokens=8192,
+        llm_args=model_llm_args,
+        spec_metadata="model-spec",
+        attn_metadata="model-attn",
+    )
+    draft_model_engine = types.SimpleNamespace(
+        max_num_tokens=4096,
+        llm_args=draft_llm_args,
+        spec_metadata="draft-spec",
+        attn_metadata="draft-attn",
+    )
     drafter = types.SimpleNamespace(draft_model_engine=draft_model_engine)
+
+    class FakeKvCacheCreator:
+        def __init__(self):
+            self._max_num_tokens = 8192
+            self._max_batch_size = 8
+            self._dummy_reqs = ["stale-8192"]
+            self._model_engine = model_engine
+            self._draft_model_engine = draft_model_engine
+            self._llm_args = model_llm_args
+
+        def try_prepare_estimation(self):
+            call_log.append(
+                f"try_prepare_estimation:max={self._max_num_tokens}:dummy={self._dummy_reqs}"
+            )
+            if self._dummy_reqs is None:
+                self._dummy_reqs = [f"req-{self._max_num_tokens}"]
+            call_log.append(
+                f"after_try_prepare:max={self._max_num_tokens}:dummy={self._dummy_reqs}"
+            )
+            return True
+
+        def build_managers(self, _resources, estimating_kv_cache):
+            call_log.append(
+                "build_managers:"
+                f"{estimating_kv_cache}:creator={self._max_num_tokens}:"
+                f"model={model_engine.max_num_tokens}:model_llm={model_llm_args.max_num_tokens}:"
+                f"draft={draft_model_engine.max_num_tokens}:draft_llm={draft_llm_args.max_num_tokens}"
+            )
+
+        def configure_kv_cache_capacity(self, py_executor):
+            call_log.append(
+                "configure_kv_cache_capacity:"
+                f"creator={self._max_num_tokens}:"
+                f"model={model_engine.max_num_tokens}:model_llm={model_llm_args.max_num_tokens}:"
+                f"draft={draft_model_engine.max_num_tokens}:draft_llm={draft_llm_args.max_num_tokens}:"
+                f"dummy={self._dummy_reqs}"
+            )
+            py_executor.start_worker()
+
+        def teardown_managers(self, _resources):
+            call_log.append("teardown_managers")
+
+    py_executor_creator.KvCacheCreator = FakeKvCacheCreator
 
     def fake_create_py_executor_instance(*args, name="executor", **kwargs):
         call_log.append(
-            f"create_py_executor_instance:{name}:model={kwargs['model_engine'].max_num_tokens}:"
-            f"draft={getattr(kwargs.get('drafter'), 'draft_model_engine', None).max_num_tokens}"
+            "create_py_executor_instance:"
+            f"{name}:model={kwargs['model_engine'].max_num_tokens}:"
+            f"model_llm={kwargs['model_engine'].llm_args.max_num_tokens}:"
+            f"draft={getattr(kwargs.get('drafter'), 'draft_model_engine', None).max_num_tokens}:"
+            f"draft_llm={getattr(kwargs.get('drafter'), 'draft_model_engine', None).llm_args.max_num_tokens}:"
+            f"arg={kwargs['max_num_tokens']}"
         )
         return py_executor_creator.PyExecutor(name)
 
@@ -369,23 +439,34 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
         kv_cache_creator = py_executor_creator.KvCacheCreator()
 
         call_log.append("create_py_executor")
-        py_executor_creator.PyTorchModelEngine()
-        kv_cache_creator.build_managers({}, True)
+        estimating_kv_cache = kv_cache_creator.try_prepare_estimation()
+        call_log.append(f"estimating_kv_cache={estimating_kv_cache}")
+        kv_cache_creator.build_managers({}, estimating_kv_cache)
         call_log.append("temp_executor_created")
         py_executor = py_executor_creator.create_py_executor_instance(
             name="temp",
             model_engine=model_engine,
             drafter=drafter,
             max_batch_size=8,
+            max_num_tokens=8192,
         )
         call_log.append(
-            f"after_temp_restore:model={model_engine.max_num_tokens}:draft={draft_model_engine.max_num_tokens}"
+            "after_temp_create:"
+            f"model={model_engine.max_num_tokens}:model_llm={model_llm_args.max_num_tokens}:"
+            f"draft={draft_model_engine.max_num_tokens}:draft_llm={draft_llm_args.max_num_tokens}:"
+            f"creator={kv_cache_creator._max_num_tokens}:dummy={kv_cache_creator._dummy_reqs}"
         )
-        py_executor.start_worker()
         kv_cache_creator.configure_kv_cache_capacity(py_executor)
         kv_cache_creator.teardown_managers({})
-        del py_executor
         py_executor_creator.gc.collect()
+        call_log.append(
+            "after_gc_restore:"
+            f"model={model_engine.max_num_tokens}:model_llm={model_llm_args.max_num_tokens}:"
+            f"draft={draft_model_engine.max_num_tokens}:draft_llm={draft_llm_args.max_num_tokens}:"
+            f"creator={kv_cache_creator._max_num_tokens}:dummy={kv_cache_creator._dummy_reqs}:"
+            f"model_spec={model_engine.spec_metadata}:model_attn={model_engine.attn_metadata}:"
+            f"draft_spec={draft_model_engine.spec_metadata}:draft_attn={draft_model_engine.attn_metadata}"
+        )
         kv_cache_creator.build_managers({}, False)
         call_log.append("final_executor_created")
         final_executor = py_executor_creator.create_py_executor_instance(
@@ -393,9 +474,15 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
             model_engine=model_engine,
             drafter=drafter,
             max_batch_size=8,
+            max_num_tokens=8192,
         )
         call_log.append(
-            f"after_final_create:model={model_engine.max_num_tokens}:draft={draft_model_engine.max_num_tokens}"
+            "after_final_create:"
+            f"model={model_engine.max_num_tokens}:model_llm={model_llm_args.max_num_tokens}:"
+            f"draft={draft_model_engine.max_num_tokens}:draft_llm={draft_llm_args.max_num_tokens}:"
+            f"creator={kv_cache_creator._max_num_tokens}:dummy={kv_cache_creator._dummy_reqs}:"
+            f"model_spec={model_engine.spec_metadata}:model_attn={model_engine.attn_metadata}:"
+            f"draft_spec={draft_model_engine.spec_metadata}:draft_attn={draft_model_engine.attn_metadata}"
         )
         final_executor.start_worker()
         return final_executor
@@ -428,21 +515,24 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
     assert call_log == [
         "setup:{'gms_read_only': True}",
         "create_py_executor",
-        "model_engine_init",
-        "build_managers:True",
+        "try_prepare_estimation:max=8:dummy=None",
+        "after_try_prepare:max=8:dummy=['req-8']",
+        "estimating_kv_cache=True",
+        "build_managers:True:creator=8:model=8:model_llm=8:draft=8:draft_llm=8",
         "temp_executor_created",
-        "create_py_executor_instance:temp:model=8:draft=8",
-        "after_temp_restore:model=8192:draft=4096",
+        "create_py_executor_instance:temp:model=8:model_llm=8:draft=8:draft_llm=8:arg=8",
+        "after_temp_create:model=8:model_llm=8:draft=8:draft_llm=8:creator=8:dummy=['req-8']",
+        "configure_kv_cache_capacity:creator=8:model=8:model_llm=8:draft=8:draft_llm=8:dummy=['req-8']",
         "start_worker:temp",
-        "configure_kv_cache_capacity",
         "teardown_managers",
         "gc_collect",
         "clear_cublas_workspaces",
         "wait_for_activation",
-        "build_managers:False",
+        "after_gc_restore:model=8192:model_llm=8192:draft=4096:draft_llm=4096:creator=8192:dummy=None:model_spec=None:model_attn=None:draft_spec=None:draft_attn=None",
+        "build_managers:False:creator=8192:model=8192:model_llm=8192:draft=4096:draft_llm=4096",
         "final_executor_created",
-        "create_py_executor_instance:final:model=8192:draft=4096",
-        "after_final_create:model=8192:draft=4096",
+        "create_py_executor_instance:final:model=8192:model_llm=8192:draft=4096:draft_llm=4096:arg=8192",
+        "after_final_create:model=8192:model_llm=8192:draft=4096:draft_llm=4096:creator=8192:dummy=None:model_spec=None:model_attn=None:draft_spec=None:draft_attn=None",
         "start_worker:final",
     ]
 

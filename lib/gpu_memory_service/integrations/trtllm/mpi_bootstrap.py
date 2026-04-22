@@ -125,6 +125,9 @@ def install_executor_finalize_hook() -> None:
     original_create_py_executor_instance = (
         _py_executor_creator.create_py_executor_instance
     )
+    original_try_prepare_estimation = (
+        _py_executor_creator.KvCacheCreator.try_prepare_estimation
+    )
     original_build_managers = _py_executor_creator.KvCacheCreator.build_managers
     original_teardown_managers = _py_executor_creator.KvCacheCreator.teardown_managers
     original_gc_collect = _py_executor_creator.gc.collect
@@ -139,6 +142,152 @@ def install_executor_finalize_hook() -> None:
         temp_estimator_executor_created = False
         wait_after_gc = False
         waited_for_activation = False
+        active_temp_estimator_clamp: dict[str, object] | None = None
+
+        def remember_attr(
+            saved_attrs: list[tuple[object, str, object]],
+            seen_attrs: set[tuple[int, str]],
+            obj: object | None,
+            attr: str,
+            value: object,
+        ) -> None:
+            if obj is None or not hasattr(obj, attr):
+                return
+
+            key = (id(obj), attr)
+            if key not in seen_attrs:
+                saved_attrs.append((obj, attr, getattr(obj, attr)))
+                seen_attrs.add(key)
+            setattr(obj, attr, value)
+
+        def clamp_engine_max_num_tokens(
+            saved_attrs: list[tuple[object, str, object]],
+            seen_attrs: set[tuple[int, str]],
+            engine: object | None,
+            clamp_tokens: int,
+        ) -> None:
+            if engine is None:
+                return
+
+            if hasattr(engine, "max_num_tokens"):
+                remember_attr(
+                    saved_attrs,
+                    seen_attrs,
+                    engine,
+                    "max_num_tokens",
+                    min(getattr(engine, "max_num_tokens"), clamp_tokens),
+                )
+
+            llm_args = getattr(engine, "llm_args", None)
+            if llm_args is not None and hasattr(llm_args, "max_num_tokens"):
+                remember_attr(
+                    saved_attrs,
+                    seen_attrs,
+                    llm_args,
+                    "max_num_tokens",
+                    min(getattr(llm_args, "max_num_tokens"), clamp_tokens),
+                )
+
+        def reset_engine_cached_metadata(engine: object | None) -> None:
+            if engine is None:
+                return
+
+            if getattr(engine, "attn_metadata", None) is not None:
+                llm_args = getattr(engine, "llm_args", None)
+                if (
+                    llm_args is not None
+                    and getattr(llm_args, "cuda_graph_config", None) is not None
+                    and hasattr(engine, "_release_cuda_graphs")
+                ):
+                    engine._release_cuda_graphs()
+                engine.attn_metadata = None
+
+            if hasattr(engine, "spec_metadata"):
+                engine.spec_metadata = None
+
+        def apply_temp_estimator_clamp(kv_cache_creator: object) -> None:
+            nonlocal active_temp_estimator_clamp
+
+            if active_temp_estimator_clamp is not None:
+                return
+
+            clamp_tokens = min(
+                getattr(kv_cache_creator, "_max_num_tokens"),
+                getattr(kv_cache_creator, "_max_batch_size"),
+            )
+            saved_attrs: list[tuple[object, str, object]] = []
+            seen_attrs: set[tuple[int, str]] = set()
+
+            remember_attr(
+                saved_attrs,
+                seen_attrs,
+                kv_cache_creator,
+                "_max_num_tokens",
+                clamp_tokens,
+            )
+            if hasattr(kv_cache_creator, "_dummy_reqs"):
+                kv_cache_creator._dummy_reqs = None
+
+            llm_args = getattr(kv_cache_creator, "_llm_args", None)
+            if llm_args is not None and hasattr(llm_args, "max_num_tokens"):
+                remember_attr(
+                    saved_attrs,
+                    seen_attrs,
+                    llm_args,
+                    "max_num_tokens",
+                    min(getattr(llm_args, "max_num_tokens"), clamp_tokens),
+                )
+
+            engines = [
+                getattr(kv_cache_creator, "_model_engine", None),
+                getattr(kv_cache_creator, "_draft_model_engine", None),
+            ]
+            for engine in engines:
+                clamp_engine_max_num_tokens(
+                    saved_attrs, seen_attrs, engine, clamp_tokens
+                )
+
+            active_temp_estimator_clamp = {
+                "tokens": clamp_tokens,
+                "saved_attrs": saved_attrs,
+                "kv_cache_creator": kv_cache_creator,
+                "engines": [engine for engine in engines if engine is not None],
+            }
+            logger.info(
+                "[Shadow] Clamping standby temp estimator token budget to %d",
+                clamp_tokens,
+            )
+
+        def restore_temp_estimator_clamp() -> None:
+            nonlocal active_temp_estimator_clamp
+
+            if active_temp_estimator_clamp is None:
+                return
+
+            for obj, attr, value in reversed(
+                active_temp_estimator_clamp["saved_attrs"]
+            ):
+                setattr(obj, attr, value)
+
+            kv_cache_creator = active_temp_estimator_clamp["kv_cache_creator"]
+            if hasattr(kv_cache_creator, "_dummy_reqs"):
+                kv_cache_creator._dummy_reqs = None
+
+            for engine in active_temp_estimator_clamp["engines"]:
+                reset_engine_cached_metadata(engine)
+
+            active_temp_estimator_clamp = None
+
+        def patched_try_prepare_estimation(self, *est_args, **est_kwargs):
+            if shadow_standby and active_temp_estimator_clamp is None:
+                apply_temp_estimator_clamp(self)
+
+            estimating_kv_cache = original_try_prepare_estimation(
+                self, *est_args, **est_kwargs
+            )
+            if not estimating_kv_cache:
+                restore_temp_estimator_clamp()
+            return estimating_kv_cache
 
         def patched_build_managers(
             self, resources, estimating_kv_cache, *build_args, **build_kwargs
@@ -169,6 +318,7 @@ def install_executor_finalize_hook() -> None:
 
             result = original_gc_collect(*collect_args, **collect_kwargs)
             if wait_after_gc and not waited_for_activation:
+                restore_temp_estimator_clamp()
                 clear_cublas_workspaces = getattr(
                     getattr(getattr(_py_executor_creator, "torch", None), "_C", None),
                     "_cuda_clearCublasWorkspaces",
@@ -184,38 +334,26 @@ def install_executor_finalize_hook() -> None:
         def patched_create_py_executor_instance(*instance_args, **instance_kwargs):
             nonlocal temp_estimator_executor_created
 
-            restore_max_num_tokens: list[tuple[object, int]] = []
             should_clamp_temp_estimator = (
                 shadow_standby
+                and active_temp_estimator_clamp is not None
                 and saw_estimating_build
                 and not temp_estimator_executor_created
             )
 
             if should_clamp_temp_estimator:
-                max_batch_size = instance_kwargs["max_batch_size"]
-                drafter = instance_kwargs.get("drafter")
-
-                for engine in (
-                    instance_kwargs["model_engine"],
-                    getattr(drafter, "draft_model_engine", None),
-                ):
-                    if engine is None or not hasattr(engine, "max_num_tokens"):
-                        continue
-
-                    original_max_num_tokens = engine.max_num_tokens
-                    restore_max_num_tokens.append((engine, original_max_num_tokens))
-                    engine.max_num_tokens = min(
-                        original_max_num_tokens,
-                        max_batch_size,
-                    )
-
-            try:
-                executor = original_create_py_executor_instance(
-                    *instance_args, **instance_kwargs
+                instance_kwargs = dict(instance_kwargs)
+                instance_kwargs["max_num_tokens"] = min(
+                    instance_kwargs.get(
+                        "max_num_tokens",
+                        active_temp_estimator_clamp["tokens"],
+                    ),
+                    active_temp_estimator_clamp["tokens"],
                 )
-            finally:
-                for engine, original_max_num_tokens in restore_max_num_tokens:
-                    engine.max_num_tokens = original_max_num_tokens
+
+            executor = original_create_py_executor_instance(
+                *instance_args, **instance_kwargs
+            )
 
             if should_clamp_temp_estimator:
                 temp_estimator_executor_created = True
@@ -246,6 +384,9 @@ def install_executor_finalize_hook() -> None:
                 patched_create_py_executor_instance
             )
         if shadow_standby:
+            _py_executor_creator.KvCacheCreator.try_prepare_estimation = (
+                patched_try_prepare_estimation
+            )
             _py_executor_creator.KvCacheCreator.build_managers = patched_build_managers
             _py_executor_creator.KvCacheCreator.teardown_managers = (
                 patched_teardown_managers
@@ -254,6 +395,10 @@ def install_executor_finalize_hook() -> None:
         try:
             return original_create_py_executor(*args, **kwargs)
         finally:
+            restore_temp_estimator_clamp()
+            _py_executor_creator.KvCacheCreator.try_prepare_estimation = (
+                original_try_prepare_estimation
+            )
             _py_executor_creator.KvCacheCreator.build_managers = original_build_managers
             _py_executor_creator.KvCacheCreator.teardown_managers = (
                 original_teardown_managers
