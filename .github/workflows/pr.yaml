@@ -425,9 +425,12 @@ jobs:
     with:
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '12.9'
-      include_sglang: ${{ needs.changed-files.outputs.sglang == 'true' }}
-      include_vllm:   ${{ needs.changed-files.outputs.vllm   == 'true' }}
-      include_trtllm: ${{ needs.changed-files.outputs.trtllm == 'true' }}
+      # Backends also run mypy when core changes — core code (e.g.
+      # components/src/dynamo/common/**) is imported by every backend, so
+      # a type-breaking change there can silently break backend typing.
+      include_sglang: ${{ needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.core == 'true' }}
+      include_vllm:   ${{ needs.changed-files.outputs.vllm   == 'true' || needs.changed-files.outputs.core == 'true' }}
+      include_trtllm: ${{ needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.core == 'true' }}
     secrets: inherit
 
   dynamo-test-parallel:
