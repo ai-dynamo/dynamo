@@ -252,8 +252,12 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
-    consolidator_config:
-        Option<(String, Option<String>, EventSource, KvEventConsolidationMode)>, // (engine_endpoint, output_endpoint (optional), engine_source, mode)
+    consolidator_config: Option<(
+        String,
+        Option<String>,
+        EventSource,
+        KvEventConsolidationMode,
+    )>, // (engine_endpoint, output_endpoint (optional), engine_source, mode)
 }
 
 impl BlockManagerBuilder {

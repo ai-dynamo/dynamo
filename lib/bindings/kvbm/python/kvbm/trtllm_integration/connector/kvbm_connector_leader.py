@@ -7,10 +7,7 @@ from typing import List, Optional
 
 import tensorrt_llm
 from kvbm import KvbmLeader
-from kvbm.trtllm_integration.consolidator_config import (
-    get_consolidator_mode,
-    is_truthy,
-)
+from kvbm.trtllm_integration.consolidator_config import get_consolidator_mode, is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput

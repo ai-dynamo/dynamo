@@ -65,6 +65,7 @@ impl SchedulerOutput {
 
     /// This is called by the leader to update the cached requests
     #[pyo3(signature = (request_id, resumed_from_preemption, new_token_ids, new_block_ids, num_computed_tokens, priorities=None, external_sequence_hashes=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn add_cached_request(
         &mut self,
         request_id: String,
