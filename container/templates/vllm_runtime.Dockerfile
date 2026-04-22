@@ -18,6 +18,7 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG LMCACHE_REF
 ARG VLLM_OMNI_REF
 
 WORKDIR /workspace
@@ -34,9 +35,16 @@ ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ENV NIXL_PREFIX=/opt/dynamo/nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}
 ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
+ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
+ENV CUDA_RUNTIME_LIB_DIR=/opt/dynamo/cuda-runtime
 ENV LD_LIBRARY_PATH=\
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
+# Upstream vLLM bundles torch/CUDA wheels under site-packages. Keep their
+# runtime libs visible after resetting the image entrypoint, or LMCache's
+# compiled extension fails to load libc10/libcudart during serve startup.
+${TORCH_LIB_DIR}:\
+${CUDA_RUNTIME_LIB_DIR}:\
 ${LD_LIBRARY_PATH:-}
 
 # Install NATS and ETCD
@@ -54,11 +62,16 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-# Find upstream's CUDA-versioned NIXL libs and expose them at a stable path.
+# Find upstream's CUDA-versioned NIXL and libcudart libs and expose them at
+# stable paths. CUDA 12 and CUDA 13 package the runtime under different
+# site-packages directories, so resolve the actual location once at build time.
 RUN set -eu; \
     NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' | sort | tail -n 1)"; \
     test -n "${NIXL_SITE_DIR}"; \
-    ln -sfn "${NIXL_SITE_DIR}" "${NIXL_PREFIX}"
+    ln -sfn "${NIXL_SITE_DIR}" "${NIXL_PREFIX}"; \
+    CUDA_RUNTIME_SITE_LIB="$(find "${SITE_PACKAGES}/nvidia" -maxdepth 2 -type f -name 'libcudart.so.*' | sort | tail -n 1)"; \
+    test -n "${CUDA_RUNTIME_SITE_LIB}"; \
+    ln -sfn "$(dirname "${CUDA_RUNTIME_SITE_LIB}")" "${CUDA_RUNTIME_LIB_DIR}"
 
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
@@ -103,6 +116,16 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
+
+# The upstream CUDA 13 image currently ships an LMCache wheel linked against
+# CUDA 12. Rebuild the same stable LMCache release from source only on CUDA 13
+# so the connector matches the image's torch/CUDA stack without pulling a
+# nightly wheel or changing unrelated dependencies.
+RUN --mount=type=bind,source=./container/deps/vllm/install_lmcache.sh,target=/tmp/install_lmcache.sh \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    bash /tmp/install_lmcache.sh
 {% endif %}
 
 USER dynamo
