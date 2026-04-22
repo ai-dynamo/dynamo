@@ -298,6 +298,10 @@ class StandbyWaitReached(Exception):
     """Raised when the standby path reaches engine init in tests."""
 
 
+class ShadowPrimaryLockReached(Exception):
+    """Raised when the primary shadow path reaches the failover lock."""
+
+
 def test_standby_generate_proxy_answers_health_check_before_delegate():
     proxy = _StandbyGenerateProxy({"token_ids": [1]})
 
@@ -405,4 +409,119 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
         "get_llm_engine",
         "engine_enter",
         "serve_cancelled",
+    ]
+
+
+def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch):
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/failover.lock")
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--load-format",
+            "gms",
+            "--gms-shadow-mode",
+            "--gpus-per-node",
+            "1",
+        ]
+    )
+
+    call_log = []
+    engine_state = {"alive": False}
+
+    class FakeEndpoint:
+        def connection_id(self):
+            return "7"
+
+    class FakeEngine:
+        @staticmethod
+        def get_attention_dp_size():
+            return 1
+
+    class FakeEngineContext:
+        async def __aenter__(self):
+            engine_state["alive"] = True
+            call_log.append("engine_enter")
+            return FakeEngine()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            call_log.append("engine_exit")
+            engine_state["alive"] = False
+            return False
+
+    class FakeQuiesceController:
+        async def quiesce(self):
+            assert engine_state["alive"] is True
+            call_log.append("quiesce")
+
+    class FakeHandler:
+        def __init__(self):
+            self._quiesce_controller = FakeQuiesceController()
+
+    class FakeLock:
+        def __init__(self, path):
+            call_log.append(f"lock_path:{path}")
+
+        async def acquire(self, engine_id):
+            call_log.append(f"lock_acquire:{engine_id}")
+            raise ShadowPrimaryLockReached()
+
+    runtime = mock.MagicMock()
+    runtime.endpoint.return_value = FakeEndpoint()
+    runtime.set_health_status.side_effect = lambda ready: call_log.append(
+        f"health:{ready}"
+    )
+
+    fake_request_handler_factory = mock.MagicMock()
+    fake_request_handler_factory.get_request_handler.return_value = FakeHandler()
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.TrtllmHealthCheckPayload",
+            return_value=mock.Mock(to_dict=mock.Mock(return_value={})),
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=lambda *args, **kwargs: (
+                call_log.append("get_llm_engine"),
+                FakeEngineContext(),
+            )[1],
+        ),
+        mock.patch("dynamo.trtllm.workers.llm_worker.RequestHandlerFactory") as factory,
+        mock.patch("dynamo.trtllm.workers.llm_worker.register_engine_metrics_callback"),
+        mock.patch("dynamo.trtllm.workers.llm_worker._register_memory_routes"),
+        mock.patch("gpu_memory_service.integrations.trtllm.setup_gms"),
+        mock.patch(
+            "gpu_memory_service.integrations.trtllm.utils.configure_gms_lock_mode"
+        ),
+        mock.patch(
+            "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
+            FakeLock,
+        ),
+    ):
+        factory.return_value = fake_request_handler_factory
+
+        with pytest.raises(ShadowPrimaryLockReached):
+            asyncio.run(
+                init_llm_worker(
+                    runtime=runtime,
+                    config=config,
+                    shutdown_event=asyncio.Event(),
+                )
+            )
+
+    assert call_log == [
+        "get_llm_engine",
+        "engine_enter",
+        "quiesce",
+        "health:True",
+        "lock_path:/tmp/failover.lock",
+        "lock_acquire:engine-0",
+        "engine_exit",
     ]
