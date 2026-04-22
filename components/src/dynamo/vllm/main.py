@@ -685,7 +685,14 @@ async def register_vllm_model(
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)
-        media_fetcher.allow_direct_port(False)
+        # DYN_MM_ALLOW_INTERNAL relaxes the Rust MediaFetcher's SSRF checks the same
+        # way it relaxes the Python url_validator (see
+        # dynamo/common/multimodal/url_validator.py:97). Intended for on-prem / local-dev
+        # setups where media is served from localhost or a private IP. Never enable in
+        # public-facing deployments — opens SSRF paths to cloud metadata endpoints.
+        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        media_fetcher.allow_direct_ip(allow_internal)
+        media_fetcher.allow_direct_port(allow_internal)
 
     await register_model(
         model_input,

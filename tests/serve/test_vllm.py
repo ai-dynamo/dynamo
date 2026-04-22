@@ -382,7 +382,11 @@ vllm_configs = {
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
-        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer.
+        # DYN_MM_ALLOW_INTERNAL=1 relaxes the Rust MediaFetcher's SSRF checks so the test's
+        # http://localhost:<port>/llm-graphic.png URL is accepted — same pattern already used
+        # by multimodal_agg_llava and aggregated_toolcalling below.
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         script_args=[
             "--model",
             "Qwen/Qwen2-VL-2B-Instruct",
