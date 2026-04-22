@@ -70,7 +70,7 @@ jobs:
     name: Tag RC & Publish to NGC
     needs: [prepare-release]
     if: needs.prepare-release.result == 'success'
-    runs-on: prod-builder-amd-v1
+    runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}

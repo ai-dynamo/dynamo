@@ -201,7 +201,7 @@ jobs:
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.trtllm == 'true'
-    runs-on: prod-builder-amd-v1
+    runs-on: prod-tester-amd-v1
     name: Mypy
     timeout-minutes: 15
     env:

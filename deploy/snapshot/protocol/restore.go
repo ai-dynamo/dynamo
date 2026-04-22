@@ -72,6 +72,7 @@ func PrepareRestorePodSpec(
 	if storage.BasePath != "" {
 		injectCheckpointVolumeMount(container, storage.BasePath)
 	}
+	EnsureControlVolume(podSpec, container)
 	if isCheckpointReady {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
@@ -134,6 +135,36 @@ func ValidateRestorePodSpec(
 		if !hasMount {
 			return fmt.Errorf("missing %s mount at %s", CheckpointVolumeName, storage.BasePath)
 		}
+	}
+	hasControlVolume := false
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == SnapshotControlVolumeName && volume.EmptyDir != nil {
+			hasControlVolume = true
+			break
+		}
+	}
+	if !hasControlVolume {
+		return fmt.Errorf("missing %s emptyDir volume; add it via snapshotprotocol.EnsureControlVolume", SnapshotControlVolumeName)
+	}
+	hasControlMount := false
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == SnapshotControlVolumeName && mount.MountPath == SnapshotControlMountPath {
+			hasControlMount = true
+			break
+		}
+	}
+	if !hasControlMount {
+		return fmt.Errorf("missing %s mount at %s", SnapshotControlVolumeName, SnapshotControlMountPath)
+	}
+	hasControlEnv := false
+	for _, env := range container.Env {
+		if env.Name == SnapshotControlDirEnv {
+			hasControlEnv = true
+			break
+		}
+	}
+	if !hasControlEnv {
+		return fmt.Errorf("missing %s env var on worker container", SnapshotControlDirEnv)
 	}
 	if seccompProfile == "" {
 		return nil
