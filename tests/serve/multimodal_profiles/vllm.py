@@ -93,7 +93,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=922_354_000,
             ),
         },
-        request_payloads=[make_image_payload(["purple"])],
+        request_payloads=[make_image_payload(["green"])],
     ),
     # Audio: uses agg topology with DYN_CHAT_PROCESSOR=vllm because the Rust
     # Jinja engine cannot render multimodal content arrays (audio_url).

@@ -626,3 +626,42 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+{% if framework == "vllm" and target not in ("dev", "local-dev") %}
+# vLLM uses NIXL from the upstream runtime image, but ai-dynamo-runtime still
+# needs to compile with NIXL headers/libs present. Otherwise nixl_sys falls back
+# to stub mode and frontend-decoding cannot create a Rust NIXL agent.
+ARG ENABLE_MEDIA_FFMPEG
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/root/.cache/uv \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    mkdir -p ${CARGO_TARGET_DIR} && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    rm -f /opt/dynamo/dist/ai_dynamo_runtime*.whl && \
+    cd /opt/dynamo/lib/bindings/python && \
+    RUNTIME_WHEEL_DIR="$(mktemp -d)" && \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        maturin build --release --features "media-ffmpeg,kv-indexer" --auditwheel skip --out "${RUNTIME_WHEEL_DIR}"; \
+    else \
+        maturin build --release --features "kv-indexer" --auditwheel skip --out "${RUNTIME_WHEEL_DIR}"; \
+    fi && \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    auditwheel repair \
+        --exclude libnixl.so \
+        --exclude libnixl_build.so \
+        --exclude libnixl_common.so \
+        --exclude 'lib*.so*' \
+        --plat manylinux_2_28_${ARCH_ALT} \
+        --wheel-dir /opt/dynamo/dist \
+        "${RUNTIME_WHEEL_DIR}"/ai_dynamo_runtime*.whl && \
+    rm -rf "${RUNTIME_WHEEL_DIR}" && \
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime (NIXL)"
+{% endif %}

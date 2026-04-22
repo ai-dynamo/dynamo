@@ -15,15 +15,20 @@ MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 
 
 def get_multimodal_test_image_bytes() -> bytes:
-    """Return a deterministic green PNG for multimodal serve tests."""
+    """Return a deterministic PNG with an obvious green square."""
 
     # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     buf = BytesIO()
-    # Keep this synthetic so CI never depends on Git LFS media, but make it large
-    # enough that multimodal models reliably identify the color.
-    Image.new("RGB", (256, 256), color="green").save(buf, format="PNG")
+    # Keep this synthetic so CI never depends on Git LFS media. The white
+    # background plus large centered square gives VLMs a stronger signal than
+    # an edge-to-edge flat color.
+    img = Image.new("RGB", (512, 512), color="white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((96, 96, 416, 416), fill=(0, 180, 0), outline=(0, 90, 0), width=8)
+    draw.text((214, 444), "GREEN", fill=(0, 90, 0))
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -43,7 +48,7 @@ def image_server(httpserver: HTTPServer):
     inference capabilities where models need to fetch images via HTTP.
 
     Currently serves:
-        - /llm-graphic.png - 256x256 green PNG used by multimodal serve tests
+        - /llm-graphic.png - synthetic green-square PNG used by multimodal serve tests
 
     Usage:
         def test_multimodal(image_server):

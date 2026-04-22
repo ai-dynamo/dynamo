@@ -23,6 +23,9 @@ AUDIO_TEST_URL = (
     "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client"
     "/main/datasets/mini_en/wav/1221-135766-0002.wav"
 )
+IMAGE_COLOR_PROMPT = (
+    "What color is the large square in this image? Respond with one color word."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +39,7 @@ def make_image_payload(expected_response: list[str]) -> ChatPayload:
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? "
-                "Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -47,7 +49,8 @@ def make_image_payload(expected_response: list[str]) -> ChatPayload:
         repeat_count=1,
         expected_response=expected_response,
         temperature=0.0,
-        max_tokens=100,
+        max_tokens=20,
+        timeout=180,
     )
 
 

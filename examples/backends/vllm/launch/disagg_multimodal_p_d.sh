@@ -89,6 +89,7 @@ fi
 # Start prefill worker (handles image loading internally, no --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}} \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
 python -m dynamo.vllm \
   --disaggregation-mode prefill \
@@ -103,6 +104,7 @@ python -m dynamo.vllm \
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
 python -m dynamo.vllm \
   --disaggregation-mode decode \
