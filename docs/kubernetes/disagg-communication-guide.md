@@ -503,12 +503,12 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 
 ### KV Cache Transfer Overhead
 
-| Configuration | TTFT Overhead | KV Transfer BW | Source |
-|---------------|---------------|----------------|--------|
+| Configuration | TTFT Overhead (avg) | KV Transfer BW | Source |
+|---------------|---------------------|----------------|--------|
 | Aggregated (baseline) | 0 | N/A | No KV transfer needed |
 | Disagg + InfiniBand RDMA with GPUDirect | +200-500ms | 20-50 GB/s | *Expected* based on hardware specs |
 | Disagg + RoCE RDMA with GPUDirect | +300-800ms | 10-25 GB/s | *Expected* based on hardware specs |
-| Disagg + AWS EFA with libfabric + GDRCopy | **+146ms** | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000) |
+| Disagg + AWS EFA with libfabric + GDRCopy | **+146ms** (p95: +372ms) | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000, c=10) |
 | Disagg + Host-staged (no GPUDirect) | +1-3s | 1-3 GB/s | *Expected* - CPU bottleneck |
 | Disagg + AWS EFA with UCX (without GPUDirect) | ~3x slower than aggregated | ~1 GB/s | *Measured* on AWS p5.48xlarge |
 | Disagg + TCP fallback | **+90-100s** | ~100 MB/s | *Measured* ~98s TTFT on AWS p5.48xlarge |
