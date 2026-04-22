@@ -96,6 +96,7 @@ Additional TCP-specific environment variables:
 - `DYN_TCP_RPC_HOST`: Server host address (default: auto-detected)
 - `DYN_TCP_RPC_PORT`: Server port. If not set, the OS assigns a free port automatically (recommended for most deployments). Set explicitly only if you need a specific port for firewall rules.
 - `DYN_TCP_MAX_MESSAGE_SIZE`: Maximum message size for TCP client (default: 32MB)
+- `DYN_TCP_SHRINK_MESSAGE_SIZE`: Threshold for shrinking the zero-copy decoder buffer back to initial size after processing large messages (default: 8MB, max: DYN_TCP_MAX_MESSAGE_SIZE)
 - `DYN_TCP_REQUEST_TIMEOUT`: Request timeout for TCP client (default: 10 seconds)
 - `DYN_TCP_POOL_SIZE`: Connection pool size for TCP client (default: 50)
 - `DYN_TCP_CONNECT_TIMEOUT`: Connect timeout for TCP client (default: 3 seconds)
