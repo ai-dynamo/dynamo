@@ -537,6 +537,126 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
     ]
 
 
+def test_worker_init_hook_waits_before_final_kv_build_when_estimation_skipped(
+    stubbed_env, monkeypatch
+):
+    bootstrap = stubbed_env["bootstrap"]
+    py_executor_creator = stubbed_env["py_executor_creator"]
+    call_log = stubbed_env["call_log"]
+
+    model_llm_args = types.SimpleNamespace(max_num_tokens=8192, cuda_graph_config=None)
+    draft_llm_args = types.SimpleNamespace(max_num_tokens=4096, cuda_graph_config=None)
+    model_engine = types.SimpleNamespace(
+        max_num_tokens=8192,
+        llm_args=model_llm_args,
+    )
+    draft_model_engine = types.SimpleNamespace(
+        max_num_tokens=4096,
+        llm_args=draft_llm_args,
+    )
+    drafter = types.SimpleNamespace(draft_model_engine=draft_model_engine)
+
+    class FakeKvCacheCreator:
+        def __init__(self):
+            self._max_num_tokens = 8192
+            self._max_batch_size = 8
+            self._dummy_reqs = None
+            self._model_engine = model_engine
+            self._draft_model_engine = draft_model_engine
+            self._llm_args = model_llm_args
+
+        def try_prepare_estimation(self):
+            call_log.append(
+                f"try_prepare_estimation:max={self._max_num_tokens}:dummy={self._dummy_reqs}"
+            )
+            return False
+
+        def build_managers(self, _resources, estimating_kv_cache):
+            call_log.append(
+                "build_managers:"
+                f"{estimating_kv_cache}:creator={self._max_num_tokens}:"
+                f"model={model_engine.max_num_tokens}:model_llm={model_llm_args.max_num_tokens}:"
+                f"draft={draft_model_engine.max_num_tokens}:draft_llm={draft_llm_args.max_num_tokens}"
+            )
+
+        def configure_kv_cache_capacity(self, _py_executor):
+            raise AssertionError(
+                "skip-estimation path should not configure KV cache capacity"
+            )
+
+        def teardown_managers(self, _resources):
+            raise AssertionError("skip-estimation path should not tear down managers")
+
+    py_executor_creator.KvCacheCreator = FakeKvCacheCreator
+
+    def fake_create_py_executor_instance(*args, name="executor", **kwargs):
+        call_log.append(
+            "create_py_executor_instance:"
+            f"{name}:model={kwargs['model_engine'].max_num_tokens}:"
+            f"model_llm={kwargs['model_engine'].llm_args.max_num_tokens}:"
+            f"draft={getattr(kwargs.get('drafter'), 'draft_model_engine', None).max_num_tokens}:"
+            f"draft_llm={getattr(kwargs.get('drafter'), 'draft_model_engine', None).llm_args.max_num_tokens}:"
+            f"arg={kwargs['max_num_tokens']}"
+        )
+        return py_executor_creator.PyExecutor(name)
+
+    py_executor_creator.create_py_executor_instance = fake_create_py_executor_instance
+
+    def fake_create_py_executor(*args, **kwargs):
+        kv_cache_creator = py_executor_creator.KvCacheCreator()
+
+        call_log.append("create_py_executor")
+        estimating_kv_cache = kv_cache_creator.try_prepare_estimation()
+        call_log.append(f"estimating_kv_cache={estimating_kv_cache}")
+        kv_cache_creator.build_managers({}, estimating_kv_cache)
+        call_log.append("final_executor_created")
+        final_executor = py_executor_creator.create_py_executor_instance(
+            name="final",
+            model_engine=model_engine,
+            drafter=drafter,
+            max_batch_size=8,
+            max_num_tokens=8192,
+        )
+        final_executor.start_worker()
+        return final_executor
+
+    py_executor_creator.create_py_executor = fake_create_py_executor
+
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
+    fake_setup_gms = MagicMock(
+        side_effect=lambda extra: call_log.append(f"setup:{extra}")
+    )
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
+    monkeypatch.setattr(
+        bootstrap,
+        "_wait_for_shadow_activation",
+        lambda: call_log.append("wait_for_activation"),
+    )
+
+    env_snapshot = {
+        "DYN_GMS_TRTLLM_ENABLED": "1",
+        "CONTAINER_NAME": "engine-1",
+        "FAILOVER_LOCK_PATH": "/tmp/failover.lock",
+    }
+    bootstrap.worker_init_hook(env_snapshot, '{"gms_read_only": true}')
+
+    py_executor_creator.create_py_executor()
+
+    assert fake_setup_gms.call_count == 1
+    assert call_log == [
+        "setup:{'gms_read_only': True}",
+        "create_py_executor",
+        "try_prepare_estimation:max=8:dummy=None",
+        "estimating_kv_cache=False",
+        "wait_for_activation",
+        "build_managers:False:creator=8192:model=8192:model_llm=8192:draft=4096:draft_llm=4096",
+        "final_executor_created",
+        "create_py_executor_instance:final:model=8192:model_llm=8192:draft=4096:draft_llm=4096:arg=8192",
+        "start_worker:final",
+    ]
+
+
 def test_worker_init_hook_is_picklable(monkeypatch):
     """mpi4py.futures requires the initializer to be picklable-by-reference."""
     import pickle

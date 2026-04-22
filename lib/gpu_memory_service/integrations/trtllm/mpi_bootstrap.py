@@ -37,6 +37,7 @@ _ENABLED_ENV = "DYN_GMS_TRTLLM_ENABLED"
 # identically to the parent. Upstream MpiPoolSession only forwards TRTLLM_*/TLLM_*.
 _PROPAGATED_ENV_VARS: tuple[str, ...] = (
     _ENABLED_ENV,
+    "CONTAINER_NAME",
     "DYN_GMS_SHADOW_MODE",
     "ENGINE_ID",
     "FAILOVER_LOCK_PATH",
@@ -59,10 +60,24 @@ def _delay_commit_until_engine_init(extra: "dict[str, Any] | None") -> bool:
     return bool(extra and extra.get("gms_delay_commit_until_engine_init") is True)
 
 
-def _is_shadow_standby() -> bool:
-    return (
-        os.environ.get("DYN_GMS_SHADOW_MODE") == "1"
-        and os.environ.get("ENGINE_ID", "0") != "0"
+def _get_shadow_engine_id() -> str:
+    engine_id = os.environ.get("ENGINE_ID")
+    if engine_id:
+        return engine_id.removeprefix("engine-")
+
+    container_name = os.environ.get("CONTAINER_NAME", "")
+    if container_name.startswith("engine-"):
+        return container_name.removeprefix("engine-")
+
+    return "0"
+
+
+def _is_shadow_standby(extra: "dict[str, Any] | None" = None) -> bool:
+    if os.environ.get("DYN_GMS_SHADOW_MODE") == "1":
+        return _get_shadow_engine_id() != "0"
+
+    return bool(
+        extra and extra.get("gms_read_only") is True and _get_shadow_engine_id() != "0"
     )
 
 
@@ -89,7 +104,7 @@ def _wait_for_shadow_activation() -> None:
 
     rank, comm = _get_mpi_rank_and_comm()
     if rank == 0 and _shadow_activation_fd is None:
-        shadow_engine_id = os.environ.get("ENGINE_ID", "0")
+        shadow_engine_id = _get_shadow_engine_id()
         lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
         logger.info(
             "[Shadow] Standby RO import complete, rank0 waiting for failover lock before KV init"
@@ -136,7 +151,7 @@ def install_executor_finalize_hook() -> None:
     def patched_create_py_executor(*args, **kwargs):
         extra = json.loads(_extra_config_json) if _extra_config_json else None
         delay_finalize = _delay_commit_until_engine_init(extra)
-        shadow_standby = _is_shadow_standby()
+        shadow_standby = _is_shadow_standby(extra)
 
         saw_estimating_build = False
         temp_estimator_executor_created = False
@@ -292,10 +307,20 @@ def install_executor_finalize_hook() -> None:
         def patched_build_managers(
             self, resources, estimating_kv_cache, *build_args, **build_kwargs
         ):
-            nonlocal saw_estimating_build
+            nonlocal saw_estimating_build, waited_for_activation
 
             if shadow_standby and estimating_kv_cache:
                 saw_estimating_build = True
+            elif (
+                shadow_standby
+                and not waited_for_activation
+                and not saw_estimating_build
+            ):
+                logger.info(
+                    "[Shadow] Standby skipping KV estimation, waiting for failover lock before full KV init"
+                )
+                _wait_for_shadow_activation()
+                waited_for_activation = True
 
             return original_build_managers(
                 self,
@@ -440,7 +465,7 @@ def worker_init_hook(env_snapshot: dict, extra_config_json: Optional[str]) -> No
     extra = json.loads(extra_config_json) if extra_config_json else None
     set_extra_config(extra)
     setup_gms(extra)
-    if _delay_commit_until_engine_init(extra) or _is_shadow_standby():
+    if _delay_commit_until_engine_init(extra) or _is_shadow_standby(extra):
         install_executor_finalize_hook()
     logger.info(
         "[GMS] MPI worker init hook applied (pid=%d rank=%d)", os.getpid(), rank
