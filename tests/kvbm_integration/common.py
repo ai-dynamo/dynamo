@@ -1381,3 +1381,76 @@ def assert_deterministic(
             f"{label1}: {response1}\n"
             f"{label2}: {response2}"
         )
+
+
+# ============================================================================
+# Shared test prompts & formatting helpers
+# ============================================================================
+
+
+# Canonical prompt for KVBM offload/onboard/eviction tests. Kept in one place
+# so determinism tests in different files always compare the same input — two
+# drifting copies would silently turn into two different tests.
+AELDORA_STORY = (
+    "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, "
+    "lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria "
+    "was buried beneath the shifting sands of time, lost to the world for centuries. You are "
+    "an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled "
+    "upon an ancient map hinting at secrets that Aeloria holds a secret so profound that it has "
+    "the potential to reshape the very fabric of reality. Your journey will take you through "
+    "treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: "
+    "Character Background: Develop a detailed background for your character. Describe their "
+    "motivations for seeking out Aeloria, their skills and weaknesses, and any personal "
+    "connections to the ancient city or its legends. Are they driven by a quest for knowledge, "
+    "a search for lost familt clue is hidden."
+)
+
+
+def print_test_header(title: str) -> None:
+    """Print a formatted test header."""
+    print(f"\n{'=' * 70}")
+    print(title)
+    print("=" * 70)
+
+
+def print_phase(phase_num: int, description: str) -> None:
+    """Print a formatted phase header."""
+    print(f"\n=== Phase {phase_num}: {description} ===")
+
+
+def check_kvbm_metrics(phase_name: str, metrics_port: int) -> dict[str, int]:
+    """Fetch and display KVBM metrics.
+
+    Args:
+        phase_name: Name of the test phase for logging
+        metrics_port: Port number for the KVBM metrics endpoint
+
+    Returns:
+        Dictionary containing KVBM metrics with keys:
+        - kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
+        - kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
+    """
+    print(f"\n--- Checking KVBM metrics after {phase_name} ---")
+    metrics = fetch_kvbm_metrics(port=metrics_port)
+
+    offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
+    onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
+
+    print(f"  kvbm_offload_blocks_d2h: {offload_d2h}")
+    print(f"  kvbm_onboard_blocks_h2d: {onboard_h2d}")
+
+    return {
+        "kvbm_offload_blocks_d2h": offload_d2h,
+        "kvbm_onboard_blocks_h2d": onboard_h2d,
+    }
+
+
+def reset_cache(base_url: str) -> None:
+    """Reset the GPU prefix cache."""
+    print("Resetting prefix cache...")
+    try:
+        response = requests.post(f"{base_url}/reset_prefix_cache", timeout=30)
+        response.raise_for_status()
+        print("Cache reset successful")
+    except Exception as e:
+        print(f"Warning: Cache reset failed: {e}")
