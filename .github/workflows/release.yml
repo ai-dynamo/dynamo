@@ -128,6 +128,10 @@ jobs:
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          # Dashed alias (e.g. 1.1.0-rc3) emitted alongside the no-dash form so
+          # that downstream consumers (including the manual ops-support
+          # staging runbook) can find images at either tag shape.
+          echo "ngc_version_tag_dashed=${VERSION}-rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
           echo "Helm chart version: ${HELM_CHART_VERSION}"
@@ -172,6 +176,7 @@ jobs:
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
           NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          NGC_VERSION_TAG_DASHED: ${{ steps.rc_tag.outputs.ngc_version_tag_dashed }}
         run: |
           set -euo pipefail
 
@@ -212,6 +217,10 @@ jobs:
             SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
+            # Dashed alias (1.1.0-rc3) — matches the shape the manual staging
+            # runbook historically produced and is the shape QA consumers expect.
+            TARGET_DASHED="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG_DASHED}"
+            copy_image "${SOURCE}" "${TARGET_DASHED}" "${NGC_NAME}:${NGC_VERSION_TAG_DASHED}"
           done
 
           # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
@@ -228,6 +237,9 @@ jobs:
             SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            # Dashed alias (1.1.0-rc3-cuda13).
+            TARGET_DASHED="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG_DASHED}-cuda13"
+            copy_image "${SOURCE}" "${TARGET_DASHED}" "${NGC_NAME}:${NGC_VERSION_TAG_DASHED}-cuda13"
           done
 
           # ---- EFA runtime images (amd64 only, no multi-arch manifest needed) ----
@@ -238,11 +250,17 @@ jobs:
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+          # -efa-amd64 alias makes the single-arch restriction explicit in the
+          # tag; matches what the manual staging script emits.
+          TARGET_AMD64="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa-amd64"
+          copy_image "${SOURCE}" "${TARGET_AMD64}" "vllm-runtime:${NGC_VERSION_TAG}-efa-amd64"
 
           # trtllm EFA (CUDA 13, amd64 only)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+          TARGET_AMD64="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa-amd64"
+          copy_image "${SOURCE}" "${TARGET_AMD64}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa-amd64"
 
           # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
           echo ""
@@ -250,6 +268,10 @@ jobs:
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
           copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
+          # Dashed alias (1.1.0-rc3) for consumers using the manual staging
+          # runbook's tag shape.
+          TARGET_DASHED="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG_DASHED}"
+          copy_image "${SOURCE}" "${TARGET_DASHED}" "dynamo-frontend:${NGC_VERSION_TAG_DASHED}"
 
           # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
           echo ""
@@ -336,6 +358,7 @@ jobs:
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
           NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          NGC_VERSION_TAG_DASHED: ${{ steps.rc_tag.outputs.ngc_version_tag_dashed }}
           HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
@@ -358,17 +381,17 @@ jobs:
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\` (alias: \`${NGC_VERSION_TAG_DASHED}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\` (alias: \`${NGC_VERSION_TAG_DASHED}\`)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (alias: \`${NGC_VERSION_TAG_DASHED}-cuda13\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (alias: \`${NGC_VERSION_TAG_DASHED}-cuda13\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (alias: \`${NGC_VERSION_TAG_DASHED}-cuda13\`)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\` (alias: \`${NGC_VERSION_TAG}-efa-amd64\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\` (alias: \`${NGC_VERSION_TAG}-efa-amd64\`)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
@@ -377,7 +400,7 @@ jobs:
           echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch, alias: \`${NGC_VERSION_TAG_DASHED}\`)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
