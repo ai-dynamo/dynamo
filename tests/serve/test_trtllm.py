@@ -72,7 +72,9 @@ trtllm_configs = {
     ),
     # Aggregated with canary health check enabled.
     # Validates the health check payload (with priority=1.0) is accepted by
-    # the engine and the /health endpoint reports ready after canary succeeds.
+    # TRT-LLM's generate_async() and the engine serves requests normally.
+    # Note: health_check_workers is not set because agg.sh starts a single
+    # worker but the test harness allocates 2 system ports — only one is bound.
     "aggregated_health_check": TRTLLMConfig(
         name="aggregated_health_check",
         directory=trtllm_dir,
@@ -88,7 +90,6 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         delayed_start=5,
-        health_check_workers=True,
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",
