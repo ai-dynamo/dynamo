@@ -173,10 +173,10 @@ curl http://localhost:8000/metrics
 | `aggregated` | Aggregated (non-disaggregated) serving — a single worker handles both prefill and decode |
 | `""` (empty) | The stage does not distinguish phases (used by `preprocess`) |
 
-**Derived signals operators commonly want** (all computed per frontend pod; `stage_requests` has no `model` label so you cannot split these by model):
+**Derived signals operators commonly want.** These are cluster-wide totals across all frontend pods. `stage_requests` has no `model` label, so you cannot split these by model; add `by (pod)` or `by (instance)` to any `sum(...)` below if you need per-pod visibility. The stage filter `stage=~"preprocess|route|dispatch"` is used explicitly to keep the "pre-first-token" semantic stable if additional stages (e.g. `postprocess`) are added in the future.
 
-- **Requests waiting for a worker to start generating (the old "queued" semantic):** `sum(dynamo_frontend_stage_requests)` — i.e. still in `preprocess`, `route`, or `dispatch`.
-- **Requests currently generating tokens:** `sum(dynamo_frontend_active_requests) - sum(dynamo_frontend_stage_requests)` — active requests that have already passed through `dispatch` and are streaming. Sum both sides first so the mismatched label sets line up.
+- **Requests waiting for a worker to start generating (the old "queued" semantic):** `sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})` — i.e. still in `preprocess`, `route`, or `dispatch`.
+- **Requests currently generating tokens:** `sum(dynamo_frontend_active_requests) - sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})` — active requests that have already passed through `dispatch` and are streaming. Sum both sides first so the mismatched label sets line up.
 - **Router saturation:** `sum(dynamo_frontend_stage_requests{stage="route"})` spiking indicates workers can't be selected fast enough (e.g. all backends busy, KV-router queue full).
 - **Backend prefill saturation:** `sum(dynamo_frontend_stage_requests{stage="dispatch"})` spiking indicates the backend is slow to produce first tokens.
 
@@ -188,7 +188,7 @@ The following gauges are still emitted but will be removed in a future release. 
 | Deprecated metric | Replacement |
 |-------------------|-------------|
 | `dynamo_frontend_inflight_requests` | `dynamo_frontend_active_requests` (same semantics, clearer name) |
-| `dynamo_frontend_queued_requests` | `sum(dynamo_frontend_stage_requests)` across `preprocess` + `route` + `dispatch` stages |
+| `dynamo_frontend_queued_requests` | `sum(dynamo_frontend_stage_requests{stage=~"preprocess\|route\|dispatch"})` |
 
 #### Model Configuration Metrics
 

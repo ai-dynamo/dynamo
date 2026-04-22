@@ -354,7 +354,7 @@ Add this rule to your `prometheus-adapter-values.yaml` (alongside the TTFT rule)
 
 ```yaml
 # Add to rules.external in prometheus-adapter-values.yaml
-- seriesQuery: 'dynamo_frontend_stage_requests{namespace!=""}'
+- seriesQuery: 'dynamo_frontend_stage_requests{namespace!="",stage=~"preprocess|route|dispatch"}'
   resources:
     overrides:
       namespace: {resource: "namespace"}
@@ -508,7 +508,7 @@ spec:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
       metricName: dynamo_frontend_pending_requests
       query: |
-        sum(dynamo_frontend_stage_requests{dynamo_namespace="default-sglang-agg"})
+        sum(dynamo_frontend_stage_requests{dynamo_namespace="default-sglang-agg",stage=~"preprocess|route|dispatch"})
       threshold: "10"    # Scale up when queue > 10 requests
 ```
 
