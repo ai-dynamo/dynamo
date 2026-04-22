@@ -158,6 +158,7 @@ def _wait_for_status(url: str, target: int, deadline_s: float) -> int:
 
 
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(
