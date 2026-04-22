@@ -125,19 +125,42 @@ def install_executor_finalize_hook() -> None:
     original_create_py_executor_instance = (
         _py_executor_creator.create_py_executor_instance
     )
+    original_build_managers = _py_executor_creator.KvCacheCreator.build_managers
     original_teardown_managers = _py_executor_creator.KvCacheCreator.teardown_managers
     original_gc_collect = _py_executor_creator.gc.collect
 
     @wraps(original_create_py_executor)
     def patched_create_py_executor(*args, **kwargs):
+        extra = json.loads(_extra_config_json) if _extra_config_json else None
+        delay_finalize = _delay_commit_until_engine_init(extra)
+        shadow_standby = _is_shadow_standby()
+
+        saw_estimating_build = False
+        temp_estimator_executor_created = False
         wait_after_gc = False
         waited_for_activation = False
+
+        def patched_build_managers(
+            self, resources, estimating_kv_cache, *build_args, **build_kwargs
+        ):
+            nonlocal saw_estimating_build
+
+            if shadow_standby and estimating_kv_cache:
+                saw_estimating_build = True
+
+            return original_build_managers(
+                self,
+                resources,
+                estimating_kv_cache,
+                *build_args,
+                **build_kwargs,
+            )
 
         def patched_teardown_managers(*teardown_args, **teardown_kwargs):
             nonlocal wait_after_gc
 
             result = original_teardown_managers(*teardown_args, **teardown_kwargs)
-            if _is_shadow_standby():
+            if shadow_standby:
                 wait_after_gc = True
             return result
 
@@ -146,15 +169,60 @@ def install_executor_finalize_hook() -> None:
 
             result = original_gc_collect(*collect_args, **collect_kwargs)
             if wait_after_gc and not waited_for_activation:
+                clear_cublas_workspaces = getattr(
+                    getattr(getattr(_py_executor_creator, "torch", None), "_C", None),
+                    "_cuda_clearCublasWorkspaces",
+                    None,
+                )
+                if clear_cublas_workspaces is not None:
+                    clear_cublas_workspaces()
                 _wait_for_shadow_activation()
                 waited_for_activation = True
                 wait_after_gc = False
             return result
 
         def patched_create_py_executor_instance(*instance_args, **instance_kwargs):
-            executor = original_create_py_executor_instance(
-                *instance_args, **instance_kwargs
+            nonlocal temp_estimator_executor_created
+
+            restore_max_num_tokens: list[tuple[object, int]] = []
+            should_clamp_temp_estimator = (
+                shadow_standby
+                and saw_estimating_build
+                and not temp_estimator_executor_created
             )
+
+            if should_clamp_temp_estimator:
+                max_batch_size = instance_kwargs["max_batch_size"]
+                drafter = instance_kwargs.get("drafter")
+
+                for engine in (
+                    instance_kwargs["model_engine"],
+                    getattr(drafter, "draft_model_engine", None),
+                ):
+                    if engine is None or not hasattr(engine, "max_num_tokens"):
+                        continue
+
+                    original_max_num_tokens = engine.max_num_tokens
+                    restore_max_num_tokens.append((engine, original_max_num_tokens))
+                    engine.max_num_tokens = min(
+                        original_max_num_tokens,
+                        max_batch_size,
+                    )
+
+            try:
+                executor = original_create_py_executor_instance(
+                    *instance_args, **instance_kwargs
+                )
+            finally:
+                for engine, original_max_num_tokens in restore_max_num_tokens:
+                    engine.max_num_tokens = original_max_num_tokens
+
+            if should_clamp_temp_estimator:
+                temp_estimator_executor_created = True
+
+            if not delay_finalize:
+                return executor
+
             original_start_worker = executor.start_worker
             finalized = False
 
@@ -173,13 +241,12 @@ def install_executor_finalize_hook() -> None:
             executor.start_worker = patched_start_worker
             return executor
 
-        if _delay_commit_until_engine_init(
-            json.loads(_extra_config_json) if _extra_config_json else None
-        ):
+        if delay_finalize or shadow_standby:
             _py_executor_creator.create_py_executor_instance = (
                 patched_create_py_executor_instance
             )
-        if _is_shadow_standby():
+        if shadow_standby:
+            _py_executor_creator.KvCacheCreator.build_managers = patched_build_managers
             _py_executor_creator.KvCacheCreator.teardown_managers = (
                 patched_teardown_managers
             )
@@ -187,6 +254,7 @@ def install_executor_finalize_hook() -> None:
         try:
             return original_create_py_executor(*args, **kwargs)
         finally:
+            _py_executor_creator.KvCacheCreator.build_managers = original_build_managers
             _py_executor_creator.KvCacheCreator.teardown_managers = (
                 original_teardown_managers
             )

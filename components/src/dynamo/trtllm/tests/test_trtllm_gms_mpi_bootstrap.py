@@ -70,6 +70,9 @@ def stubbed_env(monkeypatch):
     )
     torch_module = types.ModuleType("torch")
     torch_module.cuda = types.SimpleNamespace(empty_cache=lambda: None)
+    torch_module._C = types.SimpleNamespace(
+        _cuda_clearCublasWorkspaces=lambda: call_log.append("clear_cublas_workspaces")
+    )
     gc_module = types.SimpleNamespace(collect=lambda: call_log.append("gc_collect"))
 
     class FakePyExecutor:
@@ -106,6 +109,7 @@ def stubbed_env(monkeypatch):
     trtllm_pyexecutor_creator_module.PyTorchModelEngine = FakePyTorchModelEngine
     trtllm_pyexecutor_creator_module.KvCacheCreator = FakeKvCacheCreator
     trtllm_pyexecutor_creator_module.gc = gc_module
+    trtllm_pyexecutor_creator_module.torch = torch_module
     trtllm_pyexecutor_creator_module.create_py_executor_instance = (
         fake_create_py_executor_instance
     )
@@ -348,6 +352,19 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
     py_executor_creator = stubbed_env["py_executor_creator"]
     call_log = stubbed_env["call_log"]
 
+    model_engine = types.SimpleNamespace(max_num_tokens=8192)
+    draft_model_engine = types.SimpleNamespace(max_num_tokens=4096)
+    drafter = types.SimpleNamespace(draft_model_engine=draft_model_engine)
+
+    def fake_create_py_executor_instance(*args, name="executor", **kwargs):
+        call_log.append(
+            f"create_py_executor_instance:{name}:model={kwargs['model_engine'].max_num_tokens}:"
+            f"draft={getattr(kwargs.get('drafter'), 'draft_model_engine', None).max_num_tokens}"
+        )
+        return py_executor_creator.PyExecutor(name)
+
+    py_executor_creator.create_py_executor_instance = fake_create_py_executor_instance
+
     def fake_create_py_executor(*args, **kwargs):
         kv_cache_creator = py_executor_creator.KvCacheCreator()
 
@@ -355,7 +372,15 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
         py_executor_creator.PyTorchModelEngine()
         kv_cache_creator.build_managers({}, True)
         call_log.append("temp_executor_created")
-        py_executor = py_executor_creator.create_py_executor_instance(name="temp")
+        py_executor = py_executor_creator.create_py_executor_instance(
+            name="temp",
+            model_engine=model_engine,
+            drafter=drafter,
+            max_batch_size=8,
+        )
+        call_log.append(
+            f"after_temp_restore:model={model_engine.max_num_tokens}:draft={draft_model_engine.max_num_tokens}"
+        )
         py_executor.start_worker()
         kv_cache_creator.configure_kv_cache_capacity(py_executor)
         kv_cache_creator.teardown_managers({})
@@ -363,7 +388,15 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
         py_executor_creator.gc.collect()
         kv_cache_creator.build_managers({}, False)
         call_log.append("final_executor_created")
-        final_executor = py_executor_creator.create_py_executor_instance(name="final")
+        final_executor = py_executor_creator.create_py_executor_instance(
+            name="final",
+            model_engine=model_engine,
+            drafter=drafter,
+            max_batch_size=8,
+        )
+        call_log.append(
+            f"after_final_create:model={model_engine.max_num_tokens}:draft={draft_model_engine.max_num_tokens}"
+        )
         final_executor.start_worker()
         return final_executor
 
@@ -398,13 +431,18 @@ def test_worker_init_hook_standby_gates_after_temp_executor_before_final_kv_buil
         "model_engine_init",
         "build_managers:True",
         "temp_executor_created",
+        "create_py_executor_instance:temp:model=8:draft=8",
+        "after_temp_restore:model=8192:draft=4096",
         "start_worker:temp",
         "configure_kv_cache_capacity",
         "teardown_managers",
         "gc_collect",
+        "clear_cublas_workspaces",
         "wait_for_activation",
         "build_managers:False",
         "final_executor_created",
+        "create_py_executor_instance:final:model=8192:draft=4096",
+        "after_final_create:model=8192:draft=4096",
         "start_worker:final",
     ]
 
