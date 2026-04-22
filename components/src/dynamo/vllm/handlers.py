@@ -37,7 +37,7 @@ from dynamo.common.multimodal.embedding_transfer import (
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.mm_kwargs_transfer import (
-    MmKwargsReceiver,
+    MmKwargsNixlReceiver,
     MmKwargsTransferMetadata,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -423,7 +423,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
-        self._mm_kwargs_receiver: MmKwargsReceiver | None = None
+        self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -1178,219 +1178,166 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
-    async def _try_receive_mm_kwargs_nixl(
+    async def _try_receive_mm_kwargs(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
-        """Try to receive pre-processed mm_kwargs via NIXL from the frontend.
+        """Try to receive pre-processed mm_kwargs from the frontend (SHM or NIXL).
 
-        If the request contains NIXL transfer metadata (mm_kwargs_nixl), pulls
-        the tensors via NIXL READ and constructs a pre-rendered MultiModalInput
-        dict that the vLLM engine can consume directly, skipping the HF processor.
-
-        Returns a dict suitable for passing to engine as an EngineInput, or None
-        if NIXL metadata is not present.
+        If ``extra_args`` contains ``mm_kwargs_shm`` or ``mm_kwargs_nixl``, fetch
+        the tensors via the corresponding transport and construct a pre-rendered
+        MultiModalInput dict the vLLM engine can consume directly, skipping the
+        HF processor. Returns None if no transfer metadata is present or the
+        receive fails (caller falls back to normal processing).
         """
         extra_args = request.get("extra_args") or {}
-        ea_keys = list(extra_args.keys()) if extra_args else []
         logger.debug(
-            "[mm-routing] _try_receive_mm_kwargs_nixl: extra_args keys=%s", ea_keys
+            "[mm-routing] _try_receive_mm_kwargs: extra_args keys=%s",
+            list(extra_args.keys()),
         )
 
-        # Try SHM path first (same-node, ~1.5ms).
-        # SHM only works when frontend and backend are on the same machine.
-        # If SHM read fails (cross-node), fall through to normal processing.
+        # SHM path (same-node, ~1.5ms). Only works when frontend and backend
+        # share /dev/shm; if the read fails (cross-node), fall through to
+        # normal processing.
         shm_meta = extra_args.get("mm_kwargs_shm")
         if shm_meta:
-            result = await self._receive_mm_kwargs_shm(request, shm_meta)
-            if result is not None:
-                return result
-            logger.debug(
-                "[mm-routing] SHM read failed (cross-node?), falling back to "
-                "normal processing"
+            return await self._receive_mm_kwargs(
+                extra_args, "shm", shm_meta, shm_meta["modality"]
             )
-            return None
 
         nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
-        if not nixl_meta_raw:
-            logger.debug("[mm-routing] No mm_kwargs_nixl in extra_args, skipping NIXL")
-            return None
-
-        rng = _nvtx.start_range("mm_backend:nixl_receive", color="magenta")
-        logger.debug(
-            "[mm-routing] Found mm_kwargs_nixl in extra_args, attempting NIXL reception"
-        )
-        mm_hashes = extra_args.get("mm_hashes")
-        mm_placeholders = extra_args.get("mm_placeholders")
-        if not mm_hashes or not mm_placeholders:
-            logger.warning(
-                "mm_kwargs_nixl present but mm_hashes/mm_placeholders missing"
+        if nixl_meta_raw:
+            metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+            return await self._receive_mm_kwargs(
+                extra_args, "nixl", metadata, metadata.modality
             )
-            _nvtx.end_range(rng)
-            return None
 
+        logger.debug("[mm-routing] No mm_kwargs transfer metadata in extra_args")
+        return None
+
+    async def _receive_mm_kwargs(
+        self,
+        extra_args: Dict[str, Any],
+        transport: str,
+        meta: Any,
+        modality: str,
+    ) -> Dict[str, Any] | None:
+        """Shared NIXL/SHM receive path.
+
+        Fetches pickled ``MultiModalKwargsItem`` bytes via the requested
+        ``transport``, deserializes them, builds an ``EngineInput`` dict,
+        and injects into the engine's MM processor cache. Returns None on
+        any validation or transport failure (caller falls back).
+        """
+        is_nixl = transport == "nixl"
+        color = "magenta" if is_nixl else "cyan"
+        label = f"mm_backend:{transport}_receive"
+
+        rng = _nvtx.start_range(label, color=color)
         try:
-            with _nvtx.annotate("mm_backend:nixl_setup", color="magenta"):
-                metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
-                if self._mm_kwargs_receiver is None:
-                    self._mm_kwargs_receiver = MmKwargsReceiver()
-                receiver = self._mm_kwargs_receiver
-            with _nvtx.annotate("mm_backend:nixl_rdma_read", color="magenta"):
-                mm_kwargs_tensors = await receiver.receive(metadata)
-
-            pickled_items = mm_kwargs_tensors.get("__pickled_kwargs_item__")
-            if not pickled_items:
+            mm_hashes = extra_args.get("mm_hashes")
+            mm_placeholders = extra_args.get("mm_placeholders")
+            if not mm_hashes or not mm_placeholders:
                 logger.warning(
-                    "[mm-routing] NIXL tensors received but no pickled kwargs items; "
-                    "falling back to normal path"
+                    "[mm-routing] %s present but mm_hashes/mm_placeholders missing",
+                    transport,
                 )
                 return None
-            # pickled_items is a list (one per image/feature).
-            kwargs_items = []
-            with _nvtx.annotate("mm_backend:nixl_pickle_loads", color="magenta"):
+
+            # Receive pickled kwargs items.
+            if is_nixl:
+                with _nvtx.annotate("mm_backend:nixl_setup", color=color):
+                    if self._mm_kwargs_receiver is None:
+                        self._mm_kwargs_receiver = MmKwargsNixlReceiver()
+                    receiver = self._mm_kwargs_receiver
+                with _nvtx.annotate("mm_backend:nixl_rdma_read", color=color):
+                    results = await receiver.receive(meta)
+            else:
+                from dynamo.common.multimodal.mm_kwargs_transfer import (
+                    MmKwargsShmReceiver,
+                )
+
+                with _nvtx.annotate("mm_backend:shm_open_and_read", color=color):
+                    results = MmKwargsShmReceiver().receive(meta)
+
+            pickled_items = results.get("__pickled_kwargs_item__")
+            if not pickled_items:
+                logger.warning(
+                    "[mm-routing] %s: no pickled kwargs items received", transport
+                )
+                return None
+
+            # Unpickle and validate each item.
+            kwargs_items: list[MultiModalKwargsItem] = []
+            with _nvtx.annotate(f"mm_backend:{transport}_pickle_loads", color=color):
                 for pi in pickled_items:
                     item = pickle.loads(pi)
                     if not isinstance(item, MultiModalKwargsItem):
                         logger.warning(
-                            "[mm-routing] Deserialized object is %s, expected "
+                            "[mm-routing] %s: deserialized object is %s, expected "
                             "MultiModalKwargsItem; falling back to normal path",
+                            transport,
                             type(item).__name__,
                         )
                         return None
                     kwargs_items.append(item)
 
             # Use the expanded token IDs (with image placeholders) from the
-            # frontend, not the unexpanded request["token_ids"].
-            # The mm_placeholders and transferred kwargs are aligned to the
+            # frontend, not the unexpanded request["token_ids"]. The
+            # mm_placeholders and transferred kwargs are aligned to the
             # expanded sequence — using unexpanded tokens would misplace
             # every placeholder.
             expanded_token_ids = extra_args.get("expanded_token_ids")
             if not expanded_token_ids:
                 logger.warning(
-                    "[mm-routing] No expanded_token_ids in extra_args, "
-                    "cannot use pre-rendered mm_kwargs; falling back to "
-                    "normal processing"
+                    "[mm-routing] %s: no expanded_token_ids in extra_args, "
+                    "cannot use pre-rendered mm_kwargs; falling back",
+                    transport,
                 )
-                _nvtx.end_range(rng)
                 return None
 
-            mm_hashes_dict = {metadata.modality: mm_hashes}
-            mm_kwargs_dict = {metadata.modality: kwargs_items}
-            engine_input = {
-                "type": "multimodal",
-                "prompt_token_ids": expanded_token_ids,
-                "mm_kwargs": mm_kwargs_dict,
-                "mm_hashes": mm_hashes_dict,
-                "mm_placeholders": {
-                    metadata.modality: [
-                        PlaceholderRange(offset=off, length=length)
-                        for off, length in mm_placeholders
-                    ],
-                },
-            }
-            # Inject into the engine's MM processor cache so that
-            # subsequent requests with the same images get cache hits.
-            try:
-                self.engine_client.input_processor.inject_into_mm_cache(
-                    mm_hashes_dict, mm_kwargs_dict
-                )
-            except Exception:
-                logger.debug(
-                    "[mm-routing] Failed to inject into mm_cache",
-                    exc_info=True,
-                )
-            logger.debug(
-                "[mm-routing] Constructed pre-rendered MultiModalInput from "
-                "%d pickled kwargs_items, %d hashes, %d placeholders",
-                len(kwargs_items),
-                len(mm_hashes),
-                len(mm_placeholders),
-            )
-            _nvtx.end_range(rng)
-            return engine_input
-        except Exception:
-            logger.exception("Failed to receive mm_kwargs via NIXL, falling back")
-            _nvtx.end_range(rng)
-            return None
-
-    async def _receive_mm_kwargs_shm(
-        self, request: Dict[str, Any], shm_meta: Dict[str, Any]
-    ) -> Dict[str, Any] | None:
-        """Receive pre-processed mm_kwargs via shared memory (~2ms)."""
-        rng = _nvtx.start_range("mm_backend:shm_receive", color="cyan")
-        extra_args = request.get("extra_args") or {}
-        mm_hashes = extra_args.get("mm_hashes")
-        mm_placeholders = extra_args.get("mm_placeholders")
-        if not mm_hashes or not mm_placeholders:
-            logger.warning(
-                "[mm-routing] SHM present but mm_hashes/mm_placeholders missing"
-            )
-            _nvtx.end_range(rng)
-            return None
-
-        try:
-            from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsShmReceiver
-
-            receiver = MmKwargsShmReceiver()
-            with _nvtx.annotate("mm_backend:shm_open_and_read", color="cyan"):
-                results = receiver.receive(shm_meta)
-
-            pickled_items = results.get("__pickled_kwargs_item__")
-            if not pickled_items:
-                logger.warning("[mm-routing] SHM: no pickled items received")
-                _nvtx.end_range(rng)
-                return None
-
-            with _nvtx.annotate("mm_backend:shm_pickle_loads", color="cyan"):
-                kwargs_items = []
-                for pi in pickled_items:
-                    item = pickle.loads(pi)
-                    if not isinstance(item, MultiModalKwargsItem):
-                        logger.warning(
-                            "[mm-routing] SHM: deserialized object is %s, expected "
-                            "MultiModalKwargsItem; falling back to normal path",
-                            type(item).__name__,
-                        )
-                        _nvtx.end_range(rng)
-                        return None
-                    kwargs_items.append(item)
-
-            expanded_token_ids = extra_args.get("expanded_token_ids")
-            if not expanded_token_ids:
-                logger.warning("[mm-routing] SHM: no expanded_token_ids, falling back")
-                _nvtx.end_range(rng)
-                return None
-
-            with _nvtx.annotate("mm_backend:shm_build_engine_input", color="cyan"):
-                mm_hashes_dict = {shm_meta["modality"]: mm_hashes}
-                mm_kwargs_dict = {shm_meta["modality"]: kwargs_items}
+            mm_hashes_dict = {modality: mm_hashes}
+            mm_kwargs_dict = {modality: kwargs_items}
+            with _nvtx.annotate(
+                f"mm_backend:{transport}_build_engine_input", color=color
+            ):
                 engine_input = {
                     "type": "multimodal",
                     "prompt_token_ids": expanded_token_ids,
                     "mm_kwargs": mm_kwargs_dict,
                     "mm_hashes": mm_hashes_dict,
                     "mm_placeholders": {
-                        shm_meta["modality"]: [
+                        modality: [
                             PlaceholderRange(offset=off, length=length)
                             for off, length in mm_placeholders
                         ],
                     },
                 }
-            # Inject into the engine's MM processor cache.
+
+            # Inject into the engine's MM processor cache so subsequent
+            # requests with the same images get cache hits.
             try:
                 self.engine_client.input_processor.inject_into_mm_cache(
                     mm_hashes_dict, mm_kwargs_dict
                 )
             except Exception:
                 logger.debug(
-                    "[mm-routing] Failed to inject into mm_cache",
-                    exc_info=True,
+                    "[mm-routing] Failed to inject into mm_cache", exc_info=True
                 )
-            _nvtx.end_range(rng)
+
+            logger.debug(
+                "[mm-routing] %s: constructed pre-rendered MultiModalInput from "
+                "%d kwargs_items, %d hashes, %d placeholders",
+                transport,
+                len(kwargs_items),
+                len(mm_hashes),
+                len(mm_placeholders),
+            )
             return engine_input
         except Exception:
-            logger.exception("[mm-routing] SHM receive failed, falling back")
-            _nvtx.end_range(rng)
+            logger.exception("[mm-routing] %s receive failed, falling back", transport)
             return None
+        finally:
+            _nvtx.end_range(rng)
 
     @staticmethod
     def _get_mm_processor_kwargs(
@@ -1997,7 +1944,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from frontend.
             # If available, we skip image downloading AND the HF processor.
             with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
-                pre_rendered = await self._try_receive_mm_kwargs_nixl(request)
+                pre_rendered = await self._try_receive_mm_kwargs(request)
             if pre_rendered is not None:
                 logger.debug(
                     "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
