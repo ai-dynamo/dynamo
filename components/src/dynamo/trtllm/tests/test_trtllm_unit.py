@@ -306,8 +306,8 @@ class Dep16PrimaryStartupReached(Exception):
     """Raised when the DEP16 primary path reaches engine init in tests."""
 
 
-class Dep16PrimaryRegisterReached(Exception):
-    """Raised when the DEP16 primary path registers after delegate install."""
+class Dep16PrimaryEndpointRegisterReached(Exception):
+    """Raised when the DEP16 primary path re-registers the real endpoint."""
 
 
 def test_deferred_generate_proxy_answers_health_check_before_delegate():
@@ -427,7 +427,7 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
     ]
 
 
-def test_init_llm_worker_dep16_shadow_primary_serves_health_before_engine_init_without_runtime_lock(
+def test_init_llm_worker_dep16_shadow_primary_hides_startup_proxy_from_discovery(
     monkeypatch,
 ):
     monkeypatch.setenv("ENGINE_ID", "0")
@@ -463,6 +463,9 @@ def test_init_llm_worker_dep16_shadow_primary_serves_health_before_engine_init_w
                     raise
 
             return asyncio.create_task(wait_forever())
+
+        async def unregister_endpoint_instance(self):
+            call_log.append("unregister_endpoint_instance")
 
     class FakeLock:
         def __init__(self, *_args, **_kwargs):
@@ -515,13 +518,14 @@ def test_init_llm_worker_dep16_shadow_primary_serves_health_before_engine_init_w
 
     assert call_log == [
         "serve_endpoint",
+        "unregister_endpoint_instance",
         "get_llm_engine",
         "engine_enter",
         "serve_cancelled",
     ]
 
 
-def test_init_llm_worker_dep16_shadow_primary_registers_after_delegate_install(
+def test_init_llm_worker_dep16_shadow_primary_registers_model_then_endpoint_after_delegate_install(
     monkeypatch,
 ):
     monkeypatch.setenv("ENGINE_ID", "0")
@@ -557,6 +561,13 @@ def test_init_llm_worker_dep16_shadow_primary_registers_after_delegate_install(
                     raise
 
             return asyncio.create_task(wait_forever())
+
+        async def unregister_endpoint_instance(self):
+            call_log.append("unregister_endpoint_instance")
+
+        async def register_endpoint_instance(self):
+            call_log.append("register_endpoint_instance")
+            raise Dep16PrimaryEndpointRegisterReached()
 
     class FakeLock:
         def __init__(self, *_args, **_kwargs):
@@ -594,7 +605,6 @@ def test_init_llm_worker_dep16_shadow_primary_registers_after_delegate_install(
 
     async def fake_register_model(*_args, **_kwargs):
         call_log.append("register_model")
-        raise Dep16PrimaryRegisterReached()
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
@@ -636,7 +646,7 @@ def test_init_llm_worker_dep16_shadow_primary_registers_after_delegate_install(
     ):
         factory.return_value = fake_request_handler_factory
 
-        with pytest.raises(Dep16PrimaryRegisterReached):
+        with pytest.raises(Dep16PrimaryEndpointRegisterReached):
             asyncio.run(
                 init_llm_worker(
                     runtime=runtime,
@@ -647,10 +657,12 @@ def test_init_llm_worker_dep16_shadow_primary_registers_after_delegate_install(
 
     assert call_log == [
         "serve_endpoint",
+        "unregister_endpoint_instance",
         "get_llm_engine",
         "engine_enter",
         "set_delegate",
         "register_model",
+        "register_endpoint_instance",
         "engine_exit",
         "serve_cancelled",
     ]

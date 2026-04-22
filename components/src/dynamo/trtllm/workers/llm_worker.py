@@ -586,6 +586,7 @@ async def init_llm_worker(
     startup_serve_task = None
     # Keep DEP16 active startup health-only until the real handler is live.
     register_model_after_delegate = False
+    register_endpoint_after_delegate = False
     if primary_shadow_owner and not dep16_shadow_primary:
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
@@ -615,6 +616,7 @@ async def init_llm_worker(
         register_model_after_delegate = (
             config.disaggregation_mode != DisaggregationMode.ENCODE
         )
+        register_endpoint_after_delegate = True
         startup_generate_proxy = _DeferredGenerateProxy(
             health_check_payload,
             waiting_message="Active engine is still initializing",
@@ -628,11 +630,16 @@ async def init_llm_worker(
         if startup_serve_task.done():
             await startup_serve_task
 
+        await endpoint.unregister_endpoint_instance()
+
         logging.info(
             "[DEP16] Active startup proxy is serving health checks before engine init"
         )
         logging.info(
             "[DEP16] Skipping runtime primary startup lock reacquire during multinode active startup"
+        )
+        logging.info(
+            "[DEP16] Startup proxy unregistered from discovery until real handler is ready"
         )
 
     try:
@@ -841,6 +848,11 @@ async def init_llm_worker(
                             logging.info(
                                 "[DEP16] Active model registered after engine init"
                             )
+                        if register_endpoint_after_delegate:
+                            await endpoint.register_endpoint_instance()
+                            logging.info(
+                                "[DEP16] Active endpoint re-registered after engine init"
+                            )
                         await startup_serve_task
                     else:
                         await endpoint.serve_endpoint(
@@ -869,6 +881,11 @@ async def init_llm_worker(
                         )
                         logging.info(
                             "[DEP16] Active model registered after engine init"
+                        )
+                    if register_endpoint_after_delegate:
+                        await endpoint.register_endpoint_instance()
+                        logging.info(
+                            "[DEP16] Active endpoint re-registered after engine init"
                         )
                     await startup_serve_task
                 else:
