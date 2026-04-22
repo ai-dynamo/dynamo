@@ -67,6 +67,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
         bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
 
         self.default_payload = {
+            "_HEALTH_CHECK": True,
             "token_ids": [bos_token_id],
             "stop_conditions": {
                 "max_tokens": 1,
@@ -87,7 +88,6 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             },
         }
         if disaggregation_mode == DisaggregationMode.DECODE:
-            self.default_payload["_HEALTH_CHECK"] = True
             self.default_payload["disaggregated_params"] = {
                 "request_type": "context_and_generation"
             }

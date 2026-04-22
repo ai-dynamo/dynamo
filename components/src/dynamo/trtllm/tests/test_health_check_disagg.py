@@ -15,17 +15,17 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    "mode,expect_canary",
+    "mode,expect_disagg",
     [
         (DisaggregationMode.AGGREGATED, False),
         (DisaggregationMode.PREFILL, False),
         (DisaggregationMode.DECODE, True),
     ],
 )
-def test_payload_marks_only_decode(mode, expect_canary):
+def test_payload_shape(mode, expect_disagg):
     payload = TrtllmHealthCheckPayload(disaggregation_mode=mode).to_dict()
-    assert bool(payload.get("_HEALTH_CHECK")) is expect_canary
-    if expect_canary:
+    assert payload["_HEALTH_CHECK"] is True
+    if expect_disagg:
         assert payload["disaggregated_params"] == {
             "request_type": "context_and_generation"
         }
