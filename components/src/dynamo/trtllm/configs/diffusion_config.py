@@ -18,10 +18,9 @@ Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo.common.utils.namespace import get_worker_namespace
-from dynamo.trtllm.args import Config
 
 DYN_NAMESPACE = get_worker_namespace()
 
@@ -121,9 +120,7 @@ class DiffusionConfig:
     skip_components: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_config(
-        cls, config: Config, skip_components: list[str]
-    ) -> "DiffusionConfig":
+    def from_config(cls, config: Any, skip_components: list[str]) -> "DiffusionConfig":
         """Build a DiffusionConfig from a worker Config, mapping matching field names automatically.
 
         Special cases:
