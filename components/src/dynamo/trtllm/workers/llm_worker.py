@@ -564,8 +564,6 @@ async def init_llm_worker(
             (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
         ]
 
-    startup_runtime_config = _build_runtime_config(config, engine_args)
-
     # Construct Prometheus gauges directly; passed through to the engine and publisher
     # via explicit parameters (no module-level global).
     component_gauges = LLMBackendMetrics(
@@ -586,8 +584,9 @@ async def init_llm_worker(
     startup_lock = None
     startup_generate_proxy = None
     startup_serve_task = None
-    model_registered = False
-    if primary_shadow_owner:
+    # Keep DEP16 active startup health-only until the real handler is live.
+    register_model_after_delegate = False
+    if primary_shadow_owner and not dep16_shadow_primary:
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
         startup_lock = FlockFailoverLock(failover_lock_path)
@@ -613,6 +612,9 @@ async def init_llm_worker(
             "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
         )
     elif dep16_shadow_primary:
+        register_model_after_delegate = (
+            config.disaggregation_mode != DisaggregationMode.ENCODE
+        )
         startup_generate_proxy = _DeferredGenerateProxy(
             health_check_payload,
             waiting_message="Active engine is still initializing",
@@ -629,21 +631,9 @@ async def init_llm_worker(
         logging.info(
             "[DEP16] Active startup proxy is serving health checks before engine init"
         )
-
-        if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_model(
-                model_input,
-                model_type,
-                endpoint,
-                config.model,
-                config.served_model_name,
-                context_length=config.max_seq_len,
-                kv_cache_block_size=config.kv_block_size,
-                runtime_config=startup_runtime_config,
-                custom_template_path=config.custom_jinja_template,
-            )
-            model_registered = True
-            logging.info("[DEP16] Active model registered before engine init")
+        logging.info(
+            "[DEP16] Skipping runtime primary startup lock reacquire during multinode active startup"
+        )
 
     try:
         async with get_llm_engine(
@@ -780,7 +770,7 @@ async def init_llm_worker(
             # Prefill and decode workers register - frontend detects their role via ModelType
             if (
                 config.disaggregation_mode != DisaggregationMode.ENCODE
-                and not model_registered
+                and not register_model_after_delegate
             ):
                 await register_model(
                     model_input,
@@ -836,6 +826,21 @@ async def init_llm_worker(
                         )
                     if startup_generate_proxy is not None:
                         startup_generate_proxy.set_delegate(handler.generate)
+                        if register_model_after_delegate:
+                            await register_model(
+                                model_input,
+                                model_type,
+                                endpoint,
+                                config.model,
+                                config.served_model_name,
+                                context_length=config.max_seq_len,
+                                kv_cache_block_size=config.kv_block_size,
+                                runtime_config=runtime_config,
+                                custom_template_path=config.custom_jinja_template,
+                            )
+                            logging.info(
+                                "[DEP16] Active model registered after engine init"
+                            )
                         await startup_serve_task
                     else:
                         await endpoint.serve_endpoint(
@@ -850,6 +855,21 @@ async def init_llm_worker(
             else:
                 if startup_generate_proxy is not None:
                     startup_generate_proxy.set_delegate(handler.generate)
+                    if register_model_after_delegate:
+                        await register_model(
+                            model_input,
+                            model_type,
+                            endpoint,
+                            config.model,
+                            config.served_model_name,
+                            context_length=config.max_seq_len,
+                            kv_cache_block_size=config.kv_block_size,
+                            runtime_config=runtime_config,
+                            custom_template_path=config.custom_jinja_template,
+                        )
+                        logging.info(
+                            "[DEP16] Active model registered after engine init"
+                        )
                     await startup_serve_task
                 else:
                     await endpoint.serve_endpoint(
