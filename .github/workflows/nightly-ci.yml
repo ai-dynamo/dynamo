@@ -118,13 +118,95 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # DYNAMO RUNTIME PIPELINE
+  # ============================================================================
+  dynamo-build:
+    name: dynamo
+    needs: [create-fresh-builder]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: runtime
+      cuda_version: '["12.9"]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      fresh_builder: true
+      build_timeout_minutes: 180
+    secrets: inherit
+
+  dynamo-rust:
+    name: dynamo
+    needs: [dynamo-build]
+    uses: ./.github/workflows/shared-rust.yml
+    with:
+      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
+      cuda_version: '12.9'
+    secrets: inherit
+
+  dynamo-test-parallel:
+    name: dynamo
+    needs: [dynamo-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: Pytest (parallel)
+      amd_runner: prod-builder-amd-v1
+      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_timeout_minutes: 60
+      cpu_parallel_mode: '4'
+      run_gpu_tests: false
+    secrets: inherit
+
+  dynamo-test-sequential:
+    name: dynamo
+    needs: [dynamo-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: Pytest (sequential)
+      amd_runner: prod-builder-amd-v1
+      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_timeout_minutes: 60
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  dynamo-test-gpu:
+    name: dynamo
+    needs: [dynamo-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: Pytest (GPU)
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      gpu_test_markers: 'none and gpu_1'
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-rust, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -147,7 +229,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-rust, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu ]
     permissions:
       contents: read
     steps:
