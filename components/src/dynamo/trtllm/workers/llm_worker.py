@@ -68,10 +68,15 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
-class _StandbyGenerateProxy:
-    def __init__(self, health_check_payload: dict | None = None):
+class _DeferredGenerateProxy:
+    def __init__(
+        self,
+        health_check_payload: dict | None = None,
+        waiting_message: str = "Engine is not ready",
+    ):
         self._delegate = None
         self._health_check_payload = health_check_payload
+        self._waiting_message = waiting_message
 
     def set_delegate(self, delegate) -> None:
         self._delegate = delegate
@@ -84,10 +89,42 @@ class _StandbyGenerateProxy:
             ):
                 yield {"status": "ok"}
                 return
-            raise RuntimeError("Shadow standby is waiting for failover lock")
+            raise RuntimeError(self._waiting_message)
 
         async for response in self._delegate(request, context):
             yield response
+
+
+def _initial_attention_dp_size(engine_args: dict) -> int:
+    if not engine_args.get("enable_attention_dp", False):
+        return 1
+
+    return int(engine_args.get("tensor_parallel_size", 1))
+
+
+def _build_runtime_config(
+    config: Config,
+    engine_args: dict,
+    attention_dp_size: int | None = None,
+) -> ModelRuntimeConfig:
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.max_num_seqs = engine_args["max_batch_size"]
+    runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
+    runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.tool_call_parser = config.dyn_tool_call_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
+    runtime_config.enable_local_indexer = (
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
+    )
+    runtime_config.data_parallel_size = (
+        attention_dp_size
+        if attention_dp_size is not None
+        else _initial_attention_dp_size(engine_args)
+    )
+    return runtime_config
 
 
 def build_kv_connector_config(config: Config):
@@ -527,6 +564,8 @@ async def init_llm_worker(
             (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
         ]
 
+    startup_runtime_config = _build_runtime_config(config, engine_args)
+
     # Construct Prometheus gauges directly; passed through to the engine and publisher
     # via explicit parameters (no module-level global).
     component_gauges = LLMBackendMetrics(
@@ -538,10 +577,16 @@ async def init_llm_worker(
     shadow_engine_id = os.environ.get("ENGINE_ID", "0")
     shadow_standby = config.gms_shadow_mode and shadow_engine_id != "0"
     primary_shadow_owner = config.gms_shadow_mode and shadow_engine_id == "0"
+    try:
+        node_count = int(os.environ.get("NNODES", "1"))
+    except ValueError:
+        node_count = 1
+    dep16_shadow_primary = primary_shadow_owner and node_count > 1
     failover_lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
     startup_lock = None
-    standby_generate_proxy = None
-    standby_serve_task = None
+    startup_generate_proxy = None
+    startup_serve_task = None
+    model_registered = False
     if primary_shadow_owner:
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
@@ -550,20 +595,55 @@ async def init_llm_worker(
         logging.info("[Shadow] Primary acquired startup lock, starting engine init")
 
     if shadow_standby:
-        standby_generate_proxy = _StandbyGenerateProxy(health_check_payload)
-        standby_serve_task = endpoint.serve_endpoint(
-            standby_generate_proxy.generate,
+        startup_generate_proxy = _DeferredGenerateProxy(
+            health_check_payload,
+            waiting_message="Shadow standby is waiting for failover lock",
+        )
+        startup_serve_task = endpoint.serve_endpoint(
+            startup_generate_proxy.generate,
             metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
         )
         await asyncio.sleep(0)
-        if standby_serve_task.done():
-            await standby_serve_task
+        if startup_serve_task.done():
+            await startup_serve_task
 
         runtime.set_health_status(True)
         logging.info(
             "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
         )
+    elif dep16_shadow_primary:
+        startup_generate_proxy = _DeferredGenerateProxy(
+            health_check_payload,
+            waiting_message="Active engine is still initializing",
+        )
+        startup_serve_task = endpoint.serve_endpoint(
+            startup_generate_proxy.generate,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
+        )
+        await asyncio.sleep(0)
+        if startup_serve_task.done():
+            await startup_serve_task
+
+        logging.info(
+            "[DEP16] Active startup proxy is serving health checks before engine init"
+        )
+
+        if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            await register_model(
+                model_input,
+                model_type,
+                endpoint,
+                config.model,
+                config.served_model_name,
+                context_length=config.max_seq_len,
+                kv_cache_block_size=config.kv_block_size,
+                runtime_config=startup_runtime_config,
+                custom_template_path=config.custom_jinja_template,
+            )
+            model_registered = True
+            logging.info("[DEP16] Active model registered before engine init")
 
     try:
         async with get_llm_engine(
@@ -582,36 +662,12 @@ async def init_llm_worker(
             # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
             # So for now, we just set the parsers from the config
             # TODO: fix this once we have a better way to get total_kv_blocks
-            runtime_config = ModelRuntimeConfig()
-
-            # Set values from config that are available immediately
-            # Note: We populate max_num_seqs and max_num_batched_tokens from config
-            # to ensure Prometheus metrics are available even without engine stats
-
-            # Naming clarification:
-            # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
-            # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
-            # Both parameters control the same thing: how many requests can be processed simultaneously
-
-            # Need to get max_num_seqs and max_num_batched_tokens from engine_args
-            # because they can be overridden by --extra-engine-args or --override-engine-args
-            runtime_config.max_num_seqs = engine_args["max_batch_size"]
-            runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
-            runtime_config.reasoning_parser = config.dyn_reasoning_parser
-            runtime_config.tool_call_parser = config.dyn_tool_call_parser
-            runtime_config.exclude_tools_when_tool_choice_none = (
-                config.exclude_tools_when_tool_choice_none
-            )
-            # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-            runtime_config.enable_local_indexer = (
-                config.enable_local_indexer
-                and config.disaggregation_mode != DisaggregationMode.DECODE
-            )
-            # Set data_parallel_size for attention DP mode
-            # This enables the router's scheduler to correctly iterate over all dp_ranks
-            # Need to name ADP as `data_parallel_size` for parity with other frameworks
             attention_dp_size = engine.get_attention_dp_size()
-            runtime_config.data_parallel_size = attention_dp_size
+            runtime_config = _build_runtime_config(
+                config,
+                engine_args,
+                attention_dp_size=attention_dp_size,
+            )
 
             logging.info(
                 f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}"
@@ -722,7 +778,10 @@ async def init_llm_worker(
             # Register the model with runtime config
             # Encode workers do NOT register - they're internal workers only
             # Prefill and decode workers register - frontend detects their role via ModelType
-            if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            if (
+                config.disaggregation_mode != DisaggregationMode.ENCODE
+                and not model_registered
+            ):
                 await register_model(
                     model_input,
                     model_type,
@@ -775,9 +834,9 @@ async def init_llm_worker(
                             model_name=model_name_for_metrics,
                             component_name=config.component,
                         )
-                    if shadow_standby:
-                        standby_generate_proxy.set_delegate(handler.generate)
-                        await standby_serve_task
+                    if startup_generate_proxy is not None:
+                        startup_generate_proxy.set_delegate(handler.generate)
+                        await startup_serve_task
                     else:
                         await endpoint.serve_endpoint(
                             handler.generate,
@@ -789,18 +848,18 @@ async def init_llm_worker(
                 if consolidator_publisher:
                     consolidator_publisher.shutdown()
             else:
-                if shadow_standby:
-                    standby_generate_proxy.set_delegate(handler.generate)
-                    await standby_serve_task
+                if startup_generate_proxy is not None:
+                    startup_generate_proxy.set_delegate(handler.generate)
+                    await startup_serve_task
                 else:
                     await endpoint.serve_endpoint(
                         handler.generate, health_check_payload=health_check_payload
                     )
     except Exception:
-        if standby_serve_task is not None:
-            standby_serve_task.cancel()
+        if startup_serve_task is not None:
+            startup_serve_task.cancel()
             with suppress(asyncio.CancelledError):
-                await standby_serve_task
+                await startup_serve_task
         raise
     finally:
         if startup_lock is not None:

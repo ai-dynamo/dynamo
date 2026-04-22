@@ -22,7 +22,7 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update
-from dynamo.trtllm.workers.llm_worker import _StandbyGenerateProxy, init_llm_worker
+from dynamo.trtllm.workers.llm_worker import _DeferredGenerateProxy, init_llm_worker
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -302,8 +302,12 @@ class ShadowPrimaryLockReached(Exception):
     """Raised when the primary shadow path reaches post-init registration."""
 
 
-def test_standby_generate_proxy_answers_health_check_before_delegate():
-    proxy = _StandbyGenerateProxy({"token_ids": [1]})
+class Dep16PrimaryStartupReached(Exception):
+    """Raised when the DEP16 primary path reaches engine init in tests."""
+
+
+def test_deferred_generate_proxy_answers_health_check_before_delegate():
+    proxy = _DeferredGenerateProxy({"token_ids": [1]})
 
     async def collect_response():
         return [
@@ -413,6 +417,116 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
     assert call_log == [
         "serve_endpoint",
         "health:True",
+        "get_llm_engine",
+        "engine_enter",
+        "serve_cancelled",
+    ]
+
+
+def test_init_llm_worker_dep16_shadow_primary_serves_and_registers_before_engine_init(
+    monkeypatch,
+):
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("NNODES", "2")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/failover.lock")
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--load-format",
+            "gms",
+            "--gms-shadow-mode",
+            "--gpus-per-node",
+            "1",
+        ]
+    )
+
+    call_log = []
+
+    class FakeEndpoint:
+        def connection_id(self):
+            return "7"
+
+        def serve_endpoint(self, *_args, **_kwargs):
+            call_log.append("serve_endpoint")
+
+            async def wait_forever():
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    call_log.append("serve_cancelled")
+                    raise
+
+            return asyncio.create_task(wait_forever())
+
+    class FakeLock:
+        def __init__(self, path):
+            call_log.append(f"lock_path:{path}")
+
+        async def acquire(self, engine_id):
+            call_log.append(f"lock_acquire:{engine_id}")
+
+        async def release(self):
+            return None
+
+    class FakeEngineContext:
+        async def __aenter__(self):
+            call_log.append("engine_enter")
+            raise Dep16PrimaryStartupReached()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    runtime = mock.MagicMock()
+    runtime.endpoint.return_value = FakeEndpoint()
+
+    async def fake_register_model(*_args, **_kwargs):
+        call_log.append("register_model")
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.TrtllmHealthCheckPayload",
+            return_value=mock.Mock(to_dict=mock.Mock(return_value={})),
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=lambda *args, **kwargs: (
+                call_log.append("get_llm_engine"),
+                FakeEngineContext(),
+            )[1],
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.register_model",
+            side_effect=fake_register_model,
+        ),
+        mock.patch("gpu_memory_service.integrations.trtllm.setup_gms"),
+        mock.patch(
+            "gpu_memory_service.integrations.trtllm.utils.configure_gms_lock_mode"
+        ),
+        mock.patch(
+            "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
+            FakeLock,
+        ),
+    ):
+        with pytest.raises(Dep16PrimaryStartupReached):
+            asyncio.run(
+                init_llm_worker(
+                    runtime=runtime,
+                    config=config,
+                    shutdown_event=asyncio.Event(),
+                )
+            )
+
+    assert call_log == [
+        "lock_path:/tmp/failover.lock",
+        "lock_acquire:engine-0",
+        "serve_endpoint",
+        "register_model",
         "get_llm_engine",
         "engine_enter",
         "serve_cancelled",
