@@ -66,7 +66,9 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
+{% if "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
+{% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}

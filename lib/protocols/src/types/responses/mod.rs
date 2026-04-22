@@ -35,6 +35,13 @@ use serde::{Deserialize, Serialize};
 // shadow their upstream counterparts where no dual-side conflict exists.
 pub use async_openai::types::responses::*;
 
+// Re-export upstream's pre-shadow `InputContent` under an explicit alias.
+// Needed because `FunctionCallOutput::Content` and `EasyInputContent::ContentList`
+// are non-owned upstream types that carry upstream's original `InputContent`
+// inline, so downstream consumers occasionally need to name it alongside the
+// Dynamo-owned shadow defined further down this module.
+pub use async_openai::types::responses::InputContent as UpstreamInputContent;
+
 // Re-export from parent module for backward compat.
 pub use crate::types::ImageDetail;
 pub use crate::types::ReasoningEffort;
@@ -51,6 +58,40 @@ pub type ResponseStream = std::pin::Pin<
     Box<dyn futures::Stream<Item = Result<ResponseStreamEvent, crate::error::OpenAIError>> + Send>,
 >;
 
+/// Fields on upstream `Response` that the OpenResponses spec requires as
+/// `T | null` but async-openai declares as `Option<T>` with
+/// `skip_serializing_if = Option::is_none` — meaning `None` disappears from
+/// the wire shape, where the spec wants an explicit `null`.
+///
+/// Colocated here (next to the upstream `Response` re-export) rather than in
+/// `lib/llm/src/protocols/openai/responses/mod.rs` so that when upstream's
+/// `Response` gains a new nullable-required field, the reviewer editing this
+/// module is looking directly at the authoritative list. Keep sorted
+/// alphabetically; entries must match serde field names on `Response` exactly.
+///
+/// Any field we unconditionally populate ourselves during response
+/// construction (e.g. `metadata`, `parallel_tool_calls`, `temperature`,
+/// `text`, `tool_choice`, `tools`, `top_p`, `top_logprobs`, `truncation`,
+/// `service_tier`, `background`) is deliberately absent — it's always
+/// present on the wire, so listing it here would be noise.
+pub const SPEC_NULLABLE_REQUIRED_RESPONSE_FIELDS: &[&str] = &[
+    "billing",
+    "completed_at",
+    "conversation",
+    "error",
+    "incomplete_details",
+    "instructions",
+    "max_output_tokens",
+    "max_tool_calls",
+    "previous_response_id",
+    "prompt",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "reasoning",
+    "safety_identifier",
+    "usage",
+];
+
 // ---------------------------------------------------------------------------
 // Input-side assistant message (relaxed vs upstream OutputMessage)
 // ---------------------------------------------------------------------------
@@ -66,6 +107,19 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+/// Deserialize `null` or a missing field as `T::default()`. Scalar counterpart
+/// to `deserialize_null_as_empty_vec` — plain `#[serde(default)]` rejects
+/// explicit `null` because serde tries to deserialize the null into `T` and
+/// fails. Real clients emit `null` for unset enum-ish fields (e.g. OpenAI
+/// Agents SDK sending `"detail": null` on `input_image` parts).
+fn deserialize_null_as_default<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Deserialize<'de> + Default,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 /// Relaxed counterpart to upstream `OutputTextContent` for input-side content.
@@ -103,6 +157,45 @@ pub struct InputOutputMessage {
     pub role: AssistantRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<MessagePhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<OutputStatus>,
+}
+
+// ---------------------------------------------------------------------------
+// Input-side image / content / message (shadow upstream, relaxed shapes)
+// ---------------------------------------------------------------------------
+
+/// Relaxed counterpart to upstream `InputImageContent`. `detail` defaults to
+/// `ImageDetail::Auto` when the client omits it — OpenAI's hosted API and the
+/// OpenResponses spec both accept this shape, but upstream's struct marks
+/// `detail` as required.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct InputImageContent {
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    pub detail: ImageDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+}
+
+/// Parts of an input message: text, image, or file. Mirrors upstream
+/// `InputContent` but routes `InputImage` through the Dynamo-owned relaxed
+/// `InputImageContent` above.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputContent {
+    InputText(InputTextContent),
+    InputImage(InputImageContent),
+    InputFile(InputFileContent),
+}
+
+/// User / system / developer input message. Shadows upstream `InputMessage`
+/// so we can route through the Dynamo-owned `InputContent` chain.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct InputMessage {
+    pub content: Vec<InputContent>,
+    pub role: InputRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<OutputStatus>,
 }
@@ -268,6 +361,33 @@ mod tests {
                 assert!(out.status.is_none());
             }
             other => panic!("expected Item::Message(Output), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_image_without_detail_defaults_to_auto() {
+        let json = serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.jpg"
+        });
+        let content: InputContent = serde_json::from_value(json).unwrap();
+        match content {
+            InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
+            other => panic!("expected InputImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_image_with_explicit_null_detail_defaults_to_auto() {
+        let json = serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.jpg",
+            "detail": null
+        });
+        let content: InputContent = serde_json::from_value(json).unwrap();
+        match content {
+            InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
+            other => panic!("expected InputImage, got {other:?}"),
         }
     }
 

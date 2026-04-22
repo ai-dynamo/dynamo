@@ -5,7 +5,6 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
 
 import pytest
 
@@ -26,38 +25,9 @@ from tests.utils.payload_builder import (
     metric_payload_default,
     multimodal_payload_default,
 )
-from tests.utils.payloads import BasePayload
+from tests.utils.payloads import VideoGenerationPayload
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class VideoGenerationPayload(BasePayload):
-    """Payload for /v1/videos endpoint (TRT-LLM video diffusion)."""
-
-    endpoint: str = "/v1/videos"
-    timeout: int = 300
-
-    def response_handler(self, response: Any) -> str:
-        response.raise_for_status()
-        result = response.json()
-        assert result.get("status") == "completed", (
-            f"Video generation not completed. Status: {result.get('status')}, "
-            f"Error: {result.get('error', 'none')}"
-        )
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
-        assert len(result["data"]) > 0, "Empty data in video response"
-        entry = result["data"][0]
-        if "url" in entry:
-            assert entry["url"], "Video response url is empty"
-            return entry["url"]
-        assert entry.get("b64_json"), "Video response b64_json is empty"
-        return "b64_video_returned"
-
-    def validate(self, response: Any, content: str) -> None:
-        assert content, "Video response content is empty"
 
 
 @dataclass
@@ -437,6 +407,7 @@ trtllm_configs = {
                         "seed": 42,
                     },
                 },
+                timeout=300,
                 repeat_count=1,
                 expected_response=[],
                 expected_log=[],

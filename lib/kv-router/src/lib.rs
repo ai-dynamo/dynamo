@@ -50,7 +50,9 @@ pub use config::{
     KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
     SharedCacheType,
 };
-pub use indexer::{MaybeError, SharedKvCache, SyncIndexer, ThreadPoolIndexer};
+pub use indexer::{
+    BranchShardedIndexer, MaybeError, SharedKvCache, SyncIndexer, ThreadPoolIndexer,
+};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
     KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, RouterEventSink,
