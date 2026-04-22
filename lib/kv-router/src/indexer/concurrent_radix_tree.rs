@@ -32,7 +32,9 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerTask,
+};
 use crate::active_set::reconcile_active_workers;
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
@@ -309,6 +311,7 @@ impl ConcurrentRadixTree {
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
@@ -317,7 +320,7 @@ impl ConcurrentRadixTree {
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
+            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
                 // Ensure the worker is tracked in lookup before clearing,
@@ -340,6 +343,7 @@ impl ConcurrentRadixTree {
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         // Ensure this worker has an entry in the outer map.
         let worker_lookup = lookup.entry(worker).or_default();
@@ -364,6 +368,7 @@ impl ConcurrentRadixTree {
         };
 
         let mut needs_worker_insert = false;
+        let mut duplicate_store = !op.blocks.is_empty();
 
         let mut num_blocks_added = 0;
 
@@ -379,8 +384,8 @@ impl ConcurrentRadixTree {
                 // Insert worker into this node if it was the child from the
                 // previous iteration (skip for the initial parent, which is
                 // not one of the blocks being stored).
-                if needs_worker_insert {
-                    parent_guard.workers.insert(worker);
+                if needs_worker_insert && parent_guard.workers.insert(worker) {
+                    duplicate_store = false;
                 }
                 needs_worker_insert = true;
 
@@ -390,6 +395,7 @@ impl ConcurrentRadixTree {
                         {
                             let existing_guard = existing.read();
                             if existing_guard.block_hash != Some(block_data.block_hash) {
+                                duplicate_store = false;
                                 tracing::warn!(
                                     expected = ?block_data.block_hash,
                                     actual = ?existing_guard.block_hash,
@@ -400,6 +406,7 @@ impl ConcurrentRadixTree {
                         existing.clone()
                     }
                     None => {
+                        duplicate_store = false;
                         // Reuse from lookup or create new
                         let new_block = worker_lookup
                             .get(&block_data.block_hash)
@@ -417,11 +424,13 @@ impl ConcurrentRadixTree {
             };
 
             // Update lookup
-            if worker_lookup
-                .insert(block_data.block_hash, child.clone())
-                .is_none()
-            {
-                num_blocks_added += 1;
+            match worker_lookup.insert(block_data.block_hash, child.clone()) {
+                Some(existing) if Arc::ptr_eq(&existing, &child) => {}
+                Some(_) => duplicate_store = false,
+                None => {
+                    num_blocks_added += 1;
+                    duplicate_store = false;
+                }
             }
 
             current = child;
@@ -429,8 +438,8 @@ impl ConcurrentRadixTree {
 
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
-        if needs_worker_insert {
-            current.write().workers.insert(worker);
+        if needs_worker_insert && current.write().workers.insert(worker) {
+            duplicate_store = false;
         }
 
         match self.tree_sizes.get(&worker) {
@@ -441,6 +450,10 @@ impl ConcurrentRadixTree {
                 self.tree_sizes
                     .insert(worker, AtomicUsize::new(num_blocks_added));
             }
+        }
+
+        if duplicate_store && let Some(counters) = counters {
+            counters.inc_warning(EventWarningKind::DuplicateStore);
         }
 
         Ok(())
@@ -649,7 +662,7 @@ impl SyncIndexer for ConcurrentRadixTree {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut lookup, event);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }

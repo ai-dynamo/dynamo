@@ -31,11 +31,25 @@ use super::{
     AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
     ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
-use ingress::push_handler::WorkHandlerMetrics;
-
-// Add Prometheus metrics types
 use crate::metrics::MetricsHierarchy;
+use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
+
+/// Shared default maximum TCP message size across request-plane components.
+pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
+static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
+
+/// Read the configured TCP max message size once and share it across client,
+/// server, and zero-copy decoder code paths.
+pub(crate) fn get_tcp_max_message_size() -> usize {
+    *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
+        std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE)
+    })
+}
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
