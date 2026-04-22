@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# One-command demo for the rotating_tokens Rust backend.
+#
+#   docker compose up --build
+#   curl http://localhost:8000/v1/chat/completions \
+#       -H 'Content-Type: application/json' \
+#       -d '{"model": "sample-model",
+#            "messages": [{"role":"user","content":"hello"}],
+#            "max_tokens": 32}'
+#
+# First `up` is slow (Rust build + HF tokenizer download). Subsequent
+# runs reuse the layer cache and the huggingface-cache volume.
+
+networks:
+  dynamo:
+    driver: bridge
+
+services:
+  nats-server:
+    image: nats:2.11.4
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    networks:
+      - dynamo
+
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+    ports:
+      - "2379:2379"
+    networks:
+      - dynamo
+
+  frontend:
+    build:
+      context: ../../../..
+      dockerfile: lib/backend-common/examples/rotating_tokens/Dockerfile.frontend
+    command: ["--http-port", "8000"]
+    environment:
+      - NATS_SERVER=nats://nats-server:4222
+      - ETCD_ENDPOINTS=http://etcd-server:2379
+    ports:
+      - "8000:8000"
+    depends_on:
+      - nats-server
+      - etcd-server
+    networks:
+      - dynamo
+
+  rotating-tokens:
+    build:
+      # Build context is the workspace root so cargo can see all crates.
+      context: ../../../..
+      dockerfile: lib/backend-common/examples/rotating_tokens/Dockerfile
+    # --model-path points at a real HF repo so the frontend can load a
+    # tokenizer + chat template. The engine still emits rotating token
+    # IDs (no weights needed); Qwen3-0.6B is just a small, openly
+    # licensed tokenizer that ships everywhere.
+    command:
+      - "--model-name"
+      - "sample-model"
+      - "--model-path"
+      - "Qwen/Qwen3-0.6B"
+      - "--max-tokens"
+      - "32"
+      - "--delay-ms"
+      - "20"
+    environment:
+      - NATS_SERVER=nats://nats-server:4222
+      - ETCD_ENDPOINTS=http://etcd-server:2379
+      - HF_HOME=/cache/huggingface
+      # Set HF_TOKEN in your shell if you hit HuggingFace rate limits.
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - huggingface-cache:/cache/huggingface
+    depends_on:
+      - nats-server
+      - etcd-server
+      - frontend
+    networks:
+      - dynamo
+
+volumes:
+  huggingface-cache:

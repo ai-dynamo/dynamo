@@ -2584,6 +2584,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-rotating-tokens"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap 4.6.0",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "futures",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-runtime"
 version = "1.2.0"
 dependencies = [
