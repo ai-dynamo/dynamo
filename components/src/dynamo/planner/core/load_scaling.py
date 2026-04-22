@@ -162,6 +162,13 @@ class LoadScalingMixin:
             else None
         )
 
+        # Sub-decisions may have set _diag_load_reason to an informative
+        # value like "insufficient_data"; the per-component aggregation
+        # below only emits {scale_up, scale_down, scale_down_capped_by_
+        # throughput, no_change}, which would silently overwrite it.
+        # Capture here and restore in the no-scaling-needed branch below.
+        sub_decision_reason = self._diag_load_reason
+
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
 
@@ -219,6 +226,13 @@ class LoadScalingMixin:
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
+            # If a sub-decision surfaced a reason outside the aggregation
+            # vocabulary (e.g. "insufficient_data" when context_length is
+            # missing), preserve it so the Enum gauge and HTML timeline
+            # reflect the real decision path instead of a blanket
+            # "no_change".
+            if sub_decision_reason is not None and sub_decision_reason != "no_change":
+                self._diag_load_reason = sub_decision_reason
             return None
 
         logger.info(
