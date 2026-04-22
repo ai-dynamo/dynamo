@@ -402,6 +402,14 @@ async def run_profile(
                 phase=ops.current_phase,
             )
             if not is_disagg_config:
+                # TODO: agg + throughput-scaling has no profiling-data
+                # fallback today. The NPZ sweep (thorough) and the AIC
+                # spec (rapid, see build_aic_interpolation_spec) are both
+                # shaped around prefill + decode picks. For agg picks the
+                # planner currently falls back to DYN_BENCHMARK_MODE at
+                # runtime only. Extend AICInterpolationSpec and
+                # run_interpolation to carry an agg_pick so both paths
+                # work for aggregated deployments too.
                 logger.info(
                     "Picked config is aggregated (chosen_exp=%r) — "
                     "skipping interpolation (requires disaggregated config).",
