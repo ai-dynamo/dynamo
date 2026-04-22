@@ -30,7 +30,13 @@ opt-out and lets `run.rs` stay non-generic.
   — streaming inference. Author returns a plain stream; the framework wraps
   it in `Annotated` and plumbs cancellation.
 - `abort(&self, ctx)` — optional, default no-op. Called by the framework
-  when `ctx.stopped()` or `ctx.killed()` fires during an active request.
+  ONLY when `ctx.stopped()` or `ctx.killed()` fires during an active
+  request — NOT on silent stream drops (TCP reset, consumer-side
+  timeout, etc.). For per-request cleanup that must run on ANY drop
+  path (releasing a scheduler slot, freeing an engine handle), put the
+  release logic inside the `generate` stream body using RAII; use
+  `abort` only for out-of-band notifications (e.g. telling a remote
+  scheduler to cancel compute early).
 - `cleanup(&self) -> Result<(), BackendError>` — called once on shutdown.
   Guaranteed to run if `start()` succeeded, even if later registration or
   serve fails.
@@ -137,8 +143,11 @@ yield chunk::cancelled(usage(prompt_len, generated));
 
 `Worker` wraps lifecycle errors in `BackendError` variants. Engines
 return `BackendError` directly from `start`, `generate`, and `cleanup`.
-Non-fatal stream errors should be reported via a terminal chunk
-with `finish_reason = Some(FinishReason::Error(...))`.
+
+Mid-stream, non-fatal errors are signalled via a terminal
+`LLMEngineOutput` with `finish_reason = Some(FinishReason::Error(msg))`
+plus a `completion_usage`. Construct this by hand; there is no
+`chunk::error` helper (the helper set is deliberately small).
 
 ## Logging
 
@@ -174,10 +183,19 @@ async fn my_engine_satisfies_contract() {
 }
 ```
 
-The kit asserts: `start()` returns non-empty model; terminal chunk
-carries `finish_reason` + `completion_usage`; no chunk yielded after
-terminal; cancellation is observed within a bounded deadline;
-`cleanup()` is idempotent.
+The kit asserts:
+
+- `start()` returns a non-empty `EngineConfig.model`.
+- A single `generate()` yields a well-formed stream ending in a
+  terminal chunk (`finish_reason` + `completion_usage` both set).
+- 8 interleaved `generate()` calls all complete successfully
+  (catches shared-state bugs under concurrent polling).
+- After `stop_generating()` fires mid-stream, the stream terminates
+  within a 2s deadline (else `CancellationNotObserved`). If the last
+  chunk yielded is not a `FinishReason::Cancelled` terminal — any
+  other terminal reason, or no terminal at all — the check raises
+  `ConformanceFailure::CancellationIgnored`.
+- `cleanup()` succeeds and is idempotent (two calls in a row both Ok).
 
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.
