@@ -280,8 +280,25 @@ The dashboard is organized into five sections:
 | **Request Latency** | E2E Request Latency, Time-To-First-Token, Inter-Token Latency | Tail latency regressions, TTFT spikes during prefill pressure |
 | **Throughput & Queue** | Token Generation Throughput (tok/s), Running & Queued Requests, Request Rate | Throughput saturation, queue depth growth |
 | **Cache & PIN** | Cache Hit Rate, Active PIN Count, Retractions | KV cache reuse efficiency, PIN pressure from disagg routing |
-| **Memory Pressure** | GPU KV Cache Usage %, Host (CPU) KV Cache Usage %, Eviction & Load-back Rate | OOM risk, HiCache offload activity |
+| **Memory Pressure** | KV Pool Breakdown, KV Physical Usage %, GPU KV Cache Usage %, Host (CPU) KV Cache Usage %, Eviction & Load-back Rate | Physical KV occupancy, logical pinned usage, and HiCache offload activity |
 | **HiCache Latency** | Eviction P99 Latency, Load-back P99 Latency | PCIe/NVLink bottlenecks in KV offload path |
+
+The Memory Pressure section now includes the raw KV pool gauges that recent SGLang releases expose:
+
+- `sglang:kv_used_tokens` - actively pinned KV slots
+- `sglang:kv_evictable_tokens` - radix-cached KV slots that can be reclaimed
+- `sglang:kv_available_tokens` - free KV slots
+
+The **KV Pool Breakdown** panel plots those three gauges directly, while **KV Physical Usage %** derives physical occupancy with:
+
+```promql
+100 * (1 - (sglang:kv_available_tokens / clamp_min(
+  sglang:kv_available_tokens + sglang:kv_evictable_tokens + sglang:kv_used_tokens,
+  1
+)))
+```
+
+The existing **GPU KV Cache Usage %** panel remains as a legacy view of `sglang:token_usage`, which excludes evictable tokens. On older SGLang builds that do not export the raw KV pool gauges yet, the new panels will simply show no data while the legacy panel continues to work.
 
 ### Accessing the Dashboard
 
