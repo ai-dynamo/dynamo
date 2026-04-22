@@ -98,7 +98,7 @@ def build_worker_health_check_payload(
 ) -> dict:
     payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
     if disaggregation_mode == DisaggregationMode.DECODE:
-        # Tells the DECODE handler to run the probe locally (context+decode)
-        # instead of the usual generation_only path which needs a prefill peer.
+        # DECODE handler runs this as a local prefill+decode (no transceiver).
+        payload["_CANARY_HEALTH_CHECK"] = True
         payload["disaggregated_params"] = {"request_type": "context_and_generation"}
     return payload

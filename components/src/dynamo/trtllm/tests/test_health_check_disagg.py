@@ -15,16 +15,17 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    "mode,expect_disagg",
+    "mode,expect_canary",
     [
         (DisaggregationMode.AGGREGATED, False),
         (DisaggregationMode.PREFILL, False),
         (DisaggregationMode.DECODE, True),
     ],
 )
-def test_builder_adds_disagg_params_only_for_decode(mode, expect_disagg):
+def test_builder_marks_only_decode(mode, expect_canary):
     payload = build_worker_health_check_payload(disaggregation_mode=mode)
-    if expect_disagg:
+    assert bool(payload.get("_CANARY_HEALTH_CHECK")) is expect_canary
+    if expect_canary:
         assert payload["disaggregated_params"] == {
             "request_type": "context_and_generation"
         }
