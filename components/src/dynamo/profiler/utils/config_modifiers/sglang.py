@@ -26,6 +26,7 @@ from dynamo.profiler.utils.defaults import (
     EngineType,
     resolve_deploy_path,
 )
+from dynamo.profiler.utils.dgdr_v1beta1_types import DeviceType
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -62,6 +63,130 @@ class SGLangConfigModifier(BaseConfigModifier):
     def update_image(cls, config, image: str) -> dict:
         """Update container image for all DGD services (frontend, planner, workers)."""
         return update_image(config, image)
+
+    @classmethod
+    def set_device_type(cls, config: dict, device_type: str) -> dict:
+        """Inject XPU-specific configuration when device_type is 'xpu'.
+
+        For NVIDIA CUDA (default), this method is a no-op.
+        For Intel XPU:
+        - Removes generic ``gpu`` resource limits/requests (not used by Intel DRA).
+        - Adds a ``ResourceClaimTemplate`` for Intel DRA (``gpu.intel.com``) and
+          the matching ``resourceClaims`` + ``claims`` references to each worker
+          pod spec.
+        """
+        device_str = (
+            device_type.value
+            if isinstance(device_type, DeviceType)
+            else str(device_type).lower()
+        )
+        if device_str != DeviceType.Xpu.value:
+            return config
+
+        cfg = Config.model_validate(config)
+        worker_names: list[str] = []
+        gpu_count_per_worker = 1  # fallback
+        gpu_count_parsed = False
+        for name, service in cfg.spec.services.items():
+            if name in cls._NON_WORKER_SERVICES:
+                continue
+            if not service.extraPodSpec or not service.extraPodSpec.mainContainer:
+                continue
+
+            container = service.extraPodSpec.mainContainer
+
+            # 1. Remove NVIDIA-style gpu resource requests/limits (incompatible
+            #    with DRA).  Capture the GPU count first so we can use it in the
+            #    ResourceClaimTemplate.
+            if service.resources:
+                for bucket in ("requests", "limits"):
+                    res_dict = getattr(service.resources, bucket, None) or {}
+                    if isinstance(res_dict, dict):
+                        gpu_val = res_dict.pop("gpu", None)
+                        if gpu_val is not None:
+                            try:
+                                gpu_count_per_worker = int(gpu_val)
+                                gpu_count_parsed = True
+                            except (ValueError, TypeError):
+                                pass
+                        setattr(service.resources, bucket, res_dict or None)
+
+            # If gpu count was not in resources, infer from --tensor-parallel-size
+            if not gpu_count_parsed and container.args:
+                args = list(container.args)
+                for i, arg in enumerate(args):
+                    if arg in ("--tensor-parallel-size", "--tp") and i + 1 < len(args):
+                        try:
+                            gpu_count_per_worker = int(args[i + 1])
+                            gpu_count_parsed = True
+                        except (ValueError, TypeError):
+                            pass
+                        break
+
+            worker_names.append(name)
+
+        if not gpu_count_parsed and worker_names:
+            logger.warning(
+                "No gpu resource count found in worker config (resources or "
+                "--tensor-parallel-size); defaulting to %d GPU(s) per worker "
+                "for ResourceClaimTemplate.",
+                gpu_count_per_worker,
+            )
+
+        # 2. Add a single shared ResourceClaimTemplate for Intel DRA and wire
+        #    each worker pod to use it.
+        template_name = (
+            f"{cfg.metadata.name}-gpu-template" if cfg.metadata.name else "gpu-template"
+        )
+        if worker_names:
+            for name in worker_names:
+                service = cfg.spec.services[name]
+                pod_extra = service.extraPodSpec.model_extra
+                pod_extra.setdefault("resourceClaims", [])
+                existing_claim_names = [
+                    rc.get("name")
+                    for rc in pod_extra["resourceClaims"]
+                    if isinstance(rc, dict)
+                ]
+                if "gpu" not in existing_claim_names:
+                    pod_extra["resourceClaims"].append(
+                        {"name": "gpu", "resourceClaimTemplateName": template_name}
+                    )
+                container = service.extraPodSpec.mainContainer
+                container_resources = container.model_extra.get("resources") or {}
+                claims: list = container_resources.get("claims") or []
+                if not any(
+                    isinstance(c, dict) and c.get("name") == "gpu" for c in claims
+                ):
+                    claims.append({"name": "gpu"})
+                container_resources["claims"] = claims
+                container.model_extra["resources"] = container_resources
+
+        dumped = cfg.model_dump()
+
+        # 3. Prepend the ResourceClaimTemplate as a separate K8s document.
+        resource_claim_template = {
+            "apiVersion": "resource.k8s.io/v1",
+            "kind": "ResourceClaimTemplate",
+            "metadata": {"name": template_name},
+            "spec": {
+                "spec": {
+                    "devices": {
+                        "requests": [
+                            {
+                                "name": "gpu",
+                                "exactly": {
+                                    "deviceClassName": "gpu.intel.com",
+                                    "count": gpu_count_per_worker,
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+        dumped["_xpu_resource_claim_template"] = resource_claim_template
+        return dumped
 
     @classmethod
     def convert_config(
