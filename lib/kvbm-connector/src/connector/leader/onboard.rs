@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Instant;
+
 use anyhow::Context;
 use futures::future::{BoxFuture, Either, Ready};
 
@@ -202,11 +204,13 @@ async fn execute_onboarding(
     staging_fut: Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>,
 ) -> Result<()> {
     let g1_block_ids = block_ids;
+    let start = Instant::now();
 
     // Wait for find_session completion by accessing it through the slot
     staging_fut
         .await
         .context("Onboarding find_session operation failed")?;
+    let staging_complete = Instant::now();
 
     let g2_blocks = slot
         .lock()
@@ -218,7 +222,8 @@ async fn execute_onboarding(
 
     let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
 
-    assert_eq!(g2_block_ids.len(), g1_block_ids.len());
+    let num_blocks = g2_block_ids.len();
+    assert_eq!(num_blocks, g1_block_ids.len());
 
     // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
@@ -230,7 +235,7 @@ async fn execute_onboarding(
     // The current implementation awaits all G2 blocks to be ready before executing the transfer.
     // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
     // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
-    // let start_time = Instant::now();
+    let start_xfer = Instant::now();
     parallel_worker
         .execute_local_transfer(
             LogicalLayoutHandle::G2,
@@ -240,13 +245,18 @@ async fn execute_onboarding(
             TransferOptions::default(),
         )?
         .await?;
-    // let end_time = Instant::now();
-    // let duration = end_time.duration_since(start_time);
-    // tracing::info!(
-    //     "G2 to G1 transfer: blocks={}, duration={:?}"
-    //     g2_block_ids.len(),
-    //     duration,
-    // );
+    let end_xfer = Instant::now();
+
+    tracing::info!(
+        blocks = num_blocks,
+        staging_ms = staging_complete.duration_since(start).as_millis() as u64,
+        xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
+        total_ms = end_xfer.duration_since(start).as_millis() as u64,
+        src = "kvbm_engine::G2",
+        dst = "kvbm_engine::G1",
+        "Onboard transfer complete"
+    );
+
     Ok(())
 }
 
