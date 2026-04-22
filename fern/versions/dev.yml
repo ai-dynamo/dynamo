@@ -130,6 +130,8 @@ navigation:
             path: ../pages-dev/backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
             path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
+      - page: Chat Processor Options
+        path: ../pages-dev/agents/chat-processor-options.md
       - page: Tool Calling
         path: ../pages-dev/agents/tool-calling.md
       - page: Reasoning
