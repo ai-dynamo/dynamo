@@ -285,8 +285,10 @@ def optimize_dense_disagg_with_replay(
     """Run a heuristic block search over dense disaggregated offline replay configs.
 
     This routine assumes we want to use as much of `max_total_gpus` as possible,
-    then ranks visited states by raw output throughput subject to replay
-    constraints. The descended dimensions are:
+    then ranks visited states by the selected `objective` subject to replay
+    constraints. Supported objectives: `"throughput"` (default, maximize
+    `output_throughput_tok_s`), `"mean_e2e_latency"` and `"mean_ttft"` (minimize
+    the corresponding report metric). The descended dimensions are:
     1. `(prefill_tp, decode_tp)` at equal worker counts that fit the budget.
     2. `(prefill_workers, decode_workers)` on the budget edge for the incumbent TP
        shape.
@@ -433,8 +435,10 @@ def optimize_dense_agg_with_replay(
     """Run a heuristic block search over dense aggregated offline replay configs.
 
     This routine assumes we want to use as much of `max_total_gpus` as possible,
-    then ranks visited states by raw output throughput subject to replay
-    constraints. The descended dimensions are:
+    then ranks visited states by the selected `objective` subject to replay
+    constraints. Supported objectives: `"throughput"` (default, maximize
+    `output_throughput_tok_s`), `"mean_e2e_latency"` and `"mean_ttft"` (minimize
+    the corresponding report metric). The descended dimensions are:
     1. `tp` at the maximum worker count that fits the budget.
     2. `workers` for the incumbent `tp`.
     3. `(router_mode, overlap_score_weight)`.
