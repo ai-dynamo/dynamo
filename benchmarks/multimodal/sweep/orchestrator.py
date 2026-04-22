@@ -134,12 +134,18 @@ def _run_config(
                 char="-",
             )
 
+            # Per-run capture paths: one .nsys-rep per sweep value. The backend
+            # trace must be unique per run because nsys's stop-shutdown kills
+            # and restarts the server between sweep points.
+            run_env = dict(env_overrides)
+            start_url, stop_url = _profile_wiring(config, artifact_dir, run_env)
+
             if config.restart_server_every_benchmark:
                 server.start(
                     workflow_script=workflow_abs,
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
-                    env_overrides=env_overrides,
+                    env_overrides=run_env,
                 )
 
             try:
@@ -153,6 +159,8 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    start_profile_url=start_url,
+                    stop_profile_url=stop_url,
                 )
             finally:
                 if config.restart_server_every_benchmark:
@@ -160,6 +168,40 @@ def _run_config(
     finally:
         if not config.restart_server_every_benchmark:
             server.stop()
+
+
+def _profile_wiring(
+    config: SweepConfig,
+    artifact_dir: Path,
+    env: dict,
+) -> tuple[Optional[str], Optional[str]]:
+    """Compute backend start/stop URLs and inject nsys env vars for the workflow.
+
+    Returns ``(start_profile_url, stop_profile_url)`` or ``(None, None)`` if no
+    capture is configured. Mutates ``env`` to add the paths the workflow needs.
+    """
+    start_url: Optional[str] = None
+    stop_url: Optional[str] = None
+
+    if config.backend_capture and config.backend_system_port:
+        port = config.backend_system_port
+        base = f"http://localhost:{port}/engine"
+        start_url = f"{base}/start_profile"
+        stop_url = f"{base}/stop_profile"
+
+        # Per-run capture file. Treat the configured value as a directory so
+        # multiple sweep points don't overwrite each other.
+        backend_dir = Path(config.backend_capture_out or str(artifact_dir))
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        env["DYN_SYSTEM_PORT"] = str(port)
+        env["DYN_BACKEND_CAPTURE_OUT"] = str(backend_dir / "backend.nsys-rep")
+
+    if config.frontend_capture_out:
+        frontend_dir = Path(config.frontend_capture_out)
+        frontend_dir.mkdir(parents=True, exist_ok=True)
+        env["DYN_FRONTEND_CAPTURE_OUT"] = str(frontend_dir / "frontend.nsys-rep")
+
+    return start_url, stop_url
 
 
 def _generate_plots_for_file(

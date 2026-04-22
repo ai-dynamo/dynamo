@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 def _build_aiperf_cmd(
@@ -58,6 +60,40 @@ def _build_aiperf_cmd(
     ]
 
 
+def _post_engine_route(url: str, label: str, *, required: bool) -> None:
+    """POST an empty body to a backend /engine/* route.
+
+    ``required=True`` (start): any failure aborts. ``required=False`` (stop):
+    failures log a warning — stop is best-effort so an aiperf exception isn't
+    masked by a profile finalize error.
+    """
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        msg = f"POST {url} ({label}) failed: {e}"
+        if required:
+            raise RuntimeError(msg) from e
+        print(f"  WARN: {msg}", flush=True)
+        return
+
+    if status >= 400:
+        msg = f"POST {url} ({label}) returned HTTP {status}: {body}"
+        if required:
+            raise RuntimeError(msg)
+        print(f"  WARN: {msg}", flush=True)
+        return
+
+    print(f"  {label}: POST {url} -> {status}", flush=True)
+
+
 def run_aiperf_single(
     model: str,
     port: int,
@@ -68,8 +104,16 @@ def run_aiperf_single(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    start_profile_url: Optional[str] = None,
+    stop_profile_url: Optional[str] = None,
 ) -> None:
-    """Run a single aiperf profile invocation."""
+    """Run a single aiperf profile invocation.
+
+    If ``start_profile_url`` / ``stop_profile_url`` are set (wired from the
+    backend's DYN_SYSTEM_PORT), wrap the aiperf run in
+    POST start_profile → aiperf → POST stop_profile, so an nsys-wrapped
+    backend captures only the aiperf window.
+    """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cmd = _build_aiperf_cmd(
         model=model,
@@ -84,7 +128,15 @@ def run_aiperf_single(
     )
 
     print(f"  aiperf {sweep_mode}={sweep_value} -> {artifact_dir}", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    if start_profile_url:
+        _post_engine_route(start_profile_url, "start_profile", required=True)
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if stop_profile_url:
+            _post_engine_route(stop_profile_url, "stop_profile", required=False)
 
     if proc.returncode != 0:
         print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)

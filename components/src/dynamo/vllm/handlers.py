@@ -627,6 +627,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def start_profile(self, body: dict) -> dict:
+        """Start CUDA profiling on the vLLM engine.
+
+        Calls AsyncLLM.start_profile(), which broadcasts to every TP/PP/EP
+        worker over vLLM's internal IPC. Each worker invokes
+        torch.cuda.profiler.start() in its own CUDA context. When the
+        dynamo.vllm process is wrapped in nsys with
+        --capture-range=cudaProfilerApi, the first worker's start opens the
+        capture window for the whole process tree (nsys 2026.1+ traces the
+        full tree by default).
+        """
+        try:
+            await self.engine_client.start_profile()
+            return {"status": "ok", "message": "Profiling started"}
+        except Exception as e:
+            logger.error(f"Failed to start profile: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop CUDA profiling. Symmetric to start_profile.
+
+        The stop broadcast ends the cudaProfilerApi range in every worker.
+        With --capture-range-end=stop-shutdown --kill=sigterm, nsys then
+        finalizes the .nsys-rep and terminates the process tree.
+        """
+        try:
+            await self.engine_client.stop_profile()
+            return {"status": "ok", "message": "Profiling stopped"}
+        except Exception as e:
+            logger.error(f"Failed to stop profile: {e}")
+            return {"status": "error", "message": str(e)}
+
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError

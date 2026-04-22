@@ -335,8 +335,11 @@ class WorkerFactory:
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        runtime.register_engine_route("start_profile", handler.start_profile)
+        runtime.register_engine_route("stop_profile", handler.stop_profile)
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+            "Registered engine routes: /engine/sleep, /engine/wake_up, "
+            "/engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
         )
 
         # Parse endpoint types from --endpoint-types flag
@@ -570,8 +573,11 @@ class WorkerFactory:
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        runtime.register_engine_route("start_profile", handler.start_profile)
+        runtime.register_engine_route("stop_profile", handler.stop_profile)
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
+            "Registered engine routes: /engine/sleep, /engine/wake_up, "
+            "/engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
         )
 
         # Wait for self-benchmark to complete before registering.

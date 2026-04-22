@@ -43,6 +43,16 @@ class SweepConfig:
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
 
+    # Nsys profiling (opt-in). See benchmarks/multimodal/sweep/workflows/dynamo_serve.sh.
+    # Backend (dynamo.vllm): triggered via /engine/start_profile on DYN_SYSTEM_PORT;
+    # AsyncLLM broadcasts cudaProfilerStart to all TP workers. nsys 2026.1+ captures
+    # the whole process tree into one .nsys-rep.
+    # Frontend (dynamo.frontend): plain nsys wrap — no trigger, full-lifetime trace.
+    backend_capture: Optional[str] = None  # "cudaProfilerApi" | None
+    backend_capture_out: Optional[str] = None
+    backend_system_port: Optional[int] = None
+    frontend_capture_out: Optional[str] = None
+
     @property
     def sweep_mode(self) -> str:
         """Return ``'request_rate'`` or ``'concurrency'``."""
@@ -85,6 +95,28 @@ class SweepConfig:
             raise ValueError(
                 "At least one of request_rates or concurrencies is required."
             )
+
+        if self.backend_capture is not None:
+            if self.backend_capture != "cudaProfilerApi":
+                raise ValueError(
+                    f"backend_capture must be 'cudaProfilerApi' or unset, "
+                    f"got {self.backend_capture!r}"
+                )
+            if not self.backend_capture_out:
+                raise ValueError(
+                    "backend_capture is set but backend_capture_out is missing"
+                )
+            if not self.backend_system_port:
+                raise ValueError(
+                    "backend_capture is set but backend_system_port is missing "
+                    "(required so the orchestrator can POST /engine/start_profile)"
+                )
+            if not self.restart_server_every_benchmark:
+                raise ValueError(
+                    "backend_capture requires restart_server_every_benchmark=True "
+                    "(cudaProfilerApi + stop-shutdown terminates the server on "
+                    "stop_profile, so the server must restart between sweep points)"
+                )
 
 
 _DEFAULT_REQUEST_RATES: List[int] = [4, 8, 16, 32, 64]
@@ -137,6 +169,10 @@ def load_config(
         skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
+        backend_capture=raw.get("backend_capture"),
+        backend_capture_out=raw.get("backend_capture_out"),
+        backend_system_port=raw.get("backend_system_port"),
+        frontend_capture_out=raw.get("frontend_capture_out"),
     )
 
     if cli_overrides:
