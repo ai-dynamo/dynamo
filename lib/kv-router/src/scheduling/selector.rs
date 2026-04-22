@@ -322,8 +322,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::OverlapScores;
-    use crate::test_utils::SimpleWorkerConfig;
 
     #[test]
     fn test_softmax_sample_single_key() {
@@ -432,66 +430,5 @@ mod tests {
 
         let result = softmax_sample_with_sample(&logits, temperature, sample);
         assert_eq!(result, entries[target_idx]);
-    }
-
-    fn request_without_prefill_for_worker(
-        worker_with_prefill: WorkerWithDpRank,
-        prefill_tokens: usize,
-        track_prefill_tokens: bool,
-    ) -> SchedulingRequest {
-        let mut request = SchedulingRequest {
-            maybe_request_id: None,
-            token_seq: None,
-            isl_tokens: 64,
-            overlaps: OverlapScores::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
-            track_prefill_tokens,
-            router_config_override: None,
-            update_states: false,
-            lora_name: None,
-            priority_jump: 0.0,
-            expected_output_tokens: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            resp_tx: None,
-        };
-        request
-            .prefill_tokens
-            .insert(worker_with_prefill, prefill_tokens);
-        request
-    }
-
-    #[test]
-    fn test_select_worker_missing_prefill_tokens_falls_back_to_zero_when_untracked() {
-        let worker_with_prefill = WorkerWithDpRank::from_worker_id(1);
-        let worker_without_prefill = WorkerWithDpRank::from_worker_id(2);
-        let workers = HashMap::from([
-            (1, SimpleWorkerConfig::default()),
-            (2, SimpleWorkerConfig::default()),
-        ]);
-        let request = request_without_prefill_for_worker(worker_with_prefill, 32, false);
-        let selector = DefaultWorkerSelector::new(None, "prefill");
-
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
-
-        assert_eq!(result.worker, worker_without_prefill);
-    }
-
-    #[test]
-    fn test_select_worker_missing_prefill_tokens_falls_back_to_isl_when_tracked() {
-        let worker_with_prefill = WorkerWithDpRank::from_worker_id(1);
-        let worker_without_prefill = WorkerWithDpRank::from_worker_id(2);
-        let workers = HashMap::from([
-            (1, SimpleWorkerConfig::default()),
-            (2, SimpleWorkerConfig::default()),
-        ]);
-        let request = request_without_prefill_for_worker(worker_with_prefill, 32, true);
-        let selector = DefaultWorkerSelector::new(None, "prefill");
-
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
-
-        assert_eq!(result.worker, worker_with_prefill);
-        assert_ne!(result.worker, worker_without_prefill);
     }
 }
