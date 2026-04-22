@@ -18,6 +18,8 @@ except ImportError:
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,
+    ReplayConstraints,
+    ReplayObjective,
     SyntheticReplayWorkload,
     TraceReplayWorkload,
     compare_agg_and_disagg_with_replay,
@@ -559,7 +561,7 @@ def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
 
 
 def test_disagg_optimizer_rejects_invalid_objective() -> None:
-    with pytest.raises(ValueError, match="objective must be one of"):
+    with pytest.raises(ValueError, match="not a valid ReplayObjective"):
         optimize_dense_disagg_with_replay(
             model=_AIC_MODEL,
             backend="vllm",
@@ -783,8 +785,8 @@ def test_evaluate_state_prefers_normalized_metrics_over_report_payload() -> None
             model="meta-llama/Llama-3.1-8B-Instruct",
             backend="vllm",
             system="h100_sxm",
-            objective="throughput",
-            constraints={"mean_e2e_latency_ms": 1000.0},
+            objective=ReplayObjective.THROUGHPUT,
+            constraints=ReplayConstraints(mean_e2e_latency_ms=1000.0),
             cache=cache,
         )
 
@@ -826,8 +828,8 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
             model="meta-llama/Llama-3.1-8B-Instruct",
             backend="vllm",
             system="h100_sxm",
-            objective="throughput",
-            constraints={"mean_e2e_latency_ms": 1000.0},
+            objective=ReplayObjective.THROUGHPUT,
+            constraints=ReplayConstraints(mean_e2e_latency_ms=1000.0),
             cache=cache,
         )
 
