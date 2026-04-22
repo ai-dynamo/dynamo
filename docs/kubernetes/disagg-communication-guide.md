@@ -260,9 +260,11 @@ VllmDecodeWorker:
             topologyKey: kubernetes.io/hostname
 ```
 
+> **Note**: Anti-affinity only needs to be configured on one side (here, the decode worker). The Kubernetes scheduler enforces the constraint symmetrically—if decode cannot be placed with prefill, they will end up on different nodes regardless of which pod has the rule.
+
 **EFA Resource Requests:**
 
-Request EFA interfaces in your pod spec. The p5.48xlarge instance has **32 EFA interfaces** (8 network cards × 4 interfaces each) with 3200 Gbps total bandwidth. The number of interfaces to allocate per worker depends on your deployment:
+Request EFA interfaces in your pod spec. The p5.48xlarge instance has **32 EFA interfaces** (32 network cards × 1 interface each) with 3200 Gbps total bandwidth. The number of interfaces to allocate per worker depends on your deployment:
 
 | Deployment | EFA per Worker | Rationale |
 |------------|----------------|-----------|
@@ -518,7 +520,7 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 ### When Disaggregated Makes Sense
 
 **Use disaggregated architecture when:**
-- Input sequence length (ISL) ≥ 4000 tokens (5-18% throughput gain)
+- Input sequence length (ISL) ≥ 4000 tokens (14-22% throughput gain)
 - You need independent scaling of prefill vs decode capacity
 - Prefill and decode have different hardware requirements
 
@@ -537,27 +539,28 @@ KV Transfer Overhead (TTFT min, unqueued):
 - Disaggregated: ~215ms
 - KV transfer cost: ~40ms
 
-Performance at ISL=8000, concurrency=10:
-- ITL improvement: 27% faster per-token generation
-- Throughput gain: 18% higher overall throughput
+Performance at ISL=8000, OSL=50, concurrency=10:
+- ITL improvement: 41% faster per-token generation
+- Throughput gain: 22% higher output throughput
 ```
 
-**Key Insight**: The KV transfer overhead via libfabric+EFA is only **~40ms**. Combined with 27% faster decode (ITL), disaggregated inference delivers **18% higher throughput** for long-context workloads.
+**Key Insight**: The KV transfer overhead via libfabric+EFA is only **~40ms**. Combined with 41% faster decode (ITL), disaggregated inference delivers **22% higher throughput** for prefill-bound workloads.
 
 | Metric | Aggregated | Disaggregated | Difference |
 |--------|------------|---------------|------------|
-| TTFT (min, unqueued) | 175 ms | 215 ms | +40ms |
-| ITL (avg) | 17.9 ms | 13.1 ms | **-27%** |
-| Throughput (ISL=8000) | 20,131 tok/s | 24,229 tok/s | **+20%** |
+| TTFT (min, unqueued) | 173 ms | 210 ms | +37ms |
+| TTFT (p95) | 2097 ms | 1752 ms | **-16%** |
+| ITL (avg) | 28.5 ms | 16.9 ms | **-41%** |
+| Output throughput (ISL=8000, OSL=50) | 204 tok/s | 248 tok/s | **+22%** |
 
-**Disagg advantage scales with input length (ISL):**
+**Disagg advantage scales with input length (ISL)** (all at OSL=50, concurrency=10):
 
 | ISL | Throughput Δ | ITL Δ | Recommendation |
 |-----|--------------|-------|----------------|
-| 1000 | ~0% | -4% | Use aggregated |
-| 2000 | +3% | -7% | Either works |
-| 4000 | +5% | -12% | Disagg preferred |
-| 8000 | **+18%** | **-27%** | **Disagg strongly preferred** |
+| 1000 | ~0% | -7% | Use aggregated |
+| 2000 | +3% | -11% | Either works |
+| 4000 | +14% | -18% | Disagg preferred |
+| 8000 | **+22%** | **-41%** | **Disagg strongly preferred** |
 
 ---
 
