@@ -55,7 +55,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
     TRT-LLM-specific health check payload.
 
     Provides TRT-LLM defaults and inherits environment override support from base class.
-    For DECODE workers, marks the probe so the handler runs it as a local
+    For DECODE workers, adds disaggregated_params so the handler runs it as a local
     prefill+decode (no transceiver, no prefill peer required).
     """
 
