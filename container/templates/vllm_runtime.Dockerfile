@@ -79,6 +79,64 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
     fi
+
+# vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
+# jq for readable curl output just like the upstream omni image does.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git \
+        jq \
+        sox \
+        libsox-fmt-all; \
+    rm -rf /var/lib/apt/lists/*
+
+# Layer vLLM-Omni on top of the upstream vLLM runtime without letting pip
+# silently replace the base image's torch/vLLM/transformers stack. We install
+# the package itself with no deps, then add the omni extras under constraints
+# that pin the core runtime versions already shipped by vllm-openai. We also
+# keep the original `vllm` CLI because vllm-omni overwrites it with its own
+# entrypoint, and skip fa3-fwd because upstream does not publish wheels for
+# every arch/Python combo we build while omni can fall back without it.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv VLLM_OMNI_TARGET_DEVICE=cuda; \
+    cp /usr/local/bin/vllm /tmp/vllm-openai-cli; \
+    git clone --depth 1 --branch "${VLLM_OMNI_REF}" \
+        https://github.com/vllm-project/vllm-omni.git /tmp/vllm-omni; \
+    python3 - <<'PY' > /tmp/vllm-openai-protected.txt
+import importlib.metadata as md
+
+protected = [
+    "numpy",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "triton",
+    "vllm",
+    "transformers",
+    "tokenizers",
+    "safetensors",
+    "flashinfer-python",
+    "flash-attn",
+    "xformers",
+]
+
+for name in protected:
+    try:
+        dist = md.distribution(name)
+    except Exception:
+        continue
+    project_name = dist.metadata.get("Name") or name
+    print(f"{project_name}=={dist.version}")
+PY
+    uv pip install --system --no-deps /tmp/vllm-omni; \
+    uv pip install --system \
+        --constraints /tmp/vllm-openai-protected.txt \
+        --requirement /tmp/vllm-omni/requirements/common.txt \
+        "onnxruntime>=1.23.2"; \
+    install -m 755 /tmp/vllm-openai-cli /usr/local/bin/vllm; \
+    rm -rf /tmp/vllm-openai-cli /tmp/vllm-openai-protected.txt /tmp/vllm-omni
 {% endif %}
 
 USER dynamo
