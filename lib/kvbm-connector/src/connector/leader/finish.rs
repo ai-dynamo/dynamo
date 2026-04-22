@@ -425,3 +425,239 @@ async fn cleanup_preparing_to_onboard(
         shard_count
     );
 }
+
+#[cfg(all(test, feature = "testing"))]
+mod cleanup_tests {
+    //! Unit tests for `cleanup_preparing_to_onboard`.
+    //!
+    //! These cover the observable contract of the cancel-path cleanup task:
+    //! - every `AsyncSession` shard has its session released via
+    //!   `InstanceLeader::release_session`,
+    //! - `Ready` shards are dropped via RAII (no extra release call),
+    //! - non-terminal `AsyncSession` shards block release until they become
+    //!   terminal,
+    //! - shards drain concurrently via `join_all`,
+    //! - sessions unrelated to the state are left alone.
+    //!
+    //! Observability is via the `#[cfg(any(test, feature = "testing"))]`
+    //! `has_session` accessor on `InstanceLeader` — `release_session` removes
+    //! from all three internal session maps; `has_session` returns `true` if
+    //! any of them still sees the id.
+    use super::*;
+    use kvbm_engine::leader::{
+        AsyncSessionResult, FindMatchesResult, MatchBreakdown, OnboardingStatus, ReadyResult,
+        SessionId,
+    };
+    use kvbm_engine::testing::{managers, messenger};
+    use slot::{OnboardingShard, OnboardingState};
+    use std::time::Duration;
+    use tokio::sync::{Mutex as TokioMutex, watch};
+    use uuid::Uuid;
+
+    use crate::G2;
+
+    const TEST_BLOCK_COUNT: usize = 8;
+    const TEST_BLOCK_SIZE: usize = 4;
+
+    /// Build a minimal `InstanceLeader` backed by a local TCP messenger. No
+    /// handlers are registered — the tests only touch the session maps.
+    async fn build_leader() -> InstanceLeader {
+        let m = messenger::create_messenger_tcp()
+            .await
+            .expect("tcp messenger");
+        let registry = managers::TestRegistryBuilder::new().build();
+        let g2 = Arc::new(
+            managers::TestManagerBuilder::<G2>::new()
+                .block_count(TEST_BLOCK_COUNT)
+                .block_size(TEST_BLOCK_SIZE)
+                .registry(registry.clone())
+                .build(),
+        );
+        InstanceLeader::builder()
+            .messenger(m)
+            .registry(registry)
+            .g2_manager(g2)
+            .workers(vec![])
+            .build()
+            .expect("instance leader")
+    }
+
+    /// A terminal `AsyncSession` (status = Complete) with a known session_id.
+    fn complete_async(session_id: SessionId) -> FindMatchesResult {
+        let (status_tx, status_rx) =
+            watch::channel(OnboardingStatus::Complete { matched_blocks: 0 });
+        drop(status_tx);
+        FindMatchesResult::AsyncSession(AsyncSessionResult::new(
+            session_id,
+            status_rx,
+            Arc::new(TokioMutex::new(Some(Vec::new()))),
+            Arc::new(TokioMutex::new(MatchBreakdown::default())),
+            None,
+        ))
+    }
+
+    /// A pending `AsyncSession` (status = Searching) with a known session_id.
+    /// Returns the shard and the watch sender so the test can drive it terminal.
+    fn pending_async(
+        session_id: SessionId,
+    ) -> (FindMatchesResult, watch::Sender<OnboardingStatus>) {
+        let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
+        let session = AsyncSessionResult::new(
+            session_id,
+            status_rx,
+            Arc::new(TokioMutex::new(None)),
+            Arc::new(TokioMutex::new(MatchBreakdown::default())),
+            None,
+        );
+        (FindMatchesResult::AsyncSession(session), status_tx)
+    }
+
+    /// A `Ready` shard with no blocks — no session_id, RAII-only release.
+    fn ready_empty() -> FindMatchesResult {
+        FindMatchesResult::Ready(ReadyResult::new(vec![], MatchBreakdown::default()))
+    }
+
+    /// Build an `OnboardingState` from a list of shards, numbering them
+    /// contiguously starting at block 0 with `num_queried_blocks = 1` each.
+    fn state_from(shards: Vec<FindMatchesResult>) -> OnboardingState {
+        assert!(!shards.is_empty());
+        let mut it = shards.into_iter().enumerate();
+        let (i0, first) = it.next().unwrap();
+        let mut state = OnboardingState::new(
+            0,
+            0,
+            OnboardingShard {
+                start_block: i0,
+                num_queried_blocks: 1,
+                find_session: first,
+            },
+        );
+        for (i, find_session) in it {
+            state.shards.push(OnboardingShard {
+                start_block: i,
+                num_queried_blocks: 1,
+                find_session,
+            });
+        }
+        state
+    }
+
+    fn fresh_id() -> SessionId {
+        Uuid::new_v4()
+    }
+
+    /// Test 1 — a single terminal `AsyncSession` shard: cleanup must release
+    /// the session.
+    #[tokio::test]
+    async fn cleanup_releases_async_session() {
+        let leader = build_leader().await;
+        let sid = fresh_id();
+        leader.insert_test_session_marker(sid);
+        assert!(leader.has_session(sid));
+
+        let state = state_from(vec![complete_async(sid)]);
+        cleanup_preparing_to_onboard(state, leader.clone(), "r1".into()).await;
+
+        assert!(
+            !leader.has_session(sid),
+            "cleanup must release AsyncSession shards"
+        );
+    }
+
+    /// Test 2 — mixed shards: `Ready` shard needs no session call; the
+    /// `AsyncSession` shard is released; an unrelated session is untouched.
+    #[tokio::test]
+    async fn cleanup_skips_ready_shards_and_scoped_to_state() {
+        let leader = build_leader().await;
+        let sid = fresh_id();
+        let unrelated = fresh_id();
+        leader.insert_test_session_marker(sid);
+        leader.insert_test_session_marker(unrelated);
+
+        let state = state_from(vec![ready_empty(), complete_async(sid)]);
+        cleanup_preparing_to_onboard(state, leader.clone(), "r2".into()).await;
+
+        assert!(!leader.has_session(sid), "AsyncSession shard must release");
+        assert!(
+            leader.has_session(unrelated),
+            "cleanup must not touch sessions outside the OnboardingState"
+        );
+    }
+
+    /// Test 3 — a non-terminal `AsyncSession` shard blocks cleanup until the
+    /// status transitions to a terminal state, then releases.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_drains_pending_async_before_release() {
+        let leader = build_leader().await;
+        let sid = fresh_id();
+        leader.insert_test_session_marker(sid);
+
+        let (find, status_tx) = pending_async(sid);
+        let state = state_from(vec![find]);
+
+        let leader_for_task = leader.clone();
+        let task =
+            tokio::spawn(cleanup_preparing_to_onboard(state, leader_for_task, "r3".into()));
+
+        // With status still Searching, cleanup is blocked on wait_for_completion.
+        // Give it a tick to ensure it has polled.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            leader.has_session(sid),
+            "cleanup must wait for AsyncSession to reach terminal status before releasing"
+        );
+        assert!(!task.is_finished(), "cleanup task should still be pending");
+
+        // Transition the session to terminal; cleanup should complete and release.
+        status_tx
+            .send(OnboardingStatus::Complete { matched_blocks: 0 })
+            .expect("send terminal status");
+        task.await.expect("cleanup task");
+
+        assert!(
+            !leader.has_session(sid),
+            "cleanup must release after status reaches terminal"
+        );
+    }
+
+    /// Test 4 — `join_all` drains shards concurrently: a terminal shard does
+    /// not wait for a pending sibling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_drains_concurrently() {
+        let leader = build_leader().await;
+        let terminal_id = fresh_id();
+        let pending_id = fresh_id();
+        leader.insert_test_session_marker(terminal_id);
+        leader.insert_test_session_marker(pending_id);
+
+        let (pending_find, status_tx) = pending_async(pending_id);
+        let state = state_from(vec![complete_async(terminal_id), pending_find]);
+
+        let leader_for_task = leader.clone();
+        let task = tokio::spawn(cleanup_preparing_to_onboard(
+            state,
+            leader_for_task,
+            "r4".into(),
+        ));
+
+        // Drive the test runtime so the terminal shard's release_session can
+        // land even though the pending shard is still blocked.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !leader.has_session(terminal_id),
+            "terminal shard must be released before the pending shard transitions"
+        );
+        assert!(
+            leader.has_session(pending_id),
+            "pending shard must still be registered while its find session is non-terminal"
+        );
+        assert!(!task.is_finished());
+
+        status_tx
+            .send(OnboardingStatus::Complete { matched_blocks: 0 })
+            .expect("send terminal status");
+        task.await.expect("cleanup task");
+
+        assert!(!leader.has_session(pending_id));
+    }
+}
