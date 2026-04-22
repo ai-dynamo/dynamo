@@ -385,6 +385,16 @@ async def run_profile(
                 phase=ops.current_phase,
             )
             if not is_disagg_config:
+                # TODO: agg + throughput-scaling / agg + mocker has no
+                # profiling-data fallback today. run_interpolation is
+                # shaped around prefill + decode picks, so for agg picks
+                # the NPZ sweep is skipped entirely and no
+                # planner-profile-data ConfigMap is produced — the
+                # planner and mocker have nothing to consume on
+                # aggregated deployments. Extend run_interpolation (and
+                # the downstream _load_profiling_data / mount logic) to
+                # handle an agg pick so both paths work for aggregated
+                # deployments too.
                 logger.info(
                     "Picked config is aggregated (chosen_exp=%r) — "
                     "skipping interpolation (requires disaggregated config).",
