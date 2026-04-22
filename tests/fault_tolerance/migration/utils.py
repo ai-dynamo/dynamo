@@ -102,7 +102,10 @@ def start_completion_request(
                     stream=True,
                 ):
                     text = chunk.choices[0].text if chunk.choices else None
-                    if text:
+                    # Match the original hand-rolled parser: keep empty strings,
+                    # drop only None. Empty chunks (e.g. the first stream frame)
+                    # still count as a response arrival for delay measurement.
+                    if text is not None:
                         response_list.append((text, time.time()))
             else:
                 resp = client.completions.create(
@@ -166,7 +169,11 @@ def start_chat_completion_request(
                     stream=True,
                 ):
                     content = chunk.choices[0].delta.content if chunk.choices else None
-                    if content:
+                    # Match the original hand-rolled parser: keep empty strings,
+                    # drop only None. Empty chunks (e.g. the first `role`-only
+                    # stream frame) still count as a response arrival for delay
+                    # measurement.
+                    if content is not None:
                         response_list.append((content, time.time()))
             else:
                 resp = client.chat.completions.create(
