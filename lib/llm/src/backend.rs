@@ -300,6 +300,7 @@ impl
                     index: data.index,
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
+                    engine_data: data.engine_data,
                 })
             })
         });
@@ -638,7 +639,7 @@ mod tests {
             &self,
             _token_ids: &[TokenIdType],
             _skip_special_tokens: bool,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<traits::DecodeResult> {
             Err(anyhow::anyhow!(
                 "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
             ))

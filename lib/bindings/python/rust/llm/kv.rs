@@ -306,6 +306,7 @@ impl KvEventPublisher {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    start_position: None,
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,
@@ -1076,6 +1077,7 @@ impl KvRouter {
                     update_states,
                     lora_name.clone(),
                     0.0,
+                    None,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )

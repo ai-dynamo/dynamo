@@ -136,7 +136,26 @@ pub async fn prepare_engine(
 
             let model_service_name = watch_obj.wait_for_chat_model().await;
             tracing::info!("Connected to {model_service_name}");
-            let engine = model_manager.get_chat_completions_engine(&model_service_name)?;
+            // In disaggregated deployments the model may be listed before the prefill
+            // router is fully activated, causing a transient ModelUnavailable. Retry
+            // with a timeout so the startup path doesn't fail during this cold-start
+            // window, but also doesn't hang indefinitely on misconfiguration.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let engine = loop {
+                match model_manager.get_chat_completions_engine(&model_service_name) {
+                    Ok(engine) => break engine,
+                    Err(crate::discovery::ModelManagerError::ModelUnavailable(_))
+                        if tokio::time::Instant::now() < deadline =>
+                    {
+                        tracing::debug!(
+                            model = %model_service_name,
+                            "Model listed but not yet servable, waiting for prefill activation"
+                        );
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
             Ok(PreparedEngine {
                 service_name: model_service_name,
                 engine,
@@ -303,19 +322,13 @@ where
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    // Get threshold value and wrap monitor for PushRouter
-    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
-    let threshold_value = worker_monitor
-        .as_ref()
-        .map(|m| m.active_decode_blocks_threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
-        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
             router_client,
             router_mode,
-            threshold_value,
             monitor_arc,
         )
         .await?;

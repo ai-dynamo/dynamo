@@ -56,10 +56,14 @@ use prometheus::{HistogramOpts, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
-/// Exponential buckets for routing overhead histograms:
-/// from 0.0001 ms (0.1 µs) to ~13.1 ms, factor 2, 18 steps.
-fn overhead_buckets() -> Vec<f64> {
-    prometheus::exponential_buckets(0.0001, 2.0, 18).expect("exponential buckets should not fail")
+/// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
+fn compute_overhead_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(0.001, 2.0, 15).unwrap()
+}
+
+/// Buckets for async phases (indexer find_matches, scheduling, total).
+fn async_overhead_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +145,7 @@ pub fn register_worker_load_metrics(
 /// disaggregated mode. At most 2 label combinations.
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
+    pub pending_isl_tokens: IntGaugeVec,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -157,6 +162,14 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::WORKER_TYPE],
         )
         .expect("Failed to create router_queue_pending_requests gauge"),
+        pending_isl_tokens: IntGaugeVec::new(
+            Opts::new(
+                format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
+                "Sum of isl_tokens for requests pending in the router scheduler queue",
+            ),
+            &[labels::WORKER_TYPE],
+        )
+        .expect("Failed to create router_queue_pending_isl_tokens gauge"),
     });
 
 impl RouterQueueMetrics {
@@ -164,6 +177,12 @@ impl RouterQueueMetrics {
         self.pending_requests
             .with_label_values(&[worker_type])
             .set(count as i64);
+    }
+
+    pub fn set_pending_isl_tokens(&self, worker_type: &str, tokens: usize) {
+        self.pending_isl_tokens
+            .with_label_values(&[worker_type])
+            .set(tokens as i64);
     }
 }
 
@@ -174,6 +193,7 @@ pub fn register_router_queue_metrics(
 ) -> Result<(), prometheus::Error> {
     let m = &*ROUTER_QUEUE_METRICS;
     registry.register(Box::new(m.pending_requests.clone()))?;
+    registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     Ok(())
 }
 
@@ -203,39 +223,45 @@ impl RoutingOverheadMetrics {
         instance_id: u64,
     ) -> Result<(), prometheus::Error> {
         let m = ROUTING_OVERHEAD_METRICS.get_or_init(|| {
-            let buckets = overhead_buckets();
+            let compute_buckets = compute_overhead_buckets();
+            let async_buckets = async_overhead_buckets();
             let router_id = instance_id.to_string();
-            let make = |suffix: &str, help: &str| {
+            let make = |suffix: &str, help: &str, buckets: Vec<f64>| {
                 let name = format!("{}_{}", name_prefix::ROUTER, suffix);
                 prometheus::Histogram::with_opts(
                     HistogramOpts::new(name, help)
                         .const_label(labels::ROUTER_ID, &router_id)
-                        .buckets(buckets.clone()),
+                        .buckets(buckets),
                 )
             };
             let block_hashing = make(
                 routing_overhead::BLOCK_HASHING_MS,
                 "Time spent computing block hashes in milliseconds",
+                compute_buckets.clone(),
             )
             .expect("overhead_block_hashing_ms");
             let indexer_find_matches = make(
                 routing_overhead::INDEXER_FIND_MATCHES_MS,
                 "Time spent in indexer find_matches in milliseconds",
+                async_buckets.clone(),
             )
             .expect("overhead_indexer_find_matches_ms");
             let seq_hashing = make(
                 routing_overhead::SEQ_HASHING_MS,
                 "Time spent computing sequence hashes in milliseconds",
+                compute_buckets,
             )
             .expect("overhead_seq_hashing_ms");
             let scheduling = make(
                 routing_overhead::SCHEDULING_MS,
                 "Time spent in scheduler worker selection in milliseconds",
+                async_buckets.clone(),
             )
             .expect("overhead_scheduling_ms");
             let total = make(
                 routing_overhead::TOTAL_MS,
                 "Total routing overhead per request in milliseconds",
+                async_buckets,
             )
             .expect("overhead_total_ms");
             Arc::new(Self {
@@ -545,15 +571,30 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[labels::WORKER_TYPE],
             )
             .unwrap(),
+            pending_isl_tokens: IntGaugeVec::new(
+                Opts::new(
+                    format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
+                    "Sum of isl_tokens for requests pending in the router scheduler queue",
+                ),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.pending_requests.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.pending_isl_tokens.clone()))
+            .unwrap();
 
         metrics.set_pending("decode", 5);
+        metrics.set_pending_isl_tokens("decode", 1024);
 
         let output = gather_pef(&registry);
         let expected = "\
+# HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
+dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024
 # HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_requests gauge
 dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
@@ -569,7 +610,7 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
         // Verify the overhead constants produce valid histogram names when
         // combined with dynamo_router_ prefix.
         let registry = prometheus::Registry::new();
-        let buckets = overhead_buckets();
+        let buckets = async_overhead_buckets();
         let prefix = name_prefix::ROUTER;
         let name = format!("{}_{}", prefix, routing_overhead::TOTAL_MS);
         let total = prometheus::Histogram::with_opts(

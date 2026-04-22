@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
 use dynamo_kv_router::indexer::{
     KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer, METRIC_EVENT_REMOVED,
     METRIC_EVENT_STORED, METRIC_STATUS_BLOCK_NOT_FOUND, METRIC_STATUS_INVALID_BLOCK,
-    METRIC_STATUS_OK, METRIC_STATUS_PARENT_NOT_FOUND,
+    METRIC_STATUS_OK, METRIC_STATUS_PARENT_NOT_FOUND, METRIC_WARNING_DUPLICATE_STORE,
 };
 use dynamo_kv_router::protocols::{
     KvCacheEvent, KvCacheEventData, LocalBlockHash, RouterEvent, WorkerId, WorkerWithDpRank,
@@ -17,8 +17,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use super::{DirectRequest, OutputSignal, SchedulerHandle};
-use crate::common::protocols::KvCacheEventSink;
+use super::{DirectRequest, ForwardPassSnapshot, OutputSignal, SchedulerHandle};
+use crate::common::protocols::{FpmSink, KvCacheEventSink};
 
 pub(crate) struct RouterIndexerHarness {
     indexer: Arc<LocalKvIndexer>,
@@ -95,6 +95,24 @@ impl RouterIndexerHarness {
             .sum()
     }
 
+    pub(crate) fn warning_count(&self, warning_kind: &'static str) -> u64 {
+        warning_metric_value(&self.metrics, warning_kind)
+    }
+
+    pub(crate) fn warning_counts(&self) -> Vec<(&'static str, u64)> {
+        [METRIC_WARNING_DUPLICATE_STORE]
+            .into_iter()
+            .map(|warning_kind| (warning_kind, self.warning_count(warning_kind)))
+            .collect()
+    }
+
+    pub(crate) fn total_warning_count(&self) -> u64 {
+        self.warning_counts()
+            .into_iter()
+            .map(|(_, count)| count)
+            .sum()
+    }
+
     pub(crate) fn spawn_forwarder(&self) -> (Arc<TestKvEventSink>, JoinHandle<()>) {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RouterEvent>();
         let sink = Arc::new(TestKvEventSink {
@@ -135,6 +153,26 @@ impl RouterIndexerHarness {
         );
     }
 
+    pub(crate) fn assert_no_event_warnings(&self) {
+        let breakdown = self
+            .warning_counts()
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(warning_kind, count)| format!("{warning_kind}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            self.total_warning_count(),
+            0,
+            "router indexer reported suspicious KV events{}",
+            if breakdown.is_empty() {
+                String::new()
+            } else {
+                format!(": {breakdown}")
+            }
+        );
+    }
+
     pub(crate) fn shutdown(&self) {
         self.indexer.shutdown();
     }
@@ -162,6 +200,14 @@ pub(crate) fn metric_value(
     metrics
         .kv_cache_events_applied
         .get_metric_with_label_values(&[event_type, status])
+        .unwrap()
+        .get()
+}
+
+pub(crate) fn warning_metric_value(metrics: &KvIndexerMetrics, warning_kind: &'static str) -> u64 {
+    metrics
+        .kv_cache_event_warnings
+        .get_metric_with_label_values(&[warning_kind])
         .unwrap()
         .get()
 }
@@ -205,6 +251,25 @@ pub(crate) fn removed_event_count(events: &[RouterEvent]) -> usize {
         .iter()
         .filter(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
         .count()
+}
+
+/// Test sink that captures FPM snapshots for assertion.
+#[derive(Default)]
+pub(crate) struct CapturingFpmSink {
+    snapshots: Mutex<Vec<ForwardPassSnapshot>>,
+}
+
+impl FpmSink for CapturingFpmSink {
+    fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
+        self.snapshots.lock().unwrap().push(snapshot);
+        Ok(())
+    }
+}
+
+impl CapturingFpmSink {
+    pub(crate) fn take(&self) -> Vec<ForwardPassSnapshot> {
+        std::mem::take(&mut *self.snapshots.lock().unwrap())
+    }
 }
 
 /// Send `num_requests` to a scheduler, collect all output signals, and assert

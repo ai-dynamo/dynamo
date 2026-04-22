@@ -127,7 +127,7 @@ def get_or_create_gms_client_memory_manager(
             )
         return state.manager
 
-    manager = GMSClientMemoryManager(socket_path, device=device)
+    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
     manager.connect(mode, timeout_ms=timeout_ms)
 
     mem_pool = None

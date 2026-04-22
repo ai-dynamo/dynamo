@@ -31,6 +31,13 @@ use futures::stream;
 use tracing::Instrument;
 use validator::Validate;
 
+// Re-export from dynamo-kv-router crate
+pub use dynamo_kv_router::approx;
+pub use dynamo_kv_router::protocols;
+pub use dynamo_kv_router::scheduling;
+pub use dynamo_kv_router::selector;
+
+pub mod agent_controller;
 pub mod indexer;
 pub mod metrics;
 pub mod prefill_router;
@@ -38,10 +45,13 @@ pub mod publisher;
 pub mod push_router;
 pub mod scheduler;
 pub mod sequence;
+pub mod sticky_sessions;
 
+pub use agent_controller::AgentController;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub use sticky_sessions::StickySessionRouter;
 
 use crate::{
     discovery::RuntimeConfigWatch,
@@ -273,6 +283,9 @@ where
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking.
     ///
+    /// When `pinned_worker` is Some, scheduling and queueing are constrained to
+    /// that exact worker/rank.
+    ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
@@ -285,6 +298,7 @@ where
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
@@ -335,6 +349,7 @@ where
                 lora_name,
                 priority_jump,
                 expected_output_tokens,
+                pinned_worker,
                 allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
@@ -406,8 +421,6 @@ where
             .add_request(SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: maybe_seq_hashes,
-                isl: isl_tokens,
-                overlap: overlap_blocks,
                 track_prefill_tokens,
                 expected_output_tokens,
                 prefill_load_hint,
@@ -449,24 +462,25 @@ where
             return None;
         }
 
-        let Some(estimator) = &self.prefill_load_estimator else {
-            return None;
+        let expected_prefill_duration = match &self.prefill_load_estimator {
+            Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+                Ok(expected_prefill_duration) => Some(expected_prefill_duration),
+                Err(error) => {
+                    tracing::warn!(
+                        effective_isl,
+                        prefix,
+                        "failed to predict prefill duration for direct add_request path: {error}"
+                    );
+                    None
+                }
+            },
+            None => None,
         };
 
-        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
-            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
-                initial_effective_prefill_tokens: effective_isl,
-                expected_prefill_duration: Some(expected_prefill_duration),
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    effective_isl,
-                    prefix,
-                    "failed to predict prefill duration for direct add_request path: {error}"
-                );
-                None
-            }
-        }
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: effective_isl,
+            expected_prefill_duration,
+        })
     }
 
     /// Get the worker type for this router ("prefill" or "decode").
@@ -588,6 +602,7 @@ where
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                     )

@@ -277,6 +277,12 @@ class VllmProcessor:
         if mm_data:
             dynamo_preproc["multi_modal_data"] = mm_data
 
+        # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        if request_for_sampling.mm_processor_kwargs is not None:
+            dynamo_preproc[
+                "mm_processor_kwargs"
+            ] = request_for_sampling.mm_processor_kwargs
+
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
             request_for_sampling=request_for_sampling,
@@ -310,6 +316,10 @@ class VllmProcessor:
 
         try:
             if self.is_kv_router:
+                extra_args: dict[str, Any] = {}
+                mm_proc_kwargs = dynamo_preproc.get("mm_processor_kwargs")
+                if mm_proc_kwargs is not None:
+                    extra_args["mm_processor_kwargs"] = mm_proc_kwargs
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
                     model=dynamo_preproc["model"],
@@ -317,6 +327,7 @@ class VllmProcessor:
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
                     multi_modal_data=dynamo_preproc.get("multi_modal_data"),
+                    extra_args=extra_args or None,
                 )
             else:
                 dynamo_stream = await self.router.generate(
@@ -437,7 +448,7 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
-        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
+        trust_remote_code = self.config.trust_remote_code
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
@@ -455,12 +466,30 @@ class EngineFactory:
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
+
+        # Resolve stream_interval: env var override > backend config > default (20)
+        stream_interval = self.stream_interval
+        if not os.getenv("DYN_VLLM_STREAM_INTERVAL"):
+            backend_interval = (
+                mdc.runtime_config().get("runtime_data", {}).get("stream_interval")
+            )
+            if backend_interval is not None:
+                try:
+                    stream_interval = max(1, int(backend_interval))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid stream_interval=%r from backend runtime_config, "
+                        "using default=%d",
+                        backend_interval,
+                        stream_interval,
+                    )
+
         output_processor = OutputProcessor(
             tokenizer,
             log_stats=False,
-            stream_interval=self.stream_interval,
+            stream_interval=stream_interval,
         )
-        logger.info("vLLM OutputProcessor stream_interval=%d", self.stream_interval)
+        logger.info("vLLM OutputProcessor stream_interval=%d", stream_interval)
 
         tool_parser_name = self.flags.tool_call_parser or mdc.runtime_config().get(
             "tool_call_parser"

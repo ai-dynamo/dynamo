@@ -11,7 +11,7 @@ from sglang.srt.server_args import ServerArgs
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
 
@@ -108,7 +108,6 @@ def _get_bootstrap_info_for_config(
                 f"Using auto-detected local IP: {local_ip} "
                 f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
             )
-
         return bootstrap_host, bootstrap_port
     except Exception as e:
         logging.warning(f"Failed to get bootstrap info: {e}")
@@ -171,37 +170,38 @@ async def _get_runtime_config(
         runtime_config.enable_eagle = True
 
     try:
-        # Try to check if the engine has a scheduler attribute with the computed values
-        if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
-            # Get max_total_num_tokens from scheduler_info
-            if "max_total_num_tokens" in engine.scheduler_info:
-                max_total_tokens = engine.scheduler_info["max_total_num_tokens"]
-                if max_total_tokens and hasattr(
-                    engine.tokenizer_manager, "server_args"
-                ):
-                    page_size = engine.tokenizer_manager.server_args.page_size
-                    if page_size:
-                        runtime_config.total_kv_blocks = (
-                            max_total_tokens + page_size - 1
-                        ) // page_size
-                        logging.info(
-                            f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
-                            f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
-                        )
+        scheduler_info = get_scheduler_info(engine)
+        max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
-            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info.
-            # SGLang separates configuration (server_args) from runtime stats (scheduler_info).
-            # In contrast, vLLM exposes both config and runtime values through engine config.
-            # These are config parameters, so they must be retrieved from server_args only.
+        if max_total_tokens:
+            page_size = server_args.page_size
+            if page_size:
+                runtime_config.total_kv_blocks = (
+                    max_total_tokens + page_size - 1
+                ) // page_size
+                logging.info(
+                    f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
+                    f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                )
 
-            return runtime_config
+            # When max_prefill_tokens is not explicitly set by the user, fall back
+            # to max_total_num_tokens from the scheduler. This ensures the planner
+            # always has a prefill load signal for aggregated scaling decisions.
+            if not max_prefill_tokens:
+                runtime_config.max_num_batched_tokens = max_total_tokens
+                logging.info(
+                    f"max_prefill_tokens not set, using max_total_num_tokens "
+                    f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
+                )
+        else:
+            unpublished = "total_kv_blocks"
+            if not max_prefill_tokens:
+                unpublished += " and max_num_batched_tokens"
+            logging.warning(
+                f"Could not access scheduler info from SGLang engine. "
+                f"{unpublished} will not be published; SGLang will use its internal defaults."
+            )
 
-        # If scheduler approach doesn't work, log and return None to indicate we'll skip runtime config
-        logging.warning(
-            "Could not access runtime config from SGLang engine. "
-            "The engine may compute these values internally after initialization. "
-            "Proceeding without runtime config - SGLang will use its internal defaults."
-        )
         return runtime_config
 
     except Exception as e:

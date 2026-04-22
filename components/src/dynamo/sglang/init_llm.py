@@ -80,6 +80,15 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    load_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
+    )
+    unload_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.unload_lora"
+    )
+    list_loras_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
+    )
 
     shutdown_endpoints[:] = [generate_endpoint]
 
@@ -117,13 +126,32 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    # Only serve session_control when streaming sessions are enabled.
+    if getattr(server_args, "enable_streaming_session", False):
+        session_control_endpoint = runtime.endpoint(
+            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
+        )
+        shutdown_endpoints.append(session_control_endpoint)
+
     try:
-        await asyncio.gather(
+        gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=metrics_labels,
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=metrics_labels,
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
+                metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(
                 engine,
@@ -133,7 +161,12 @@ async def init_decode(
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
-        )
+        ]
+        if getattr(server_args, "enable_streaming_session", False):
+            gather_tasks.append(
+                session_control_endpoint.serve_endpoint(handler.session_control)
+            )
+        await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -175,6 +208,15 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    load_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
+    )
+    unload_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.unload_lora"
+    )
+    list_loras_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
+    )
 
     shutdown_endpoints[:] = [generate_endpoint]
 
@@ -215,6 +257,18 @@ async def init_prefill(
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=metrics_labels,
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=metrics_labels,
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
+                metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(
                 engine,

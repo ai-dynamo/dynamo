@@ -162,6 +162,23 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--load-format",
+            env_var="DYN_TRTLLM_LOAD_FORMAT",
+            default="auto",
+            help="Model weight loading format passed to TensorRT-LLM (e.g. 'auto', 'gms').",
+        )
+        add_argument(
+            g,
+            flag_name="--model-loader-extra-config",
+            env_var="DYN_TRTLLM_MODEL_LOADER_EXTRA_CONFIG",
+            default="",
+            help=(
+                "JSON object passed as extra config to the model loader "
+                "(e.g. '{\"gms_read_only\": true}')."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
             default=DisaggregationMode.AGGREGATED.value,
@@ -197,6 +214,17 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=50,
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--frontend-decoding",
+            env_var="DYN_TRTLLM_FRONTEND_DECODING",
+            default=False,
+            help=(
+                "Enable frontend decoding of multimodal images. "
+                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+                "Without this flag, images are decoded in the Python backend (default behavior)."
+            ),
         )
 
         # --- Guided Decoding ---
@@ -453,6 +481,8 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     disable_request_abort: bool
+    load_format: str
+    model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
@@ -460,6 +490,7 @@ class DynamoTrtllmConfig(ConfigBase):
     encode_endpoint: str
     allowed_local_media_path: str
     max_file_size_mb: int
+    frontend_decoding: bool
 
     default_height: int
     default_width: int

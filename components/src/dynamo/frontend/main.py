@@ -114,17 +114,6 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     vllm_flags = None
     sglang_flags = None
 
-    # --trust-remote-code is only meaningful with --dyn-chat-processor vllm.
-    # Warn and strip it when a different (or no) chat processor is active so
-    # it does not propagate as an unknown-argument error below.
-    if "--trust-remote-code" in unknown and config.chat_processor != "vllm":
-        logger.warning(
-            "--trust-remote-code has no effect without '--dyn-chat-processor vllm'. "
-            "It is only supported by the vLLM chat processor. "
-            "Pass '--dyn-chat-processor vllm' to enable trust_remote_code."
-        )
-        unknown = [arg for arg in unknown if arg != "--trust-remote-code"]
-
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
@@ -209,26 +198,8 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = config.metrics_prefix
 
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Durable KV events (JetStream) is explicitly requested, OR
-    # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
-    # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
-    enable_nats = config.request_plane == "nats" or (
-        config.router_mode == "kv"
-        and (
-            config.durable_kv_events
-            or (
-                config.event_plane == "nats"
-                and (config.use_kv_events or config.router_replica_sync)
-            )
-        )
-    )
-
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(
-        loop, config.discovery_backend, config.request_plane, enable_nats
-    )
+    runtime = DistributedRuntime(loop, config.discovery_backend, config.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))

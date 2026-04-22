@@ -133,6 +133,8 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
             path: backends/trtllm/trtllm-video-diffusion.md
+      - page: Chat Processor Options
+        path: agents/chat-processor-options.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: Reasoning
@@ -220,6 +222,8 @@ navigation:
         contents:
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
+          - page: Tokenizer
+            path: components/frontend/Tokenizer.md
       - section: Router
         path: components/router/README.md
         contents:

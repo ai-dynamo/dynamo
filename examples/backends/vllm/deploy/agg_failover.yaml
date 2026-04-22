@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Active-passive GPU failover example.
+#
+# The operator clones the worker's main container into two engine containers
+# (engine-0 active, engine-1 standby) sharing GPUs via DRA and the GMS sidecar.
+# When the active engine fails, the standby acquires the flock and takes over.
+#
+# Requires:
+#   - gpuMemoryService.enabled: true (GMS sidecar + DRA)
+#   - nvidia.com/dynamo-kube-discovery-mode: container (per-container K8s discovery)
+#   - Kubernetes 1.32+ with DRA enabled and the NVIDIA GPU DRA driver installed
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-failover
+  annotations:
+    nvidia.com/dynamo-kube-discovery-mode: container
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      gpuMemoryService:
+        enabled: true
+      failover:
+        enabled: true
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --tensor-parallel-size
+            - "2"
+            - --load-format
+            - gms

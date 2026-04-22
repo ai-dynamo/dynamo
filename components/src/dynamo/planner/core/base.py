@@ -20,10 +20,11 @@ import logging
 import time
 from typing import TYPE_CHECKING, Optional, Union
 
+import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import TargetReplica
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -42,6 +43,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
+from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
@@ -77,6 +79,7 @@ def _engine_caps(
         else None,
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
+        max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
     )
 
 
@@ -116,26 +119,25 @@ class NativePlannerBase:
 
         # Connector
         self.connector: ConnectorType
-        if not config.no_operation:
-            if config.environment == "global-planner":
-                assert config.global_planner_namespace is not None
-                assert runtime is not None
-                self.connector = GlobalPlannerConnector(
-                    runtime,
-                    self.namespace,
-                    config.global_planner_namespace,
-                    "GlobalPlanner",
-                    config.model_name,
-                )
-            elif config.environment == "kubernetes":
-                self.connector = KubernetesConnector(self.namespace, config.model_name)
-            elif config.environment == "virtual":
-                assert runtime is not None
-                self.connector = VirtualConnector(
-                    runtime, self.namespace, config.model_name
-                )
-            else:
-                raise ValueError(f"Invalid environment: {config.environment}")
+        if config.environment == "global-planner":
+            assert config.global_planner_namespace is not None
+            assert runtime is not None
+            self.connector = GlobalPlannerConnector(
+                runtime,
+                self.namespace,
+                config.global_planner_namespace,
+                "GlobalPlanner",
+                config.model_name,
+            )
+        elif config.environment == "kubernetes":
+            self.connector = KubernetesConnector(self.namespace, config.model_name)
+        elif config.environment == "virtual":
+            assert runtime is not None
+            self.connector = VirtualConnector(
+                runtime, self.namespace, config.model_name
+            )
+        else:
+            raise ValueError(f"Invalid environment: {config.environment}")
 
         # Prometheus
         self.prometheus_traffic_client = PrometheusAPIClient(
@@ -175,6 +177,9 @@ class NativePlannerBase:
 
         # Diagnostics recorder
         self._recorder = DiagnosticsRecorder(config=config)
+
+        # Live dashboard runner (started in _async_init)
+        self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
 
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
@@ -229,32 +234,35 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        if not self.config.no_operation:
-            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
-            logger.info("Validating deployment...")
-            await self.connector.validate_deployment(
-                prefill_component_name=(
-                    defaults.prefill_worker_k8s_name
-                    if self.require_prefill and defaults
-                    else None
-                ),
-                decode_component_name=(
-                    defaults.decode_worker_k8s_name
-                    if self.require_decode and defaults
-                    else None
-                ),
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-            )
-            logger.info("Successfully validated the deployment")
-            _initialize_gpu_counts(
-                self.config,
-                self.connector,
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-            )
-            await self.connector.wait_for_deployment_ready(include_planner=False)
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+        logger.info("Validating deployment...")
+        await self.connector.validate_deployment(
+            prefill_component_name=(
+                defaults.prefill_worker_k8s_name
+                if self.require_prefill and defaults
+                else None
+            ),
+            decode_component_name=(
+                defaults.decode_worker_k8s_name
+                if self.require_decode and defaults
+                else None
+            ),
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+        )
+        logger.info("Successfully validated the deployment")
+        _initialize_gpu_counts(
+            self.config,
+            self.connector,
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+        )
+        await self.connector.wait_for_deployment_ready(include_planner=False)
 
+        # Resolve WorkerInfo once from the connector.  For K8s this populates
+        # runtime_config fields from MDC CRDs; for Virtual it returns backend
+        # defaults (subscribers aren't attached yet) which is enough to
+        # construct the FPM endpoint.
         await self._init_worker_info()
 
         if self.runtime is not None:
@@ -263,7 +271,32 @@ class NativePlannerBase:
             if self.require_decode:
                 await self._init_fpm_subscriber("decode")
 
+        # VirtualConnector reads MDC from the FPM subscriber's discovery watch;
+        # hand it the subscribers now that they exist.  The tick-loop refresh
+        # will backfill runtime_config fields once discovery sees the workers.
+        if isinstance(self.connector, VirtualConnector):
+            self.connector.set_mdc_subscribers(
+                prefill=self._prefill_fpm_sub,
+                decode=self._decode_fpm_sub,
+            )
+
         await self._bootstrap_regression()
+
+        # Log operating mode at startup
+        if self.config.advisory:
+            logger.info(
+                "[ADVISORY] Planner started in advisory mode — "
+                "scaling decisions will be logged but NOT executed."
+            )
+
+        # Start live dashboard if configured
+        if self.config.live_dashboard_port:
+            try:
+                self._dashboard_runner = await start_live_dashboard(
+                    self._recorder, self.config.live_dashboard_port
+                )
+            except Exception as e:
+                logger.error(f"Failed to start live dashboard: {e}")
 
     async def _init_worker_info(self) -> None:
         connector = getattr(self, "connector", None)
@@ -273,7 +306,7 @@ class NativePlannerBase:
             require_decode=self.require_decode,
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation,
+            no_operation=False,
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
@@ -311,6 +344,73 @@ class NativePlannerBase:
     async def _bootstrap_regression(self) -> None:
         """Override in subclasses to bootstrap regression models."""
         pass
+
+    # ------------------------------------------------------------------
+    # Discovery refresh
+    # ------------------------------------------------------------------
+
+    _MDC_REFRESH_FIELDS = (
+        "total_kv_blocks",
+        "kv_cache_block_size",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "context_length",
+    )
+
+    def _refresh_worker_info_from_connector(self) -> None:
+        """Re-query the connector for any sub-component whose WorkerInfo is
+        still missing runtime-config fields.
+
+        This handles the cold-start path where workers haven't registered
+        their model cards yet when ``_init_worker_info`` first runs.  It is
+        a no-op for K8s mode once CRDs are present, and drives the
+        VirtualConnector's discovery-sourced population once cards arrive.
+        """
+        if not hasattr(self.connector, "get_worker_info"):
+            return
+
+        targets: list[tuple[WorkerInfo, SubComponentType]] = []
+        if self.require_prefill:
+            targets.append((self.prefill_worker_info, SubComponentType.PREFILL))
+        if self.require_decode:
+            targets.append((self.decode_worker_info, SubComponentType.DECODE))
+
+        changed = False
+        for worker_info, sub_type in targets:
+            if worker_info.max_num_batched_tokens is not None:
+                continue
+            try:
+                fresh = self.connector.get_worker_info(sub_type, self.config.backend)
+            except Exception as e:
+                logger.debug(
+                    f"get_worker_info refresh for {sub_type.value} failed: {e}"
+                )
+                continue
+
+            updated = False
+            for field_name in self._MDC_REFRESH_FIELDS:
+                fresh_val = getattr(fresh, field_name)
+                if (
+                    fresh_val is not None
+                    and getattr(worker_info, field_name) != fresh_val
+                ):
+                    setattr(worker_info, field_name, fresh_val)
+                    updated = True
+            if updated:
+                changed = True
+                logger.info(
+                    f"Refreshed {sub_type.value} WorkerInfo from connector: "
+                    f"{worker_info.summary()}"
+                )
+
+        if changed and self._state_machine is not None:
+            self._state_machine.update_capabilities(
+                build_worker_capabilities(
+                    self.config,
+                    self.prefill_worker_info,
+                    self.decode_worker_info,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Data collection (runtime I/O)
@@ -394,7 +494,7 @@ class NativePlannerBase:
         return num_p, num_d, True
 
     async def _collect_traffic(self) -> Optional[TrafficObservation]:
-        """Pull traffic metrics from Prometheus."""
+        """Pull traffic metrics from Prometheus over the throughput interval."""
         num_p, num_d, _ = await self._get_worker_counts_raw()
 
         if self.prometheus_port != 0:
@@ -438,9 +538,14 @@ class NativePlannerBase:
         m.osl = self.prometheus_traffic_client.get_avg_output_sequence_tokens(
             interval_str, self.model_name
         )
+        m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
+            interval_str, self.model_name
+        )
 
+        hit_rate_str = f"{m.kv_hit_rate:.3f}" if m.kv_hit_rate is not None else "n/a"
         logger.info(
-            f"Observed num_req: {m.num_req:.2f} isl: {m.isl:.2f} osl: {m.osl:.2f}"
+            f"Observed num_req: {m.num_req:.2f} isl: {m.isl:.2f} osl: {m.osl:.2f} "
+            f"kv_hit_rate: {hit_rate_str}"
         )
 
         if self.prometheus_port != 0:
@@ -463,6 +568,42 @@ class NativePlannerBase:
             num_req=m.num_req,
             isl=m.isl,
             osl=m.osl,
+            kv_hit_rate=m.kv_hit_rate,
+        )
+
+    async def _collect_kv_hit_rate_observation(
+        self, duration_s: float
+    ) -> Optional[TrafficObservation]:
+        """Pull only the KV hit rate from Prometheus over ``duration_s``.
+
+        Used in load-only deployments: the load tick only needs the hit rate
+        to discount prefill work, so we skip the five other (unused) traffic
+        queries to keep the per-load-tick scrape cheap.
+
+        Returns ``None`` when the router metric is unavailable (e.g.
+        Prometheus source is "frontend"); the state machine treats that as
+        a no-discount fallback.
+        """
+        assert self.model_name is not None
+        if duration_s <= 0:
+            return None
+        interval_str = f"{int(duration_s)}s"
+        hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
+            interval_str, self.model_name
+        )
+        # Mirror the observed value into Metrics so the diagnostics recorder
+        # sees the up-to-date hit rate even on load-only ticks.
+        self._last_metrics.kv_hit_rate = hit_rate
+        hit_rate_str = f"{hit_rate:.3f}" if hit_rate is not None else "n/a"
+        logger.info(f"Observed kv_hit_rate over {interval_str}: {hit_rate_str}")
+        if hit_rate is None:
+            return None
+        return TrafficObservation(
+            duration_s=duration_s,
+            num_req=0.0,
+            isl=0.0,
+            osl=0.0,
+            kv_hit_rate=hit_rate,
         )
 
     def _collect_fpm(self) -> FpmObservations:
@@ -540,7 +681,17 @@ class NativePlannerBase:
         fpm_obs = None
 
         if tick.need_traffic_metrics:
-            traffic = await self._collect_traffic()
+            # Throughput ticks pull the full traffic snapshot over the
+            # throughput interval. Load-only deployments instead piggyback
+            # a cheap kv-hit-rate-only scrape (over the load interval) on
+            # each load tick so the planner can still discount prefill work
+            # by recent prefix reuse.
+            if tick.run_throughput_scaling:
+                traffic = await self._collect_traffic()
+            else:
+                traffic = await self._collect_kv_hit_rate_observation(
+                    tick.traffic_metrics_duration_s
+                )
         if tick.need_worker_states:
             worker_counts = await self._collect_worker_counts()
         if tick.need_worker_fpm:
@@ -564,10 +715,59 @@ class NativePlannerBase:
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
-        """Shared helper: send scaling targets to connector."""
-        if self.config.no_operation or not targets:
+        """Shared helper: send scaling targets to connector.
+
+        Skipped in advisory mode (decisions are logged but not executed).
+        """
+        if self.config.advisory or not targets:
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
+
+    # ------------------------------------------------------------------
+    # Periodic decision summary
+    # ------------------------------------------------------------------
+
+    def _log_decision_summary(self, effects: PlannerEffects) -> None:
+        """Log a one-line summary of the scaling decision after each tick."""
+        decision = effects.scale_to
+        diag = effects.diagnostics
+
+        sm = self.state_machine
+        current_p = sm._num_p_workers
+        current_d = sm._num_d_workers
+
+        rec_p = decision.num_prefill if decision else None
+        rec_d = decision.num_decode if decision else None
+
+        delta_p = (rec_p - current_p) if rec_p is not None else 0
+        delta_d = (rec_d - current_d) if rec_d is not None else 0
+
+        if decision is None or (delta_p == 0 and delta_d == 0):
+            action = "hold"
+        elif (delta_p > 0 or delta_d > 0) and (delta_p < 0 or delta_d < 0):
+            action = "rebalance"
+        elif delta_p > 0 or delta_d > 0:
+            action = "scale_up"
+        else:
+            action = "scale_down"
+
+        logger.info(
+            "[summary] %s | current: prefill=%d decode=%d | "
+            "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
+            "load_reason=%s throughput_reason=%s | "
+            "est_ttft=%.1fms est_itl=%.1fms",
+            action.upper(),
+            current_p,
+            current_d,
+            rec_p if rec_p is not None else "-",
+            rec_d if rec_d is not None else "-",
+            delta_p,
+            delta_d,
+            diag.load_decision_reason or "n/a",
+            diag.throughput_decision_reason or "n/a",
+            diag.estimated_ttft_ms or 0,
+            diag.estimated_itl_ms or 0,
+        )
 
     # ------------------------------------------------------------------
     # Diagnostics reporting (shared across all adapters)
@@ -604,32 +804,40 @@ class NativePlannerBase:
         next_tick = self.state_machine.initial_tick(time.time())
         poll_interval = self.config.load_adjustment_interval / 10
 
-        while True:
-            now = time.time()
-            if now < next_tick.at_s:
-                await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
-                continue
+        try:
+            while True:
+                now = time.time()
+                if now < next_tick.at_s:
+                    await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
+                    continue
 
-            tick_input = await self._gather_tick_input(next_tick)
-            effects = self.state_machine.on_tick(next_tick, tick_input)
-            await self._apply_effects(effects)
-            self._report_diagnostics(effects.diagnostics)
+                self._refresh_worker_info_from_connector()
 
-            if self._recorder.enabled:
-                try:
-                    self._recorder.record(
-                        tick_input,
-                        effects,
-                        self._last_metrics,
-                        self._cumulative_gpu_hours,
-                    )
-                    if self._recorder.should_generate_report(tick_input.now_s):
-                        self._recorder.generate_report()
-                except Exception as e:
-                    logger.error(f"Diagnostics report failed: {e}")
+                tick_input = await self._gather_tick_input(next_tick)
+                effects = self.state_machine.on_tick(next_tick, tick_input)
+                await self._apply_effects(effects)
+                self._report_diagnostics(effects.diagnostics)
+                self._log_decision_summary(effects)
 
-            assert effects.next_tick is not None
-            next_tick = effects.next_tick
+                if self._recorder.enabled:
+                    try:
+                        self._recorder.record(
+                            tick_input,
+                            effects,
+                            self._last_metrics,
+                            self._cumulative_gpu_hours,
+                        )
+                        if self._recorder.should_generate_report(tick_input.now_s):
+                            self._recorder.generate_report()
+                    except Exception as e:
+                        logger.error(f"Diagnostics report failed: {e}")
+
+                assert effects.next_tick is not None
+                next_tick = effects.next_tick
+        finally:
+            self._recorder.finalize()
+            if self._dashboard_runner is not None:
+                await self._dashboard_runner.cleanup()
 
 
 # ------------------------------------------------------------------

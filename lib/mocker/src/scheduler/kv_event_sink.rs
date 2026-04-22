@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, WorkerId};
 
-use crate::common::protocols::{KvCacheEventSink, KvEventPublishers, RawKvEvent, RawKvEventSink};
+use crate::common::protocols::{
+    ForwardPassSnapshot, FpmPublisher, KvCacheEventSink, KvEventPublishers, RawKvEvent,
+    RawKvEventSink,
+};
 
 /// Captures router-ready events for offline replay and scheduler tests.
 ///
@@ -153,6 +156,33 @@ pub(crate) fn publish_deferred_kv_events(
     for event in events {
         if let Err(error) = sinks.publish(event.event, event.block_token_ids.as_deref()) {
             tracing::warn!("Failed to forward buffered KV event: {error}");
+        }
+    }
+}
+
+/// Captures FPM snapshots for the live scheduler so it can flush them at the
+/// correct pass phase, matching the deferred KV event pattern.
+#[derive(Clone, Default)]
+pub(crate) struct DeferredFpmBuffer {
+    snapshots: Arc<Mutex<Vec<ForwardPassSnapshot>>>,
+}
+
+impl DeferredFpmBuffer {
+    pub(crate) fn push(&self, snapshot: ForwardPassSnapshot) {
+        self.snapshots.lock().unwrap().push(snapshot);
+    }
+
+    pub(crate) fn drain(&self) -> Vec<ForwardPassSnapshot> {
+        std::mem::take(&mut *self.snapshots.lock().unwrap())
+    }
+}
+
+/// Forwards buffered FPM snapshots to the real sink once the pass reaches
+/// the configured visibility point.
+pub(crate) fn publish_deferred_fpm(sink: &FpmPublisher, snapshots: Vec<ForwardPassSnapshot>) {
+    for snapshot in snapshots {
+        if let Err(error) = sink.publish(snapshot) {
+            tracing::warn!("Failed to forward buffered FPM snapshot: {error}");
         }
     }
 }
