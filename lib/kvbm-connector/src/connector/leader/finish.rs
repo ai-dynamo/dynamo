@@ -4,15 +4,27 @@
 use kvbm_engine::offload::{TransferHandle, TransferStatus};
 
 use super::*;
+use slot::OnboardingState;
 
 impl ConnectorLeader {
     /// Mark a request as finished, returning the status.
     ///
-    /// This method:
-    /// 1. Marks the slot for deletion
-    /// 2. If there's an OffloadingState, takes it and checks all transfer handles
-    /// 3. If all handles are complete, returns Finished immediately
-    /// 4. If any handles are incomplete, spawns a cleanup task and returns Pending
+    /// Dispatches on the slot's current `TransactionState`:
+    /// - `Inactive`: the request has no outstanding work; the slot is removed
+    ///   synchronously and `Finished` is returned.
+    /// - `PreparingToOnboard`: the request was cancelled mid-search, before
+    ///   onboarding was committed to the scheduler or the workers. The
+    ///   `OnboardingState` is extracted, the slot is removed synchronously,
+    ///   and a fire-and-forget task drains every shard's find session and
+    ///   releases it. No worker callbacks are emitted because no worker ever
+    ///   learned about this request. Returns `Finished`.
+    /// - `Offloading`: outstanding offload handles must complete before
+    ///   workers can be signalled. If all handles are already complete the
+    ///   slot is removed and `Finished` is returned; otherwise a cleanup
+    ///   task is spawned, `mark_offloading_complete` will be issued on
+    ///   completion, and `Pending` is returned.
+    /// - `Onboarding` / `Error`: not handled in this path yet; the caller
+    ///   sees the pre-existing log-only behaviour.
     #[tracing::instrument(level = "debug", skip(self), fields(?request_id), ret)]
     pub fn request_finished(&self, request_id: &str) -> FinishedStatus {
         tracing::debug!("evaluating finished status");
@@ -22,6 +34,31 @@ impl ConnectorLeader {
         };
 
         let mut slot = shared_slot.lock();
+
+        // Cancel path: request is finished while still in PreparingToOnboard.
+        // No worker callback will ever arrive (scheduler never committed), so we
+        // own the whole cleanup here — remove the slot synchronously and hand
+        // the OnboardingState to a background task for session release.
+        if matches!(slot.txn_state(), TransactionState::PreparingToOnboard(_)) {
+            match slot.txn_take_preparing_to_onboard() {
+                Ok(onboarding_state) => {
+                    drop(slot);
+                    self.remove_slot(request_id);
+                    self.spawn_preparing_to_onboard_cleanup(request_id, onboarding_state);
+                    return FinishedStatus::Finished;
+                }
+                Err(e) => {
+                    // txn_state() said PreparingToOnboard, so this branch should
+                    // be unreachable. Fall through to the legacy path (which
+                    // will log and return Pending) rather than panicking.
+                    tracing::error!(
+                        "Failed to take PreparingToOnboard state for request ID {}: {}",
+                        request_id,
+                        e
+                    );
+                }
+            }
+        }
 
         // Mark the slot for deletion
         let initial_status = slot.slot_mark_finished();
@@ -141,6 +178,37 @@ impl ConnectorLeader {
         }
 
         Ok(())
+    }
+
+    /// Spawn a fire-and-forget task that drains the find sessions of a
+    /// cancelled-in-`PreparingToOnboard` request and releases each one.
+    ///
+    /// The caller must have already removed the slot from the map and taken
+    /// ownership of the `OnboardingState`; this function only touches the
+    /// extracted state and the `InstanceLeader`.
+    fn spawn_preparing_to_onboard_cleanup(
+        &self,
+        request_id: &str,
+        onboarding_state: OnboardingState,
+    ) {
+        let Some(instance_leader) = self.instance_leader.get().cloned() else {
+            // InstanceLeader is set during worker initialization, well before
+            // any request reaches PreparingToOnboard. If it is missing we have
+            // a serious lifecycle bug — log and drop the state (RAII releases
+            // Ready shards; AsyncSession server-side state will be cleaned up
+            // when the leader shuts down).
+            tracing::error!(
+                "InstanceLeader not available; dropping OnboardingState without releasing sessions for request_id: {}",
+                request_id
+            );
+            return;
+        };
+
+        let request_id_owned = request_id.to_string();
+        self.runtime.tokio().spawn(async move {
+            cleanup_preparing_to_onboard(onboarding_state, instance_leader, request_id_owned)
+                .await;
+        });
     }
 
     fn remove_slot(&self, request_id: &str) {
@@ -287,5 +355,73 @@ async fn cleanup_offloading_handles(mut handles: Vec<TransferHandle>, request_id
         "cleanup complete for {} transfer handles for request_id: {}",
         handles.len(),
         request_id
+    );
+}
+
+/// Async cleanup task for a request cancelled while in `PreparingToOnboard`.
+///
+/// Each shard's find session is driven to a terminal state before its
+/// server-side state is released. `FindMatchesResult::Ready` variants resolve
+/// immediately (blocks are held via RAII and will be dropped when the state
+/// falls out of scope at the end of this task); `AsyncSession` variants await
+/// `wait_for_completion` — already-terminal sessions complete on first poll,
+/// and in-flight sessions drain naturally. A session-drain error is logged
+/// but the task still attempts to release the session, because leaving the
+/// leader-side session state mapped would be worse than a failed RPC.
+///
+/// Shards are drained concurrently via `join_all` so that ready / already-
+/// terminal shards free their resources immediately without waiting on the
+/// slowest in-flight shard.
+///
+/// No worker callback (`mark_onboarding_complete` / `mark_failed_onboarding` /
+/// `mark_offloading_complete`) is emitted — the scheduler never committed
+/// this request, so no worker ever learned about it.
+async fn cleanup_preparing_to_onboard(
+    onboarding_state: OnboardingState,
+    instance_leader: InstanceLeader,
+    request_id: String,
+) {
+    let shard_count = onboarding_state.shards.len();
+    tracing::debug!(
+        "starting PreparingToOnboard cleanup of {} shard(s) for request_id: {}",
+        shard_count,
+        request_id
+    );
+
+    let drain_futures = onboarding_state
+        .shards
+        .iter()
+        .map(|shard| {
+            let wait = shard.find_session.wait_for_completion();
+            let session_id = shard.find_session.session_id();
+            let instance_leader = instance_leader.clone();
+            let request_id = request_id.clone();
+            async move {
+                if let Err(e) = wait.await {
+                    tracing::warn!(
+                        "find_session drain failed for request_id {} (session {:?}): {}; \
+                         releasing session anyway",
+                        request_id,
+                        session_id,
+                        e
+                    );
+                }
+                if let Some(session_id) = session_id {
+                    instance_leader.release_session(session_id);
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    futures::future::join_all(drain_futures).await;
+
+    // Dropping `onboarding_state` here releases any `Ready`-variant blocks
+    // held by RAII.
+    drop(onboarding_state);
+
+    tracing::debug!(
+        "PreparingToOnboard cleanup complete for request_id: {} ({} shard(s))",
+        request_id,
+        shard_count
     );
 }
