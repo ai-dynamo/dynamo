@@ -648,7 +648,7 @@ def _run_codex_exec_smoke(
         "-c",
         "model_provider=local",
         "exec",
-        "Run `ls` in the current directory and tell me the filenames.",
+        "What files exist in the current working directory? Use your shell tool to run ls and report each filename verbatim from the output.",
         "--dangerously-bypass-approvals-and-sandbox",
     ]
     result = subprocess.run(
@@ -725,7 +725,7 @@ def _run_claude_exec_smoke(
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
         "-p",
-        "Run `ls` in the current directory and tell me the filenames.",
+        "What files exist in the current working directory? Use your shell tool to run ls and report each filename verbatim from the output.",
     ]
     result = subprocess.run(
         cmd,
