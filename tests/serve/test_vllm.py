@@ -4,6 +4,7 @@
 import dataclasses
 import logging
 import os
+import platform
 import random
 from dataclasses import dataclass, field
 from typing import Optional
@@ -42,6 +43,22 @@ def _is_cuda13() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
     # handles "13", "13.0", "13.0.1", etc.
     return v.startswith("13")
+
+
+def _is_aarch64() -> bool:
+    arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
+    return arch in ("aarch64", "arm64")
+
+
+def _xfail_lmcache_aarch64_container():
+    return pytest.mark.xfail(
+        _is_aarch64(),
+        reason=(
+            "LMCache does not publish aarch64 wheels yet; the CUDA 13 x86_64 "
+            "container rebuilds LMCache from source instead"
+        ),
+        strict=False,
+    )
 
 
 @dataclass
@@ -182,6 +199,7 @@ vllm_configs = {
         script_name="agg_lmcache.sh",
         marks=[
             pytest.mark.lmcache,
+            _xfail_lmcache_aarch64_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -204,6 +222,7 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.lmcache,
+            _xfail_lmcache_aarch64_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
