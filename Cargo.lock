@@ -2309,6 +2309,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamo-backend-common"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap 4.6.0",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "futures",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-bench"
 version = "1.2.0"
 dependencies = [
