@@ -27,6 +27,7 @@ import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
@@ -1095,15 +1096,11 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
         # Extract priority if set (e.g., health check sets 1.0 for highest priority).
-        # TRT-LLM accepts priority as a float in [0.0, 1.0], default 0.5.
-        priority = request.get("priority")
+        # TRT-LLM BaseLLM.generate_async() accepts priority as a float in [0.0, 1.0],
+        # defaulting to 0.5.
+        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
 
         try:
-            # Build optional kwargs — only pass priority if explicitly set
-            optional_kwargs = {}
-            if priority is not None:
-                optional_kwargs["priority"] = priority
-
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
@@ -1112,7 +1109,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
-                **optional_kwargs,
+                priority=priority,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
