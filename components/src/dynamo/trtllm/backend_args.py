@@ -215,6 +215,17 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--frontend-decoding",
+            env_var="DYN_TRTLLM_FRONTEND_DECODING",
+            default=False,
+            help=(
+                "Enable frontend decoding of multimodal images. "
+                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+                "Without this flag, images are decoded in the Python backend (default behavior)."
+            ),
+        )
 
         # --- Guided Decoding ---
         add_argument(
@@ -479,6 +490,7 @@ class DynamoTrtllmConfig(ConfigBase):
     encode_endpoint: str
     allowed_local_media_path: str
     max_file_size_mb: int
+    frontend_decoding: bool
 
     default_height: int
     default_width: int

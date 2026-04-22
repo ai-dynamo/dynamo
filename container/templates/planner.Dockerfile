@@ -70,6 +70,7 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/comp
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 

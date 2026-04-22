@@ -139,10 +139,6 @@ checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
 
-  # Path written by worker when model is loaded and ready for checkpointing
-  # Must match the path expected by checkpoint-enabled runtime images
-  readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
 # Webhook configuration
 webhook:
   # Certificate configuration
