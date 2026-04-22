@@ -148,7 +148,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 >
 > | dynamo-platform | kai-scheduler | Grove |
 > |-----------------|---------------|-------|
-> | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
+> | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.7 |
 >
 > After installing them separately, enable Dynamo integration:
 >

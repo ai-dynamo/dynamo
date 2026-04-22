@@ -28,6 +28,7 @@ The top-level Grove object that defines a group of components managed and coloca
 - Support for autoscaling
 - Topology-aware spread of replicas for availability
 - Unified management of multiple disaggregated components
+- Pass-through scheduling controls such as `priorityClassName`, `replicaSpreadConstraints`, and `spreadConstraints` directly from DynamoGraphDeployment manifests
 
 ### PodClique
 Represents a group of pods with a specific role (e.g., leader, worker, frontend). Each clique features:
@@ -50,6 +51,15 @@ Supports pluggable horizontal auto-scaling solutions to scale PodCliqueSet, PodC
 
 ### Network Topology-Aware Scheduling
 Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication. Dynamo exposes this capability through the `topologyConstraint` field on DynamoGraphDeployment resources, so users can opt in to topology-aware placement without interacting with Grove internals. See the [Topology Aware Scheduling guide](./topology-aware-scheduling.md) for configuration details and examples.
+
+### Additional Grove Scheduling Passthroughs
+Dynamo also exposes a small set of Grove-native pass-through fields on `DynamoGraphDeployment.spec` for multi-tenant scheduling and fault tolerance:
+
+- `priorityClassName` sets the priority class used for each generated Grove PodGang
+- `replicaSpreadConstraints` configures PodCliqueSet-level replica spreading across failure domains
+- `spreadConstraints` configures PodGang-level spreading across topology domains within each gang
+
+These fields are optional and only affect deployments that are orchestrated by Grove.
 
 ### Custom Startup Dependencies
 Prescribes the order in which PodCliques must start in a declarative specification, with pod startup decoupled from pod creation or scheduling. This ensures proper initialization order for disaggregated components.

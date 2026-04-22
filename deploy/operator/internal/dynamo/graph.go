@@ -1383,6 +1383,15 @@ func GenerateGrovePodCliqueSet(
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}
+	if dynamoDeployment.Spec.PriorityClassName != nil {
+		gangSet.Spec.Template.PriorityClassName = *dynamoDeployment.Spec.PriorityClassName
+	}
+	if len(dynamoDeployment.Spec.ReplicaSpreadConstraints) > 0 {
+		gangSet.Spec.ReplicaSpreadConstraints = deepCopyTopologySpreadConstraints(dynamoDeployment.Spec.ReplicaSpreadConstraints)
+	}
+	if len(dynamoDeployment.Spec.SpreadConstraints) > 0 {
+		gangSet.Spec.Template.SpreadConstraints = deepCopyTopologySpreadConstraints(dynamoDeployment.Spec.SpreadConstraints)
+	}
 
 	// Inject deployment-level topology constraint (PCS template).
 	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.

@@ -7520,6 +7520,55 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 	assert.Equal(t, dgd.Name, dcd.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 }
 
+func TestGenerateGrovePodCliqueSet_GrovePassthroughs(t *testing.T) {
+	replicaSpread := []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       "topology.kubernetes.io/zone",
+		WhenUnsatisfiable: corev1.DoNotSchedule,
+		LabelSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"app": "replica"},
+		},
+	}}
+	podGangSpread := []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       "kubernetes.io/hostname",
+		WhenUnsatisfiable: corev1.ScheduleAnyway,
+		MatchLabelKeys:    []string{"app.kubernetes.io/instance"},
+	}}
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			PriorityClassName:        ptr.To("inference-critical"),
+			ReplicaSpreadConstraints: replicaSpread,
+			SpreadConstraints:        podGangSpread,
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(2)),
+					Multinode: &v1alpha1.MultinodeSpec{
+						NodeCount: 2,
+					},
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "inference-critical", pcs.Spec.Template.PriorityClassName)
+	require.Equal(t, replicaSpread, pcs.Spec.ReplicaSpreadConstraints)
+	require.Equal(t, podGangSpread, pcs.Spec.Template.SpreadConstraints)
+
+	dgd.Spec.ReplicaSpreadConstraints[0].LabelSelector.MatchLabels["app"] = "mutated"
+	dgd.Spec.SpreadConstraints[0].MatchLabelKeys[0] = "mutated"
+
+	require.Equal(t, "replica", pcs.Spec.ReplicaSpreadConstraints[0].LabelSelector.MatchLabels["app"])
+	require.Equal(t, "app.kubernetes.io/instance", pcs.Spec.Template.SpreadConstraints[0].MatchLabelKeys[0])
+}
+
 func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}

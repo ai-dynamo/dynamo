@@ -651,6 +651,9 @@ _Appears in:_
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, topologyProfile is required and names the ClusterTopology CR to use.<br />packDomain is optional here — it can be omitted when only services carry constraints.<br />Services without their own topologyConstraint inherit from this value. |  | Optional: \{\} <br /> |
+| `priorityClassName` _string_ | PriorityClassName configures the Grove PodGang priority class through the generated PodCliqueSet template.<br />This only applies when Grove is the selected orchestrator. |  | Optional: \{\} <br /> |
+| `replicaSpreadConstraints` _[TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#topologyspreadconstraint-v1-core) array_ | ReplicaSpreadConstraints configures Grove PodCliqueSet replica spreading across topology domains.<br />This only applies when Grove is the selected orchestrator. |  | Optional: \{\} <br /> |
+| `spreadConstraints` _[TopologySpreadConstraint](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#topologyspreadconstraint-v1-core) array_ | SpreadConstraints configures Grove PodGang spreading across topology domains through the generated PodCliqueSet template.<br />This only applies when Grove is the selected orchestrator. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus

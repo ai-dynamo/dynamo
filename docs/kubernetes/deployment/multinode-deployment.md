@@ -40,6 +40,12 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Resource-aware rolling updates
 - [Topology Aware Scheduling](../topology-aware-scheduling.md) — pack pods within a rack, block, or other topology domain for lower latency
 
+You can also pass Grove-native scheduling knobs directly through `DynamoGraphDeployment.spec` when you need multi-tenant priority or fault-domain spreading:
+
+- `priorityClassName` for PodGang priority and preemption behavior
+- `replicaSpreadConstraints` for PodCliqueSet replica spreading across zones, racks, or nodes
+- `spreadConstraints` for PodGang spreading within each gang
+
 
 [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is a Kubernetes native scheduler optimized for AI workloads at large scale.
 
@@ -105,6 +111,38 @@ spec:
 ```
 
 > **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
+
+**Example with Grove priority and spread controls:**
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: grove-ha-deployment
+spec:
+  priorityClassName: inference-critical
+  replicaSpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: grove-ha-deployment
+  spreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      matchLabelKeys:
+        - app.kubernetes.io/instance
+  services:
+    worker:
+      componentType: worker
+      replicas: 2
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+```
 
 **Force LWS usage:**
 ```yaml

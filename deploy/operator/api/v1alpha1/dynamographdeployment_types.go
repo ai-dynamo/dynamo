@@ -91,6 +91,23 @@ type DynamoGraphDeploymentSpec struct {
 	// Services without their own topologyConstraint inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// PriorityClassName configures the Grove PodGang priority class through the
+	// generated PodCliqueSet template.
+	// This only applies when Grove is the selected orchestrator.
+	// +optional
+	PriorityClassName *string `json:"priorityClassName,omitempty"`
+
+	// ReplicaSpreadConstraints configures Grove PodCliqueSet replica spreading across topology domains.
+	// This only applies when Grove is the selected orchestrator.
+	// +optional
+	ReplicaSpreadConstraints []corev1.TopologySpreadConstraint `json:"replicaSpreadConstraints,omitempty"`
+
+	// SpreadConstraints configures Grove PodGang spreading across topology domains
+	// through the generated PodCliqueSet template.
+	// This only applies when Grove is the selected orchestrator.
+	// +optional
+	SpreadConstraints []corev1.TopologySpreadConstraint `json:"spreadConstraints,omitempty"`
 }
 
 type Restart struct {

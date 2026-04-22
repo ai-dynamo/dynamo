@@ -7,6 +7,7 @@ import (
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -259,6 +260,17 @@ func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.T
 	return &grovev1alpha1.TopologyConstraint{
 		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
 	}
+}
+
+func deepCopyTopologySpreadConstraints(in []corev1.TopologySpreadConstraint) []corev1.TopologySpreadConstraint {
+	if in == nil {
+		return nil
+	}
+	out := make([]corev1.TopologySpreadConstraint, len(in))
+	for i := range in {
+		in[i].DeepCopyInto(&out[i])
+	}
+	return out
 }
 
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default
