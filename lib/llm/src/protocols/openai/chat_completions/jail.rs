@@ -1022,28 +1022,11 @@ impl JailedStream {
                 //     the configured tool_call_parser recovers the call.
                 let mut tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = Vec::new();
 
-                // 1. Primary: base_json_parser configured to skip marker
-                //    matching and fall through to its bare-JSON extraction
-                //    path. Handles `[{name,parameters}, ...]`,
-                //    `{name,parameters}`, `{name,arguments}`, and arrays of
-                //    either.
-                //
-                //    The `__DYNAMO_BARE_JSON__` sentinel is a workaround for
-                //    try_tool_call_parse_basic_json's two gating checks:
-                //      - An empty tool_call_start_tokens vec early-exits
-                //        without parsing, so we must supply at least one
-                //        token.
-                //      - If any configured token is present in the input, the
-                //        parser switches to marker-delimited extraction;
-                //        otherwise it falls through to bare-JSON extraction
-                //        (scan for the first `{` or `[`).
-                //    A sentinel that can never appear in real model output
-                //    passes the first check while guaranteeing the second
-                //    check routes us to the bare-JSON path — which is what
-                //    guided decoding produces.
+                // 1. Primary: bare-JSON extraction — handles
+                //    `[{name,parameters}, ...]`, `{name,parameters}`,
+                //    `{name,arguments}`, and arrays of either.
                 let basic_json_cfg = JsonParserConfig {
-                    tool_call_start_tokens: vec!["__DYNAMO_BARE_JSON__".to_string()],
-                    tool_call_end_tokens: vec!["".to_string()],
+                    bare_json_mode: true,
                     ..Default::default()
                 };
                 if let Ok((parsed, _)) = try_tool_call_parse_basic_json(

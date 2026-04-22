@@ -1195,11 +1195,11 @@ impl OpenAIPreprocessor {
         // qwen3_coder_parser).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                builder = builder.tool_choice_named(named.function.name.clone());
+                builder = builder
+                    .tool_choice_named(named.function.name.clone())
+                    .named_tool_filter(named.function.name.clone());
                 if let Some(parser) = tool_call_parser {
-                    builder = builder
-                        .tool_call_parser(parser)
-                        .named_tool_filter(named.function.name.clone());
+                    builder = builder.tool_call_parser(parser);
                 }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {

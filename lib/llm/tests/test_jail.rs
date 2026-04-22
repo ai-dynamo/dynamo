@@ -3592,4 +3592,49 @@ fahrenheit
             "named_tool_filter must drop tool calls whose name doesn't match the requested tool"
         );
     }
+
+    #[tokio::test]
+    async fn test_tool_choice_named_no_parser_bare_json_wrong_tool_filtered() {
+        // Regression: with tool_choice=Named and NO parser, the base-JSON
+        // parser (step 1 in create_tool_call_choice) can now parse arbitrary
+        // JSON arrays. The named filter must still apply or a mismatched
+        // tool name would leak to the client.
+        let bare_json = r#"[{"name":"search","parameters":{"q":"foo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            None,
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "Named + no-parser: wrong-name tool call must be filtered"
+        );
+    }
 }
