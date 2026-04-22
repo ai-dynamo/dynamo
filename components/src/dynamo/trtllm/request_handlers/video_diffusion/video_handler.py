@@ -234,10 +234,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 raise RuntimeError("Pipeline returned no output (MediaOutput is None)")
 
             # Determine output format
-            data_source = req.data_source or "url"
-            response_format = req.response_format or "mp4"
-            if response_format != "mp4":
-                raise ValueError(f"Unsupported response format: {response_format}")
+            response_format = req.response_format or "url"
+            output_format = req.output_format or "mp4"
+            if output_format != "mp4":
+                raise ValueError(f"Unsupported response format: {output_format}")
             fps = nvext.fps or self.config.default_fps
 
             # Encode media based on what the pipeline returned
@@ -257,7 +257,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                     encode_to_video_bytes,
                     frames_np,
                     fps=fps,
-                    response_format=response_format,
+                    output_format=output_format,
                 )
 
             elif output.image is not None:
@@ -281,20 +281,18 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 )
 
             # Return media via URL or base64
-            if data_source == "url":
-                storage_path = f"videos/{request_id}.{response_format}"
+            if response_format == "url":
+                storage_path = f"videos/{request_id}.{output_format}"
                 video_url = await upload_to_fs(
                     self.media_output_fs,
                     storage_path,
                     video_bytes,
                     self.media_output_http_url,
                 )
-                video_data = VideoData(response_format=response_format, url=video_url)
+                video_data = VideoData(output_format=output_format, url=video_url)
             else:
                 b64_video = base64.b64encode(video_bytes).decode("utf-8")
-                video_data = VideoData(
-                    response_format=response_format, b64_json=b64_video
-                )
+                video_data = VideoData(output_format=output_format, b64_json=b64_video)
 
             inference_time = time.time() - start_time
 

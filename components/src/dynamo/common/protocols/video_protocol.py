@@ -73,13 +73,13 @@ class NvCreateVideoRequest(BaseModel):
     user: Optional[str] = None
     """Optional user identifier."""
 
-    data_source: Optional[str] = None
+    response_format: Optional[str] = None
     """Data source: 'url' or 'b64_json' (default: 'url')."""
 
-    response_format: Optional[str] = None
+    output_format: Optional[str] = None
     """Output container format: 'mp4', "mjpeg", etc.
     This field is used as model hint and the model may not
-    return the requested format, should check with response_format
+    return the requested format, should check with output_format
     field in the response data."""
 
     nvext: Optional[VideoNvExt] = None
@@ -92,14 +92,14 @@ class VideoData(BaseModel):
     Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
     """
 
-    response_format: str
+    output_format: str
     """Actual container format of this video: 'mp4', 'webm', 'gif'."""
 
     url: Optional[str] = None
-    """URL of the generated video (if data_source is 'url')."""
+    """URL of the generated video (if response_format is 'url')."""
 
     b64_json: Optional[str] = None
-    """Base64-encoded video (if data_source is 'b64_json')."""
+    """Base64-encoded video (if response_format is 'b64_json')."""
 
 
 class NvVideosResponse(BaseModel):

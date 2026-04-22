@@ -178,7 +178,7 @@ def encode_to_mp4(
 def encode_to_video_bytes(
     frames: np.ndarray,
     fps: int = 16,
-    response_format: str = "mp4",
+    output_format: str = "mp4",
 ) -> bytes:
     """Encode numpy frames to video bytes (in-memory).
 
@@ -186,7 +186,7 @@ def encode_to_video_bytes(
         frames: Video frames as numpy array of shape (num_frames, height, width, 3)
             with uint8 values 0-255.
         fps: Frames per second for the output video.
-        response_format: Container format — "mp4", "webm".
+        output_format: Container format — "mp4", "webm".
 
     Returns:
         Encoded video as bytes.
@@ -206,26 +206,22 @@ def encode_to_video_bytes(
                 "Install with: pip install imageio[ffmpeg]"
             )
 
-    logger.info(
-        f"Encoding {len(frames)} frames to {response_format} bytes at {fps} fps"
-    )
+    logger.info(f"Encoding {len(frames)} frames to {output_format} bytes at {fps} fps")
 
     try:
         buffer = io.BytesIO()
 
         kwargs: dict = {"fps": fps}
-        if response_format == "webm":
+        if output_format == "webm":
             kwargs["codec"] = "libvpx-vp9"
-        elif response_format == "mp4":
+        elif output_format == "mp4":
             kwargs["codec"] = "libx264"
         else:
-            raise ValueError(
-                f"No codec specified for response format: {response_format}"
-            )
+            raise ValueError(f"No codec specified for response format: {output_format}")
 
         if hasattr(iio, "imwrite"):
             # v3 API
-            iio.imwrite(buffer, frames, extension=f".{response_format}", **kwargs)
+            iio.imwrite(buffer, frames, extension=f".{output_format}", **kwargs)
         else:
             # v2 API
             writer = iio.get_writer(  # type: ignore[attr-defined]
@@ -251,4 +247,4 @@ def encode_to_mp4_bytes(
     fps: int = 16,
 ) -> bytes:
     """Encode numpy frames to MP4 bytes. Calls encode_to_video_bytes with format='mp4'."""
-    return encode_to_video_bytes(frames, fps=fps, response_format="mp4")
+    return encode_to_video_bytes(frames, fps=fps, output_format="mp4")

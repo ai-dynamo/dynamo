@@ -112,6 +112,8 @@ class OmniStageRouter:
             fmt_ctx["fps"] = nvext["fps"]
         if request.get("response_format") is not None:
             fmt_ctx["response_format"] = request["response_format"]
+        if request.get("output_format") is not None:
+            fmt_ctx["output_format"] = request["output_format"]
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
 

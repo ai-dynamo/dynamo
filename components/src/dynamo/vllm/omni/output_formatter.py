@@ -137,7 +137,7 @@ class DiffusionFormatter:
                 status="completed",
                 progress=100,
                 created=int(time.time()),
-                data=[VideoData(response_format="mp4", url=video_url)],
+                data=[VideoData(output_format="mp4", url=video_url)],
                 inference_time_s=time.time() - start_time,
             ).model_dump()
         except Exception as e:

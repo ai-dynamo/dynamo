@@ -352,6 +352,7 @@ class TestNvCreateVideoRequest:
         assert req.seconds is None
         assert req.size is None
         assert req.response_format is None
+        assert req.output_format is None
         assert req.nvext is None
 
     def test_full_request_valid(self):
@@ -390,34 +391,34 @@ class TestVideoData:
 
     def test_url_only(self):
         """Test VideoData with URL only."""
-        data = VideoData(response_format="mp4", url="/tmp/video.mp4")
-        assert data.response_format == "mp4"
+        data = VideoData(output_format="mp4", url="/tmp/video.mp4")
+        assert data.output_format == "mp4"
         assert data.url == "/tmp/video.mp4"
         assert data.b64_json is None
 
     def test_b64_only(self):
         """Test VideoData with base64 only."""
-        data = VideoData(response_format="mp4", b64_json="SGVsbG8gV29ybGQ=")
-        assert data.response_format == "mp4"
+        data = VideoData(output_format="mp4", b64_json="SGVsbG8gV29ybGQ=")
+        assert data.output_format == "mp4"
         assert data.url is None
         assert data.b64_json == "SGVsbG8gV29ybGQ="
 
     def test_both_fields(self):
         """Test VideoData with both fields (unusual but valid)."""
-        data = VideoData(response_format="mp4", b64_json="SGVsbG8=")
-        assert data.response_format == "mp4"
+        data = VideoData(output_format="mp4", url="/tmp/video.mp4", b64_json="SGVsbG8=")
+        assert data.output_format == "mp4"
         assert data.url == "/tmp/video.mp4"
         assert data.b64_json == "SGVsbG8="
 
     def test_empty_defaults(self):
         """Test VideoData with no arguments."""
-        data = VideoData(response_format="mp4")
-        assert data.response_format == "mp4"
+        data = VideoData(output_format="mp4")
+        assert data.output_format == "mp4"
         assert data.url is None
         assert data.b64_json is None
 
-    def test_required_response_format(self):
-        """Test VideoData requires response_format."""
+    def test_required_output_format(self):
+        """Test VideoData requires output_format."""
         with pytest.raises(Exception):  # Pydantic ValidationError
             VideoData()  # type: ignore
 
@@ -459,7 +460,7 @@ class TestNvVideosResponse:
 
     def test_with_video_data(self):
         """Test response with video data."""
-        video = VideoData(response_format="mp4", url="/tmp/output.mp4")
+        video = VideoData(output_format="mp4", url="/tmp/output.mp4")
         response = NvVideosResponse(
             id="req-789",
             model="wan_t2v",
@@ -478,7 +479,7 @@ class TestNvVideosResponse:
             id="req-123",
             model="wan_t2v",
             created=1234567890,
-            data=[VideoData(response_format="mp4", url="/tmp/video.mp4")],
+            data=[VideoData(output_format="mp4", url="/tmp/video.mp4")],
         )
 
         dumped = response.model_dump()
@@ -705,7 +706,7 @@ class TestVideoHandlerConcurrency:
             requests = [self._make_request() for _ in range(3)]
 
             with patch(
-                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+                "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
                 return_value=b"fake_mp4_bytes",
             ), patch(
                 "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
@@ -777,7 +778,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
             return_value=b"fake_mp4",
         ), patch(
             "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
@@ -809,7 +810,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
             return_value=b"fake_mp4_bytes",
         ):
             results = []
@@ -841,7 +842,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_mp4_bytes",
+            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
             return_value=b"fake_mp4",
         ), patch(
             "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
