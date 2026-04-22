@@ -50,6 +50,24 @@ use crate::common::protocols::{
 };
 use crate::common::sequence::ActiveSequence;
 
+/// Classification for each block processed inside `Use`.
+///
+/// - `ActiveHit`: block is already pinned in `active_full` / `active_partial`;
+///   we just bump our local refcount (handle clone).
+/// - `InactiveHit`: block was in kvbm-logical's inactive pool and was
+///   reactivated via `match_blocks(plh)`.
+/// - `NewStore`: block was freshly allocated, staged, and registered.
+///
+/// The router radix tree already knows about `ActiveHit` and `InactiveHit`
+/// (it only forgets on explicit `Removed`), so only `NewStore` should emit a
+/// `Stored` KV event. Both hit outcomes still advance the parent cursor so
+/// subsequent `NewStore` batches anchor to the last reused full block.
+enum UseOutcome {
+    ActiveHit,
+    InactiveHit,
+    NewStore,
+}
+
 /// Synchronous G1 KV block manager backed by `kvbm-logical::BlockManager<G1>`.
 pub struct KvManager {
     block_manager: BlockManager<G1>,
@@ -74,13 +92,8 @@ pub struct KvManager {
     /// `PositionalLineageHash`, but the router's radix tree is keyed by the
     /// mocker's u64 `SequenceHash` on `UniqueBlock::FullBlock`. We keep this
     /// map so we can emit router-compatible `Removed` events when kvbm-logical
-    /// silently evicts inactive blocks inside `allocate_blocks`.
+    /// evicts inactive blocks as a side effect of `allocate_blocks_with_evictions`.
     registered_plhs: HashMap<PositionalLineageHash, SequenceHash>,
-
-    /// Last observed value of kvbm-logical's `evictions` metric. Used to skip
-    /// the O(N) presence scan in `emit_evicted_events` when no eviction has
-    /// happened since the previous check.
-    last_evictions_seen: u64,
 }
 
 impl KvManager {
@@ -142,41 +155,6 @@ impl KvManager {
             active_partial: HashMap::new(),
             active_full: HashMap::new(),
             registered_plhs: HashMap::new(),
-            last_evictions_seen: 0,
-        }
-    }
-
-    /// Detect any registered blocks that kvbm-logical silently evicted from
-    /// its inactive pool (typically during `allocate_blocks`). For each, emit
-    /// a `Removed` KV event so the router's radix tree stays in sync.
-    ///
-    /// Fast path: kvbm-logical exposes a monotonic `evictions` counter in its
-    /// metrics snapshot. If the counter hasn't advanced since the previous
-    /// call, no eviction happened and we skip the O(N) presence scan — this
-    /// is the common case and makes the per-call overhead O(1).
-    fn emit_evicted_events(&mut self) {
-        if self.registered_plhs.is_empty() {
-            return;
-        }
-        let current_evictions = self.block_manager.metrics().snapshot().evictions;
-        if current_evictions == self.last_evictions_seen {
-            return;
-        }
-        self.last_evictions_seen = current_evictions;
-
-        let plhs: Vec<PositionalLineageHash> = self.registered_plhs.keys().copied().collect();
-        let presence = self
-            .block_manager
-            .block_registry()
-            .check_presence::<G1>(&plhs);
-        let mut evicted = Vec::new();
-        for (plh, present) in presence {
-            if !present && let Some(seq_hash) = self.registered_plhs.remove(&plh) {
-                evicted.push(seq_hash);
-            }
-        }
-        if !evicted.is_empty() {
-            self.publish_kv_event(evicted, &[], None, false, None);
         }
     }
 
@@ -209,10 +187,14 @@ impl KvManager {
         }
 
         let event_data = if is_store {
-            debug_assert_eq!(
+            // `local_hashes` is either empty (caller has no token-derived
+            // hashes to publish) or 1:1 with `full_blocks`. Match the
+            // front-door contract in `process_use`.
+            debug_assert!(
+                local_hashes.is_empty() || local_hashes.len() == full_blocks.len(),
+                "publish_kv_event: local_hashes must be empty or 1:1 with full_blocks ({} vs {})",
                 local_hashes.len(),
                 full_blocks.len(),
-                "publish_kv_event: stored blocks must be 1:1 with local_hashes"
             );
 
             KvCacheEventData::Stored(KvCacheStoreData {
@@ -220,10 +202,12 @@ impl KvManager {
                 start_position: None,
                 blocks: full_blocks
                     .into_iter()
-                    .zip(local_hashes.iter())
-                    .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
+                    .enumerate()
+                    .map(|(i, global_hash)| KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(global_hash),
-                        tokens_hash: LocalBlockHash(*local_hash),
+                        tokens_hash: LocalBlockHash(
+                            local_hashes.get(i).copied().unwrap_or_default(),
+                        ),
                         mm_extra_info: None,
                     })
                     .collect(),
@@ -321,39 +305,88 @@ impl KvManager {
         );
 
         let mut blocks_stored = Vec::<SequenceHash>::new();
-        // Track the local_hash for each block we actually store, in push order.
         let mut stored_local_hashes = Vec::<BlockHash>::new();
         let mut stored_token_ids: Option<Vec<Vec<u32>>> = token_ids.map(|_| Vec::new());
+        let mut evicted_plhs = Vec::<PositionalLineageHash>::new();
 
         let mut parent_block: Option<&UniqueBlock> = parent;
         let mut plh_idx = 0usize;
         let mut allocated = 0usize;
 
         for (i, block) in blocks.iter().enumerate() {
-            match block {
+            let outcome = match block {
                 UniqueBlock::FullBlock(seq_hash) => {
-                    // Already active — bump refcount by cloning the first handle.
+                    // Active hit — bump refcount by cloning the first handle.
                     if let Some(vec) = self.active_full.get_mut(seq_hash) {
                         let cloned = vec[0].clone();
                         vec.push(cloned);
-                        parent_block = Some(block);
                         plh_idx += 1;
-                        allocated += 1;
-                        continue;
+                        UseOutcome::ActiveHit
+                    } else {
+                        // Not active: try inactive via PLH lookup, else allocate fresh.
+                        let plh = plhs[plh_idx];
+                        plh_idx += 1;
+                        let matched = self.block_manager.match_blocks(&[plh]);
+                        if let Some(immutable) = matched.into_iter().next() {
+                            self.active_full
+                                .entry(*seq_hash)
+                                .or_default()
+                                .push(immutable);
+                            UseOutcome::InactiveHit
+                        } else {
+                            let Some((mut alloc, evicted)) =
+                                self.block_manager.allocate_blocks_with_evictions(1)
+                            else {
+                                break; // capacity exhausted; scheduler will preempt
+                            };
+                            evicted_plhs.extend(evicted);
+                            let mutable = alloc.pop().unwrap();
+                            let complete =
+                                mutable.stage(plh, self.block_size).expect("stage failed");
+                            let immutable = self.block_manager.register_block(complete);
+                            self.active_full
+                                .entry(*seq_hash)
+                                .or_default()
+                                .push(immutable);
+                            self.registered_plhs.insert(plh, *seq_hash);
+                            UseOutcome::NewStore
+                        }
                     }
+                }
+                UniqueBlock::PartialBlock(uuid) => {
+                    if self.active_partial.contains_key(uuid) {
+                        UseOutcome::ActiveHit
+                    } else {
+                        let Some((mut alloc, evicted)) =
+                            self.block_manager.allocate_blocks_with_evictions(1)
+                        else {
+                            break;
+                        };
+                        evicted_plhs.extend(evicted);
+                        let mutable = alloc.pop().unwrap();
+                        self.active_partial.insert(*uuid, mutable);
+                        UseOutcome::ActiveHit
+                    }
+                }
+            };
 
-                    // Try active+inactive pools via PLH lookup.
-                    let plh = plhs.get(plh_idx).copied();
-                    plh_idx += 1;
-                    let matched = plh
-                        .map(|p| self.block_manager.match_blocks(&[p]))
-                        .unwrap_or_default();
-                    if let Some(immutable) = matched.into_iter().next() {
-                        self.active_full
-                            .entry(*seq_hash)
-                            .or_default()
-                            .push(immutable);
-                        // Re-announce to router
+            match outcome {
+                UseOutcome::ActiveHit | UseOutcome::InactiveHit => {
+                    // Router already has this block; no `Stored` event.
+                    // Advance the parent cursor across the reused prefix so any
+                    // subsequent `NewStore` batches anchor at the last reused
+                    // full block.
+                    if matches!(block, UniqueBlock::FullBlock(_)) {
+                        parent_block = Some(block);
+                    }
+                }
+                UseOutcome::NewStore => {
+                    // Freshly registered: announce to router.
+                    // NOTE: we do NOT advance `parent_block` here — within a
+                    // single `Stored` event, consecutive blocks chain via their
+                    // position in `blocks[]`, so `parent_hash` must remain the
+                    // block *before* the first newly-stored one.
+                    if let UniqueBlock::FullBlock(seq_hash) = block {
                         blocks_stored.push(*seq_hash);
                         if let Some(lh) = local_hashes.get(i) {
                             stored_local_hashes.push(*lh);
@@ -363,55 +396,10 @@ impl KvManager {
                         {
                             stids.push(ids[i].clone());
                         }
-                        allocated += 1;
-                        continue;
                     }
-
-                    // Allocate new block → stage → register.
-                    // NOTE: we do NOT update `parent_block` here — it must point
-                    // to the block *before* the first newly-stored one so the
-                    // Stored event's `parent_hash` correctly anchors the radix
-                    // chain (subsequent stored blocks are chained by position
-                    // within the event).
-                    let Some(mut alloc) = self.block_manager.allocate_blocks(1) else {
-                        break; // capacity exhausted; scheduler will preempt
-                    };
-                    let mutable = alloc.pop().unwrap();
-                    // `plh` is guaranteed `Some` by the front assert on plhs.len().
-                    let plh =
-                        plh.expect("Use: PLH missing for FullBlock (caller invariant broken)");
-                    let complete = mutable.stage(plh, self.block_size).expect("stage failed");
-                    let immutable = self.block_manager.register_block(complete);
-                    self.active_full
-                        .entry(*seq_hash)
-                        .or_default()
-                        .push(immutable);
-                    self.registered_plhs.insert(plh, *seq_hash);
-
-                    blocks_stored.push(*seq_hash);
-                    if let Some(lh) = local_hashes.get(i) {
-                        stored_local_hashes.push(*lh);
-                    }
-                    if let (Some(ref mut stids), Some(ids)) = (stored_token_ids.as_mut(), token_ids)
-                    {
-                        stids.push(ids[i].clone());
-                    }
-                    allocated += 1;
-                }
-                UniqueBlock::PartialBlock(uuid) => {
-                    if self.active_partial.contains_key(uuid) {
-                        // Partial block already held; treat as a no-op success.
-                        allocated += 1;
-                        continue;
-                    }
-                    let Some(mut alloc) = self.block_manager.allocate_blocks(1) else {
-                        break;
-                    };
-                    let mutable = alloc.pop().unwrap();
-                    self.active_partial.insert(*uuid, mutable);
-                    allocated += 1;
                 }
             }
+            allocated += 1;
         }
 
         let parent_hash = match parent_block {
@@ -427,13 +415,37 @@ impl KvManager {
             stored_token_ids,
         );
 
-        // Detect any blocks kvbm-logical evicted from its inactive pool
-        // during the `allocate_blocks` calls above and emit `Removed` events.
-        self.emit_evicted_events();
+        // Translate any blocks kvbm-logical evicted from its inactive pool
+        // during the allocations above into router `Removed` events.
+        if !evicted_plhs.is_empty() {
+            let evicted: Vec<SequenceHash> = evicted_plhs
+                .into_iter()
+                .filter_map(|plh| self.registered_plhs.remove(&plh))
+                .collect();
+            if !evicted.is_empty() {
+                self.publish_kv_event(evicted, &[], None, false, None);
+            }
+        }
 
         allocated
     }
 
+    /// Process a `MoveBlock::Destroy` instruction.
+    ///
+    /// Contract difference vs. the legacy `vllm_backend`: in the old manual
+    /// backend `Destroy(FullBlock)` physically removed the block from the
+    /// cache surface. Here we only drop all active RAII handles for the
+    /// block; kvbm-logical keeps the `Registered` state alive and the block
+    /// transitions to the **inactive pool**, where it remains matchable via
+    /// `match_blocks(plh)` until an allocation forces its eviction. We still
+    /// emit a router `Removed` event for protocol parity, but callers should
+    /// be aware that a subsequent `Use` on the same PLH will reactivate the
+    /// same physical block from inactive (an `InactiveHit`) rather than
+    /// allocating fresh.
+    ///
+    /// In the current scheduler flow `Destroy(FullBlock)` is not exercised
+    /// (preemption goes through `Deref` + `reset_with_signal`), so this
+    /// divergence is effectively dormant — see `test_destroy_full_block`.
     fn process_destroy(&mut self, blocks: &[UniqueBlock]) {
         let mut destroyed = Vec::<SequenceHash>::new();
         for block in blocks {
@@ -522,15 +534,20 @@ impl KvManager {
         }
     }
 
-    pub fn current_capacity(&self) -> usize {
+    /// Number of **distinct** physically-resident KV blocks currently pinned
+    /// by mocker (not available for eviction).
+    pub fn num_active_blocks(&self) -> usize {
+        // kvbm-logical partitions physical blocks into three pools:
+        //   total = reset + inactive + active
+        // where `available = reset + inactive`. So `total - available` is
+        // exactly the number of registered (ImmutableBlock) full blocks.
         self.block_manager.total_blocks() - self.block_manager.available_blocks()
     }
 
-    pub fn current_capacity_perc(&self) -> f64 {
-        self.current_capacity() as f64 / self.max_capacity as f64
-    }
-
-    pub fn num_active_blocks(&self) -> usize {
+    /// Total number of held RAII handles (refcount-style): one per held
+    /// `MutableBlock` plus one per cloned `ImmutableBlock` in `active_full`.
+    /// Shared-prefix reuse inflates this above the distinct-block count.
+    pub fn num_active_block_refs(&self) -> usize {
         self.active_partial.len() + self.active_full.values().map(|v| v.len()).sum::<usize>()
     }
 
@@ -610,10 +627,34 @@ impl KvManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use crate::common::protocols::KvCacheEventSink;
+
+    /// Capturing event sink for router-publication assertions.
+    #[derive(Default)]
+    struct CapturingSink {
+        events: Mutex<Vec<KvCacheEvent>>,
+    }
+    impl KvCacheEventSink for CapturingSink {
+        fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
 
     fn make_mgr(capacity: usize, block_size: usize) -> KvManager {
         KvManager::new_with_event_sink(capacity, block_size, KvEventPublishers::default(), 0)
+    }
+
+    fn make_mgr_capturing(capacity: usize, block_size: usize) -> (KvManager, Arc<CapturingSink>) {
+        let sink = Arc::new(CapturingSink::default());
+        let publishers = KvEventPublishers::new(Some(sink.clone() as _), None);
+        (
+            KvManager::new_with_event_sink(capacity, block_size, publishers, 0),
+            sink,
+        )
     }
 
     fn plh(v: u64) -> PositionalLineageHash {
@@ -660,7 +701,10 @@ mod tests {
         let mut mgr = make_mgr(10, 16);
         use_full(&mut mgr, 1, plh(100));
         use_full(&mut mgr, 1, plh(100));
-        assert_eq!(mgr.num_active_blocks(), 2);
+        // Same seq_hash used twice: only one distinct physical block is
+        // resident, but the mocker holds two RAII handles.
+        assert_eq!(mgr.num_active_blocks(), 1);
+        assert_eq!(mgr.num_active_block_refs(), 2);
     }
 
     #[test]
@@ -742,10 +786,32 @@ mod tests {
 
     #[test]
     fn test_destroy_full_block() {
-        let mut mgr = make_mgr(10, 16);
+        let (mut mgr, sink) = make_mgr_capturing(10, 16);
+
         use_full(&mut mgr, 1, plh(100));
+        assert_eq!(mgr.num_active_blocks(), 1);
+        assert_eq!(mgr.num_inactive_blocks(), 0);
+
         destroy_full(&mut mgr, 1);
+
+        // Active handles released — but kvbm-logical keeps the Registered
+        // state alive and the block lands in the *inactive* pool, still
+        // matchable via `match_blocks(plh)`.
         assert_eq!(mgr.num_active_blocks(), 0);
+        assert_eq!(
+            mgr.num_inactive_blocks(),
+            1,
+            "Destroy must leave the block in kvbm-logical's inactive pool"
+        );
+
+        // Router-visible protocol parity: we still emit a `Removed` event
+        // for the caller.
+        let events = sink.events.lock().unwrap();
+        let removed_count = events
+            .iter()
+            .filter(|e| matches!(e.data, KvCacheEventData::Removed(_)))
+            .count();
+        assert_eq!(removed_count, 1, "Destroy must emit one Removed event");
     }
 
     #[test]
@@ -798,7 +864,7 @@ mod tests {
         // Fill capacity in a single Use batch.
         let ids: Vec<u64> = (0..10).collect();
         assert_eq!(use_batch(&mut mgr, &ids), 10, "all 10 should allocate");
-        assert_eq!(mgr.current_capacity(), 10);
+        assert_eq!(mgr.num_active_blocks(), 10);
 
         // One more block must return 0 (no partial allocation possible, not panic).
         assert_eq!(
@@ -829,11 +895,17 @@ mod tests {
             mgr.active_full.get(&id).map(|v| v.len()).unwrap_or(0)
         }
         fn assert_active(mgr: &KvManager, expected: &[(u64, usize)]) {
-            let total: usize = expected.iter().map(|&(_, r)| r).sum();
+            let distinct = expected.len();
+            let total_refs: usize = expected.iter().map(|&(_, r)| r).sum();
             assert_eq!(
                 mgr.num_active_blocks(),
-                total,
-                "active count mismatch; expected={expected:?}"
+                distinct,
+                "distinct active-block count mismatch; expected={expected:?}"
+            );
+            assert_eq!(
+                mgr.num_active_block_refs(),
+                total_refs,
+                "active handle-refcount mismatch; expected={expected:?}"
             );
             for &(id, r) in expected {
                 assert_eq!(refcount(mgr, id), r, "block {id} refcount mismatch");
@@ -917,28 +989,11 @@ mod tests {
 
     #[test]
     fn test_chunked_prefill_parent_hash() {
-        use std::sync::Mutex;
-
-        use crate::common::protocols::KvCacheEventSink;
-
-        #[derive(Default)]
-        struct CapturingSink {
-            events: Mutex<Vec<KvCacheEvent>>,
-        }
-        impl KvCacheEventSink for CapturingSink {
-            fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
-                self.events.lock().unwrap().push(event);
-                Ok(())
-            }
-        }
-
         let block_size = 64;
         let tokens: Vec<u32> = (0..512).collect(); // 8 full blocks
         let mut seq = ActiveSequence::new(tokens, 100, Some(block_size), true, false);
 
-        let sink = Arc::new(CapturingSink::default());
-        let publishers = KvEventPublishers::new(Some(sink.clone() as _), None);
-        let mut mgr = KvManager::new_with_event_sink(256, block_size, publishers, 0);
+        let (mut mgr, sink) = make_mgr_capturing(256, block_size);
 
         // Chunk 1: blocks 0..=3 (cumulative 256 tokens).
         let signal = seq.prepare_allocation(256).unwrap();
@@ -1009,5 +1064,236 @@ mod tests {
             mgr.process(signal);
         }
         assert_eq!(mgr.num_active_blocks(), 0);
+    }
+
+    /// When a FullBlock is used, deref'd (becomes inactive in kvbm-logical),
+    /// then used again, the router already knows about it — reactivation must
+    /// NOT emit a second `Stored` event.
+    #[test]
+    fn test_inactive_hit_does_not_republish_stored() {
+        let (mut mgr, sink) = make_mgr_capturing(4, 16);
+
+        // First Use: fresh registration → 1 Stored.
+        use_full(&mut mgr, 1, plh(100));
+        // Deref → block transitions to inactive pool. No Removed (we don't
+        // emit one on Deref).
+        deref_full(&mut mgr, 1);
+        // Second Use: match_blocks reactivates from inactive → InactiveHit.
+        // No new Stored should fire.
+        use_full(&mut mgr, 1, plh(100));
+
+        let events = sink.events.lock().unwrap();
+        let stored_count = events
+            .iter()
+            .filter(|e| matches!(e.data, KvCacheEventData::Stored(_)))
+            .count();
+        let removed_count = events
+            .iter()
+            .filter(|e| matches!(e.data, KvCacheEventData::Removed(_)))
+            .count();
+        assert_eq!(stored_count, 1, "reactivation must not re-emit Stored");
+        assert_eq!(removed_count, 0, "Deref must not emit Removed");
+    }
+
+    /// After reusing a prefix [A, B] and storing a new suffix [C], the
+    /// `Stored` event for C must anchor `parent_hash` to B (the last reused
+    /// full block), not to whatever parent the caller originally passed.
+    #[test]
+    fn test_stored_suffix_anchors_to_last_reused_block() {
+        let (mut mgr, sink) = make_mgr_capturing(8, 16);
+
+        // Prime the cache with [A=10, B=11].
+        mgr.process(&MoveBlock::Use(
+            vec![UniqueBlock::FullBlock(10), UniqueBlock::FullBlock(11)],
+            vec![],
+            vec![plh(10), plh(11)],
+            None,
+            None,
+        ));
+        // Drop both to inactive.
+        deref_full(&mut mgr, 10);
+        deref_full(&mut mgr, 11);
+
+        // Clear captured events from priming.
+        sink.events.lock().unwrap().clear();
+
+        // New request reuses [A, B] and stores a new block C=12.
+        mgr.process(&MoveBlock::Use(
+            vec![
+                UniqueBlock::FullBlock(10),
+                UniqueBlock::FullBlock(11),
+                UniqueBlock::FullBlock(12),
+            ],
+            vec![],
+            vec![plh(10), plh(11), plh(12)],
+            None,
+            None, // no explicit parent → scheduler would pass None for a head-chunk
+        ));
+
+        let events = sink.events.lock().unwrap();
+        // Only one Stored (for C); no Stored for reused A or B.
+        assert_eq!(events.len(), 1, "only new suffix should fire a Stored");
+        let KvCacheEventData::Stored(ref data) = events[0].data else {
+            panic!("expected Stored");
+        };
+        assert_eq!(data.blocks.len(), 1, "Stored must only include C");
+        assert_eq!(data.blocks[0].block_hash, ExternalSequenceBlockHash(12));
+        assert_eq!(
+            data.parent_hash,
+            Some(ExternalSequenceBlockHash(11)),
+            "parent_hash must anchor to last reused full block (B=11)"
+        );
+    }
+
+    /// Two requests sharing a prefix must not inflate scheduler-visible
+    /// occupancy. The distinct count reflects physically-resident blocks; the
+    /// refcount metric reflects held handles.
+    #[test]
+    fn test_shared_prefix_distinct_vs_refcount() {
+        let mut mgr = make_mgr(8, 16);
+
+        // Request A uses [10, 11, 12].
+        mgr.process(&MoveBlock::Use(
+            vec![
+                UniqueBlock::FullBlock(10),
+                UniqueBlock::FullBlock(11),
+                UniqueBlock::FullBlock(12),
+            ],
+            vec![],
+            vec![plh(10), plh(11), plh(12)],
+            None,
+            None,
+        ));
+        assert_eq!(mgr.num_active_blocks(), 3);
+        assert_eq!(mgr.num_active_block_refs(), 3);
+
+        // Request B reuses prefix [10, 11] and adds its own block [13].
+        mgr.process(&MoveBlock::Use(
+            vec![
+                UniqueBlock::FullBlock(10),
+                UniqueBlock::FullBlock(11),
+                UniqueBlock::FullBlock(13),
+            ],
+            vec![],
+            vec![plh(10), plh(11), plh(13)],
+            None,
+            None,
+        ));
+
+        // Distinct resident blocks: {10, 11, 12, 13} = 4 (scheduler view).
+        assert_eq!(
+            mgr.num_active_blocks(),
+            4,
+            "shared prefix must not inflate distinct count"
+        );
+        // Handle count: 10 and 11 each held twice, 12 once, 13 once → 6.
+        assert_eq!(
+            mgr.num_active_block_refs(),
+            6,
+            "handle count should reflect per-request refcount"
+        );
+    }
+
+    /// With `enable_prefix_caching=false`, each sequence should still be able
+    /// to reactivate its OWN inactive blocks after preemption and re-admit.
+    #[test]
+    fn test_random_plh_stable_across_preempt_retry() {
+        // 4 blocks of size 16 → 64 tokens of prompt.
+        let block_size = 16;
+        let tokens: Vec<u32> = (0..64).collect();
+        let mut seq = ActiveSequence::new(tokens, 100, Some(block_size), false, false);
+
+        let (mut mgr, sink) = make_mgr_capturing(8, block_size);
+
+        // Admit: allocate prompt blocks.
+        let signal = seq.take_creation_signal().unwrap();
+        assert_eq!(mgr.process(&signal), 4);
+        assert_eq!(mgr.num_active_blocks(), 4);
+
+        // Preempt: reset_with_signal frees all active blocks (Deref) →
+        // kvbm-logical keeps them in the inactive pool (no Removed events).
+        let reset_signals = seq.reset_with_signal();
+        for signal in &reset_signals {
+            mgr.process(signal);
+        }
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert_eq!(mgr.num_inactive_blocks(), 4);
+
+        // Re-admit: prompt blocks must reactivate via InactiveHit, NOT allocate
+        // fresh. The cached per-sequence PLHs are what make this work.
+        let signal = seq.take_creation_signal().unwrap();
+        assert_eq!(mgr.process(&signal), 4);
+        assert_eq!(mgr.num_active_blocks(), 4);
+        assert_eq!(mgr.num_inactive_blocks(), 0);
+
+        // Router-event witness: only ONE `Stored` (from the original admit).
+        let events = sink.events.lock().unwrap();
+        let stored_count = events
+            .iter()
+            .filter(|e| matches!(e.data, KvCacheEventData::Stored(_)))
+            .count();
+        assert_eq!(
+            stored_count, 1,
+            "preempted request should self-match on re-admit (no duplicate Stored)"
+        );
+    }
+
+    #[test]
+    fn test_eviction_emits_exact_removed_event() {
+        // Capacity = 2. Use three blocks (10, 11, 12); deref 10, 11 to push
+        // them into the inactive pool; then use a third distinct block (12)
+        // that isn't already in the active or inactive pool — this forces
+        // allocation → inactive-pool eviction.
+        let (mut mgr, sink) = make_mgr_capturing(2, 16);
+
+        // Seed 10 and 11 in the inactive pool.
+        mgr.process(&MoveBlock::Use(
+            vec![UniqueBlock::FullBlock(10), UniqueBlock::FullBlock(11)],
+            vec![],
+            vec![plh(10), plh(11)],
+            None,
+            None,
+        ));
+        deref_full(&mut mgr, 10);
+        deref_full(&mut mgr, 11);
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert_eq!(mgr.num_inactive_blocks(), 2);
+
+        sink.events.lock().unwrap().clear();
+
+        // Introduce block 12 → must evict exactly one of {10, 11}.
+        use_full(&mut mgr, 12, plh(12));
+
+        let events = sink.events.lock().unwrap();
+        let removed: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match &e.data {
+                KvCacheEventData::Removed(data) => Some(
+                    data.block_hashes
+                        .iter()
+                        .map(|ExternalSequenceBlockHash(h)| *h)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let stored_count = events
+            .iter()
+            .filter(|e| matches!(e.data, KvCacheEventData::Stored(_)))
+            .count();
+
+        assert_eq!(
+            removed.len(),
+            1,
+            "exactly one block should be reported as evicted"
+        );
+        assert!(
+            removed[0] == 10 || removed[0] == 11,
+            "evicted hash must be one we seeded ({}), got {}",
+            "10 or 11",
+            removed[0]
+        );
+        assert_eq!(stored_count, 1, "one Stored event for the fresh block 12");
     }
 }
