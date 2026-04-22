@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import suppress
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -65,6 +66,28 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+
+
+class _StandbyGenerateProxy:
+    def __init__(self, health_check_payload: dict | None = None):
+        self._delegate = None
+        self._health_check_payload = health_check_payload
+
+    def set_delegate(self, delegate) -> None:
+        self._delegate = delegate
+
+    async def generate(self, request: dict, context):
+        if self._delegate is None:
+            if (
+                self._health_check_payload is not None
+                and request == self._health_check_payload
+            ):
+                yield {"status": "ok"}
+                return
+            raise RuntimeError("Shadow standby is waiting for failover lock")
+
+        async for response in self._delegate(request, context):
+            yield response
 
 
 def build_kv_connector_config(config: Config):
@@ -489,6 +512,21 @@ async def init_llm_worker(
     # Prepare model name for metrics
     model_name_for_metrics = config.served_model_name or config.model
 
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+
+    if shutdown_endpoints is not None:
+        shutdown_endpoints[:] = [endpoint]
+
+    health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+    metrics_labels = None
+    if config.publish_events_and_metrics:
+        metrics_labels = [
+            (prometheus_names.labels.MODEL, model_name_for_metrics),
+            (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
+        ]
+
     # Construct Prometheus gauges directly; passed through to the engine and publisher
     # via explicit parameters (no module-level global).
     component_gauges = LLMBackendMetrics(
@@ -497,22 +535,46 @@ async def init_llm_worker(
         component_name=config.component,
     )
 
-    async with get_llm_engine(
-        engine_args,
-        config.disaggregation_mode,
-        component_gauges=component_gauges,
-    ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
-        # The callback uses this to poll active request count during shutdown.
-        if engine_holder is not None:
-            engine_holder.append(engine)
+    shadow_engine_id = os.environ.get("ENGINE_ID", "0")
+    shadow_standby = config.gms_shadow_mode and shadow_engine_id != "0"
+    startup_lock = None
+    standby_generate_proxy = None
+    standby_serve_task = None
+    if shadow_standby:
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
-        endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.{config.endpoint}"
+        standby_generate_proxy = _StandbyGenerateProxy(health_check_payload)
+        standby_serve_task = asyncio.create_task(
+            endpoint.serve_endpoint(
+                standby_generate_proxy.generate,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            )
         )
+        await asyncio.sleep(0)
+        if standby_serve_task.done():
+            await standby_serve_task
 
-        if shutdown_endpoints is not None:
-            shutdown_endpoints[:] = [endpoint]
+        runtime.set_health_status(True)
+        logging.info(
+            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        )
+        startup_lock = FlockFailoverLock(
+            os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        )
+        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+        logging.info("[Shadow] Lock acquired, starting engine init")
+
+    try:
+        async with get_llm_engine(
+            engine_args,
+            config.disaggregation_mode,
+            component_gauges=component_gauges,
+        ) as engine:
+            # Expose engine to the drain callback installed by main.py (#7319).
+            # The callback uses this to poll active request count during shutdown.
+            if engine_holder is not None:
+                engine_holder.append(engine)
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
@@ -652,7 +714,7 @@ async def init_llm_worker(
         if config.load_format == "gms":
             _register_memory_routes(runtime, handler)
 
-        if config.gms_shadow_mode:
+        if config.gms_shadow_mode and not shadow_standby:
             await handler._quiesce_controller.quiesce()
 
             runtime.set_health_status(True)
@@ -663,9 +725,8 @@ async def init_llm_worker(
             from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
             lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-            engine_id = os.environ.get("ENGINE_ID", "0")
-            lock = FlockFailoverLock(lock_path)
-            await lock.acquire(engine_id=f"engine-{engine_id}")
+            startup_lock = FlockFailoverLock(lock_path)
+            await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
             logging.info("[Shadow] Lock acquired, waking engine")
 
             await handler._quiesce_controller.resume()
@@ -688,25 +749,9 @@ async def init_llm_worker(
                 custom_template_path=config.custom_jinja_template,
             )
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
-
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            # Use model as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model
-            metrics_labels = [
-                (
-                    prometheus_names.labels.MODEL,
-                    model_name_for_metrics,
-                ),  # OpenAI standard
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    model_name_for_metrics,
-                ),  # Native engine compatibility
-            ]
-
             # Create worker-side publisher for consolidated events if consolidator is enabled
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
             consolidator_publisher = None
@@ -744,16 +789,30 @@ async def init_llm_worker(
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
+                if shadow_standby:
+                    standby_generate_proxy.set_delegate(handler.generate)
+                    await standby_serve_task
+                else:
+                    await endpoint.serve_endpoint(
+                        handler.generate,
+                        metrics_labels=metrics_labels,
+                        health_check_payload=health_check_payload,
+                    )
 
             # Shutdown consolidator publisher if it was created
             if consolidator_publisher:
                 consolidator_publisher.shutdown()
         else:
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
-            )
+            if shadow_standby:
+                standby_generate_proxy.set_delegate(handler.generate)
+                await standby_serve_task
+            else:
+                await endpoint.serve_endpoint(
+                    handler.generate, health_check_payload=health_check_payload
+                )
+    except Exception:
+        if standby_serve_task is not None:
+            standby_serve_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await standby_serve_task
+        raise
