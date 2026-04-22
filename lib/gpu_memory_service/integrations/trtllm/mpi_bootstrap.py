@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sys
+from functools import wraps
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -42,12 +43,76 @@ _PROPAGATED_ENV_VARS: tuple[str, ...] = (
 
 _extra_config_json: Optional[str] = None
 _bootstrap_installed = False
+_executor_finalize_hook_installed = False
 
 
 def set_extra_config(extra: "dict[str, Any] | None") -> None:
     """Stash the model_loader_extra_config so MPI children see the same lock mode."""
     global _extra_config_json
     _extra_config_json = json.dumps(extra) if extra else None
+
+
+def _delay_commit_until_engine_init(extra: "dict[str, Any] | None") -> bool:
+    return bool(extra and extra.get("gms_delay_commit_until_engine_init") is True)
+
+
+def install_executor_finalize_hook() -> None:
+    """Finalize delayed TRT-LLM GMS publishes in MPI children before start_worker()."""
+    global _executor_finalize_hook_installed
+    if _executor_finalize_hook_installed:
+        return
+
+    try:
+        import tensorrt_llm._torch.pyexecutor.py_executor_creator as _py_executor_creator
+    except ImportError as exc:
+        raise RuntimeError(
+            "GMS delayed TRT-LLM publish hook requires py_executor_creator"
+        ) from exc
+
+    original_create_py_executor = _py_executor_creator.create_py_executor
+    original_create_py_executor_instance = (
+        _py_executor_creator.create_py_executor_instance
+    )
+
+    @wraps(original_create_py_executor)
+    def patched_create_py_executor(*args, **kwargs):
+        def patched_create_py_executor_instance(*instance_args, **instance_kwargs):
+            executor = original_create_py_executor_instance(
+                *instance_args, **instance_kwargs
+            )
+            original_start_worker = executor.start_worker
+            finalized = False
+
+            @wraps(original_start_worker)
+            def patched_start_worker(*worker_args, **worker_kwargs):
+                nonlocal finalized
+                if not finalized:
+                    from gpu_memory_service.integrations.trtllm import (
+                        finalize_pending_gms_write,
+                    )
+
+                    finalize_pending_gms_write()
+                    finalized = True
+                return original_start_worker(*worker_args, **worker_kwargs)
+
+            executor.start_worker = patched_start_worker
+            return executor
+
+        _py_executor_creator.create_py_executor_instance = (
+            patched_create_py_executor_instance
+        )
+        try:
+            return original_create_py_executor(*args, **kwargs)
+        finally:
+            _py_executor_creator.create_py_executor_instance = (
+                original_create_py_executor_instance
+            )
+
+    _py_executor_creator.create_py_executor = patched_create_py_executor
+    _executor_finalize_hook_installed = True
+    logger.info(
+        "[GMS] Patched TensorRT-LLM create_py_executor to finalize delayed publish before start_worker"
+    )
 
 
 def worker_init_hook(env_snapshot: dict, extra_config_json: Optional[str]) -> None:
@@ -74,6 +139,8 @@ def worker_init_hook(env_snapshot: dict, extra_config_json: Optional[str]) -> No
 
     extra = json.loads(extra_config_json) if extra_config_json else None
     setup_gms(extra)
+    if _delay_commit_until_engine_init(extra):
+        install_executor_finalize_hook()
     logger.info(
         "[GMS] MPI worker init hook applied (pid=%d rank=%d)", os.getpid(), rank
     )
@@ -104,9 +171,7 @@ def install_mpi_worker_bootstrap() -> None:
             if key.startswith(("TRTLLM", "TLLM"))
         }
         env_snapshot = {
-            key: os.environ[key]
-            for key in _PROPAGATED_ENV_VARS
-            if key in os.environ
+            key: os.environ[key] for key in _PROPAGATED_ENV_VARS if key in os.environ
         }
         # Forward propagated vars through MPI's env= too so they're set before
         # Python starts (some libs cache at import time).

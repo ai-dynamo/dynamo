@@ -28,6 +28,7 @@ pytestmark = [
 def stubbed_env(monkeypatch):
     """Stub tensorrt_llm.llmapi.mpi_session and mpi4py.futures before importing bootstrap."""
     captured_kwargs: dict = {}
+    call_log: list[str] = []
 
     class FakeMPIPoolExecutor:
         def __init__(self, **kwargs):
@@ -46,9 +47,39 @@ def stubbed_env(monkeypatch):
     trtllm_module = types.ModuleType("tensorrt_llm")
     trtllm_llmapi_module = types.ModuleType("tensorrt_llm.llmapi")
     trtllm_mpi_session_module = types.ModuleType("tensorrt_llm.llmapi.mpi_session")
+    trtllm_torch_module = types.ModuleType("tensorrt_llm._torch")
+    trtllm_pyexecutor_module = types.ModuleType("tensorrt_llm._torch.pyexecutor")
+    trtllm_pyexecutor_creator_module = types.ModuleType(
+        "tensorrt_llm._torch.pyexecutor.py_executor_creator"
+    )
+
+    class FakePyExecutor:
+        def __init__(self, name: str = "executor"):
+            self.name = name
+
+        def start_worker(self):
+            call_log.append(f"start_worker:{self.name}")
+
+    def fake_create_py_executor_instance(*args, name: str = "executor", **kwargs):
+        return FakePyExecutor(name)
+
+    def fake_create_py_executor(*args, **kwargs):
+        call_log.append("create_py_executor")
+        executor = fake_create_py_executor_instance()
+        executor.start_worker()
+        return executor
+
+    trtllm_pyexecutor_creator_module.PyExecutor = FakePyExecutor
+    trtllm_pyexecutor_creator_module.create_py_executor_instance = (
+        fake_create_py_executor_instance
+    )
+    trtllm_pyexecutor_creator_module.create_py_executor = fake_create_py_executor
     trtllm_mpi_session_module.MpiPoolSession = FakeMpiPoolSession
     trtllm_module.llmapi = trtllm_llmapi_module
     trtllm_llmapi_module.mpi_session = trtllm_mpi_session_module
+    trtllm_module._torch = trtllm_torch_module
+    trtllm_torch_module.pyexecutor = trtllm_pyexecutor_module
+    trtllm_pyexecutor_module.py_executor_creator = trtllm_pyexecutor_creator_module
 
     monkeypatch.setitem(sys.modules, "mpi4py", mpi4py_module)
     monkeypatch.setitem(sys.modules, "mpi4py.futures", mpi4py_futures_module)
@@ -56,6 +87,15 @@ def stubbed_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "tensorrt_llm.llmapi", trtllm_llmapi_module)
     monkeypatch.setitem(
         sys.modules, "tensorrt_llm.llmapi.mpi_session", trtllm_mpi_session_module
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt_llm._torch", trtllm_torch_module)
+    monkeypatch.setitem(
+        sys.modules, "tensorrt_llm._torch.pyexecutor", trtllm_pyexecutor_module
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_llm._torch.pyexecutor.py_executor_creator",
+        trtllm_pyexecutor_creator_module,
     )
 
     # Force re-import so install_mpi_worker_bootstrap rebinds the stub's class.
@@ -65,20 +105,25 @@ def stubbed_env(monkeypatch):
     )
     bootstrap._bootstrap_installed = False
     bootstrap._extra_config_json = None
+    bootstrap._executor_finalize_hook_installed = False
 
     yield {
         "bootstrap": bootstrap,
         "FakeMpiPoolSession": FakeMpiPoolSession,
         "captured_kwargs": captured_kwargs,
+        "py_executor_creator": trtllm_pyexecutor_creator_module,
+        "call_log": call_log,
     }
 
 
 def test_install_patches_mpi_pool_session_start_method(stubbed_env):
     bootstrap = stubbed_env["bootstrap"]
     FakeMpiPoolSession = stubbed_env["FakeMpiPoolSession"]
-    original = FakeMpiPoolSession._start_mpi_pool if hasattr(
-        FakeMpiPoolSession, "_start_mpi_pool"
-    ) else None
+    original = (
+        FakeMpiPoolSession._start_mpi_pool
+        if hasattr(FakeMpiPoolSession, "_start_mpi_pool")
+        else None
+    )
 
     bootstrap.install_mpi_worker_bootstrap()
 
@@ -98,9 +143,7 @@ def test_install_is_idempotent(stubbed_env):
     assert FakeMpiPoolSession._start_mpi_pool is first
 
 
-def test_start_mpi_pool_injects_initializer_and_extra_config(
-    stubbed_env, monkeypatch
-):
+def test_start_mpi_pool_injects_initializer_and_extra_config(stubbed_env, monkeypatch):
     bootstrap = stubbed_env["bootstrap"]
     FakeMpiPoolSession = stubbed_env["FakeMpiPoolSession"]
     captured_kwargs = stubbed_env["captured_kwargs"]
@@ -132,9 +175,7 @@ def test_start_mpi_pool_injects_initializer_and_extra_config(
     assert captured_kwargs["env"]["DYN_GMS_TRTLLM_ENABLED"] == "1"
 
 
-def test_worker_init_hook_restores_env_and_calls_setup_gms(
-    stubbed_env, monkeypatch
-):
+def test_worker_init_hook_restores_env_and_calls_setup_gms(stubbed_env, monkeypatch):
     bootstrap = stubbed_env["bootstrap"]
 
     # Child environment starts without the propagated vars — simulates fresh interpreter.
@@ -146,12 +187,10 @@ def test_worker_init_hook_restores_env_and_calls_setup_gms(
     ):
         monkeypatch.delenv(key, raising=False)
 
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
     fake_setup_gms = MagicMock()
-    fake_trtllm_pkg = types.ModuleType("gpu_memory_service.integrations.trtllm")
-    fake_trtllm_pkg.setup_gms = fake_setup_gms
-    monkeypatch.setitem(
-        sys.modules, "gpu_memory_service.integrations.trtllm", fake_trtllm_pkg
-    )
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
 
     env_snapshot = {
         "DYN_GMS_TRTLLM_ENABLED": "1",
@@ -171,25 +210,100 @@ def test_worker_init_hook_no_op_when_gms_disabled(stubbed_env, monkeypatch):
     bootstrap = stubbed_env["bootstrap"]
 
     monkeypatch.delenv("DYN_GMS_TRTLLM_ENABLED", raising=False)
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
     fake_setup_gms = MagicMock()
-    fake_trtllm_pkg = types.ModuleType("gpu_memory_service.integrations.trtllm")
-    fake_trtllm_pkg.setup_gms = fake_setup_gms
-    monkeypatch.setitem(
-        sys.modules, "gpu_memory_service.integrations.trtllm", fake_trtllm_pkg
-    )
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
 
     bootstrap.worker_init_hook({"ENGINE_ID": "1"}, None)
 
     fake_setup_gms.assert_not_called()
 
 
+def test_worker_init_hook_installs_child_finalize_before_start_worker(
+    stubbed_env, monkeypatch
+):
+    bootstrap = stubbed_env["bootstrap"]
+    py_executor_creator = stubbed_env["py_executor_creator"]
+    call_log = stubbed_env["call_log"]
+
+    class FakePyExecutor:
+        def __init__(self, name: str):
+            self.name = name
+
+        def start_worker(self):
+            call_log.append(f"start_worker:{self.name}")
+
+    def fake_create_py_executor(*args, **kwargs):
+        call_log.append("temp_executor_created")
+        py_executor_creator.create_py_executor_instance(name="temp")
+        call_log.append("final_executor_created")
+        executor = py_executor_creator.create_py_executor_instance(name="final")
+        executor.start_worker()
+        return executor
+
+    py_executor_creator.PyExecutor = FakePyExecutor
+    py_executor_creator.create_py_executor_instance = (
+        lambda *args, name="executor", **kwargs: FakePyExecutor(name)
+    )
+    py_executor_creator.create_py_executor = fake_create_py_executor
+
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
+    fake_setup_gms = MagicMock(
+        side_effect=lambda extra: call_log.append(f"setup:{extra}")
+    )
+    fake_finalize = MagicMock(side_effect=lambda: call_log.append("finalize"))
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
+    monkeypatch.setattr(trtllm_gms, "finalize_pending_gms_write", fake_finalize)
+
+    env_snapshot = {"DYN_GMS_TRTLLM_ENABLED": "1", "ENGINE_ID": "0"}
+    bootstrap.worker_init_hook(
+        env_snapshot, '{"gms_delay_commit_until_engine_init": true}'
+    )
+
+    executor = py_executor_creator.create_py_executor()
+
+    assert executor.name == "final"
+    assert fake_setup_gms.call_count == 1
+    assert fake_finalize.call_count == 1
+    assert call_log == [
+        "setup:{'gms_delay_commit_until_engine_init': True}",
+        "temp_executor_created",
+        "final_executor_created",
+        "finalize",
+        "start_worker:final",
+    ]
+
+
+def test_worker_init_hook_skips_child_finalize_hook_without_delay_flag(
+    stubbed_env, monkeypatch
+):
+    bootstrap = stubbed_env["bootstrap"]
+    py_executor_creator = stubbed_env["py_executor_creator"]
+
+    original_create_py_executor = py_executor_creator.create_py_executor
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
+    fake_setup_gms = MagicMock()
+    fake_finalize = MagicMock()
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
+    monkeypatch.setattr(trtllm_gms, "finalize_pending_gms_write", fake_finalize)
+
+    bootstrap.worker_init_hook(
+        {"DYN_GMS_TRTLLM_ENABLED": "1", "ENGINE_ID": "0"}, '{"gms_read_only": true}'
+    )
+
+    assert py_executor_creator.create_py_executor is original_create_py_executor
+    py_executor_creator.create_py_executor()
+    fake_finalize.assert_not_called()
+
+
 def test_worker_init_hook_is_picklable():
     """mpi4py.futures requires the initializer to be picklable-by-reference."""
     import pickle
 
-    from gpu_memory_service.integrations.trtllm.mpi_bootstrap import (
-        worker_init_hook,
-    )
+    from gpu_memory_service.integrations.trtllm.mpi_bootstrap import worker_init_hook
 
     # Function imported by module path; pickle roundtrip resolves back to the same object.
     assert pickle.loads(pickle.dumps(worker_init_hook)) is worker_init_hook
