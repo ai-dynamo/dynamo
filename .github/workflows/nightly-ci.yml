@@ -128,7 +128,7 @@ jobs:
       framework: dynamo
       target: runtime
       cuda_version: '["12.9"]'
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       fresh_builder: true
       build_timeout_minutes: 180
@@ -153,7 +153,7 @@ jobs:
       amd_runner: prod-builder-amd-v1
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'parallel and not (vllm or sglang or trtllm) and (gpu_0)'
@@ -172,7 +172,7 @@ jobs:
       amd_runner: prod-builder-amd-v1
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'not parallel and not (vllm or sglang or trtllm) and (gpu_0)'

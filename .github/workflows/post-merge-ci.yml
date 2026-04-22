@@ -127,7 +127,7 @@ jobs:
       framework: dynamo
       target: runtime
       cuda_version: '["12.9"]'
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
     secrets: inherit
@@ -151,7 +151,7 @@ jobs:
       amd_runner: prod-builder-amd-v1
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
@@ -170,7 +170,7 @@ jobs:
       amd_runner: prod-builder-amd-v1
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
