@@ -277,17 +277,18 @@ class TestThoroughEdgeCases:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_empty_candidates_due_to_small_gpu(self, tmp_path):
-        """Case 8: DeepSeek-R1 on 1 L40S GPU — model too large, no candidates."""
+        """Case 8: DeepSeek-R1 on 1 L40S GPU should fail with an explicit no-candidates error."""
         dgdr = _load_dgdr(CONFIGS_DIR / "8_thorough_empty_candidates.yaml")
         ops = _make_ops(tmp_path, dry_run=True)
-        asyncio.run(run_profile(dgdr, ops))
 
-        output = tmp_path / "profiling_results" / "final_config.yaml"
-        assert output.exists()
+        with pytest.raises(ValueError, match="No viable THOROUGH candidates found"):
+            asyncio.run(run_profile(dgdr, ops))
+
         status_file = tmp_path / "profiling_results" / "profiler_status.yaml"
-        if status_file.exists():
-            status = yaml.safe_load(status_file.read_text())
-            assert status.get("status") in ("success", "failed")
+        assert status_file.exists()
+        status = yaml.safe_load(status_file.read_text())
+        assert status.get("status") == "failed"
+        assert "No viable THOROUGH candidates found" in status.get("error", "")
 
 
 # ---------------------------------------------------------------------------

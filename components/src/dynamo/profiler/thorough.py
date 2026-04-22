@@ -57,6 +57,29 @@ from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler
 logger = logging.getLogger(__name__)
 
 
+async def _cleanup_candidate_deployment(
+    client: DynamoDeploymentClient,
+    deployment_clients: list,
+    phase: str,
+    label: str,
+    num_gpus: int,
+) -> None:
+    """Best-effort cleanup for a candidate deployment."""
+    try:
+        await client.delete_deployment()
+    except Exception:
+        logger.warning(
+            "Failed to clean up %s candidate %s with %d GPUs",
+            phase,
+            label,
+            num_gpus,
+            exc_info=True,
+        )
+    finally:
+        if client in deployment_clients:
+            deployment_clients.remove(client)
+
+
 async def _benchmark_prefill_candidates(
     prefill_candidates,
     ops: ProfilerOperationalConfig,
@@ -112,48 +135,52 @@ async def _benchmark_prefill_candidates(
             deployment_name=candidate.dgd_config["metadata"]["name"],
         )
         deployment_clients.append(client)
-        await client.create_deployment(config_fn)
-        logger.info("Waiting for prefill deployment to be ready...")
         try:
+            await client.create_deployment(config_fn)
+            logger.info("Waiting for prefill deployment to be ready...")
             await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
+            logger.info("Prefill deployment ready")
+
+            await client.get_deployment_logs()
+
+            base_url = client.get_service_url()
+            ai_perf_dir = f"{work_dir}/aiperf_isl{isl}"
+            ttft = get_prefill_ttft(
+                isl,
+                ai_perf_dir,
+                model_name,
+                model_path,
+                base_url,
+                attention_dp_size=candidate.dp,
+            )
+
+            if ttft is not None:
+                prefill_rows.append(
+                    build_prefill_row(
+                        model=model,
+                        isl=isl,
+                        osl=osl,
+                        ttft=ttft,
+                        tp=candidate.tp,
+                        pp=candidate.pp,
+                        dp=candidate.dp,
+                        moe_tp=candidate.moe_tp,
+                        moe_ep=candidate.moe_ep,
+                        backend=backend,
+                        system=system,
+                    )
+                )
         except TimeoutError:
             logger.error("Prefill %s with %d GPUs timed out", label, num_gpus)
-            await client.delete_deployment()
-            deployment_clients.remove(client)
-            continue
-        logger.info("Prefill deployment ready")
-
-        await client.get_deployment_logs()
-
-        base_url = client.get_service_url()
-        ai_perf_dir = f"{work_dir}/aiperf_isl{isl}"
-        ttft = get_prefill_ttft(
-            isl,
-            ai_perf_dir,
-            model_name,
-            model_path,
-            base_url,
-            attention_dp_size=candidate.dp,
-        )
-
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-
-        if ttft is not None:
-            prefill_rows.append(
-                build_prefill_row(
-                    model=model,
-                    isl=isl,
-                    osl=osl,
-                    ttft=ttft,
-                    tp=candidate.tp,
-                    pp=candidate.pp,
-                    dp=candidate.dp,
-                    moe_tp=candidate.moe_tp,
-                    moe_ep=candidate.moe_ep,
-                    backend=backend,
-                    system=system,
-                )
+        except Exception:
+            logger.exception(
+                "Prefill candidate %s with %d GPUs failed; continuing with the next candidate",
+                label,
+                num_gpus,
+            )
+        finally:
+            await _cleanup_candidate_deployment(
+                client, deployment_clients, "prefill", label, num_gpus
             )
 
     return pd.DataFrame(prefill_rows) if prefill_rows else pd.DataFrame()
@@ -214,70 +241,81 @@ async def _benchmark_decode_candidates(
             deployment_name=candidate.dgd_config["metadata"]["name"],
         )
         deployment_clients.append(client)
-        await client.create_deployment(config_fn)
-        logger.info("Waiting for decode deployment to be ready...")
         try:
+            await client.create_deployment(config_fn)
+            logger.info("Waiting for decode deployment to be ready...")
             await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
-        except TimeoutError:
-            logger.error("Decode %s with %d GPUs timed out", label, num_gpus)
-            await client.delete_deployment()
-            deployment_clients.remove(client)
-            continue
-        logger.info("Decode deployment ready")
+            logger.info("Decode deployment ready")
 
-        await client.get_deployment_logs()
+            await client.get_deployment_logs()
 
-        decode_cfg = Config.model_validate(candidate.dgd_config)
-        decode_service_name = get_service_name_by_type(
-            decode_cfg, backend, SubComponentType.DECODE
-        ).lower()
-        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-            f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
-            attention_dp_size=candidate.dp,
-        )
-        max_concurrency = max_kv_tokens // (isl + osl)
-
-        sweep_num_request = get_num_request_range(
-            candidate.dp,
-            max_concurrency,
-            ops.decode_interpolation_granularity,
-        )
-        logger.info("Sweeping num_request: %s", sweep_num_request)
-
-        base_url = client.get_service_url()
-        for num_request in sweep_num_request:
-            ai_perf_dir = f"{work_dir}/aiperf_request{num_request}_isl{isl}_osl{osl}_n{num_request}"
-            itl, thpt_per_gpu = get_decode_itl_and_thpt_per_gpu(
-                isl,
-                osl,
-                num_request,
-                ai_perf_dir,
-                model_name,
-                model_path,
-                base_url=base_url,
-                num_gpus=num_gpus,
+            decode_cfg = Config.model_validate(candidate.dgd_config)
+            decode_service_name = get_service_name_by_type(
+                decode_cfg, backend, SubComponentType.DECODE
+            ).lower()
+            max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+                f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
                 attention_dp_size=candidate.dp,
             )
-            if itl is not None and thpt_per_gpu is not None:
-                decode_rows.append(
-                    build_decode_row(
-                        tpot=itl,
-                        thpt_per_gpu=thpt_per_gpu,
-                        num_request=num_request,
-                        num_gpus=num_gpus,
-                        osl=osl,
-                        tp=candidate.tp,
-                        pp=candidate.pp,
-                        dp=candidate.dp,
-                        moe_tp=candidate.moe_tp,
-                        moe_ep=candidate.moe_ep,
-                        backend=backend,
-                        system=system,
-                    )
+            max_concurrency = max_kv_tokens // (isl + osl)
+            if max_concurrency <= 0:
+                logger.warning(
+                    "Decode candidate %s with %d GPUs reported no usable KV capacity; skipping",
+                    label,
+                    num_gpus,
                 )
+                continue
 
-        await client.delete_deployment()
-        deployment_clients.remove(client)
+            sweep_num_request = get_num_request_range(
+                candidate.dp,
+                max_concurrency,
+                ops.decode_interpolation_granularity,
+            )
+            logger.info("Sweeping num_request: %s", sweep_num_request)
+
+            base_url = client.get_service_url()
+            for num_request in sweep_num_request:
+                ai_perf_dir = f"{work_dir}/aiperf_request{num_request}_isl{isl}_osl{osl}_n{num_request}"
+                itl, thpt_per_gpu = get_decode_itl_and_thpt_per_gpu(
+                    isl,
+                    osl,
+                    num_request,
+                    ai_perf_dir,
+                    model_name,
+                    model_path,
+                    base_url=base_url,
+                    num_gpus=num_gpus,
+                    attention_dp_size=candidate.dp,
+                )
+                if itl is not None and thpt_per_gpu is not None:
+                    decode_rows.append(
+                        build_decode_row(
+                            tpot=itl,
+                            thpt_per_gpu=thpt_per_gpu,
+                            num_request=num_request,
+                            num_gpus=num_gpus,
+                            osl=osl,
+                            tp=candidate.tp,
+                            pp=candidate.pp,
+                            dp=candidate.dp,
+                            moe_tp=candidate.moe_tp,
+                            moe_ep=candidate.moe_ep,
+                            backend=backend,
+                            system=system,
+                        )
+                    )
+        except TimeoutError:
+            logger.error("Decode %s with %d GPUs timed out", label, num_gpus)
+        except Exception:
+            logger.exception(
+                "Decode candidate %s with %d GPUs failed; continuing with the next candidate",
+                label,
+                num_gpus,
+            )
+        finally:
+            await _cleanup_candidate_deployment(
+                client, deployment_clients, "decode", label, num_gpus
+            )
 
     return pd.DataFrame(decode_rows) if decode_rows else pd.DataFrame()
 
@@ -367,6 +405,11 @@ async def run_thorough(
         len(prefill_candidates),
         len(decode_candidates),
     )
+    if not prefill_candidates or not decode_candidates:
+        raise ValueError(
+            "No viable THOROUGH candidates found for "
+            f"{model} on {system} with backend {backend} and total_gpus={total_gpus}."
+        )
 
     if dgdr.overrides and dgdr.overrides.dgd:
         for candidate in prefill_candidates:
@@ -443,21 +486,13 @@ async def run_thorough(
 
     # --- Stage 3: Picking ---
     if prefill_df.empty:
-        logger.error("No prefill results produced in THOROUGH mode.")
-        return {
-            "best_config_df": pd.DataFrame(),
-            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
-            "dgd_config": None,
-            "chosen_exp": None,
-        }
+        raise ValueError(
+            "No viable THOROUGH prefill candidates completed successfully."
+        )
     if decode_df.empty:
-        logger.error("No decode results produced in THOROUGH mode.")
-        return {
-            "best_config_df": pd.DataFrame(),
-            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
-            "dgd_config": None,
-            "chosen_exp": None,
-        }
+        raise ValueError(
+            "No viable THOROUGH decode candidates completed successfully."
+        )
 
     result = _pick_thorough_best_config(
         prefill_df,

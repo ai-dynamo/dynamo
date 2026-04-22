@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for thorough.py's _pick_thorough_best_config helper.
+"""Unit tests for thorough.py helpers.
 
-Benchmarking helpers (_benchmark_prefill_candidates, _benchmark_decode_candidates)
-require live K8s deployments and are covered by the mocked end-to-end tests
-in test_profile_sla_dgdr.py.
+Includes picking behavior plus regression coverage for THOROUGH candidate
+benchmarking recovery paths.
 """
 
-from unittest.mock import patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -21,7 +22,11 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.thorough import _pick_thorough_best_config
+    from dynamo.profiler.thorough import (
+        _benchmark_decode_candidates,
+        _benchmark_prefill_candidates,
+        _pick_thorough_best_config,
+    )
     from dynamo.profiler.utils.aic_dataframe import build_decode_row, build_prefill_row
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
@@ -255,3 +260,149 @@ class TestPickThoroughBestConfig:
         kwargs = mock_pick.call_args.kwargs
         assert "target_request_rate" not in kwargs
         assert "max_total_gpus" not in kwargs
+
+
+class TestBenchmarkCandidatesRecover:
+    @staticmethod
+    def _candidate(name: str, *, num_gpus: int = 1):
+        return SimpleNamespace(
+            num_gpus=num_gpus,
+            tp=1,
+            pp=1,
+            dp=1,
+            moe_tp=1,
+            moe_ep=1,
+            dgd_config={"metadata": {"name": name}},
+        )
+
+    @staticmethod
+    def _ops(tmp_path):
+        return SimpleNamespace(
+            output_dir=str(tmp_path),
+            k8s_namespace="default",
+            deployment_timeout=1,
+            decode_interpolation_granularity=1,
+        )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_prefill_benchmark_continues_after_failed_candidate(self, tmp_path):
+        candidates = [self._candidate("bad"), self._candidate("good")]
+        failed_client = MagicMock(
+            create_deployment=AsyncMock(),
+            wait_for_deployment_ready=AsyncMock(side_effect=RuntimeError("OOM")),
+            get_deployment_logs=AsyncMock(),
+            delete_deployment=AsyncMock(),
+            get_service_url=MagicMock(return_value="http://bad"),
+            deployment_name="bad",
+        )
+        good_client = MagicMock(
+            create_deployment=AsyncMock(),
+            wait_for_deployment_ready=AsyncMock(),
+            get_deployment_logs=AsyncMock(),
+            delete_deployment=AsyncMock(),
+            get_service_url=MagicMock(return_value="http://good"),
+            deployment_name="good",
+        )
+        config_modifier = MagicMock()
+        config_modifier.get_model_name.return_value = (
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-32B",
+        )
+        config_modifier.get_port.return_value = 8000
+        deployment_clients = []
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.DynamoDeploymentClient",
+                side_effect=[failed_client, good_client],
+            ),
+            patch("dynamo.profiler.thorough.get_prefill_ttft", return_value=42.0),
+        ):
+            df = asyncio.run(
+                _benchmark_prefill_candidates(
+                    candidates,
+                    self._ops(tmp_path),
+                    4000,
+                    1000,
+                    "Qwen/Qwen3-32B",
+                    "h200_sxm",
+                    "trtllm",
+                    deployment_clients,
+                    config_modifier,
+                )
+            )
+
+        assert len(df) == 1
+        assert df.iloc[0]["ttft"] == 42.0
+        failed_client.delete_deployment.assert_awaited_once()
+        good_client.delete_deployment.assert_awaited_once()
+        assert deployment_clients == []
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_decode_benchmark_continues_after_failed_candidate(self, tmp_path):
+        candidates = [self._candidate("bad"), self._candidate("good")]
+        failed_client = MagicMock(
+            create_deployment=AsyncMock(),
+            wait_for_deployment_ready=AsyncMock(side_effect=RuntimeError("OOM")),
+            get_deployment_logs=AsyncMock(),
+            delete_deployment=AsyncMock(),
+            get_service_url=MagicMock(return_value="http://bad"),
+            deployment_name="bad",
+        )
+        good_client = MagicMock(
+            create_deployment=AsyncMock(),
+            wait_for_deployment_ready=AsyncMock(),
+            get_deployment_logs=AsyncMock(),
+            delete_deployment=AsyncMock(),
+            get_service_url=MagicMock(return_value="http://good"),
+            deployment_name="good",
+        )
+        config_modifier = MagicMock()
+        config_modifier.get_model_name.return_value = (
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-32B",
+        )
+        config_modifier.get_port.return_value = 8000
+        config_modifier.get_kv_cache_size_from_dynamo_log.return_value = 100000
+        deployment_clients = []
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.DynamoDeploymentClient",
+                side_effect=[failed_client, good_client],
+            ),
+            patch(
+                "dynamo.profiler.thorough.Config.model_validate",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "dynamo.profiler.thorough.get_service_name_by_type",
+                return_value="TRTLLMDecodeWorker",
+            ),
+            patch("dynamo.profiler.thorough.get_num_request_range", return_value=[1]),
+            patch(
+                "dynamo.profiler.thorough.get_decode_itl_and_thpt_per_gpu",
+                return_value=(8.0, 125.0),
+            ),
+        ):
+            df = asyncio.run(
+                _benchmark_decode_candidates(
+                    candidates,
+                    self._ops(tmp_path),
+                    4000,
+                    1000,
+                    "Qwen/Qwen3-32B",
+                    "h200_sxm",
+                    "trtllm",
+                    deployment_clients,
+                    config_modifier,
+                )
+            )
+
+        assert len(df) == 1
+        assert df.iloc[0]["tpot"] == 8.0
+        failed_client.delete_deployment.assert_awaited_once()
+        good_client.delete_deployment.assert_awaited_once()
+        assert deployment_clients == []
