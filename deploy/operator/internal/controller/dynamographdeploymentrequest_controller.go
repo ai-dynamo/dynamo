@@ -1253,6 +1253,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		// Use image from spec; the defaulting webhook fills this in for production builds.
 		// Guard against empty image in case the webhook didn't run (e.g. local dev builds).
+		//
+		// Starting with Dynamo 1.1.0, the profiler's runtime dependencies
+		// (kubernetes_asyncio, pmdarima, prophet, aiconfigurator, ...) live in the
+		// dedicated dynamo-planner image, not in backend runtime or frontend images.
+		// Users on 1.1.0+ must set spec.image to a planner image
+		// (e.g. nvcr.io/nvidia/ai-dynamo/dynamo-planner:<version>); earlier versions
+		// can continue using the frontend/backend image they were using before.
 		imageName := dgdr.Spec.Image
 		if imageName == "" {
 			return nil, false, fmt.Errorf("spec.image is required but not set; ensure the defaulting webhook ran or set spec.image explicitly")

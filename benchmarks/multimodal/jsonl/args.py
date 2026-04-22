@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CLI argument parsing for request generation scripts."""
+"""CLI argument parsing for JSONL benchmark generation."""
 
 import argparse
+import sys
 from pathlib import Path
 
 DEFAULT_IMAGES_PER_REQUEST = 3
@@ -11,66 +12,42 @@ USER_TEXT_TOKENS = 300
 COCO_ANNOTATIONS = Path(__file__).parent / "annotations" / "image_info_test2017.json"
 
 
-def parse_args(description: str = "") -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=description,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "-n",
-        "--num-requests",
-        type=int,
-        default=500,
-        help="Number of requests to generate (default: 500)",
-    )
-    parser.add_argument(
-        "--images-pool",
-        type=int,
-        default=None,
-        help="Number of unique images in the pool. Each request samples from this pool, "
-        "so a smaller pool means more cross-request reuse. "
-        "Default: num_requests * images_per_request (all unique, no reuse).",
-    )
-    parser.add_argument(
-        "--images-per-request",
-        type=int,
-        default=DEFAULT_IMAGES_PER_REQUEST,
-        help=f"Number of images per request (default: {DEFAULT_IMAGES_PER_REQUEST})",
-    )
-    parser.add_argument(
+def _positive_int(value: str) -> int:
+    iv = int(value)
+    if iv <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {iv}")
+    return iv
+
+
+def _common_parser() -> argparse.ArgumentParser:
+    """Args shared across all strategies."""
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
-        help="Output .jsonl path (default: {n}req_{img}img_{pool}pool_{word}word_{mode}.jsonl, e.g. 100req_20img_1000pool_4000word_base64.jsonl)",
+        help="Output .jsonl path (default: auto-generated from parameters)",
     )
-    parser.add_argument(
-        "--image-dir",
-        type=Path,
-        default=Path("/tmp/bench_images"),
-        help="Directory to save generated PNG images (default: /tmp/bench_images)",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--user-text-tokens",
         type=int,
         default=USER_TEXT_TOKENS,
-        help=f"Target user text tokens per request (default: {USER_TEXT_TOKENS}). --isl is an alias.",
+        help=f"Target user text tokens per request (default: {USER_TEXT_TOKENS})",
     )
-    parser.add_argument(
-        "--image-mode",
-        choices=["base64", "http"],
-        default="base64",
-        help="Image loading mode: 'base64' generates local PNGs and puts file paths in "
-        "the JSONL so aiperf reads and base64-encodes them before sending (default); "
-        "'http' puts COCO HTTP URLs in the JSONL so the LLM server downloads images itself",
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible generation (default: time-based)",
     )
-    parser.add_argument(
-        "--coco-annotations",
-        type=Path,
-        default=COCO_ANNOTATIONS,
-        help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
-    )
-    parser.add_argument(
+    return p
+
+
+def _image_parser() -> argparse.ArgumentParser:
+    """Args for image generation (reusable for future video/audio parsers)."""
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
         "--image-size",
         type=int,
         nargs=2,
@@ -78,10 +55,97 @@ def parse_args(description: str = "") -> argparse.Namespace:
         metavar=("WIDTH", "HEIGHT"),
         help="Size of generated PNG images in pixels (default: 512 512)",
     )
-    parser.add_argument(
-        "--seed",
+    p.add_argument(
+        "--image-dir",
+        type=Path,
+        default=Path("/tmp/bench_images"),
+        help="Directory to save generated PNG images (default: /tmp/bench_images)",
+    )
+    p.add_argument(
+        "--image-mode",
+        choices=["base64", "http"],
+        default="base64",
+        help="'base64' generates local PNGs (default); 'http' uses COCO URLs",
+    )
+    p.add_argument(
+        "--coco-annotations",
+        type=Path,
+        default=COCO_ANNOTATIONS,
+        help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
+    )
+    return p
+
+
+def parse_args(description: str = "") -> argparse.Namespace:
+    common = _common_parser()
+    image = _image_parser()
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="strategy")
+
+    # --- single-turn (default) ---
+    st = sub.add_parser(
+        "single-turn",
+        parents=[common, image],
+        help="Independent requests with random image sampling (default)",
+    )
+    st.add_argument(
+        "-n",
+        "--num-requests",
+        type=int,
+        default=500,
+        help="Number of requests to generate (default: 500)",
+    )
+    st.add_argument(
+        "--images-per-request",
+        type=int,
+        default=DEFAULT_IMAGES_PER_REQUEST,
+        help=f"Number of images per request (default: {DEFAULT_IMAGES_PER_REQUEST})",
+    )
+    st.add_argument(
+        "--images-pool",
         type=int,
         default=None,
-        help="Random seed for reproducible dataset generation (default: time-based)",
+        help="Unique images in pool. Smaller pool = more cross-request reuse. "
+        "Default: num_requests * images_per_request (all unique).",
     )
-    return parser.parse_args()
+
+    # --- sliding-window ---
+    sw = sub.add_parser(
+        "sliding-window",
+        parents=[common, image],
+        help="Causal sessions with sliding-window image overlap",
+    )
+    sw.add_argument(
+        "--num-users",
+        type=_positive_int,
+        default=10,
+        help="Number of concurrent user sessions (default: 10)",
+    )
+    sw.add_argument(
+        "--turns-per-user",
+        type=_positive_int,
+        default=20,
+        help="Number of requests per user (default: 20)",
+    )
+    sw.add_argument(
+        "--window-size",
+        type=_positive_int,
+        default=5,
+        help="Sliding window width — each turn sees this many images, "
+        "with window_size-1 overlap between consecutive turns (default: 5)",
+    )
+
+    # Default to single-turn when no subcommand given, but let top-level
+    # `-h`/`--help` flow through the main parser so users see both
+    # subcommands and the module description.
+    known_strategies = {"single-turn", "sliding-window"}
+    argv = sys.argv[1:]
+    help_requested = bool(argv) and argv[0] in {"-h", "--help"}
+    if not help_requested and (not argv or argv[0] not in known_strategies):
+        argv = ["single-turn", *argv]
+
+    return parser.parse_args(argv)

@@ -59,16 +59,18 @@
 //! - `new_with_frequency()` is not provided
 //! - `find_matches` does not populate `OverlapScores.frequencies`
 
-use std::sync::{Arc, Weak};
-use std::time::Instant;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerTask,
+};
+use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
 
 macro_rules! read_lock {
@@ -86,8 +88,6 @@ type SharedNode = Arc<RwLock<Node>>;
 /// Position within the edge is resolved via `Node::edge_index` (O(1)) rather than
 /// stored here, keeping the map compact and correct across concurrent splits.
 type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
-
-const CLEANUP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
 /// A node in the concurrent radix tree.
 ///
@@ -120,10 +120,6 @@ impl Node {
             full_edge_workers: FxHashSet::default(),
             children: FxHashMap::default(),
         }
-    }
-
-    fn has_any_workers(&self) -> bool {
-        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
     }
 
     #[inline]
@@ -162,10 +158,13 @@ impl Node {
     }
 
     #[inline]
-    fn promote_to_full(&mut self, worker: WorkerWithDpRank) {
+    fn promote_to_full(&mut self, worker: WorkerWithDpRank) -> bool {
         if !self.full_edge_workers.contains(&worker) {
             self.worker_cutoffs.remove(&worker);
             self.full_edge_workers.insert(worker);
+            true
+        } else {
+            false
         }
     }
 
@@ -226,6 +225,22 @@ impl Node {
     }
 }
 
+impl CleanableNode for Node {
+    type ChildKey = LocalBlockHash;
+
+    fn has_any_workers(&self) -> bool {
+        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+
+    fn children(&self) -> &FxHashMap<LocalBlockHash, SharedNode> {
+        &self.children
+    }
+
+    fn remove_child(&mut self, key: &LocalBlockHash) {
+        self.children.remove(key);
+    }
+}
+
 /// Data returned by [`ConcurrentRadixTreeCompressed::split_node`] for deferred lookup updates.
 ///
 /// Callers must call [`ConcurrentRadixTreeCompressed::apply_split_lookup`] **after**
@@ -240,62 +255,9 @@ struct RemoveOutcome {
     stale_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
-struct CleanupEdge {
-    parent: Weak<RwLock<Node>>,
-    key: LocalBlockHash,
-    child: Weak<RwLock<Node>>,
-}
-
-struct CleanupState {
-    clock_origin: Instant,
-    last_cleanup_elapsed_ms: AtomicU64,
-    scheduled: AtomicBool,
-}
-
-impl CleanupState {
-    fn new() -> Self {
-        Self {
-            clock_origin: Instant::now(),
-            last_cleanup_elapsed_ms: AtomicU64::new(0),
-            scheduled: AtomicBool::new(false),
-        }
-    }
-
-    fn elapsed_ms(&self) -> u64 {
-        self.clock_origin.elapsed().as_millis() as u64
-    }
-
-    fn try_schedule(&self) -> bool {
-        let now_ms = self.elapsed_ms();
-        let last_ms = self.last_cleanup_elapsed_ms.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last_ms) < CLEANUP_INTERVAL_MS {
-            return false;
-        }
-
-        self.scheduled
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    fn cancel(&self) {
-        self.scheduled.store(false, Ordering::Release);
-    }
-}
-
-struct CleanupGuard<'a> {
-    state: &'a CleanupState,
-    completed_elapsed_ms: Option<u64>,
-}
-
-impl Drop for CleanupGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(elapsed_ms) = self.completed_elapsed_ms {
-            self.state
-                .last_cleanup_elapsed_ms
-                .store(elapsed_ms, Ordering::Relaxed);
-        }
-        self.state.scheduled.store(false, Ordering::Release);
-    }
+struct StoreInsertOutcome {
+    num_blocks_added: usize,
+    duplicate_store: bool,
 }
 
 /// Thread-safe radix tree (compressed trie) for concurrent KV cache lookups.
@@ -340,50 +302,6 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    fn cleanup_stale_children(&self) {
-        let mut queue = VecDeque::from([self.root.clone()]);
-        let mut edges = Vec::new();
-
-        while let Some(parent) = queue.pop_front() {
-            let guard = parent.read();
-            for (&key, child) in &guard.children {
-                queue.push_back(child.clone());
-                edges.push(CleanupEdge {
-                    parent: Arc::downgrade(&parent),
-                    key,
-                    child: Arc::downgrade(child),
-                });
-            }
-        }
-
-        for edge in edges.into_iter().rev() {
-            let (Some(parent), Some(child)) = (edge.parent.upgrade(), edge.child.upgrade()) else {
-                continue;
-            };
-
-            let mut parent_guard = parent.write();
-            let Some(current) = parent_guard.children.get(&edge.key) else {
-                continue;
-            };
-            if !Arc::ptr_eq(current, &child) {
-                continue;
-            }
-
-            let Some(child_guard) = child.try_write() else {
-                continue;
-            };
-            if child_guard.has_any_workers() || !child_guard.children.is_empty() {
-                continue;
-            }
-            if Arc::strong_count(&child) != 2 {
-                continue;
-            }
-
-            parent_guard.children.remove(&edge.key);
-            drop(child_guard);
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn raw_child_edge_count(&self) -> usize {
         let mut queue = VecDeque::from([self.root.clone()]);
@@ -400,7 +318,7 @@ impl ConcurrentRadixTreeCompressed {
 
     #[cfg(test)]
     pub(crate) fn run_cleanup_for_test(&self) {
-        self.cleanup_stale_children();
+        cleanup::sweep_stale_children(&self.root);
     }
 
     // ------------------------------------------------------------------
@@ -706,13 +624,14 @@ impl ConcurrentRadixTreeCompressed {
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
+            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
                 lookup.entry(worker).or_default();
@@ -735,6 +654,7 @@ impl ConcurrentRadixTreeCompressed {
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         lookup.entry(worker).or_default();
 
@@ -815,17 +735,22 @@ impl ConcurrentRadixTreeCompressed {
             None => self.root.clone(),
         };
 
-        let num_blocks_added =
-            self.insert_blocks_from(lookup, worker, &parent, op.parent_hash, &op.blocks);
+        let outcome = self.insert_blocks_from(lookup, worker, &parent, op.parent_hash, &op.blocks);
 
         match self.tree_sizes.get(&worker) {
             Some(size) => {
-                size.fetch_add(num_blocks_added, Ordering::Relaxed);
+                size.fetch_add(outcome.num_blocks_added, Ordering::Relaxed);
             }
             None => {
                 self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_blocks_added));
+                    .insert(worker, AtomicUsize::new(outcome.num_blocks_added));
             }
+        }
+
+        if outcome.duplicate_store
+            && let Some(counters) = counters
+        {
+            counters.inc_warning(EventWarningKind::DuplicateStore);
         }
 
         Ok(())
@@ -838,10 +763,11 @@ impl ConcurrentRadixTreeCompressed {
         parent: &SharedNode,
         seed_hash: Option<ExternalSequenceBlockHash>,
         blocks: &[KvCacheStoredBlockData],
-    ) -> usize {
+    ) -> StoreInsertOutcome {
         let mut current_parent = parent.clone();
         let mut remaining = blocks;
         let mut num_blocks_added = 0usize;
+        let mut duplicate_store = !blocks.is_empty();
         // Track the last ExternalSequenceBlockHash we matched to detect if
         // `current_parent` was split by a concurrent thread between iterations.
         // A split shortens `current_parent`'s edge and moves our last-matched
@@ -903,11 +829,18 @@ impl ConcurrentRadixTreeCompressed {
 
                         let wl = lookup.get_mut(&worker).unwrap();
                         for b in remaining {
-                            if wl.insert(b.block_hash, new_node.clone()).is_none() {
-                                num_blocks_added += 1;
+                            match wl.insert(b.block_hash, new_node.clone()) {
+                                Some(existing) if Arc::ptr_eq(&existing, &new_node) => {}
+                                Some(_) => {}
+                                None => {
+                                    num_blocks_added += 1;
+                                }
                             }
                         }
-                        return num_blocks_added;
+                        return StoreInsertOutcome {
+                            num_blocks_added,
+                            duplicate_store: false,
+                        };
                     }
                 }
             };
@@ -922,6 +855,7 @@ impl ConcurrentRadixTreeCompressed {
                         break;
                     }
                     if edge_elem.1 != rem_elem.block_hash {
+                        duplicate_store = false;
                         tracing::warn!(
                             expected = ?rem_elem.block_hash,
                             actual = ?edge_elem.1,
@@ -974,13 +908,21 @@ impl ConcurrentRadixTreeCompressed {
 
                         let wl = lookup.get_mut(&worker).unwrap();
                         for b in &remaining[..match_len] {
-                            if wl.insert(b.block_hash, child.clone()).is_none() {
-                                num_blocks_added += 1;
+                            match wl.insert(b.block_hash, child.clone()) {
+                                Some(existing) if Arc::ptr_eq(&existing, &child) => {}
+                                Some(_) => {}
+                                None => {
+                                    num_blocks_added += 1;
+                                }
                             }
                         }
                         for b in tail {
-                            if wl.insert(b.block_hash, new_node.clone()).is_none() {
-                                num_blocks_added += 1;
+                            match wl.insert(b.block_hash, new_node.clone()) {
+                                Some(existing) if Arc::ptr_eq(&existing, &new_node) => {}
+                                Some(_) => {}
+                                None => {
+                                    num_blocks_added += 1;
+                                }
                             }
                         }
                     } else {
@@ -989,22 +931,36 @@ impl ConcurrentRadixTreeCompressed {
 
                         let wl = lookup.get_mut(&worker).unwrap();
                         for b in &remaining[..match_len] {
-                            if wl.insert(b.block_hash, child.clone()).is_none() {
-                                num_blocks_added += 1;
+                            match wl.insert(b.block_hash, child.clone()) {
+                                Some(existing) if Arc::ptr_eq(&existing, &child) => {}
+                                Some(_) => {}
+                                None => {
+                                    num_blocks_added += 1;
+                                }
                             }
                         }
                     }
-                    return num_blocks_added;
+                    return StoreInsertOutcome {
+                        num_blocks_added,
+                        duplicate_store: false,
+                    };
                 }
 
                 // Full edge match: upgrade worker to full coverage if necessary.
-                child_guard.promote_to_full(worker);
+                if child_guard.promote_to_full(worker) {
+                    duplicate_store = false;
+                }
                 drop(child_guard);
 
                 let wl = lookup.get_mut(&worker).unwrap();
                 for b in &remaining[..edge_len] {
-                    if wl.insert(b.block_hash, child.clone()).is_none() {
-                        num_blocks_added += 1;
+                    match wl.insert(b.block_hash, child.clone()) {
+                        Some(existing) if Arc::ptr_eq(&existing, &child) => {}
+                        Some(_) => duplicate_store = false,
+                        None => {
+                            num_blocks_added += 1;
+                            duplicate_store = false;
+                        }
                     }
                 }
 
@@ -1014,7 +970,10 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        num_blocks_added
+        StoreInsertOutcome {
+            num_blocks_added,
+            duplicate_store,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1283,6 +1242,7 @@ impl ConcurrentRadixTreeCompressed {
                             event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
+                                start_position: None,
                                 blocks: full_blocks.clone(),
                             }),
                             dp_rank: worker.dp_rank,
@@ -1297,6 +1257,7 @@ impl ConcurrentRadixTreeCompressed {
                             event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
+                                start_position: None,
                                 blocks: full_blocks[..k].to_vec(),
                             }),
                             dp_rank: worker.dp_rank,
@@ -1335,7 +1296,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut lookup, event);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
@@ -1378,13 +1339,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     }
 
     fn run_cleanup_task(&self) {
-        let mut cleanup_guard = CleanupGuard {
-            state: &self.cleanup,
-            completed_elapsed_ms: None,
-        };
-
-        self.cleanup_stale_children();
-        cleanup_guard.completed_elapsed_ms = Some(self.cleanup.elapsed_ms());
+        let mut cleanup_guard = CleanupGuard::new(&self.cleanup);
+        cleanup::sweep_stale_children(&self.root);
+        cleanup_guard.mark_completed();
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {

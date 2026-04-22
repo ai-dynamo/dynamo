@@ -22,23 +22,12 @@ use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-/// Default maximum message size for TCP server (32 MB)
-const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
-
 /// Default worker pool size for TCP request handling
 const DEFAULT_WORKER_POOL_SIZE: usize = 1500;
 
 /// Default work queue size for TCP request handling
 /// this is 4X the worker pool size to handle burst traffic
 const DEFAULT_WORK_QUEUE_SIZE: usize = 6000;
-
-/// Get maximum message size from environment or use default
-fn get_max_message_size() -> usize {
-    std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
-}
 
 /// Get worker pool size from environment or use default
 fn get_worker_pool_size() -> usize {
@@ -330,10 +319,7 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        // THEN set health status to Ready (after handler is registered and ready)
-        system_health
-            .lock()
-            .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
+        system_health.lock().set_endpoint_registered(&endpoint_name);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
@@ -717,6 +703,7 @@ mod tests {
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             crate::HealthStatus::Ready,
             vec![],
+            false, // health_check_enabled
             "/health".to_string(),
             "/live".to_string(),
         )));
