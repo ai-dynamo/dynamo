@@ -696,6 +696,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
@@ -721,6 +722,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
@@ -745,6 +747,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"fe": {
 							ComponentType: "frontend",
@@ -776,6 +779,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
@@ -792,7 +796,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "GMS failover requires the Grove pathway",
+			errMsg:      "requires the Grove pathway",
 		},
 		{
 			name:         "GMS failover requires Grove pathway - operator grove disabled",
@@ -803,6 +807,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
@@ -819,7 +824,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "GMS failover requires the Grove pathway",
+			errMsg:      "requires the Grove pathway",
 		},
 		{
 			name:         "GMS failover rejected on non-vLLM backend",
@@ -833,6 +838,37 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					BackendFramework: "sglang",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+								NumShadows: 1,
+							},
+							Resources: &nvidiacomv1alpha1.Resources{
+								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "inter-pod GMS failover is currently supported only for vLLM",
+		},
+		{
+			name:         "GMS failover rejected when backendFramework is unset",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gms",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					// BackendFramework intentionally left empty — the
+					// inter-pod gate must fail closed rather than silently
+					// accept a deployment whose engine may not speak vLLM.
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,

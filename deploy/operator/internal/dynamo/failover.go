@@ -25,6 +25,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -137,8 +138,10 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	return podSpec
 }
 
-// gmsEngineEnvVars returns the environment variables injected into engine pods
-// when GMS failover is enabled.
+// gmsEngineEnvVars returns the backend-agnostic environment variables injected
+// into engine pods when GMS failover is enabled. Backend-specific switches
+// (e.g. the vLLM DYN_VLLM_GMS_SHADOW_MODE flag) are injected by the backend's
+// UpdateContainer path so non-vLLM backends do not inherit stray env vars.
 func gmsEngineEnvVars() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
@@ -151,7 +154,6 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 		},
 		{Name: gmsruntime.EnvSocketDir, Value: gmsSharedMountPath},
 		{Name: "FAILOVER_LOCK_PATH", Value: gmsSharedMountPath + "/" + gmsFailoverLockFile},
-		{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 	}
 }
@@ -218,7 +220,13 @@ func gmsPermFixInitContainer(rank int32, image string) corev1.Container {
 		Image:   image,
 		Command: []string{"sh", "-c", fmt.Sprintf("chmod 1777 %s", gmsSharedMountPath)},
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser: ptr.To[int64](0),
+			// Must run as uid 0 to chmod the hostPath mount for the non-root
+			// engine/server processes. Explicitly set RunAsNonRoot=false so
+			// cluster-wide baseline/restricted PodSecurity policies and some
+			// pod-level SecurityContext defaults do not silently reject this
+			// init container on admission.
+			RunAsUser:    ptr.To[int64](0),
+			RunAsNonRoot: ptr.To(false),
 		},
 		VolumeMounts: []corev1.VolumeMount{mount},
 	}
@@ -270,12 +278,14 @@ func getGPUCount(resources *v1alpha1.Resources) int32 {
 }
 
 // getDeviceClassName returns the DRA device class name from gpuType,
-// falling back to the standard nvidia.com/gpu resource name.
+// falling back to the default device class shipped with the NVIDIA DRA
+// driver. The literal "gpu.nvidia.com" is intentionally not duplicated
+// here — it is the single source of truth in the dra package.
 func getDeviceClassName(resources *v1alpha1.Resources) string {
 	if resources != nil && resources.Limits != nil && resources.Limits.GPUType != "" {
 		return resources.Limits.GPUType
 	}
-	return "gpu.nvidia.com"
+	return dra.DefaultDeviceClassName
 }
 
 // gmsRCTName returns a deterministic ResourceClaimTemplate name for a given rank.

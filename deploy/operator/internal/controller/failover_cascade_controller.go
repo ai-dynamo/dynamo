@@ -94,6 +94,15 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// Defensive re-check of the engine-group-member label: the predicate
+	// already filters on it at the informer layer, but labels can be removed
+	// between predicate evaluation and reconcile. We never want to cascade-
+	// delete a pod that has been explicitly unlabeled (e.g. an operator
+	// manually quarantining a pod).
+	if pod.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] != commonconsts.KubeLabelValueTrue {
+		return ctrl.Result{}, nil
+	}
+
 	pcsg := pod.Labels[groveLabelPCSG]
 	pcsgReplica := pod.Labels[groveLabelPCSGReplicaIndex]
 	podIndex := pod.Labels[groveLabelPodIndex]

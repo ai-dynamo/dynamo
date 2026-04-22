@@ -10572,8 +10572,12 @@ spec:
                     numShadows:
                       default: 1
                       description: |-
-                        NumShadows is the number of shadow (standby) engine pods/containers per rank.
+                        NumShadows is the number of shadow (standby) engine pods per rank.
                         Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
+
+                        NumShadows is only meaningful for mode=interPod; intraPod uses a fixed
+                        1 primary + 1 shadow sidecar layout and any value other than 1 is
+                        rejected at admission time.
                       format: int32
                       minimum: 1
                       type: integer

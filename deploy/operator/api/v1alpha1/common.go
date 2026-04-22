@@ -202,8 +202,12 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Enum=intraPod;interPod
 	// +optional
 	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
-	// NumShadows is the number of shadow (standby) engine pods/containers per rank.
+	// NumShadows is the number of shadow (standby) engine pods per rank.
 	// Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
+	//
+	// NumShadows is only meaningful for mode=interPod; intraPod uses a fixed
+	// 1 primary + 1 shadow sidecar layout and any value other than 1 is
+	// rejected at admission time.
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +optional

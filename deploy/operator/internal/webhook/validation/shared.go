@@ -308,6 +308,17 @@ func (v *SharedSpecValidator) validateFailover() error {
 				"%s.failover: failover.mode %q must match gpuMemoryService.mode %q",
 				v.fieldPath, v.spec.Failover.Mode, v.spec.GPUMemoryService.Mode))
 		}
+
+		// intraPod is a fixed 1 primary + 1 shadow sidecar layout; numShadows
+		// is meaningless here and any value other than the implicit 1 is
+		// almost certainly a configuration error (user probably wanted
+		// mode=interPod).
+		if v.spec.Failover.NumShadows != 0 && v.spec.Failover.NumShadows != 1 {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover.numShadows=%d is invalid for mode=%q: intraPod uses a fixed 1 primary + 1 shadow sidecar; "+
+					"use failover.mode=%q to configure numShadows",
+				v.fieldPath, v.spec.Failover.NumShadows, nvidiacomv1alpha1.GMSModeIntraPod, nvidiacomv1alpha1.GMSModeInterPod))
+		}
 	}
 
 	// For inter-pod mode: validate GPU count and component type restrictions.
@@ -344,6 +355,18 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 		return fmt.Errorf(
 			"%s.gpuMemoryService: GPU memory service is only supported for worker components (componentType must be worker, prefill, or decode)",
 			v.fieldPath)
+	}
+
+	// gpuMemoryService is the *intra-pod* (sidecar) GMS spec. The inter-pod
+	// layout is expressed exclusively through failover.mode=interPod, which
+	// wires a dedicated weight-server pod at the PCSG level. Accepting
+	// mode=interPod here would be meaningless (the sidecar path cannot
+	// produce an inter-pod layout) and misleading in the DGD spec.
+	if v.spec.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+		return fmt.Errorf(
+			"%s.gpuMemoryService.mode=%q is not allowed on the sidecar spec; "+
+				"to enable inter-pod GMS, set failover.enabled=true and failover.mode=%q",
+			v.fieldPath, nvidiacomv1alpha1.GMSModeInterPod, nvidiacomv1alpha1.GMSModeInterPod)
 	}
 
 	gpuCount, err := parseGPUCount(v.spec.Resources)

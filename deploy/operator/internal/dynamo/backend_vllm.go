@@ -27,8 +27,16 @@ type VLLMBackend struct {
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if component.IsInterPodFailoverEnabled() && !containerHasArg(container, "--load-format", "gms") {
-		injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
+	if component.IsInterPodFailoverEnabled() {
+		if !containerHasArg(container, "--load-format", "gms") {
+			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
+		}
+		// DYN_VLLM_GMS_SHADOW_MODE is a vLLM-engine-specific switch (activates
+		// the vLLM-side GMS client path for shadow weight loading). It is
+		// injected here — in the vLLM backend — rather than in the backend-
+		// agnostic GMS helpers so non-vLLM backends do not inherit a stray,
+		// meaningless env var if/when inter-pod GMS is extended to them.
+		container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 	}
 
 	isMultinode := numberOfNodes > 1

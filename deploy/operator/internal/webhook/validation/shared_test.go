@@ -396,6 +396,119 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 	}
 }
 
+// TestSharedSpecValidator_Failover_ModeConstraints covers the mode-scoping
+// invariants added to validateFailover / validateGPUMemoryService:
+//
+//  1. gpuMemoryService.mode=interPod is rejected on the sidecar spec
+//     (inter-pod GMS is expressed via failover.mode=interPod exclusively).
+//  2. intraPod failover with numShadows != 1 is rejected (intraPod is a
+//     fixed 1 primary + 1 shadow layout).
+//  3. The sibling valid cases (mode=intraPod, mode unset) still pass.
+func TestSharedSpecValidator_Failover_ModeConstraints(t *testing.T) {
+	workerGPU := &nvidiacomv1alpha1.Resources{
+		Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+	}
+
+	tests := []struct {
+		name       string
+		spec       *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		wantErr    bool
+		errSubstr  string
+	}{
+		{
+			name: "sidecar gpuMemoryService mode=interPod is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "not allowed on the sidecar spec",
+		},
+		{
+			name: "sidecar gpuMemoryService mode=intraPod is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "sidecar gpuMemoryService mode unset is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "intraPod failover with numShadows=2 is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 2,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "numShadows",
+		},
+		{
+			name: "intraPod failover with numShadows=1 is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 1,
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := NewSharedSpecValidator(tt.spec, "spec", "default-my-dgd")
+			_, err := v.Validate(context.Background())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tt.errSubstr != "" && !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // contains checks if s contains substr
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||

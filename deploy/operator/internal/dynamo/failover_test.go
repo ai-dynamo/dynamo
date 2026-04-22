@@ -143,7 +143,11 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
 	assert.True(t, hasEnvVar(c, gms.EnvSocketDir, gmsSharedMountPath))
 	assert.True(t, hasEnvVar(c, "FAILOVER_LOCK_PATH", gmsSharedMountPath+"/"+gmsFailoverLockFile))
-	assert.True(t, hasEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE", "true"))
+	// DYN_VLLM_GMS_SHADOW_MODE is backend-specific and is injected by
+	// VLLMBackend.UpdateContainer, not by augmentEngineForGMS. See
+	// TestVLLMBackend_UpdateContainer_InterPodGMS in backend_vllm_test.go.
+	assert.False(t, hasEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE", "true"),
+		"vLLM-specific env var must not leak into backend-agnostic GMS helpers")
 	assert.True(t, hasEnvVar(c, "DYN_SYSTEM_STARTING_HEALTH_STATUS", "notready"))
 	assert.True(t, hasEnvVar(c, "KEEP_ME", "yes"), "unrelated env vars should be preserved")
 
@@ -270,8 +274,12 @@ func TestGmsEngineEnvVars(t *testing.T) {
 	assert.True(t, names["ENGINE_ID"])
 	assert.True(t, names[gms.EnvSocketDir])
 	assert.True(t, names["FAILOVER_LOCK_PATH"])
-	assert.True(t, names["DYN_VLLM_GMS_SHADOW_MODE"])
 	assert.True(t, names["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
+	// DYN_VLLM_GMS_SHADOW_MODE is backend-specific and is injected by
+	// VLLMBackend.UpdateContainer, not by gmsEngineEnvVars. See
+	// TestVLLMBackend_UpdateContainer_InterPodGMS in backend_vllm_test.go.
+	assert.False(t, names["DYN_VLLM_GMS_SHADOW_MODE"],
+		"vLLM-specific env var must not leak into backend-agnostic GMS helpers")
 
 	for _, e := range envs {
 		if e.Name == "ENGINE_ID" {
@@ -284,21 +292,21 @@ func TestGmsEngineEnvVars(t *testing.T) {
 
 func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 	t.Run("GetNodeRank returns static rank for GMS", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsInterPodFailover: true, Rank: 2}
+		d := &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: 2}
 		rank, isShellExpr := d.GetNodeRank()
 		assert.Equal(t, "2", rank)
 		assert.False(t, isShellExpr, "GMS rank should be static, not a shell expression")
 	})
 
 	t.Run("GetNodeRank returns shell expr for non-GMS", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsInterPodFailover: false}
+		d := &GroveMultinodeDeployer{IsInterPodGMS: false}
 		rank, isShellExpr := d.GetNodeRank()
 		assert.Contains(t, rank, "GROVE_PCLQ_POD_INDEX")
 		assert.True(t, isShellExpr)
 	})
 
 	t.Run("GetHostNames for GMS multinode", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsInterPodFailover: true, Rank: 0}
+		d := &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: 0}
 		hostnames := d.GetHostNames("svc", 3)
 		assert.Len(t, hostnames, 3)
 		assert.Contains(t, hostnames[0], "ldr-$(GROVE_PCLQ_POD_INDEX)")
@@ -307,7 +315,7 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 	})
 
 	t.Run("GetHostNames for non-GMS multinode", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsInterPodFailover: false}
+		d := &GroveMultinodeDeployer{IsInterPodGMS: false}
 		hostnames := d.GetHostNames("svc", 3)
 		assert.Len(t, hostnames, 3)
 		assert.Contains(t, hostnames[0], "ldr")

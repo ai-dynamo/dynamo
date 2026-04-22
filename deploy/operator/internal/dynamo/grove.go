@@ -23,15 +23,19 @@ import (
 
 type GroveMultinodeDeployer struct {
 	MultinodeDeployer
-	// IsInterPodFailover is true when this deployer produces pod specs for an
-	// engine PCLQ that participates in inter-pod GMS failover (one engine pod
-	// per rank, per shadow, with a dedicated GMS weight server pod).
-	IsInterPodFailover bool
-	Rank               int32 // explicit node rank (used when IsInterPodFailover is true)
+	// IsInterPodGMS is true when this deployer produces pod specs for an
+	// engine PCLQ that uses the inter-pod GMS *layout* (one engine pod per
+	// rank, per shadow, with a dedicated GMS weight server pod). It is a
+	// layout/topology flag — not a failover policy flag — and governs how
+	// hostnames, node ranks, and per-pod wiring are computed. Today this
+	// layout is only produced when inter-pod GMS failover is enabled, but
+	// the deployer itself should not encode that assumption.
+	IsInterPodGMS bool
+	Rank          int32 // explicit node rank (used when IsInterPodGMS is true)
 }
 
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	if d.IsInterPodFailover {
+	if d.IsInterPodGMS {
 		// GMS: each PCLQ has multiple replicas; pods at the same index across
 		// ranks form a communication group, so use the dynamic pod index.
 		return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
@@ -42,7 +46,7 @@ func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
 }
 
 func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
-	if d.IsInterPodFailover {
+	if d.IsInterPodGMS {
 		return fmt.Sprintf("%d", d.Rank), false
 	}
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
@@ -56,7 +60,7 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 	hostnames := make([]string, 0, numberOfNodes)
 	hostnames = append(hostnames, d.GetLeaderHostname(serviceName))
 
-	if d.IsInterPodFailover {
+	if d.IsInterPodGMS {
 		for rank := int32(1); rank < numberOfNodes; rank++ {
 			hostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
 				strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, rank)

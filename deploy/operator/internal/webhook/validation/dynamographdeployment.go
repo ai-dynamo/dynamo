@@ -190,17 +190,19 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 		if !exists {
 			continue
 		}
-		oldGMS := oldService.IsInterPodFailoverEnabled()
-		newGMS := newService.IsInterPodFailoverEnabled()
-		if oldGMS != newGMS {
+		oldInterPod := oldService.IsInterPodFailoverEnabled()
+		newInterPod := newService.IsInterPodFailoverEnabled()
+		if oldInterPod != newInterPod {
 			errs = append(errs, fmt.Errorf(
-				"spec.services[%s].failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+				"spec.services[%s].failover: inter-pod GMS failover cannot be toggled after creation; "+
+					"delete and recreate the DynamoGraphDeployment",
 				serviceName,
 			))
 		}
-		if oldGMS && newGMS && oldService.Failover.NumShadows != newService.Failover.NumShadows {
+		if oldInterPod && newInterPod && oldService.Failover.NumShadows != newService.Failover.NumShadows {
 			errs = append(errs, fmt.Errorf(
-				"spec.services[%s].failover.numShadows is immutable; delete and recreate the DynamoGraphDeployment to change it",
+				"spec.services[%s].failover.numShadows is immutable for inter-pod GMS failover; "+
+					"delete and recreate the DynamoGraphDeployment to change it",
 				serviceName,
 			))
 		}
@@ -309,28 +311,35 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
-	// GMS failover requires the Grove pathway
+	// Inter-pod GMS failover requires the Grove pathway
 	if service.IsInterPodFailoverEnabled() && !v.isGrovePathway() {
 		if !v.groveEnabled {
 			return nil, fmt.Errorf(
-				"spec.services[%s]: GMS failover requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
-				serviceName)
+				"spec.services[%s]: GMS failover with mode=%q requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
+				serviceName, nvidiacomv1alpha1.GMSModeInterPod)
 		}
 		return nil, fmt.Errorf(
-			"spec.services[%s]: GMS failover requires the Grove pathway; remove or unset the %q annotation (currently %q)",
-			serviceName, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
+			"spec.services[%s]: GMS failover with mode=%q requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod,
+			consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 	}
 
 	// Inter-pod GMS failover is currently implemented only for vLLM (the engine
 	// relies on vLLM-specific runtime hooks like --load-format gms and
 	// DYN_VLLM_GMS_SHADOW_MODE). Fail fast at admission rather than producing a
-	// broken deployment when another backend is configured.
+	// broken deployment when another or no backend is configured — an empty
+	// BackendFramework means the operator cannot confirm the engine speaks
+	// vLLM, which is a hard prerequisite for inter-pod GMS.
 	if service.IsInterPodFailoverEnabled() &&
-		v.deployment.Spec.BackendFramework != "" &&
 		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
+		detected := v.deployment.Spec.BackendFramework
+		if detected == "" {
+			detected = "<unset>"
+		}
 		return nil, fmt.Errorf(
-			"spec.services[%s]: inter-pod GMS failover is currently supported only for vLLM (detected: %s)",
-			serviceName, v.deployment.Spec.BackendFramework)
+			"spec.services[%s]: inter-pod GMS failover is currently supported only for vLLM (detected: %s); "+
+				"set spec.backendFramework=%q",
+			serviceName, detected, backendFrameworkVLLM)
 	}
 
 	// Validate service name length constraints for Grove PodCliqueSet naming

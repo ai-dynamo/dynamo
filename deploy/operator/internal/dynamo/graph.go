@@ -842,6 +842,33 @@ const (
 	RoleGMS        Role = "gms"
 )
 
+// ServiceRole describes one PodClique (PCLQ) to be materialised for a
+// service. A single DynamoComponentDeploymentSharedSpec can expand into
+// multiple ServiceRoles depending on the deployment topology:
+//
+//   - single-node, no GMS: 1 role (RoleMain)
+//   - multinode, no GMS:    2 roles (RoleLeader + RoleWorker)
+//   - single-node, inter-pod GMS: 1 engine PCLQ (replicated) + 1 RoleGMS
+//     weight-server PCLQ
+//   - multinode, inter-pod GMS: N engine PCLQs (one per rank, replicated)
+//     + 1 RoleGMS weight-server PCLQ
+//
+// The fields carry the information buildCliqueForRole needs to produce a
+// concrete PodCliqueTemplateSpec:
+//
+//   - Name: PCLQ name suffix used for Grove resource naming and hostname
+//     derivation.
+//   - Role:     the pod's semantic role (main/leader/worker/gms). Drives
+//     backend-specific wiring (e.g. --load-format, --node-rank, discovery
+//     labels).
+//   - Replicas: the PCLQ replica count. For GMS this is the number of
+//     engine pods per rank (primary + NumShadows shadows); for non-GMS
+//     roles it is typically 1 (the PCSG-level serviceReplicas controls
+//     horizontal scaling).
+//   - Rank:     static node rank (0 = leader/main, 1..N-1 = workers).
+//     Non-trivial for inter-pod GMS because each rank becomes its own
+//     PCLQ and shares a pod index across shadows; for non-GMS multinode
+//     pods the rank is derived dynamically from GROVE_PCLQ_POD_INDEX.
 type ServiceRole struct {
 	Name     string
 	Role     Role
@@ -849,6 +876,14 @@ type ServiceRole struct {
 	Rank     int32 // node rank: 0 = leader/main, 1..N-1 = workers
 }
 
+// expandRolesForService turns a service's (numberOfNodes, failover.mode,
+// replicas) tuple into the concrete list of ServiceRole entries the rest of
+// the Grove rendering pipeline iterates over. It is the single place that
+// decides how many PodCliques a service produces and what each PCLQ looks
+// like (name, role, replicas, static rank). Callers that iterate "engine
+// roles" must still gate on IsInterPodFailoverEnabled() — this function
+// emits the GMS weight-server PCLQ as a regular ServiceRole, not as a
+// separate concept.
 func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentSharedSpec) []ServiceRole {
 	isInterPodFailover := component.IsInterPodFailoverEnabled()
 	isMultinode := numberOfNodes > 1
@@ -1249,8 +1284,16 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	// GMS: replace nvidia.com/gpu with a shared DRA claim and add the server sidecar.
-	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+	// Intra-pod GMS: replace nvidia.com/gpu with a shared DRA claim and add the server
+	// sidecar directly into this pod.
+	//
+	// Inter-pod GMS (failover mode=interPod) must be skipped here — that path wires
+	// DRA claims and the GMS server on a dedicated weight-server pod at the PCSG
+	// level (see generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying
+	// the claim and injecting a sidecar here would produce a double-wired engine
+	// pod (stray GMS sidecar, conflicting claim).
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled &&
+		!component.IsInterPodFailoverEnabled() {
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
@@ -1742,7 +1785,7 @@ func generatePodSpecForRole(
 	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode GMS
 	var deployer MultinodeDeployer
 	if isInterPodFailover && numberOfNodes > 1 {
-		deployer = &GroveMultinodeDeployer{IsInterPodFailover: true, Rank: r.Rank}
+		deployer = &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: r.Rank}
 	}
 
 	podSpec, err := GeneratePodSpecForComponent(
@@ -1813,7 +1856,7 @@ func generateLabels(
 	// Callers that render non-dynamo pods (specifically the RoleGMS weight
 	// server, which runs gpu_memory_service.cli.server and never registers a
 	// DynamoWorkerMetadata CR) are responsible for stripping these labels after
-	// the fact — see renderClique.
+	// the fact — see buildCliqueForRole.
 	if discovery.Backend == configv1alpha1.DiscoveryBackendKubernetes {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue

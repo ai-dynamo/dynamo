@@ -824,7 +824,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled activates failover mode. |  |  |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology.<br />intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).<br />interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove). | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
-| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine pods/containers per rank.<br />Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows). | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine pods per rank.<br />Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).<br /><br />NumShadows is only meaningful for mode=interPod; intraPod uses a fixed<br />1 primary + 1 shadow sidecar layout and any value other than 1 is<br />rejected at admission time. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### FrontendSidecarSpec
