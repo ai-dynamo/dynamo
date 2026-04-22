@@ -182,9 +182,9 @@ impl KvRouterConfig {
                 use_remote_indexer,
                 serve_indexer,
                 shared_cache_multiplier,
-                shared_cache_type: shared_cache_type.parse().unwrap_or_else(|_| {
-                    panic!("invalid shared_cache_type: {shared_cache_type:?}")
-                }),
+                shared_cache_type: shared_cache_type
+                    .parse()
+                    .unwrap_or_else(|_| panic!("invalid shared_cache_type: {shared_cache_type:?}")),
             },
         }
     }
