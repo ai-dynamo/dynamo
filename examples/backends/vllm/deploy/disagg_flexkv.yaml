@@ -28,7 +28,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv-runtime
+          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv
           imagePullPolicy: Always
           env:
           - name: POD_UID
@@ -77,7 +77,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv-runtime
+          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv
           imagePullPolicy: Always
           env:
           - name: POD_UID
@@ -205,7 +205,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv-runtime
+          image: nvcr.io/nvidian/dynamo-dev/anikkulkarni:dynamo-latest-vllm-flexkv
           imagePullPolicy: Always
           env:
           - name: POD_UID
