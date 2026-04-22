@@ -12300,36 +12300,73 @@ spec:
                             type: object
                             x-kubernetes-map-type: atomic
                         type: object
-                      failover:
+                      experimental:
                         description: |-
-                          Failover configures active-passive GPU failover for this service.
-                          When enabled, the main container is cloned into two engine containers
-                          (active + standby) sharing GPUs via DRA. Requires `gpuMemoryService.enabled`.
+                          Experimental groups opt-in preview features whose API shape and behavior
+                          may change in breaking ways between v1beta1 releases, including disappearing
+                          without a name-preserving graduation path. In v1beta1 this block holds
+                          `gpuMemoryService` and `failover`, which remain tightly coupled (failover
+                          requires GMS) and are expected to evolve together as the DRA-based GPU
+                          sharing story matures. Fields here are explicitly NOT covered by the normal
+                          v1beta1 deprecation policy; do not depend on them for production workloads.
                         properties:
-                          enabled:
+                          failover:
                             description: |-
-                              Enabled activates failover mode. The main container is cloned into two
-                              engine containers (active + standby) sharing GPUs via DRA. The standby
-                              acquires the flock when the active engine fails.
-                            type: boolean
-                          mode:
-                            default: intraPod
-                            description: Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
-                            enum:
-                              - intraPod
-                              - interPod
-                            type: string
-                          numShadows:
-                            default: 1
+                              Failover configures active-passive GPU failover for this service.
+                              When enabled, the main container is cloned into two engine containers
+                              (active + standby) sharing GPUs via DRA. Requires
+                              `experimental.gpuMemoryService.enabled`, and its `mode` must match
+                              `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
+                            properties:
+                              enabled:
+                                description: |-
+                                  Enabled activates failover mode. The main container is cloned into two
+                                  engine containers (active + standby) sharing GPUs via DRA. The standby
+                                  acquires the flock when the active engine fails.
+                                type: boolean
+                              mode:
+                                default: intraPod
+                                description: Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
+                                enum:
+                                  - intraPod
+                                  - interPod
+                                type: string
+                              numShadows:
+                                default: 1
+                                description: |-
+                                  NumShadows is the number of shadow (standby) engine containers per rank.
+                                  Reserved for future use; the operator currently creates exactly one shadow.
+                                format: int32
+                                maximum: 1
+                                minimum: 1
+                                type: integer
+                            required:
+                              - enabled
+                            type: object
+                          gpuMemoryService:
                             description: |-
-                              NumShadows is the number of shadow (standby) engine containers per rank.
-                              Reserved for future use; the operator currently creates exactly one shadow.
-                            format: int32
-                            maximum: 1
-                            minimum: 1
-                            type: integer
-                        required:
-                          - enabled
+                              GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+                              When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+                            properties:
+                              deviceClassName:
+                                default: gpu.nvidia.com
+                                description: DeviceClassName is the DRA DeviceClass to request GPUs from.
+                                type: string
+                              enabled:
+                                description: |-
+                                  Enabled activates the GMS sidecar. GPU resources on the main container
+                                  are replaced with a DRA ResourceClaim for shared GPU access.
+                                type: boolean
+                              mode:
+                                default: intraPod
+                                description: Mode selects the GMS deployment topology.
+                                enum:
+                                  - intraPod
+                                  - interPod
+                                type: string
+                            required:
+                              - enabled
+                            type: object
                         type: object
                       frontendSidecar:
                         description: |-
@@ -12348,30 +12385,6 @@ spec:
                           GlobalDynamoNamespace places the component in the global Dynamo namespace
                           rather than the per-deployment namespace derived from the DGD name.
                         type: boolean
-                      gpuMemoryService:
-                        description: |-
-                          GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
-                          When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
-                        properties:
-                          deviceClassName:
-                            default: gpu.nvidia.com
-                            description: DeviceClassName is the DRA DeviceClass to request GPUs from.
-                            type: string
-                          enabled:
-                            description: |-
-                              Enabled activates the GMS sidecar. GPU resources on the main container
-                              are replaced with a DRA ResourceClaim for shared GPU access.
-                            type: boolean
-                          mode:
-                            default: intraPod
-                            description: Mode selects the GMS deployment topology.
-                            enum:
-                              - intraPod
-                              - interPod
-                            type: string
-                        required:
-                          - enabled
-                        type: object
                       modelRef:
                         description: |-
                           ModelRef references a model served by this component. When specified,

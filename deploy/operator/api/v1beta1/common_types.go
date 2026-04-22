@@ -147,9 +147,34 @@ const (
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 
+// ExperimentalSpec groups opt-in preview features whose API shape and behavior
+// may change in breaking ways between v1beta1 releases (including disappearing
+// without a name-preserving graduation path). Fields placed under
+// `experimental` are explicitly NOT covered by the normal v1beta1 deprecation
+// policy and should not be relied on for production workloads. Features
+// graduate out of this block (and become first-class fields on the shared
+// spec) once their API is considered stable.
+type ExperimentalSpec struct {
+	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
+
+	// Failover configures active-passive GPU failover for this service.
+	// When enabled, the main container is cloned into two engine containers
+	// (active + standby) sharing GPUs via DRA. Requires
+	// `experimental.gpuMemoryService.enabled`, and its `mode` must match
+	// `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
+}
+
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
 // When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
 // via DRA (Dynamic Resource Allocation).
+//
+// Exposed under `DynamoComponentDeploymentSharedSpec.Experimental.GPUMemoryService`
+// in v1beta1 -- see ExperimentalSpec for the stability caveat.
 type GPUMemoryServiceSpec struct {
 	// Enabled activates the GMS sidecar. GPU resources on the main container
 	// are replaced with a DRA ResourceClaim for shared GPU access.
@@ -166,8 +191,11 @@ type GPUMemoryServiceSpec struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
-// annotation on the DGD.
+// Requires `experimental.gpuMemoryService.enabled` and the
+// `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+//
+// Exposed under `DynamoComponentDeploymentSharedSpec.Experimental.Failover`
+// in v1beta1 -- see ExperimentalSpec for the stability caveat.
 type FailoverSpec struct {
 	// Enabled activates failover mode. The main container is cloned into two
 	// engine containers (active + standby) sharing GPUs via DRA. The standby

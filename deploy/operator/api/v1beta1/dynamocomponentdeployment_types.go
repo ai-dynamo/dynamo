@@ -160,16 +160,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
 
-	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
-	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// Experimental groups opt-in preview features whose API shape and behavior
+	// may change in breaking ways between v1beta1 releases, including disappearing
+	// without a name-preserving graduation path. In v1beta1 this block holds
+	// `gpuMemoryService` and `failover`, which remain tightly coupled (failover
+	// requires GMS) and are expected to evolve together as the DRA-based GPU
+	// sharing story matures. Fields here are explicitly NOT covered by the normal
+	// v1beta1 deprecation policy; do not depend on them for production workloads.
 	// +optional
-	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
-
-	// Failover configures active-passive GPU failover for this service.
-	// When enabled, the main container is cloned into two engine containers
-	// (active + standby) sharing GPUs via DRA. Requires `gpuMemoryService.enabled`.
-	// +optional
-	Failover *FailoverSpec `json:"failover,omitempty"`
+	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of a DynamoComponentDeployment.
