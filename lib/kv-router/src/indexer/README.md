@@ -255,7 +255,10 @@ worker_blocks (DashMap<Worker, RwLock<HashMap>>):
 ### How Operations Work
 
 **store_blocks(worker, parent_hash, blocks)**:
-1. Find starting position: `pos = worker_blocks[worker][parent_hash].position + 1`
+1. Find starting position:
+   - `start_position` if the batch provides one
+   - otherwise `worker_blocks[worker][parent_hash].position + 1`
+   - otherwise `0`
 2. For each block at position `i`:
    - Insert into `index[(pos+i, local_hash)]` → add worker to SeqEntry
    - Insert into `worker_blocks[worker][seq_hash] = (pos+i, local_hash)`
@@ -291,9 +294,9 @@ Query: [b0, b1, b2, ..., b63, b64, ..., b127, ...]
 
 **dump_events()**:
 1. Iterate `worker_blocks`, collecting all blocks per worker
-2. Sort each worker's blocks by position (parents before children)
-3. Emit one single-block `RouterEvent::Stored` per block, synthesizing
-   `parent_hash` from any seq_hash at the prior position
+2. Sort each worker's blocks by position
+3. Emit one single-block `RouterEvent::Stored` per block with
+   `start_position = Some(position)` and `parent_hash = None`
 4. Events can be replayed into a fresh `PositionalIndexer` to reconstruct
    the same index state
 

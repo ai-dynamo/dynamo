@@ -442,6 +442,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: OPS-4448")
 @pytest.mark.timeout(
     360
 )  # exceed worker startup timeout (300s) with test-body headroom

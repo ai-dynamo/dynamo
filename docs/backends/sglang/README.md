@@ -20,7 +20,7 @@ We recommend using [uv](https://github.com/astral-sh/uv) to install:
 
 ```bash
 uv venv --python 3.12 --seed
-uv pip install "ai-dynamo[sglang]"
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
 This installs Dynamo with the compatible SGLang version.
