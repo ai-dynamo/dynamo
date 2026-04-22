@@ -40,5 +40,5 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-} && \
     git clone --depth 1 --branch ${FLEXKV_REF} https://github.com/taco-project/FlexKV.git /tmp/FlexKV && \
     cd /tmp/FlexKV && \
-    ./build.sh && \
+    pip install . && \
     rm -rf /tmp/FlexKV
