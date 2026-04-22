@@ -68,11 +68,6 @@ where
     /// The next step in the chain. PushRouter (this object) picks an instances,
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
-
-    /// Threshold for determining when a worker is busy (0.0 to 1.0)
-    /// If None, busy detection is disabled
-    busy_threshold: Option<f64>,
-
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
     /// instance list instead of the filtered avail list. Use for recovery/query paths
@@ -144,7 +139,6 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            busy_threshold: None,
             fault_detection_enabled: false,
             _phantom: PhantomData,
         })
@@ -154,12 +148,14 @@ where
     pub async fn from_client_with_threshold(
         client: Client,
         router_mode: RouterMode,
-        busy_threshold: Option<f64>,
+        _busy_threshold: Option<f64>,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
-        // Start worker monitor if provided and in dynamic mode
+        // Admission now happens in the frontend before preprocessing, but keep the
+        // constructor signature compatible so existing call sites and bindings can
+        // continue to bootstrap the shared worker monitor from here.
         if let Some(monitor) = worker_monitor.as_ref() {
             monitor.start_monitoring().await?;
         }
@@ -169,7 +165,6 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            busy_threshold,
             fault_detection_enabled: true,
             _phantom: PhantomData,
         };

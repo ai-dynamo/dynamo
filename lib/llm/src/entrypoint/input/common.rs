@@ -39,7 +39,7 @@ use dynamo_runtime::{
 };
 use std::sync::Arc;
 
-trait AdmissionCheck: Send + Sync {
+trait RejectionCheck: Send + Sync {
     fn reject_reason(&self) -> Option<String>;
 }
 
@@ -47,7 +47,7 @@ struct WorkerMonitorAdmissionCheck {
     monitor: KvWorkerMonitor,
 }
 
-impl AdmissionCheck for WorkerMonitorAdmissionCheck {
+impl RejectionCheck for WorkerMonitorAdmissionCheck {
     fn reject_reason(&self) -> Option<String> {
         self.monitor
             .is_overloaded()
@@ -59,7 +59,7 @@ struct RouterQueueAdmissionCheck {
     router: Arc<KvRouter>,
 }
 
-impl AdmissionCheck for RouterQueueAdmissionCheck {
+impl RejectionCheck for RouterQueueAdmissionCheck {
     fn reject_reason(&self) -> Option<String> {
         let pending = self.router.pending_count();
         (pending > 0).then_some(format!(
@@ -68,12 +68,12 @@ impl AdmissionCheck for RouterQueueAdmissionCheck {
     }
 }
 
-struct RequestAdmissionLayer {
-    checks: Vec<Arc<dyn AdmissionCheck>>,
+struct RejectionLayer {
+    checks: Vec<Arc<dyn RejectionCheck>>,
 }
 
-impl RequestAdmissionLayer {
-    fn new(checks: Vec<Arc<dyn AdmissionCheck>>) -> Arc<Self> {
+impl RejectionLayer {
+    fn new(checks: Vec<Arc<dyn RejectionCheck>>) -> Arc<Self> {
         Arc::new(Self { checks })
     }
 
@@ -85,7 +85,7 @@ impl RequestAdmissionLayer {
 #[async_trait::async_trait]
 impl<Req, Resp>
     Operator<SingleIn<Req>, ManyOut<Annotated<Resp>>, SingleIn<Req>, ManyOut<Annotated<Resp>>>
-    for RequestAdmissionLayer
+    for RejectionLayer
 where
     Req: Data,
     Resp: Data,
@@ -376,7 +376,7 @@ where
         }
     };
 
-    let mut admission_checks: Vec<Arc<dyn AdmissionCheck>> = Vec::new();
+    let mut admission_checks: Vec<Arc<dyn RejectionCheck>> = Vec::new();
     if let Some(monitor) = worker_monitor.clone() {
         admission_checks.push(Arc::new(WorkerMonitorAdmissionCheck { monitor }));
     }
@@ -385,7 +385,7 @@ where
             admission_checks.push(Arc::new(RouterQueueAdmissionCheck { router }));
         }
     }
-    let admission_op = RequestAdmissionLayer::new(admission_checks).into_operator();
+    let admission_op = RejectionLayer::new(admission_checks).into_operator();
 
     // Use the provided prefill chooser, or create a disabled one if not provided
     let prefill_chooser = prefill_chooser
@@ -421,7 +421,7 @@ mod tests {
 
     struct FakeAdmissionCheck(Option<String>);
 
-    impl AdmissionCheck for FakeAdmissionCheck {
+    impl RejectionCheck for FakeAdmissionCheck {
         fn reject_reason(&self) -> Option<String> {
             self.0.clone()
         }
@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_admission_layer_rejects_before_preprocessing() {
-        let layer = RequestAdmissionLayer::new(vec![Arc::new(FakeAdmissionCheck(Some(
+        let layer = RejectionLayer::new(vec![Arc::new(FakeAdmissionCheck(Some(
             "overloaded".to_string(),
         )))]);
         let request = PipelineContext::with_id((), "req-1".to_string());
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_admission_layer_forwards_when_not_overloaded() {
-        let layer = RequestAdmissionLayer::new(vec![Arc::new(FakeAdmissionCheck(None))]);
+        let layer = RejectionLayer::new(vec![Arc::new(FakeAdmissionCheck(None))]);
         let request = PipelineContext::with_id((), "req-2".to_string());
         let called = Arc::new(AtomicBool::new(false));
         let next = Arc::new(TrackingEngine {

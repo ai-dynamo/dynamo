@@ -367,11 +367,57 @@ impl KvWorkerMonitor {
 
     /// Returns true when every discovered worker is currently overloaded.
     ///
-    /// This mirrors the legacy PushRouter check: if there are no discovered workers,
-    /// overload is false so the regular routing path can surface the missing-endpoint error.
+    /// Prefer the live worker-state view when we have telemetry for every discovered
+    /// worker so queue-depth admission can react immediately, even before the shared
+    /// free-instance cache is refreshed. Fall back to the cache while telemetry is
+    /// still warming up so startup behavior stays compatible.
     pub fn is_overloaded(&self) -> bool {
         let all_instances = self.client.instance_ids();
-        !all_instances.is_empty() && self.client.instance_ids_free().is_empty()
+        if all_instances.is_empty() {
+            return false;
+        }
+
+        if Self::all_discovered_instances_busy(
+            &self.worker_load_states,
+            &all_instances,
+            self.active_decode_blocks_threshold(),
+            self.active_prefill_tokens_threshold(),
+            self.active_prefill_tokens_threshold_frac(),
+        ) {
+            return true;
+        }
+
+        self.client.instance_ids_free().is_empty()
+    }
+
+    fn all_discovered_instances_busy(
+        worker_load_states: &DashMap<u64, WorkerLoadState>,
+        all_instances: &[u64],
+        active_decode_blocks_threshold: f64,
+        active_prefill_tokens_threshold: u64,
+        active_prefill_tokens_threshold_frac: f64,
+    ) -> bool {
+        if all_instances.is_empty() {
+            return false;
+        }
+
+        if !all_instances
+            .iter()
+            .all(|instance_id| worker_load_states.contains_key(instance_id))
+        {
+            return false;
+        }
+
+        let busy_instances = Self::busy_instances_from_states(
+            worker_load_states,
+            active_decode_blocks_threshold,
+            active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
+        );
+
+        all_instances
+            .iter()
+            .all(|instance_id| busy_instances.contains(instance_id))
     }
 
     fn busy_instances_from_states(
@@ -829,5 +875,43 @@ mod tests {
 
         state.queued_decode_requests.insert(1, 1);
         assert!(state.is_busy(1.0, u64::MAX, 10.0));
+    }
+
+    #[test]
+    fn all_discovered_instances_busy_requires_complete_telemetry() {
+        let states = DashMap::new();
+        states.insert(1, WorkerLoadState::default());
+
+        assert!(!KvWorkerMonitor::all_discovered_instances_busy(
+            &states,
+            &[1, 2],
+            1.0,
+            u64::MAX,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn busy_instances_from_states_uses_waiting_queue_backlog() {
+        let states = DashMap::new();
+
+        let mut worker_one = WorkerLoadState::default();
+        worker_one.queued_prefill_requests.insert(0, 1);
+        let mut worker_two = WorkerLoadState::default();
+        worker_two.queued_decode_requests.insert(0, 2);
+
+        states.insert(1, worker_one);
+        states.insert(2, worker_two);
+
+        let mut busy = KvWorkerMonitor::busy_instances_from_states(&states, 1.0, u64::MAX, 10.0);
+        busy.sort_unstable();
+        assert_eq!(busy, vec![1, 2]);
+        assert!(KvWorkerMonitor::all_discovered_instances_busy(
+            &states,
+            &[1, 2],
+            1.0,
+            u64::MAX,
+            10.0,
+        ));
     }
 }

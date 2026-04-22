@@ -3,10 +3,12 @@
 
 //! HTTP endpoint for dynamically getting/setting the busy thresholds per model.
 //!
-//! The busy thresholds control when workers are marked as "busy" based on their
-//! KV cache block utilization and prefill token utilization. When all workers
-//! for a model exceed their thresholds, new requests are rejected with a 503
-//! Service Unavailable response.
+//! The busy thresholds control the worker-utilization portion of request admission.
+//! Frontends also reject when router or worker waiting queues already have backlog,
+//! but the `/busy_threshold` API remains the compatibility surface for configuring
+//! the utilization thresholds that feed the shared worker monitor. When every
+//! discovered worker is overloaded, new requests are rejected with a 503 Service
+//! Unavailable response.
 //!
 //! ## Endpoints
 //!
