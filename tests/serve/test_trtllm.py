@@ -25,33 +25,10 @@ from tests.utils.payload_builder import (
     metric_payload_default,
     multimodal_payload_default,
 )
-from tests.utils.payloads import VideoGenerationPayload
+from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class ImageGenerationPayload(BasePayload):
-    """Payload for /v1/images/generations endpoint (TRT-LLM image diffusion)."""
-
-    endpoint: str = "/v1/images/generations"
-    timeout: int = 300
-
-    def response_handler(self, response: Any) -> str:
-        response.raise_for_status()
-        result = response.json()
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
-        assert len(result["data"]) > 0, "Empty data in image response"
-        entry = result["data"][0]
-        if "url" in entry:
-            assert entry["url"], "Image response url is empty"
-            return entry["url"]
-        assert entry.get("b64_json"), "Image response b64_json is empty"
-        return "b64_image_returned"
-
-    def validate(self, response: Any, content: str) -> None:
-        assert content, "Image response content is empty"
 
 @dataclass
 class TRTLLMConfig(EngineConfig):
