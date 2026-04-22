@@ -108,6 +108,18 @@ def _normalize_router_mode(
     return router_mode
 
 
+def _normalize_objective(
+    objective: str,
+) -> Literal["throughput", "mean_e2e_latency", "mean_ttft"]:
+    if objective not in {"throughput", "mean_e2e_latency", "mean_ttft"}:
+        raise ValueError(
+            "objective must be one of "
+            "['throughput', 'mean_e2e_latency', 'mean_ttft'], "
+            f"got {objective!r}"
+        )
+    return objective
+
+
 def _router_states(
     *,
     router_mode: Literal["kv_router", "round_robin", "both"],
@@ -303,6 +315,7 @@ def optimize_dense_disagg_with_replay(
     base_router_config: KvRouterConfig | None = None,
     max_total_gpus: int,
     constraints: Mapping[str, float] | None = None,
+    objective: Literal["throughput", "mean_e2e_latency", "mean_ttft"] = "throughput",
     router_mode: Literal["kv_router", "round_robin", "both"] = "kv_router",
     overlap_score_weights: Sequence[float] | None = None,
     max_parallel_evals: int = DEFAULT_MAX_PARALLEL_EVALS,
@@ -321,6 +334,7 @@ def optimize_dense_disagg_with_replay(
     """
     backend = _validate_backend(backend)
     router_mode = _normalize_router_mode(router_mode)
+    objective = _normalize_objective(objective)
     if max_total_gpus < 2:
         raise ValueError("max_total_gpus must be at least 2 for disaggregated replay")
 
@@ -368,6 +382,7 @@ def optimize_dense_disagg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=normalized_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
@@ -391,6 +406,7 @@ def optimize_dense_disagg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=normalized_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
@@ -420,6 +436,7 @@ def optimize_dense_disagg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=normalized_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
@@ -485,6 +502,7 @@ def optimize_dense_agg_with_replay(
     base_router_config: KvRouterConfig | None = None,
     max_total_gpus: int,
     constraints: Mapping[str, float] | None = None,
+    objective: Literal["throughput", "mean_e2e_latency", "mean_ttft"] = "throughput",
     router_mode: Literal["kv_router", "round_robin", "both"] = "kv_router",
     overlap_score_weights: Sequence[float] | None = None,
     max_parallel_evals: int = DEFAULT_MAX_PARALLEL_EVALS,
@@ -502,6 +520,7 @@ def optimize_dense_agg_with_replay(
     """
     backend = _validate_backend(backend)
     router_mode = _normalize_router_mode(router_mode)
+    objective = _normalize_objective(objective)
     if max_total_gpus < 1:
         raise ValueError("max_total_gpus must be at least 1 for aggregated replay")
 
@@ -542,6 +561,7 @@ def optimize_dense_agg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=normalized_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
@@ -563,6 +583,7 @@ def optimize_dense_agg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=normalized_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
@@ -593,6 +614,7 @@ def optimize_dense_agg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=normalized_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,

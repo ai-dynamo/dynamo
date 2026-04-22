@@ -40,6 +40,19 @@ from .models import (
 from .scoring import _violation_penalty
 
 
+def _compute_score(report: Mapping[str, Any], objective: str) -> float:
+    if objective == "throughput":
+        return float(report["output_throughput_tok_s"])
+
+    if objective == "mean_e2e_latency":
+        return -float(report.get("mean_e2e_latency_ms", float("inf")))
+
+    if objective == "mean_ttft":
+        return -float(report.get("mean_ttft_ms", float("inf")))
+
+    raise ValueError(f"unsupported replay optimization objective: {objective}")
+
+
 def _run_replay_for_state(
     *,
     state: DenseReplayState,
@@ -127,6 +140,7 @@ def _evaluate_state(
     model: str,
     backend: str,
     system: str,
+    objective: str,
     constraints: Mapping[str, float],
     cache: dict[DenseReplayState, dict[str, Any]],
 ) -> dict[str, Any]:
@@ -168,7 +182,7 @@ def _evaluate_state(
 
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
-    score = throughput
+    score = _compute_score(report, objective)
     penalty = _violation_penalty(report, constraints, total_gpus_used)
     feasible = penalty == 0.0
     record = {
@@ -177,6 +191,7 @@ def _evaluate_state(
         "total_gpus_used": total_gpus_used,
         "output_throughput_tok_s": throughput,
         "score": score,
+        "objective": objective,
         "feasible": feasible,
         "violation_penalty": penalty,
     }
@@ -201,6 +216,7 @@ def _evaluate_agg_state(
     model: str,
     backend: str,
     system: str,
+    objective: str,
     constraints: Mapping[str, float],
     cache: dict[DenseAggReplayState, dict[str, Any]],
 ) -> dict[str, Any]:
@@ -232,7 +248,7 @@ def _evaluate_agg_state(
 
     total_gpus_used = state.total_gpus_used
     throughput = float(report["output_throughput_tok_s"])
-    score = throughput
+    score = _compute_score(report, objective)
     penalty = _violation_penalty(report, constraints, total_gpus_used)
     feasible = penalty == 0.0
     record = {
@@ -241,6 +257,7 @@ def _evaluate_agg_state(
         "total_gpus_used": total_gpus_used,
         "output_throughput_tok_s": throughput,
         "score": score,
+        "objective": objective,
         "feasible": feasible,
         "violation_penalty": penalty,
     }
@@ -274,6 +291,7 @@ def _evaluate_state_from_json_payloads(payload: Mapping[str, Any]) -> dict[str, 
         model=payload["model"],
         backend=payload["backend"],
         system=payload["system"],
+        objective=payload["objective"],
         constraints=payload["constraints"],
         cache={},
     )
@@ -294,6 +312,7 @@ def _evaluate_agg_state_from_json_payloads(
         model=payload["model"],
         backend=payload["backend"],
         system=payload["system"],
+        objective=payload["objective"],
         constraints=payload["constraints"],
         cache={},
     )
@@ -309,6 +328,7 @@ def _evaluate_states(
     model: str,
     backend: str,
     system: str,
+    objective: str,
     constraints: Mapping[str, float],
     cache: dict[DenseReplayState, dict[str, Any]],
     max_parallel_evals: int,
@@ -340,6 +360,7 @@ def _evaluate_states(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=constraints,
                 cache=cache,
             )
@@ -360,6 +381,7 @@ def _evaluate_states(
             "model": model,
             "backend": backend,
             "system": system,
+            "objective": objective,
             "constraints": constraints,
         }
         for state in uncached_states
@@ -388,6 +410,7 @@ def _evaluate_agg_states(
     model: str,
     backend: str,
     system: str,
+    objective: str,
     constraints: Mapping[str, float],
     cache: dict[DenseAggReplayState, dict[str, Any]],
     max_parallel_evals: int,
@@ -418,6 +441,7 @@ def _evaluate_agg_states(
                 model=model,
                 backend=backend,
                 system=system,
+                objective=objective,
                 constraints=constraints,
                 cache=cache,
             )
@@ -436,6 +460,7 @@ def _evaluate_agg_states(
             "model": model,
             "backend": backend,
             "system": system,
+            "objective": objective,
             "constraints": constraints,
         }
         for state in uncached_states
