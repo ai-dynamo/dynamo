@@ -63,10 +63,7 @@ pub struct BasicReasoningParser {
     stripped_think_start: bool,
     /// Optional marker that force-exits reasoning mode when encountered inside a
     /// reasoning block (e.g. Kimi-K2/K2.5 models sometimes emit
-    /// `<|tool_calls_section_begin|>` without first closing `</think>`). When set,
-    /// the content before the marker becomes reasoning and the marker plus remainder
-    /// becomes normal text. Ported from sglang `BaseReasoningFormatDetector`
-    /// (PR sgl-project/sglang#19552).
+    /// `<|tool_calls_section_begin|>` without first closing `</think>`).
     tool_start_token: Option<String>,
 }
 
@@ -89,7 +86,7 @@ impl BasicReasoningParser {
     }
 
     /// Enables force-exit from reasoning when `token` appears inside an open reasoning
-    /// block. Used by the Kimi-K2/K2.5 reasoning parser.
+    /// block.
     pub fn with_tool_start_token(mut self, token: impl Into<String>) -> Self {
         self.tool_start_token = Some(token.into());
         self
@@ -146,7 +143,7 @@ impl ReasoningParser for BasicReasoningParser {
                     cursor += self.think_start_token.len();
                 }
                 // Look for the earliest reasoning exit point: either </think> or the
-                // optional tool_start_token (Kimi-K2 force-exit).
+                // optional tool_start_token (force-exit case).
                 let end_offset = text[cursor..].find(&self.think_end_token);
                 let tool_offset = self
                     .tool_start_token
@@ -248,7 +245,6 @@ impl ReasoningParser for BasicReasoningParser {
             }
 
             if self._in_reasoning {
-                // Find the earliest reasoning exit point.
                 let end_idx = current_text.find(self.think_end_token.as_str());
                 let tool_idx = self
                     .tool_start_token
@@ -263,8 +259,6 @@ impl ReasoningParser for BasicReasoningParser {
                 };
 
                 if let Some(tool_at) = force_exit_idx {
-                    // Kimi-K2 force-exit: content before marker is reasoning, marker + rest
-                    // is normal text. Mirrors sglang BaseReasoningFormatDetector behavior.
                     accumulated_reasoning.push_str(&current_text[..tool_at]);
                     accumulated_normal.push_str(&current_text[tool_at..]);
                     self._buffer.clear();
@@ -349,6 +343,7 @@ impl ReasoningParser for BasicReasoningParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn test_detect_and_parse_reasoning_reasoning() {
@@ -1135,31 +1130,33 @@ mod tests {
         assert_eq!(overlap("no match", "◁think▷"), 0);
     }
 
-    // =========================================================================
-    // Kimi-K2 force-exit tests (tool_start_token)
-    //
-    // Models like Kimi-K2.5/K2.6 sometimes emit <|tool_calls_section_begin|>
-    // directly inside a <think> block without closing it first. The parser must
-    // split at the marker: content before → reasoning, marker + rest → normal.
-    // Ported from sglang PR #19552.
-    // =========================================================================
-
     fn kimi_k2_parser() -> BasicReasoningParser {
         // Mirrors the `kimi_k25` registration in reasoning/mod.rs.
         BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true)
             .with_tool_start_token(crate::reasoning::KIMI_K2_TOOL_SECTION_BEGIN)
     }
 
-    #[test]
-    fn test_force_exit_on_tool_section_one_shot() {
+    #[rstest]
+    #[case(
+        "thinking text <|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
+        "thinking text",
+        "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
+    )]
+    #[case("r</think>a", "r", "a")]
+    #[case(
+        "reasoning</think>answer <|tool_calls_section_begin|>tc",
+        "reasoning",
+        "answer <|tool_calls_section_begin|>tc"
+    )]
+    fn test_kimi_k2_one_shot_split(
+        #[case] input: &str,
+        #[case] expected_reasoning: &str,
+        #[case] expected_normal: &str,
+    ) {
         let mut parser = kimi_k2_parser();
-        let input = "thinking text <|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>";
         let r = parser.detect_and_parse_reasoning(input, &[]);
-        assert_eq!(r.reasoning_text, "thinking text");
-        assert_eq!(
-            r.normal_text,
-            "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
-        );
+        assert_eq!(r.reasoning_text, expected_reasoning);
+        assert_eq!(r.normal_text, expected_normal);
     }
 
     #[test]
@@ -1208,29 +1205,6 @@ mod tests {
         let r2 = parser.parse_reasoning_streaming_incremental("xxx", &[]);
         assert_eq!(r2.reasoning_text, "<|tool_caxxx");
         assert_eq!(r2.normal_text, "");
-    }
-
-    #[test]
-    fn test_classic_think_close_not_regressed_with_tool_token_set() {
-        // With tool_start_token set, a normal </think> close must still work.
-        let mut parser = kimi_k2_parser();
-        let r = parser.detect_and_parse_reasoning("r</think>a", &[]);
-        assert_eq!(r.reasoning_text, "r");
-        assert_eq!(r.normal_text, "a");
-    }
-
-    #[test]
-    fn test_think_end_wins_over_later_tool_start() {
-        // When </think> arrives before <|tool_calls_section_begin|>, the classic
-        // close wins and the tool marker becomes part of normal text (where the
-        // downstream tool-call parser will pick it up).
-        let mut parser = kimi_k2_parser();
-        let r = parser.detect_and_parse_reasoning(
-            "reasoning</think>answer <|tool_calls_section_begin|>tc",
-            &[],
-        );
-        assert_eq!(r.reasoning_text, "reasoning");
-        assert_eq!(r.normal_text, "answer <|tool_calls_section_begin|>tc");
     }
 
     #[test]
