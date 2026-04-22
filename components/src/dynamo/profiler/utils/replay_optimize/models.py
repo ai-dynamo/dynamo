@@ -116,8 +116,8 @@ class ReplayObjective(str, Enum):
         if self is ReplayObjective.THROUGHPUT:
             return float(report["output_throughput_tok_s"])
         if self is ReplayObjective.MEAN_TTFT:
-            return -float(report.get("mean_ttft_ms", math.inf))
-        return -float(report.get("mean_e2e_latency_ms", math.inf))
+            return -float(report["mean_ttft_ms"])
+        return -float(report["mean_e2e_latency_ms"])
 
 
 @dataclass(frozen=True)
