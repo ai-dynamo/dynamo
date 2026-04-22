@@ -91,11 +91,6 @@ pub struct MediaFetcher {
     pub user_agent: String,
     pub allow_direct_ip: bool,
     pub allow_direct_port: bool,
-    /// When `false` (default), reject URLs whose host resolves to a
-    /// blocked IP range (private / loopback / cloud metadata / etc.) and
-    /// reject hostnames in the `BLOCKED_HOSTS` list. Set to `true` for
-    /// on-prem / local-dev deployments where media lives on an internal
-    /// network. **Never** set this on anything public-facing.
     pub allow_private_ips: bool,
     pub allowed_media_domains: Option<HashSet<String>>,
     pub timeout: Option<Duration>,
@@ -124,7 +119,11 @@ impl MediaFetcher {
             return Ok(());
         }
 
-        if !self.allow_direct_ip && !matches!(url.host(), Some(url::Host::Domain(_))) {
+        let host = url
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("URL has no host component"))?;
+
+        if !self.allow_direct_ip && !matches!(host, url::Host::Domain(_)) {
             anyhow::bail!("Direct IP access is not allowed");
         }
         if !self.allow_direct_port && url.port().is_some() {
@@ -134,19 +133,16 @@ impl MediaFetcher {
         // Host-level checks: blocked hostnames and IP literals in blocked
         // ranges. DNS-resolved IPs are checked in `check_if_url_allowed_with_dns`.
         if !self.allow_private_ips {
-            let ip_literal = match url.host() {
-                None => anyhow::bail!("URL has no host component"),
-                Some(url::Host::Domain(domain)) => {
-                    let lowered = domain.to_ascii_lowercase();
+            let ip_literal = match host {
+                url::Host::Domain(domain) => {
+                    let lowered = domain.trim_end_matches('.').to_ascii_lowercase();
                     if BLOCKED_HOSTS.contains(lowered.as_str()) {
-                        anyhow::bail!(
-                            "Host '{domain}' is blocked (resolves to internal service)"
-                        );
+                        anyhow::bail!("Host '{domain}' is blocked (resolves to internal service)");
                     }
                     None
                 }
-                Some(url::Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
-                Some(url::Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+                url::Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+                url::Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
             };
             if let Some(ip) = ip_literal
                 && is_blocked_ip(&ip)
@@ -156,24 +152,17 @@ impl MediaFetcher {
         }
 
         if let Some(allowed_domains) = &self.allowed_media_domains
-            && let Some(host) = url.host_str()
-            && !allowed_domains.contains(host)
+            && let Some(host_str) = url.host_str()
+            && !allowed_domains.contains(host_str)
         {
-            anyhow::bail!("Domain '{host}' is not in allowed list");
+            anyhow::bail!("Host '{host_str}' is not in the allowed_media_domains list");
         }
 
         Ok(())
     }
 
     /// Full policy check: runs `check_if_url_allowed` and, for hostname
-    /// URLs, resolves DNS and checks each resulting IP against the blocked
-    /// ranges. Catches static DNS attacks where a domain's A record points
-    /// at a blocked IP.
-    ///
-    /// This is best-effort against DNS rebinding: reqwest re-resolves at
-    /// connect time, so an attacker who changes their DNS answer between
-    /// this call and the TCP connect can still slip through. Full
-    /// protection comes from IP pinning in the request path.
+    /// URLs, resolves DNS and checks each resulting IP against the blocked ranges.
     pub async fn check_if_url_allowed_with_dns(&self, url: &url::Url) -> Result<()> {
         self.check_if_url_allowed(url)?;
 
@@ -225,7 +214,8 @@ impl Resolve for BlocklistResolver {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::AddrNotAvailable,
                     format!("no non-blocked addresses for host '{host}'"),
-                )) as Box<dyn std::error::Error + Send + Sync>);
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
             }
             Ok(Box::new(addrs.into_iter()) as Addrs)
         })
@@ -253,9 +243,7 @@ impl MediaLoader {
         let fetcher_for_redirects = media_fetcher.clone();
         let redirect_policy = Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(anyhow::anyhow!(
-                    "too many redirects (max={MAX_REDIRECTS})"
-                ));
+                return attempt.error(anyhow::anyhow!("too many redirects (max={MAX_REDIRECTS})"));
             }
             match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
                 Ok(()) => attempt.follow(),
@@ -301,7 +289,9 @@ impl MediaLoader {
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
                 let url = &image_part.image_url.url;
-                self.media_fetcher.check_if_url_allowed_with_dns(url).await?;
+                self.media_fetcher
+                    .check_if_url_allowed_with_dns(url)
+                    .await?;
                 let data = EncodedMediaData::from_url(url, &self.http_client).await?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
@@ -322,7 +312,9 @@ impl MediaLoader {
                         })?;
 
                     let url = &video_part.video_url.url;
-                    self.media_fetcher.check_if_url_allowed_with_dns(url).await?;
+                    self.media_fetcher
+                        .check_if_url_allowed_with_dns(url)
+                        .await?;
                     let data = EncodedMediaData::from_url(url, &self.http_client).await?;
 
                     // Use runtime decoder if provided, with MDC limits enforced
@@ -497,13 +489,12 @@ mod tests_non_nixl {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("not in allowed list")
+                .contains("allowed_media_domains")
         );
     }
 
     #[test]
     fn test_is_blocked_ip_ranges() {
-        // A sampling of each RFC range.
         for ip in [
             "127.0.0.1",
             "10.0.0.1",
@@ -593,6 +584,17 @@ mod tests_non_nixl {
         let url = url::Url::parse("https://Metadata.Google.Internal/x").unwrap();
         let result = fetcher.check_if_url_allowed(&url);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hostname_blocklist_strips_trailing_dot() {
+        // FQDN form with a trailing dot must still match the blocklist;
+        // `metadata.google.internal.` resolves to the same host as
+        // `metadata.google.internal` at the DNS layer.
+        let fetcher = MediaFetcher::default();
+        let url = url::Url::parse("https://metadata.google.internal./x").unwrap();
+        let result = fetcher.check_if_url_allowed(&url);
+        assert!(result.is_err(), "FQDN with trailing dot should be rejected");
     }
 
     #[tokio::test]
