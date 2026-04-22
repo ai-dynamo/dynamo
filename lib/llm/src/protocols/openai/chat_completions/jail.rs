@@ -1081,12 +1081,18 @@ impl JailedStream {
                 }
 
                 // Named filter: drop any parsed calls whose name doesn't match.
+                // Track whether the filter drained a non-empty list so we can
+                // suppress the content fallback below — otherwise the raw
+                // wrong-tool JSON would leak to the client as assistant text.
+                let mut filter_dropped_all = false;
                 if let Some(ref required_name) = self.named_tool_name {
+                    let pre_filter_len = tool_call_chunks.len();
                     tool_call_chunks.retain(|tc| {
                         tc.function.as_ref().and_then(|f| f.name.as_deref())
                             == Some(required_name.as_str())
                     });
-                    if tool_call_chunks.is_empty() {
+                    if pre_filter_len > 0 && tool_call_chunks.is_empty() {
+                        filter_dropped_all = true;
                         tracing::warn!(
                             required = %required_name,
                             "tool_choice=named: parsers emitted no matching tool calls; dropping jail output"
@@ -1102,6 +1108,18 @@ impl JailedStream {
                         Some(tool_call_chunks),
                         base_choice.finish_reason,
                         None,
+                        base_choice.logprobs.clone(),
+                    )
+                } else if filter_dropped_all {
+                    // Named filter rejected every parsed call — do not leak
+                    // the wrong-tool JSON back as content.
+                    create_choice_stream(
+                        choice_index,
+                        Some(Role::Assistant),
+                        "",
+                        None,
+                        base_choice.finish_reason,
+                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 } else {

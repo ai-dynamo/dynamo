@@ -3636,5 +3636,20 @@ fahrenheit
             tool_call_count, 0,
             "Named + no-parser: wrong-name tool call must be filtered"
         );
+
+        // The filtered-out tool JSON must not leak as assistant content.
+        let emitted_text: String = results
+            .iter()
+            .flat_map(|r| r.data.as_ref().map(|d| &d.inner.choices).into_iter())
+            .flatten()
+            .filter_map(|c| match c.delta.content.as_ref()? {
+                ChatCompletionMessageContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !emitted_text.contains("search"),
+            "wrong-tool JSON leaked to content: {emitted_text:?}"
+        );
     }
 }
