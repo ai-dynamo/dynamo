@@ -21,12 +21,13 @@ static TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 /// `arguments` (JSON object) between the configured `call_start`, `argument_begin`, and
 /// `call_end` tokens.
 ///
-/// The `function_id` pattern `[\w.]+:\d+` matches the `functions.name:index` format used by
-/// Kimi K2, consistent with sglang/vllm reference implementations.
+/// The `function_id` pattern `[\w.\-]+:\d+` matches the `functions.name:index` format used by
+/// Kimi K2, consistent with sglang's reference implementation. The hyphen is included to
+/// support function names with dashes (common in MCP tools, e.g. `mcp__portal__search-documents`).
 fn get_tool_call_regex(config: &KimiK2ParserConfig) -> &'static Regex {
     TOOL_CALL_REGEX.get_or_init(|| {
         let pattern = format!(
-            r"(?s){}\s*(?P<function_id>[\w.]+:\d+)\s*{}\s*(?P<arguments>\{{.*?\}})\s*{}",
+            r"(?s){}\s*(?P<function_id>[\w.\-]+:\d+)\s*{}\s*(?P<arguments>\{{.*?\}})\s*{}",
             regex::escape(&config.call_start),
             regex::escape(&config.argument_begin),
             regex::escape(&config.call_end),
@@ -37,7 +38,7 @@ fn get_tool_call_regex(config: &KimiK2ParserConfig) -> &'static Regex {
 
 fn get_id_regex() -> &'static Regex {
     ID_REGEX.get_or_init(|| {
-        Regex::new(r"^(?:functions\.)?(?P<name>[\w\.]+):(?P<index>\d+)$")
+        Regex::new(r"^(?:functions\.)?(?P<name>[\w.\-]+):(?P<index>\d+)$")
             .expect("Failed to compile kimi k2 id regex")
     })
 }
@@ -630,7 +631,7 @@ mod tests {
     fn test_parse_invalid_function_id_rejected_by_regex() {
         // vllm: test_extract_tool_calls_invalid_funcall
         // sglang: test_invalid_tool_call
-        // After C2 fix, function_id regex requires [\w.]+:\d+ — IDs without :digit are rejected
+        // function_id regex requires [\w.\-]+:\d+ — IDs without :digit are rejected
         let config = default_config();
 
         // No colon+digit suffix at all
@@ -733,5 +734,47 @@ mod tests {
             Some("Here is my answer.  And more text.".to_string()),
             "Text around empty section should be preserved"
         );
+    }
+
+    #[test]
+    fn test_parse_hyphenated_function_name() {
+        // sglang PR #19552: function names with a single hyphen (common in MCP tools).
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.list-tasklists:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "Hyphenated name should parse as a tool call"
+        );
+        assert_eq!(calls[0].function.name, "list-tasklists");
+        assert_eq!(calls[0].function.arguments, "{}");
+        assert_eq!(normal, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_parse_mcp_style_name_with_multiple_separators() {
+        // sglang PR #19552: names mixing underscores and hyphens, non-zero index.
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.mcp__portal__search-documents:3<|tool_call_argument_begin|>{"q":"roger federer"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, _normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "mcp__portal__search-documents");
+        assert_eq!(calls[0].id, "functions.mcp__portal__search-documents:3");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["q"], "roger federer");
+    }
+
+    #[test]
+    fn test_parse_real_world_gtasks_name() {
+        // Real production case: Kimi-K2.6 emitting gtasks_list-tasklists via MCP.
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.gtasks_list-tasklists:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, _normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "gtasks_list-tasklists");
     }
 }
