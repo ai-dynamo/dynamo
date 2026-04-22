@@ -58,8 +58,12 @@ impl ConnectorLeader {
             .expect("session should exist")
             .num_computed_tokens;
 
-        let g1_block_ids =
-            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, self.block_size());
+        let g1_block_ids = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            self.block_size(),
+        );
 
         // Record the block_ids - this assigns them to the token_block sequence hashes
         slot.apply_new_blocks(block_ids);
@@ -119,8 +123,12 @@ impl ConnectorLeader {
                 Some(state) => state.num_computed_tokens,
                 None => 0,
             };
-            let onboard_blocks_ids =
-                select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, self.block_size());
+            let onboard_blocks_ids = select_onboard_block_ids(
+                &block_ids,
+                num_computed_tokens,
+                num_external_tokens,
+                self.block_size(),
+            );
 
             // record the block_ids
             // this will assign the block_ids to the token_block sequence hashes
@@ -281,8 +289,12 @@ mod tests {
         let num_computed_tokens = 2 * BLOCK_SIZE; // 2 blocks already computed
         let num_external_tokens = 3 * BLOCK_SIZE; // 3 blocks to onboard
 
-        let result =
-            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
 
         // Must select blocks [102, 103, 104] — the 3 blocks after the 2 computed ones
         assert_eq!(result, vec![102, 103, 104]);
@@ -295,8 +307,12 @@ mod tests {
         let num_computed_tokens = 0;
         let num_external_tokens = 5 * BLOCK_SIZE;
 
-        let result =
-            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
 
         assert_eq!(result, vec![100, 101, 102, 103, 104]);
     }
@@ -308,8 +324,12 @@ mod tests {
         let num_computed_tokens = 0;
         let num_external_tokens = 6 * BLOCK_SIZE;
 
-        let result =
-            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
 
         assert_eq!(result, vec![100, 101, 102, 103, 104, 105]);
     }
@@ -321,8 +341,12 @@ mod tests {
         let num_computed_tokens = 6 * BLOCK_SIZE;
         let num_external_tokens = 0;
 
-        let result =
-            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
 
         assert_eq!(result, Vec::<BlockId>::new());
     }
@@ -332,10 +356,14 @@ mod tests {
     fn test_select_onboard_blocks_single_external_after_large_prefix() {
         let block_ids: Vec<BlockId> = (100..120).collect(); // 20 blocks
         let num_computed_tokens = 15 * BLOCK_SIZE;
-        let num_external_tokens = 1 * BLOCK_SIZE;
+        let num_external_tokens = BLOCK_SIZE;
 
-        let result =
-            select_onboard_block_ids(&block_ids, num_computed_tokens, num_external_tokens, BLOCK_SIZE);
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
 
         // Block at index 15 (after 15 computed blocks)
         assert_eq!(result, vec![115]);
