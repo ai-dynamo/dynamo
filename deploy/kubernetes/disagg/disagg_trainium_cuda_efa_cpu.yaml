@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Both workers use CPU KV buffers while NIXL transfers data over EFA with LIBFABRIC.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-trainium-cuda-efa-cpu
+spec:
+  pvcs:
+  - create: false
+    name: model-cache
+  - create: false
+    name: compilation-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+      replicas: 1
+      resources:
+        requests:
+          cpu: "8"
+        limits:
+          cpu: "8"
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: vllm-disagg-trainium-cuda-efa-cpu
+                    nvidia.com/dynamo-component-type: worker
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -c
+          - |
+            exec python3 -m dynamo.frontend --router-mode kv --router-reset-states
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        requests:
+          gpu: "1"
+          custom:
+            vpc.amazonaws.com/efa: "1"
+        limits:
+          gpu: "1"
+          custom:
+            vpc.amazonaws.com/efa: "1"
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true
+      extraPodSpec:
+        nodeSelector:
+          node.kubernetes.io/instance-type: p5.48xlarge
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: vllm-disagg-trainium-cuda-efa-cpu
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-component: VllmPrefillWorker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          - name: VLLM_TARGET_DEVICE
+            value: cuda
+          - name: FI_PROVIDER
+            value: efa
+          - name: FI_EFA_USE_DEVICE_RDMA
+            value: "0"
+          - name: FI_EFA_FORK_SAFE
+            value: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            aws.amazon.com/neuron: "1"
+            vpc.amazonaws.com/efa: "1"
+        limits:
+          custom:
+            aws.amazon.com/neuron: "1"
+            vpc.amazonaws.com/efa: "1"
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /home/dynamo/.cache/huggingface
+      - name: compilation-cache
+        mountPoint: /home/dynamo/.cache/vllm
+        useAsCompilationCache: true
+      extraPodSpec:
+        nodeSelector:
+          node.kubernetes.io/instance-type: trn1n.32xlarge
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: vllm-disagg-trainium-cuda-efa-cpu
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-component: VllmDecodeWorker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          - name: VLLM_TARGET_DEVICE
+            value: trainium
+          - name: FI_PROVIDER
+            value: efa
+          - name: FI_EFA_USE_DEVICE_RDMA
+            value: "0"
+          - name: FI_EFA_FORK_SAFE
+            value: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
