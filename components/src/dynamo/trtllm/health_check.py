@@ -55,24 +55,21 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
     TRT-LLM-specific health check payload.
 
     Provides TRT-LLM defaults and inherits environment override support from base class.
+    For DECODE workers, marks the probe so the handler runs it as a local
+    prefill+decode (no transceiver, no prefill peer required).
     """
 
-    def __init__(self, tokenizer: Any = None) -> None:
-        """
-        Initialize TRT-LLM health check payload with TRT-LLM-specific defaults.
-
-        Args:
-            tokenizer: Optional TRT-LLM tokenizer to extract BOS token from.
-                       If provided, will attempt to use the model's actual BOS token.
-        """
+    def __init__(
+        self,
+        tokenizer: Any = None,
+        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+    ) -> None:
         bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
 
-        # Set TensorRT-LLM default payload - minimal request that completes quickly
-        # The handler expects token_ids, stop_conditions, and sampling_options
         self.default_payload = {
             "token_ids": [bos_token_id],
             "stop_conditions": {
-                "max_tokens": 1,  # Generate only 1 token
+                "max_tokens": 1,
                 "stop": None,
                 "stop_token_ids": None,
                 "include_stop_str_in_output": False,
@@ -89,16 +86,9 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
                 "seed": None,
             },
         }
+        if disaggregation_mode == DisaggregationMode.DECODE:
+            self.default_payload["_CANARY_HEALTH_CHECK"] = True
+            self.default_payload["disaggregated_params"] = {
+                "request_type": "context_and_generation"
+            }
         super().__init__()
-
-
-def build_worker_health_check_payload(
-    disaggregation_mode: DisaggregationMode,
-    tokenizer: Any = None,
-) -> dict:
-    payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
-    if disaggregation_mode == DisaggregationMode.DECODE:
-        # DECODE handler runs this as a local prefill+decode (no transceiver).
-        payload["_CANARY_HEALTH_CHECK"] = True
-        payload["disaggregated_params"] = {"request_type": "context_and_generation"}
-    return payload

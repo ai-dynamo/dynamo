@@ -4,7 +4,7 @@
 import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.health_check import build_worker_health_check_payload
+from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 
 pytestmark = [
     pytest.mark.unit,
@@ -22,8 +22,8 @@ pytestmark = [
         (DisaggregationMode.DECODE, True),
     ],
 )
-def test_builder_marks_only_decode(mode, expect_canary):
-    payload = build_worker_health_check_payload(disaggregation_mode=mode)
+def test_payload_marks_only_decode(mode, expect_canary):
+    payload = TrtllmHealthCheckPayload(disaggregation_mode=mode).to_dict()
     assert bool(payload.get("_CANARY_HEALTH_CHECK")) is expect_canary
     if expect_canary:
         assert payload["disaggregated_params"] == {
