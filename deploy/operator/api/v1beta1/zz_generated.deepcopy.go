@@ -225,11 +225,6 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 		*out = new(string)
 		**out = **in
 	}
-	if in.Checkpoint != nil {
-		in, out := &in.Checkpoint, &out.Checkpoint
-		*out = new(ServiceCheckpointConfig)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.CompilationCache != nil {
 		in, out := &in.CompilationCache, &out.CompilationCache
 		*out = new(CompilationCacheConfig)
@@ -636,6 +631,11 @@ func (in *ExperimentalSpec) DeepCopyInto(out *ExperimentalSpec) {
 		in, out := &in.Failover, &out.Failover
 		*out = new(FailoverSpec)
 		**out = **in
+	}
+	if in.Checkpoint != nil {
+		in, out := &in.Checkpoint, &out.Checkpoint
+		*out = new(ServiceCheckpointConfig)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

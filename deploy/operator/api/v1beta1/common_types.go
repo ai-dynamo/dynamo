@@ -167,6 +167,16 @@ type ExperimentalSpec struct {
 	// `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
+
+	// Checkpoint configures container-image snapshotting and restore for this
+	// service. When enabled, the DGD controller can produce a DynamoCheckpoint
+	// CR from a running pod and later restore pods from that checkpoint for
+	// faster cold start. The user-facing shape of this field -- especially its
+	// interaction with the standalone DynamoCheckpoint resource and the
+	// identity-hash computation -- is still settling, which is why it lives
+	// under `experimental` in v1beta1 instead of at the top level.
+	// +optional
+	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
