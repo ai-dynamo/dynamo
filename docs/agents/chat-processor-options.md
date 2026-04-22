@@ -184,7 +184,7 @@ python -m dynamo.sglang ...
 python -m dynamo.frontend \
   --dyn-chat-processor sglang \
   --tool-call-parser kimi_k2 \
-  --reasoning-parser kimi_k2
+  --reasoning-parser kimi_k25
 
 # D -- vLLM tokenizer delegation (no KV routing).
 python -m dynamo.vllm --use-vllm-tokenizer ...
