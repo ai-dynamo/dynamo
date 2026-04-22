@@ -8,7 +8,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
-use crate::protocols::{DpRank, OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, OverlapScores, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
@@ -59,6 +61,10 @@ pub struct SchedulingRequest {
     pub pinned_worker: Option<WorkerWithDpRank>,
     /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+    /// Shared cache hit information from an external shared KV cache pool.
+    /// When present, the selector adjusts prefill cost by weighting shared hits
+    /// beyond each worker's device prefix.
+    pub shared_cache_hits: Option<SharedCacheHits>,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 

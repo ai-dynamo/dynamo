@@ -153,6 +153,7 @@ impl PendingRequest {
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: None,
         }
     }
