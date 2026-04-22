@@ -1480,8 +1480,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		if gpuInfo.System != "" {
 			hw.GPUSKU = gpuInfo.System
 		} else {
-			// Unknown GPU type: use raw model name; profiler will attempt naive config generation.
-			hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
+			if inferred := gpu.InferHardwareSystem(gpuInfo.Model); inferred != "" {
+				hw.GPUSKU = inferred
+			} else {
+				hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
+			}
 		}
 	}
 	if hw.VRAMMB == nil {
