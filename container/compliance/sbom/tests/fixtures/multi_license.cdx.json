@@ -1,0 +1,49 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "single-id",
+      "type": "library",
+      "name": "single-license",
+      "version": "1.0.0",
+      "purl": "pkg:cargo/single-license@1.0.0",
+      "licenses": [
+        {"license": {"id": "MIT"}}
+      ]
+    },
+    {
+      "bom-ref": "multi-id",
+      "type": "library",
+      "name": "multi-license",
+      "version": "2.0.0",
+      "purl": "pkg:cargo/multi-license@2.0.0",
+      "licenses": [
+        {"license": {"id": "MIT"}},
+        {"license": {"id": "Apache-2.0"}}
+      ]
+    },
+    {
+      "bom-ref": "expression-only",
+      "type": "library",
+      "name": "expr-license",
+      "version": "3.0.0",
+      "purl": "pkg:cargo/expr-license@3.0.0",
+      "licenses": [
+        {"expression": "MIT OR Apache-2.0"}
+      ]
+    },
+    {
+      "bom-ref": "mixed-entry",
+      "type": "library",
+      "name": "mixed-license",
+      "version": "4.0.0",
+      "purl": "pkg:cargo/mixed-license@4.0.0",
+      "licenses": [
+        {"license": {"id": "GPL-3.0-only"}},
+        {"expression": "MIT OR Apache-2.0"}
+      ]
+    }
+  ]
+}

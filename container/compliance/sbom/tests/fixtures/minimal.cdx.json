@@ -1,0 +1,47 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "cargo-serde",
+      "type": "library",
+      "name": "serde",
+      "version": "1.0.197",
+      "purl": "pkg:cargo/serde@1.0.197",
+      "licenses": [
+        {"license": {"id": "MIT"}}
+      ]
+    },
+    {
+      "bom-ref": "cargo-tokio",
+      "type": "library",
+      "name": "tokio",
+      "version": "1.36.0",
+      "purl": "pkg:cargo/tokio@1.36.0",
+      "licenses": [
+        {"license": {"id": "MIT"}}
+      ]
+    },
+    {
+      "bom-ref": "pypi-requests",
+      "type": "library",
+      "name": "requests",
+      "version": "2.31.0",
+      "purl": "pkg:pypi/requests@2.31.0",
+      "licenses": [
+        {"license": {"id": "Apache-2.0"}}
+      ]
+    },
+    {
+      "bom-ref": "unknown-foo",
+      "type": "library",
+      "name": "foo",
+      "version": "1.0.0",
+      "purl": "pkg:conan/foo@1.0.0",
+      "licenses": [
+        {"license": {"id": "BSD-3-Clause"}}
+      ]
+    }
+  ]
+}

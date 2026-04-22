@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Registry mapping `container/context.yaml` source-ref keys to upstream
+# repositories so that source-compiled binaries (nixl, UCX, gdrcopy,
+# libfabric, FFmpeg, flashinfer, lmcache) are attributed in the per-container
+# CycloneDX SBOM.
+#
+# Each entry describes a component that is compiled from source inside the
+# Dynamo container build chain. `inject_source_binaries.py` resolves the
+# version from `context.yaml`, synthesizes a CycloneDX component, and fetches
+# license text from the upstream GitHub repository.
+#
+# Pre-built binaries that syft already catalogues (NATS server .deb, etcd
+# release tarball, aws-efa-installer) are intentionally not listed: their
+# attribution comes from syft's dpkg / Go build-info cataloguers.
+#
+# Schema:
+#   <context_yaml_key>:
+#     name:        Human-readable display name
+#     repo:        <org>/<repo> on GitHub
+#     purl_type:   CycloneDX PURL scheme (usually "github")
+#     applies_to:  List of container frameworks that include this component
+#                  (subset of: dynamo, vllm, sglang, trtllm)
+#     license:     Optional SPDX expression override when the repo does not
+#                  publish a machine-readable LICENSE
+
+nixl_ref:
+  name: nixl
+  repo: ai-dynamo/nixl
+  purl_type: github
+  applies_to: [dynamo, vllm, sglang, trtllm]
+  license: Apache-2.0
+
+nixl_ucx_ref:
+  name: ucx
+  repo: openucx/ucx
+  purl_type: github
+  applies_to: [dynamo]
+  license: BSD-3-Clause
+
+nixl_gdrcopy_ref:
+  name: gdrcopy
+  repo: NVIDIA/gdrcopy
+  purl_type: github
+  applies_to: [dynamo]
+  license: MIT
+
+nixl_libfabric_ref:
+  name: libfabric
+  repo: ofiwg/libfabric
+  purl_type: github
+  applies_to: [dynamo]
+  license: BSD-2-Clause
+
+ffmpeg_version:
+  name: FFmpeg
+  repo: FFmpeg/FFmpeg
+  purl_type: github
+  applies_to: [dynamo, sglang]
+  license: LGPL-2.1-or-later
+
+flashinf_ref:
+  name: flashinfer
+  repo: flashinfer-ai/flashinfer
+  purl_type: github
+  applies_to: [vllm]
+  license: Apache-2.0
+
+lmcache_ref:
+  name: lmcache
+  repo: LMCache/LMCache
+  purl_type: github
+  applies_to: [vllm]
+  license: Apache-2.0

@@ -1,5 +1,79 @@
 # Container Compliance Tooling
 
+Two pipelines live here:
+
+1. **Legacy CSV pipeline** — the original BuildKit-based extractor
+   (`Dockerfile.extract`, `helpers/*`, `process_results.py`,
+   `generate_rust_deps.py`, `generate_go_deps.py`) that emits per-container
+   CSVs and per-ecosystem Markdown. Unchanged; documented below under
+   [Legacy CSV pipeline](#legacy-csv-pipeline).
+2. **CycloneDX SBOM pipeline** — new tooling under [`sbom/`](./sbom/) that
+   emits a CycloneDX 1.6 SBOM via `syft`, augments it with source-compiled
+   binaries listed in [`binary_refs.yaml`](./sbom/binary_refs.yaml), and
+   renders per-ecosystem `ATTRIBUTIONS-*.md` files. Designed to be baked
+   into each runtime container by a follow-up PR that wires it into the
+   Dockerfile build.
+
+Both pipelines run in parallel for 1–2 releases so we can validate the
+CycloneDX output against the legacy CSVs before retiring the old tooling.
+
+## CycloneDX SBOM + ATTRIBUTIONS
+
+Two artifacts get baked into each runtime container at well-known paths:
+
+```
+/opt/dynamo/sbom/<framework>.cdx.json   # CycloneDX 1.6, machine-readable
+/opt/dynamo/licenses/                   # human-readable, one per PURL ecosystem
+  ATTRIBUTIONS-Rust.md                  # pkg:cargo/    (syft + cargo-auditable)
+  ATTRIBUTIONS-Python.md                # pkg:pypi/     (syft)
+  ATTRIBUTIONS-Go.md                    # pkg:golang/   (syft, embedded build info)
+  ATTRIBUTIONS-Debian.md                # pkg:deb/      (syft, dpkg)
+  ATTRIBUTIONS-Binary.md                # pkg:github/   (inject_source_binaries.py)
+```
+
+The container itself is the unit of attribution: legal/compliance can
+`docker run --entrypoint cat <image> /opt/dynamo/licenses/ATTRIBUTIONS-Python.md`
+for any version of any framework ever shipped. No external publish step,
+no per-release-branch commit.
+
+### Prerequisites
+
+[`syft`](https://github.com/anchore/syft), Python 3.11+ with `pyyaml`, and
+optionally `GITHUB_TOKEN` to lift the GitHub anonymous API rate limit
+(~60 req/h → 5,000 req/h) when `inject_source_binaries.py` fetches license text.
+
+### Local invocation
+
+For ad-hoc inspection of an already-built image:
+
+```bash
+container/compliance/sbom/generate_sbom.sh \
+  --image nvcr.io/nvidia/dynamo:0.9.1 \
+  --framework dynamo \
+  --output-dir ./out \
+  --name dynamo-runtime
+
+python3 container/compliance/sbom/render_attributions.py \
+  --bom ./out/dynamo-runtime.cdx.json \
+  --release 0.9.1 \
+  --output-dir ./ATTRIBUTIONS
+```
+
+`--image <ref>` is a convenience shortcut for `--scan-target docker:<ref>`;
+pass `--scan-target` directly for filesystem (`dir:/`), OCI archive, or
+registry scans. Pass `--no-inject` to skip source-binary injection. License
+text is embedded inline when present; components without an SPDX license
+land under `## Unresolved` for manual triage.
+
+### Rust dependency capture
+
+The wheel-builder image installs `cargo-auditable` and wraps `cargo build`
+so every maturin invocation embeds the dependency tree into a `.dep-v0`
+ELF section that syft auto-discovers — `pkg:cargo/...` components appear
+in the SBOM with no extra processing step.
+
+## Legacy CSV pipeline
+
 Scripts for generating attribution CSVs from built container images, listing all installed dpkg and Python packages with their SPDX license identifiers where known.
 
 ## Output format

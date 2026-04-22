@@ -1,0 +1,43 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "dup-1",
+      "type": "library",
+      "name": "dup-pkg",
+      "version": "1.0.0",
+      "purl": "pkg:cargo/dup-pkg@1.0.0",
+      "licenses": [
+        {"license": {"id": "MIT"}}
+      ],
+      "properties": [
+        {"name": "dynamo:containers", "value": "container-a"}
+      ]
+    },
+    {
+      "bom-ref": "dup-2",
+      "type": "library",
+      "name": "dup-pkg",
+      "version": "1.0.0",
+      "purl": "pkg:cargo/dup-pkg@1.0.0",
+      "licenses": [
+        {"license": {"id": "Apache-2.0"}}
+      ],
+      "properties": [
+        {"name": "dynamo:containers", "value": "container-b"}
+      ]
+    },
+    {
+      "bom-ref": "unique-1",
+      "type": "library",
+      "name": "unique-pkg",
+      "version": "2.0.0",
+      "purl": "pkg:cargo/unique-pkg@2.0.0",
+      "licenses": [
+        {"license": {"id": "BSD-2-Clause"}}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "backtick-comp",
+      "type": "library",
+      "name": "backtick-pkg",
+      "version": "1.0.0",
+      "purl": "pkg:cargo/backtick-pkg@1.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT",
+            "text": {
+              "contentType": "text/plain",
+              "content": "MIT License\n\nCopyright (c) 2024 Example Corp\n\nUsage example:\n\n```\nuse backtick_pkg;\nfn main() { }\n```\n\nSome code with longer fence:\n\n````\nlet x = `backtick`;\n````\n\nPermission is hereby granted..."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
