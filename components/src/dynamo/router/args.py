@@ -41,10 +41,7 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                 "Expected format: namespace.component.endpoint"
             )
         self.namespace = parts[0]
-        if self.serve_indexer and self.use_remote_indexer:
-            raise ValueError(
-                "--serve-indexer and --use-remote-indexer are mutually exclusive"
-            )
+        self.validate_kv_router_topology()
         if self.router_prefill_load_model == "aic":
             missing = [
                 flag

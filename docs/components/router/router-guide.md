@@ -116,6 +116,8 @@ Backend workers register themselves using the `register_model` API, after which 
 
 For all available options: `python -m dynamo.frontend --help`
 
+Approximate mode (`--no-router-kv-events`) keeps prefix state only in the router/indexer that records routing decisions. `--router-replica-sync` still synchronizes active-load state, but it does not merge approximate prefix trees across local replicas. For no-events deployments, either keep a single router replica or run one `--serve-indexer` replica and point additional replicas at it with `--use-remote-indexer`.
+
 For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md).
 
 #### AIC Prefill Load Model

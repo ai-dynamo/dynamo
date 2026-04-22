@@ -36,7 +36,7 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |
 | `--router-max-tree-size` | `DYN_ROUTER_MAX_TREE_SIZE` | `1048576` | Max radix tree size before pruning (no-events mode) |
 | `--router-prune-target-ratio` | `DYN_ROUTER_PRUNE_TARGET_RATIO` | `0.8` | Target size ratio after pruning (no-events mode) |
-| `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync state across multiple router instances |
+| `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync active-load state across multiple router instances. In approximate mode, pair this with a served remote indexer or keep a single router replica |
 | `--router-snapshot-threshold` | `DYN_ROUTER_SNAPSHOT_THRESHOLD` | `1000000` | Messages before triggering a snapshot |
 | `--router-reset-states` / `--no-router-reset-states` | `DYN_ROUTER_RESET_STATES` | `false` | Reset router state on startup. **Warning:** affects existing replicas |
 | `--router-track-active-blocks` / `--no-router-track-active-blocks` | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Track blocks used by in-progress requests for load balancing |
@@ -47,6 +47,8 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | Event processing threads. >1 enables concurrent radix tree |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `4.0` | Queue threshold fraction of prefill capacity. Enables priority scheduling |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--serve-indexer` / `--no-serve-indexer` | `DYN_SERVE_INDEXER` | `false` | Serve this frontend's local KV indexer for other Dynamo routers/frontends |
+| `--use-remote-indexer` / `--no-use-remote-indexer` | `DYN_USE_REMOTE_INDEXER` | `false` | Query a served remote KV indexer instead of building a local overlap indexer |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## AIC Prefill Load Model

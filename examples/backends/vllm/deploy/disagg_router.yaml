@@ -16,6 +16,10 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
+        # Approximate routing (`DYN_ROUTER_USE_KV_EVENTS=false`) should either keep a
+        # single frontend/router replica or use one `DYN_SERVE_INDEXER=true` replica and
+        # `DYN_USE_REMOTE_INDEXER=true` on additional replicas. Replica sync alone only
+        # shares active-load state.
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

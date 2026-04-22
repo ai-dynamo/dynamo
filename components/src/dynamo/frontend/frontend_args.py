@@ -126,6 +126,7 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        self.validate_kv_router_topology()
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
                 raise ValueError(

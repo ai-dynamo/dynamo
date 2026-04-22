@@ -69,6 +69,25 @@ class KvRouterConfigBase(ConfigBase):
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
+    def validate_kv_router_topology(self) -> None:
+        """Validate frontend/router KV-topology combinations before runtime startup."""
+        if self.serve_indexer and self.use_remote_indexer:
+            raise ValueError(
+                "--serve-indexer and --use-remote-indexer are mutually exclusive"
+            )
+
+        if (
+            not self.use_kv_events
+            and self.router_replica_sync
+            and not (self.serve_indexer or self.use_remote_indexer)
+        ):
+            raise ValueError(
+                "--router-replica-sync does not synchronize approximate prefix state "
+                "when --no-router-kv-events is set. For approximate mode, either keep "
+                "a single router replica, or run one --serve-indexer replica and point "
+                "additional replicas at it with --use-remote-indexer."
+            )
+
 
 class KvRouterArgGroup(ArgGroup):
     """CLI arguments for the shared KvRouterConfig parameters."""

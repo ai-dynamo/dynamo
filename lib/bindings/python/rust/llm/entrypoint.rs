@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
+use validator::Validate;
 
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
@@ -54,6 +55,13 @@ pub struct KvRouterConfig {
 impl KvRouterConfig {
     pub fn inner(&self) -> RsKvRouterConfig {
         self.inner.clone()
+    }
+
+    fn try_from_inner(inner: RsKvRouterConfig) -> PyResult<Self> {
+        inner
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("Invalid KvRouterConfig: {e}")))?;
+        Ok(Self { inner })
     }
 }
 
@@ -149,45 +157,43 @@ impl KvRouterConfig {
         router_queue_policy: &str,
         use_remote_indexer: bool,
         serve_indexer: bool,
-    ) -> Self {
-        KvRouterConfig {
-            inner: RsKvRouterConfig {
-                overlap_score_weight,
-                router_temperature,
-                use_kv_events,
-                durable_kv_events,
-                router_replica_sync,
-                router_track_active_blocks,
-                router_track_output_blocks,
-                router_assume_kv_reuse,
-                router_track_prefill_tokens,
-                router_prefill_load_model: router_prefill_load_model
-                    .parse::<RsRouterPrefillLoadModel>()
-                    .unwrap_or_else(|_| {
-                        panic!("invalid router_prefill_load_model: {router_prefill_load_model:?}")
-                    }),
-                router_snapshot_threshold,
-                router_reset_states,
-                router_ttl_secs,
-                router_max_tree_size,
-                router_prune_target_ratio,
-                router_queue_threshold,
-                router_event_threads,
-                skip_initial_worker_wait: false,
-                router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
-                    panic!("invalid router_queue_policy: {router_queue_policy:?}")
+    ) -> PyResult<Self> {
+        KvRouterConfig::try_from_inner(RsKvRouterConfig {
+            overlap_score_weight,
+            router_temperature,
+            use_kv_events,
+            durable_kv_events,
+            router_replica_sync,
+            router_track_active_blocks,
+            router_track_output_blocks,
+            router_assume_kv_reuse,
+            router_track_prefill_tokens,
+            router_prefill_load_model: router_prefill_load_model
+                .parse::<RsRouterPrefillLoadModel>()
+                .unwrap_or_else(|_| {
+                    panic!("invalid router_prefill_load_model: {router_prefill_load_model:?}")
                 }),
-                use_remote_indexer,
-                serve_indexer,
-            },
-        }
+            router_snapshot_threshold,
+            router_reset_states,
+            router_ttl_secs,
+            router_max_tree_size,
+            router_prune_target_ratio,
+            router_queue_threshold,
+            router_event_threads,
+            skip_initial_worker_wait: false,
+            router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
+                panic!("invalid router_queue_policy: {router_queue_policy:?}")
+            }),
+            use_remote_indexer,
+            serve_indexer,
+        })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
         serde_json::from_str::<RsKvRouterConfig>(config_json)
-            .map(|inner| KvRouterConfig { inner })
             .map_err(|e| PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}")))
+            .and_then(KvRouterConfig::try_from_inner)
     }
 
     fn dump_json(&self) -> PyResult<String> {

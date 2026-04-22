@@ -278,6 +278,15 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "use_remote_indexer and serve_indexer are mutually exclusive",
         ));
     }
+    if !config.use_kv_events
+        && config.router_replica_sync
+        && !config.use_remote_indexer
+        && !config.serve_indexer
+    {
+        return Err(ValidationError::new(
+            "router_replica_sync with use_kv_events=false requires a singleton router or a served remote indexer topology",
+        ));
+    }
     if config.serve_indexer && config.overlap_score_weight == 0.0 {
         return Err(ValidationError::new(
             "serve_indexer requires overlap_score_weight > 0",
@@ -367,6 +376,7 @@ impl KvRouterConfig {
 mod tests {
     use super::*;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+    use validator::Validate;
 
     #[test]
     fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
@@ -416,5 +426,42 @@ mod tests {
         );
 
         assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
+    }
+
+    #[test]
+    fn validate_rejects_local_approximate_replica_sync() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            ..KvRouterConfig::default()
+        };
+
+        let error = config.validate().expect_err(
+            "approximate replica-sync without a served remote indexer should fail validation",
+        );
+        assert!(error.to_string().contains("singleton router"));
+    }
+
+    #[test]
+    fn validate_allows_approximate_replica_sync_with_remote_indexer_topology() {
+        let serve_config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            serve_indexer: true,
+            ..KvRouterConfig::default()
+        };
+        serve_config
+            .validate()
+            .expect("served approximate indexer topology should validate");
+
+        let consumer_config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            use_remote_indexer: true,
+            ..KvRouterConfig::default()
+        };
+        consumer_config
+            .validate()
+            .expect("remote approximate consumer topology should validate");
     }
 }

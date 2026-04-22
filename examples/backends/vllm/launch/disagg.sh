@@ -15,6 +15,10 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_P
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+# If you switch this deployment to approximate routing (--no-router-kv-events), keep a
+# single frontend/router replica or expose one --serve-indexer replica and point any
+# additional replicas at it with --use-remote-indexer. --router-replica-sync alone only
+# shares active-load state; it does not merge approximate prefix trees.
 python -m dynamo.frontend &
 
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
