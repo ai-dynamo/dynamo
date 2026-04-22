@@ -461,14 +461,61 @@ async fn cleanup_orphaned_consumers(
         .map(|instance| instance.instance_id().to_string())
         .collect();
 
-    for consumer in consumers {
-        if consumer == consumer_id {
-            // Never delete myself (extra/redundant safeguard)
-            continue;
-        }
-        if !active_instance_ids.contains(&consumer) {
-            tracing::info!("Cleaning up orphaned consumer: {consumer}");
-            let _ = nats_queue.shutdown(Some(consumer)).await;
-        }
+    for consumer in select_orphaned_consumers(&consumers, &active_instance_ids, consumer_id) {
+        tracing::info!("Cleaning up orphaned consumer: {consumer}");
+        let _ = nats_queue.shutdown(Some(consumer)).await;
+    }
+}
+
+fn select_orphaned_consumers(
+    consumers: &[String],
+    active_instance_ids: &HashSet<String>,
+    own_consumer_id: &str,
+) -> Vec<String> {
+    if active_instance_ids.is_empty() {
+        // An empty active set can happen during simultaneous startup before discovery is
+        // populated. In that case we leave cleanup to JetStream's inactive_threshold rather
+        // than risk deleting a live peer's consumer.
+        tracing::debug!(
+            "No active router instances found in discovery; skipping orphan consumer cleanup"
+        );
+        return Vec::new();
+    }
+
+    consumers
+        .iter()
+        .filter(|consumer| {
+            consumer.as_str() != own_consumer_id && !active_instance_ids.contains(consumer.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_orphaned_consumers;
+    use std::collections::HashSet;
+
+    #[test]
+    fn select_orphaned_consumers_skips_cleanup_when_no_active_routers_are_discovered() {
+        let consumers = vec!["router-a".to_string(), "router-b".to_string()];
+
+        let selected = select_orphaned_consumers(&consumers, &HashSet::new(), "router-a");
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn select_orphaned_consumers_keeps_own_consumer_and_active_peers() {
+        let consumers = vec![
+            "router-a".to_string(),
+            "router-b".to_string(),
+            "router-c".to_string(),
+        ];
+        let active_instance_ids = HashSet::from(["router-b".to_string()]);
+
+        let selected = select_orphaned_consumers(&consumers, &active_instance_ids, "router-a");
+
+        assert_eq!(selected, vec!["router-c".to_string()]);
     }
 }
