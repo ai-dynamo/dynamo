@@ -188,7 +188,11 @@ _SPEC_NAMES = {"Dockerfile"}
 
 def _is_spec_file(p: Path) -> bool:
     """Filter for broad CONTAINERS rules: only fire on spec files, not prose Markdown."""
-    return p.suffix in _SPEC_EXTENSIONS or p.name in _SPEC_NAMES or p.name.startswith("Dockerfile.")
+    return (
+        p.suffix in _SPEC_EXTENSIONS
+        or p.name in _SPEC_NAMES
+        or p.name.startswith("Dockerfile.")
+    )
 
 
 @dataclass(frozen=True)
@@ -207,17 +211,25 @@ class Rule:
     file_filter: Callable[[Path], bool] = _always
     requires: tuple[str, ...] = ()  # ctx keys this rule needs
 
-    def apply(self, content: str, version: Version, ctx: dict[str, str] | None = None) -> str:
+    def apply(
+        self, content: str, version: Version, ctx: dict[str, str] | None = None
+    ) -> str:
         # Invariant: version.python() / .semver() / .dashed() return PEP-440 /
         # dashed numeric strings only — no re.sub replacement metacharacters
         # (\g<...>, \1, etc.) can appear in them. Same applies to ctx values
         # (backend versions are validated upstream as `<digits>.<digits>...`).
         ctx = ctx or {}
         if any(k not in ctx for k in self.requires):
-            return content  # missing context → rule no-ops (matches today's all_set guard)
+            return (
+                content  # missing context → rule no-ops (matches today's all_set guard)
+            )
         repl = self.replacement.format_map(
-            {"python": version.python(), "semver": version.semver(),
-             "dashed": version.dashed(), **ctx}
+            {
+                "python": version.python(),
+                "semver": version.semver(),
+                "dashed": version.dashed(),
+                **ctx,
+            }
         )
         return self.pattern.sub(repl, content)
 
@@ -527,7 +539,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--repo-root", default=".", help="Repository root (default: cwd)")
 
-
     # Modes
     p.add_argument(
         "--dry-run",
@@ -625,14 +636,20 @@ def _format_summary(
 
 def _run_check(args: argparse.Namespace, repo: Path) -> int:
     expected = args.expected_version or detect_current_version(repo)
-    _log(args, "info", f"Checking for stale version references (expected: {expected})...")
+    _log(
+        args, "info", f"Checking for stale version references (expected: {expected})..."
+    )
     active = _active_scopes(args)
     stale = apply_rules(repo, expected, active, {}, dry_run=True)
     if not stale:
         _log(args, "summary", "All version references are up to date.")
         return 0
     for ch in stale:
-        _log(args, "info", f"STALE: {ch.path.as_posix()} ({ch.scope.value}: {', '.join(ch.rules)})")
+        _log(
+            args,
+            "info",
+            f"STALE: {ch.path.as_posix()} ({ch.scope.value}: {', '.join(ch.rules)})",
+        )
     _log(args, "summary", f"Found {len(stale)} stale version reference(s).")
     return 1
 

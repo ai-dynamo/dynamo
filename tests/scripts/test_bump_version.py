@@ -238,9 +238,7 @@ class TestIteration:
     def test_binary_files_skipped(self, bv, tmp_path):
         # Extensionless name so the test isolates _is_binary from EXCLUDE_GLOBS
         # (which would skip *.bin via the binary-extension list anyway).
-        (tmp_path / "blob").write_bytes(
-            b"\x00\x01\x02nvcr.io/nvidia/ai-dynamo/x:0.9.0"
-        )
+        (tmp_path / "blob").write_bytes(b"\x00\x01\x02nvcr.io/nvidia/ai-dynamo/x:0.9.0")
         changes = bv.apply_rules(
             tmp_path,
             bv.Version.parse("1.0.0"),
@@ -344,9 +342,7 @@ def test_full_bump_writes_every_scope(bv, tmp_path):
 
 def test_post_release_uses_semver_in_helm_python_elsewhere(bv, tmp_path):
     _make_fake_repo(tmp_path, "0.9.0")
-    rc = bv.main(
-        ["--new-version", "0.9.0.post1", "--repo-root", str(tmp_path)]
-    )
+    rc = bv.main(["--new-version", "0.9.0.post1", "--repo-root", str(tmp_path)])
     assert rc == 0
     # Python scope: dotted post
     assert '"0.9.0.post1"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
@@ -391,9 +387,9 @@ def test_skip_flags_combine(bv, tmp_path):
         tmp_path / "deploy/helm/charts/platform/Chart.yaml"
     ).read_text(encoding="utf-8")
     # containers (outside pyproject.toml) were bumped in spec files
-    assert "vllm-runtime:1.0.0" in (tmp_path / "container/Dockerfile.example").read_text(
-        encoding="utf-8"
-    )
+    assert "vllm-runtime:1.0.0" in (
+        tmp_path / "container/Dockerfile.example"
+    ).read_text(encoding="utf-8")
 
 
 def test_check_mode_stale_exits_nonzero(bv, tmp_path):
@@ -525,6 +521,6 @@ class TestRegressionGuards:
             "pip_wheel_or_pin",
             "env_dynamo_version",
         }
-        assert expected.issubset(fired), (
-            f"missing rules in change record: {expected - fired}"
-        )
+        assert expected.issubset(
+            fired
+        ), f"missing rules in change record: {expected - fired}"
