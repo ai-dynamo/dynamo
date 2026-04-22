@@ -155,8 +155,7 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
-    def abort(self) -> None:
-        ...
+    def abort(self) -> None: ...
 
 
 class _DeferredAbort:
@@ -209,13 +208,13 @@ class RequestHandlerConfig:
     publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
     encode_client: Optional[Client] = None
-    multimodal_processor: Optional[
-        MultimodalRequestProcessor
-    ] = None  # for multimodal support
+    multimodal_processor: Optional[MultimodalRequestProcessor] = (
+        None  # for multimodal support
+    )
     connector: Optional[Connector] = None
-    runtime: Optional[
-        DistributedRuntime
-    ] = None  # DistributedRuntime reference for graceful shutdown
+    runtime: Optional[DistributedRuntime] = (
+        None  # DistributedRuntime reference for graceful shutdown
+    )
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
@@ -710,6 +709,22 @@ class HandlerBase(BaseGenerativeHandler):
         """
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
+
+        # Canary probe short-circuit: decode workers receive probes with a
+        # reserved `_canary_probe` marker (see TrtllmDisaggDecodeHealthCheckPayload
+        # in dynamo/trtllm/health_check.py). Build synthetic params with
+        # request_type="context_and_generation" so the engine runs the probe as
+        # full local prefill+decode — the cache transceiver activates only for
+        # request_type="generation_only", so this path is transceiver-free and
+        # doesn't need a real prefill peer. Mirrors sglang's FAKE_BOOTSTRAP_HOST.
+        if self.disaggregation_mode == DisaggregationMode.DECODE and request.get(
+            "_canary_probe"
+        ):
+            return (
+                LlmDisaggregatedParams(request_type="context_and_generation"),
+                None,
+                {},
+            )
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:

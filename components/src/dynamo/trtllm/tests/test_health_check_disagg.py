@@ -5,6 +5,8 @@ import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import (
+    CANARY_PROBE_KEY,
+    TrtllmDisaggDecodeHealthCheckPayload,
     TrtllmHealthCheckPayload,
     build_worker_health_check_payload,
 )
@@ -38,16 +40,28 @@ def test_non_decode_modes_register_canary_payload(mode):
     assert "sampling_options" in payload
 
 
-def test_decode_mode_opts_out_of_canary():
-    """Decode workers return None so no canary target is registered.
+def test_decode_mode_registers_probe_payload():
+    """Decode workers register a probe payload carrying CANARY_PROBE_KEY.
 
-    The trtllm decode handler strictly rejects requests without
-    `disaggregated_params` (handler_base.py: "Disaggregated params are required
-    for decode mode"), so a generic canary probe cannot satisfy that contract.
-    The worker opts out; readiness is signalled by successful endpoint
-    registration (see lib/runtime/src/system_health.rs::set_endpoint_registered).
+    The handler detects the marker in `_setup_disaggregated_params_for_mode`
+    and routes the probe through `request_type="context_and_generation"`
+    so the engine runs it as a local agg request (no cache transceiver).
+    Pattern mirrors SGLang's FAKE_BOOTSTRAP_HOST.
     """
     payload = build_worker_health_check_payload(
         disaggregation_mode=DisaggregationMode.DECODE
     )
-    assert payload is None
+    assert payload is not None
+    assert payload.get(CANARY_PROBE_KEY) is True
+    # Standard fields must still be present so the handler's downstream logic
+    # (sampling, stop conditions, token_ids) runs normally.
+    assert "token_ids" in payload
+    assert "sampling_options" in payload
+    assert "stop_conditions" in payload
+
+
+def test_disagg_decode_payload_class_sets_probe_marker():
+    """Direct construction of TrtllmDisaggDecodeHealthCheckPayload carries the marker."""
+    payload = TrtllmDisaggDecodeHealthCheckPayload().to_dict()
+    assert payload.get(CANARY_PROBE_KEY) is True
+    assert "disaggregated_params" not in payload  # real params built by handler

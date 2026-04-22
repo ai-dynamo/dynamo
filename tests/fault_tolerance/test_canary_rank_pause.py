@@ -95,15 +95,17 @@ SCENARIOS: list[RankPauseScenario] = [
         canary_enabled=False,
         expected="miss",
     ),
-    # Disagg decode: canary opts out by design (trtllm handler rejects generic
-    # probes). Documents the current trade-off — will flip to "detect" once
-    # the probe-canary follow-up lands.
+    # Disagg decode: canary probe short-circuits in
+    # `_setup_disaggregated_params_for_mode` via the `_canary_probe` marker
+    # (see TrtllmDisaggDecodeHealthCheckPayload). Engine runs the probe as
+    # a local agg request, so pausing the rank blocks the probe and flips
+    # /health to 503 — same as aggregated.
     RankPauseScenario(
         label="trtllm-disagg-decode-canary-on",
         base_config_key="disaggregated_same_gpu",
         system_port_index=1,  # DYN_SYSTEM_PORT2 = decode worker
         canary_enabled=True,
-        expected="miss",
+        expected="detect",
     ),
 ]
 

@@ -92,6 +92,33 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
         super().__init__()
 
 
+#: Reserved request key that marks a canary probe request for disagg decode.
+#: The handler detects this marker in `_setup_disaggregated_params_for_mode`
+#: and constructs a synthetic `LlmDisaggregatedParams(request_type=
+#: "context_and_generation")` so the engine runs the probe locally
+#: (full prefill + 1-token decode) without engaging the cache transceiver.
+#: Internal-only — not part of the public request protocol.
+CANARY_PROBE_KEY = "_canary_probe"
+
+
+class TrtllmDisaggDecodeHealthCheckPayload(TrtllmHealthCheckPayload):
+    """Canary payload for TRT-LLM disagg decode workers.
+
+    Sets a ``CANARY_PROBE_KEY`` marker so the handler bypasses the strict
+    "Disaggregated params are required for decode mode" guard and routes
+    the probe through `request_type="context_and_generation"` (local
+    prefill + decode, transceiver-free).
+
+    Mirrors SGLang's `SglangDisaggHealthCheckPayload` which uses
+    `FAKE_BOOTSTRAP_HOST` for the same purpose, and vLLM's natural
+    agg-style fallback when `prefill_result` is absent.
+    """
+
+    def __init__(self, tokenizer: Any = None) -> None:
+        super().__init__(tokenizer=tokenizer)
+        self.default_payload[CANARY_PROBE_KEY] = True
+
+
 def build_worker_health_check_payload(
     disaggregation_mode: DisaggregationMode,
     tokenizer: Any = None,
@@ -99,15 +126,15 @@ def build_worker_health_check_payload(
     """
     Decide the health_check_payload for a TRT-LLM worker based on its disagg role.
 
-    Decode workers opt out of canary: the TRT-LLM decode handler strictly rejects
-    inference requests without `disaggregated_params` (see
-    `trtllm/request_handlers/handler_base.py` — "Disaggregated params are required
-    for decode mode"). A generic canary probe cannot satisfy that contract, so the
-    decode worker registers no payload and opts out of canary verification.
+    Decode workers use a probe payload with ``CANARY_PROBE_KEY`` set; the
+    handler short-circuits in `_setup_disaggregated_params_for_mode` and
+    routes the probe as a local agg request (no cache transceiver, no real
+    prefill peer required). This gives disagg decode the same engine-level
+    canary coverage as aggregated / prefill workers.
 
     Aggregated and prefill workers accept generic probes and register the
     standard canary payload.
     """
     if disaggregation_mode == DisaggregationMode.DECODE:
-        return None
+        return TrtllmDisaggDecodeHealthCheckPayload(tokenizer=tokenizer).to_dict()
     return TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
