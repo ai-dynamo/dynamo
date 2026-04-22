@@ -18,6 +18,8 @@ except ImportError:
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,
+    ReplayConstraints,
+    ReplayObjective,
     SyntheticReplayWorkload,
     TraceReplayWorkload,
     compare_agg_and_disagg_with_replay,
@@ -500,6 +502,84 @@ def test_optimizer_supports_round_robin_router_mode(monkeypatch) -> None:
     assert set(seen_weights) == {0.0}
 
 
+def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
+    def fake_run(**kwargs):
+        state = kwargs["state"]
+        if state.prefill_tp == 1 and state.decode_tp == 1:
+            return {
+                "output_throughput_tok_s": 1200.0,
+                "mean_ttft_ms": 140.0,
+                "p95_ttft_ms": 160.0,
+                "mean_tpot_ms": 10.0,
+                "p95_tpot_ms": 12.0,
+                "mean_e2e_latency_ms": 300.0,
+                "p95_e2e_latency_ms": 320.0,
+            }
+        return {
+            "output_throughput_tok_s": 1000.0,
+            "mean_ttft_ms": 100.0,
+            "p95_ttft_ms": 120.0,
+            "mean_tpot_ms": 10.0,
+            "p95_tpot_ms": 12.0,
+            "mean_e2e_latency_ms": 200.0,
+            "p95_e2e_latency_ms": 220.0,
+        }
+
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([1, 2], [1, 2]),
+    )
+    monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
+
+    result = optimize_dense_disagg_with_replay(
+        model=_AIC_MODEL,
+        backend="vllm",
+        system=_AIC_SYSTEM,
+        workload=SyntheticReplayWorkload(
+            isl=64,
+            osl=32,
+            request_count=8,
+            replay_concurrency=4,
+        ),
+        base_prefill_engine_args=_base_prefill_args(),
+        base_decode_engine_args=_base_decode_args(),
+        max_total_gpus=4,
+        constraints={"mean_e2e_latency_ms": 500.0},
+        objective="mean_e2e_latency",
+        overlap_score_weights=[0.0],
+        max_parallel_evals=1,
+    )
+
+    assert result.best_feasible is not None
+    assert (
+        result.best_feasible["prefill_tp"],
+        result.best_feasible["decode_tp"],
+    ) in {(1, 2), (2, 1), (2, 2)}
+    assert result.best_feasible["score"] == -200.0
+    assert result.best_feasible["objective"] == "mean_e2e_latency"
+
+
+def test_disagg_optimizer_rejects_invalid_objective() -> None:
+    with pytest.raises(ValueError, match="not a valid ReplayObjective"):
+        optimize_dense_disagg_with_replay(
+            model=_AIC_MODEL,
+            backend="vllm",
+            system=_AIC_SYSTEM,
+            workload=SyntheticReplayWorkload(
+                isl=64,
+                osl=32,
+                request_count=8,
+                replay_concurrency=4,
+            ),
+            base_prefill_engine_args=_base_prefill_args(),
+            base_decode_engine_args=_base_decode_args(),
+            max_total_gpus=4,
+            objective="bad_objective",
+            max_parallel_evals=1,
+        )
+
+
 def test_disagg_optimizer_supports_router_mode_search(monkeypatch) -> None:
     seen_router_modes: list[str] = []
     seen_weights: list[float] = []
@@ -705,7 +785,8 @@ def test_evaluate_state_prefers_normalized_metrics_over_report_payload() -> None
             model="meta-llama/Llama-3.1-8B-Instruct",
             backend="vllm",
             system="h100_sxm",
-            constraints={"mean_e2e_latency_ms": 1000.0},
+            objective=ReplayObjective.THROUGHPUT,
+            constraints=ReplayConstraints(mean_e2e_latency_ms=1000.0),
             cache=cache,
         )
 
@@ -747,7 +828,8 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
             model="meta-llama/Llama-3.1-8B-Instruct",
             backend="vllm",
             system="h100_sxm",
-            constraints={"mean_e2e_latency_ms": 1000.0},
+            objective=ReplayObjective.THROUGHPUT,
+            constraints=ReplayConstraints(mean_e2e_latency_ms=1000.0),
             cache=cache,
         )
 

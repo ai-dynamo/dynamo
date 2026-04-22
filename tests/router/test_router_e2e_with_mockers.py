@@ -31,6 +31,7 @@ from tests.router.common import (
     _test_router_indexers_sync,
     _test_router_overload_503,
     _test_router_query_instance_id,
+    _test_router_threshold_none_disables_rejection,
     _test_router_two_routers,
 )
 from tests.router.helper import (
@@ -974,6 +975,38 @@ def test_mocker_kv_router_overload_503(
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             blocks_threshold=0.2,
+        )
+
+
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)  # Use NATS Core (local indexer)
+@pytest.mark.timeout(45)
+def test_mocker_kv_router_threshold_none_disables_rejection(
+    request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
+):
+    """Test that explicit CLI None thresholds disable KV router overload rejection."""
+    logger.info("Starting mocker KV router explicit-None threshold test")
+    mocker_args = {
+        "speedup_ratio": 0.01,
+        "block_size": 4,
+        "num_gpu_blocks": 64,
+        "durable_kv_events": durable_kv_events,
+    }
+
+    with MockerProcess(request, mocker_args=mocker_args, num_mockers=1) as mockers:
+        logger.info("Starting single mocker instance with limited resources")
+        logger.info(f"Mocker using endpoint: {mockers.endpoint}")
+
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+
+        _test_router_threshold_none_disables_rejection(
+            engine_workers=mockers,
+            block_size=4,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+            num_requests=4,
         )
 
 
