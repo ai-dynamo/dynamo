@@ -11506,84 +11506,6 @@ spec:
                     - vllm
                     - trtllm
                   type: string
-                checkpoint:
-                  description: |-
-                    Checkpoint configures container checkpointing for this service.
-                    When enabled, pods can be restored from a checkpoint file for faster cold start.
-                  properties:
-                    checkpointRef:
-                      description: |-
-                        CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-                        When set, this service's Identity is ignored and the referenced checkpoint is used directly.
-                      type: string
-                    enabled:
-                      default: false
-                      description: Enabled indicates whether checkpointing is enabled for this service.
-                      type: boolean
-                    identity:
-                      description: |-
-                        Identity defines the checkpoint identity for hash computation.
-                        Used when Mode is Auto or when looking up existing checkpoints.
-                        Required when checkpointRef is not specified.
-                      properties:
-                        backendFramework:
-                          description: BackendFramework is the runtime framework (vllm, sglang, trtllm).
-                          enum:
-                            - vllm
-                            - sglang
-                            - trtllm
-                          type: string
-                        dtype:
-                          description: Dtype is the data type (fp16, bf16, fp8, etc.).
-                          type: string
-                        dynamoVersion:
-                          description: |-
-                            DynamoVersion is the Dynamo platform version. If empty, the version is not
-                            included in the identity hash, so checkpoints remain compatible across releases.
-                          type: string
-                        extraParameters:
-                          additionalProperties:
-                            type: string
-                          description: ExtraParameters are additional parameters that affect the checkpoint hash.
-                          type: object
-                        maxModelLen:
-                          description: MaxModelLen is the maximum sequence length.
-                          format: int32
-                          minimum: 1
-                          type: integer
-                        model:
-                          description: Model is the model identifier (e.g. "meta-llama/Llama-3-70B").
-                          type: string
-                        pipelineParallelSize:
-                          default: 1
-                          description: PipelineParallelSize is the pipeline parallel configuration.
-                          format: int32
-                          minimum: 1
-                          type: integer
-                        tensorParallelSize:
-                          default: 1
-                          description: TensorParallelSize is the tensor parallel configuration.
-                          format: int32
-                          minimum: 1
-                          type: integer
-                      required:
-                        - backendFramework
-                        - model
-                      type: object
-                    mode:
-                      default: Auto
-                      description: |-
-                        Mode defines how checkpoint creation is handled.
-                        Auto: DGD controller creates the DynamoCheckpoint CR automatically.
-                        Manual: user must create the DynamoCheckpoint CR.
-                      enum:
-                        - Auto
-                        - Manual
-                      type: string
-                  type: object
-                  x-kubernetes-validations:
-                    - message: When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified
-                      rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))'
                 compilationCache:
                   description: |-
                     CompilationCache configures a PVC-backed compilation cache. The operator
@@ -11777,11 +11699,96 @@ spec:
                     Experimental groups opt-in preview features whose API shape and behavior
                     may change in breaking ways between v1beta1 releases, including disappearing
                     without a name-preserving graduation path. In v1beta1 this block holds
-                    `gpuMemoryService` and `failover`, which remain tightly coupled (failover
-                    requires GMS) and are expected to evolve together as the DRA-based GPU
-                    sharing story matures. Fields here are explicitly NOT covered by the normal
+                    `gpuMemoryService` and `failover` (which remain tightly coupled -- failover
+                    requires GMS -- and are expected to evolve together as the DRA-based GPU
+                    sharing story matures), and `checkpoint` (whose interaction with the
+                    standalone DynamoCheckpoint resource and identity-hash computation is
+                    still settling). Fields here are explicitly NOT covered by the normal
                     v1beta1 deprecation policy; do not depend on them for production workloads.
                   properties:
+                    checkpoint:
+                      description: |-
+                        Checkpoint configures container-image snapshotting and restore for this
+                        service. When enabled, the DGD controller can produce a DynamoCheckpoint
+                        CR from a running pod and later restore pods from that checkpoint for
+                        faster cold start. The user-facing shape of this field -- especially its
+                        interaction with the standalone DynamoCheckpoint resource and the
+                        identity-hash computation -- is still settling, which is why it lives
+                        under `experimental` in v1beta1 instead of at the top level.
+                      properties:
+                        checkpointRef:
+                          description: |-
+                            CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
+                            When set, this service's Identity is ignored and the referenced checkpoint is used directly.
+                          type: string
+                        enabled:
+                          default: false
+                          description: Enabled indicates whether checkpointing is enabled for this service.
+                          type: boolean
+                        identity:
+                          description: |-
+                            Identity defines the checkpoint identity for hash computation.
+                            Used when Mode is Auto or when looking up existing checkpoints.
+                            Required when checkpointRef is not specified.
+                          properties:
+                            backendFramework:
+                              description: BackendFramework is the runtime framework (vllm, sglang, trtllm).
+                              enum:
+                                - vllm
+                                - sglang
+                                - trtllm
+                              type: string
+                            dtype:
+                              description: Dtype is the data type (fp16, bf16, fp8, etc.).
+                              type: string
+                            dynamoVersion:
+                              description: |-
+                                DynamoVersion is the Dynamo platform version. If empty, the version is not
+                                included in the identity hash, so checkpoints remain compatible across releases.
+                              type: string
+                            extraParameters:
+                              additionalProperties:
+                                type: string
+                              description: ExtraParameters are additional parameters that affect the checkpoint hash.
+                              type: object
+                            maxModelLen:
+                              description: MaxModelLen is the maximum sequence length.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            model:
+                              description: Model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                              type: string
+                            pipelineParallelSize:
+                              default: 1
+                              description: PipelineParallelSize is the pipeline parallel configuration.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            tensorParallelSize:
+                              default: 1
+                              description: TensorParallelSize is the tensor parallel configuration.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                          required:
+                            - backendFramework
+                            - model
+                          type: object
+                        mode:
+                          default: Auto
+                          description: |-
+                            Mode defines how checkpoint creation is handled.
+                            Auto: DGD controller creates the DynamoCheckpoint CR automatically.
+                            Manual: user must create the DynamoCheckpoint CR.
+                          enum:
+                            - Auto
+                            - Manual
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                        - message: When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified
+                          rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))'
                     failover:
                       description: |-
                         Failover configures active-passive GPU failover for this service.

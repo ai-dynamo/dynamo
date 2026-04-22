@@ -142,11 +142,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
-	// Checkpoint configures container checkpointing for this service.
-	// When enabled, pods can be restored from a checkpoint file for faster cold start.
-	// +optional
-	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
-
 	// CompilationCache configures a PVC-backed compilation cache. The operator
 	// handles backend-specific mount paths and environment variables, so users do
 	// not need to hand-wire them into `podTemplate`. Extracted from v1alpha1's
@@ -163,9 +158,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Experimental groups opt-in preview features whose API shape and behavior
 	// may change in breaking ways between v1beta1 releases, including disappearing
 	// without a name-preserving graduation path. In v1beta1 this block holds
-	// `gpuMemoryService` and `failover`, which remain tightly coupled (failover
-	// requires GMS) and are expected to evolve together as the DRA-based GPU
-	// sharing story matures. Fields here are explicitly NOT covered by the normal
+	// `gpuMemoryService` and `failover` (which remain tightly coupled -- failover
+	// requires GMS -- and are expected to evolve together as the DRA-based GPU
+	// sharing story matures), and `checkpoint` (whose interaction with the
+	// standalone DynamoCheckpoint resource and identity-hash computation is
+	// still settling). Fields here are explicitly NOT covered by the normal
 	// v1beta1 deprecation policy; do not depend on them for production workloads.
 	// +optional
 	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
