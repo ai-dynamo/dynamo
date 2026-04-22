@@ -65,6 +65,10 @@ impl MediaFetcher {
         self.inner.allow_direct_port = allow;
     }
 
+    fn allow_private_ips(&mut self, allow: bool) {
+        self.inner.allow_private_ips = allow;
+    }
+
     fn allowed_media_domains(&mut self, domains: Vec<String>) {
         self.inner.allowed_media_domains = Some(domains.into_iter().collect());
     }
