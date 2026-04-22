@@ -152,6 +152,12 @@ type MultinodeSpec struct {
 	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+
+	// +kubebuilder:default=1
+	// Minimum number of PodCliqueScalingGroup replicas that must remain available
+	// before Grove treats the multinode gang as unhealthy.
+	// +kubebuilder:validation:Minimum=1
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
 }
 
 type IngressTLSSpec struct {
@@ -323,6 +329,13 @@ func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
 func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	if s.Multinode != nil {
 		return s.Multinode.NodeCount
+	}
+	return 1
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) GetMultinodeMinAvailable() int32 {
+	if s.Multinode != nil && s.Multinode.MinAvailable != nil {
+		return *s.Multinode.MinAvailable
 	}
 	return 1
 }

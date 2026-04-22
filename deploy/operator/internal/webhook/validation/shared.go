@@ -85,6 +85,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
 	}
 
+	// Validate multinode configuration
+	if err := v.validateMultinode(); err != nil {
+		return nil, err
+	}
+
 	// Validate ingress configuration if enabled
 	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
 		if err := v.validateIngress(); err != nil {
@@ -129,6 +134,20 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 	}
 
 	return warnings, nil
+}
+
+// validateMultinode validates multinode-specific configuration.
+func (v *SharedSpecValidator) validateMultinode() error {
+	if v.spec.Multinode == nil || v.spec.Replicas == nil {
+		return nil
+	}
+
+	minAvailable := v.spec.GetMultinodeMinAvailable()
+	if minAvailable > *v.spec.Replicas {
+		return fmt.Errorf("%s.multinode.minAvailable must be less than or equal to %s.replicas", v.fieldPath, v.fieldPath)
+	}
+
+	return nil
 }
 
 // validateIngress validates the ingress configuration.

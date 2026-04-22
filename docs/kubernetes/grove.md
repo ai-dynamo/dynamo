@@ -38,6 +38,8 @@ Represents a group of pods with a specific role (e.g., leader, worker, frontend)
 ### PodCliqueScalingGroup
 A set of PodCliques that scale and are scheduled together, ideal for tightly coupled roles like prefill leader and worker components that need coordinated scaling behavior.
 
+When Dynamo renders Grove `PodCliqueScalingGroup` objects for multinode services, it exposes Grove's `minAvailable` setting through the service's `multinode.minAvailable` field. This lets you choose how many replicas must remain healthy before Grove marks the gang unhealthy and reschedules it. If omitted, Dynamo preserves the existing behavior and sets `minAvailable: 1`.
+
 ## Key Capabilities for Disaggregated Serving
 
 Grove provides several specialized features that make it particularly well-suited for disaggregated serving:

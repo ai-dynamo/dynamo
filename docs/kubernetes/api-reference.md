@@ -906,6 +906,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1. | 2 | Minimum: 2 <br /> |
+| `minAvailable` _integer_ | Minimum number of PodCliqueScalingGroup replicas that must remain available<br />before Grove treats the multinode gang as unhealthy. | 1 | Minimum: 1 <br /> |
 
 
 #### PVC

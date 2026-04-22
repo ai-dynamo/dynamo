@@ -1466,7 +1466,7 @@ func GenerateGrovePodCliqueSet(
 				Name:         strings.ToLower(serviceName),
 				CliqueNames:  cliqueNames,
 				Replicas:     component.Replicas,
-				MinAvailable: ptr.To(int32(1)),
+				MinAvailable: ptr.To(component.GetMultinodeMinAvailable()),
 			})
 		}
 	}

@@ -134,10 +134,13 @@ spec:
       ...
       multinode:
         nodeCount: 2
+        minAvailable: 2  # Optional for Grove; defaults to 1 and must be <= replicas
       resources:
         limits:
           gpu: "2"            # 2 GPUs per node
 ```
+
+`multinode.minAvailable` applies when Dynamo deploys the service through Grove. It controls how many replicas in the generated PodCliqueScalingGroup must stay available before Grove marks the gang unhealthy and reschedules it. If you omit it, Dynamo keeps the previous behavior and uses `1`.
 
 ### GPU Distribution
 

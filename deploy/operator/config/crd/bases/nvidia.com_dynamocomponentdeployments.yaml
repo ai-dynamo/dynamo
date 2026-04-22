@@ -10947,6 +10947,14 @@ spec:
                       format: int32
                       minimum: 2
                       type: integer
+                    minAvailable:
+                      default: 1
+                      description: |-
+                        Minimum number of PodCliqueScalingGroup replicas that must remain available
+                        before Grove treats the multinode gang as unhealthy.
+                      format: int32
+                      minimum: 1
+                      type: integer
                   required:
                     - nodeCount
                   type: object

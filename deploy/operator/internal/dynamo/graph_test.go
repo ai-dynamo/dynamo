@@ -2761,7 +2761,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "test_generate_grove_pod_gang_set_multinode vllm",
+			name: "test_generate_grove_pod_gang_set_multinode vllm with custom minAvailable",
 			args: args{
 				ctx: context.Background(),
 				controllerConfig: &configv1alpha1.OperatorConfiguration{
@@ -2852,7 +2852,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 							"worker": {
 
 								Multinode: &v1alpha1.MultinodeSpec{
-									NodeCount: 3,
+									NodeCount:    3,
+									MinAvailable: ptr.To(int32(3)),
 								},
 								ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 									Annotations: map[string]string{
@@ -3010,7 +3011,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									"worker-wkr",
 								},
 								Replicas:     ptr.To(int32(5)),
-								MinAvailable: ptr.To(int32(1)),
+								MinAvailable: ptr.To(int32(3)),
 							},
 						},
 						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),

@@ -208,6 +208,32 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			wantErr:             false,
 		},
 		{
+			name: "multinode minAvailable defaults within replicas",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Replicas: &validReplicas,
+				Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+					NodeCount: 3,
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "multinode minAvailable cannot exceed replicas",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Replicas: &[]int32{2}[0],
+				Multinode: &nvidiacomv1alpha1.MultinodeSpec{
+					NodeCount:    3,
+					MinAvailable: &[]int32{3}[0],
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].multinode.minAvailable must be less than or equal to spec.services[worker].replicas",
+		},
+		{
 			name: "custom field path for service validation",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Replicas: &negativeReplicas,
