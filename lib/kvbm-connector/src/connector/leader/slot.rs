@@ -292,9 +292,7 @@ impl SlotStateMachine {
     /// we need to extract the `OnboardingState` so the caller can drain the
     /// find sessions and release them — no worker callback will arrive,
     /// because the scheduler never committed the request.
-    fn txn_take_preparing_to_onboard(
-        &mut self,
-    ) -> Result<OnboardingState, StateTransitionError> {
+    fn txn_take_preparing_to_onboard(&mut self) -> Result<OnboardingState, StateTransitionError> {
         let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
 
         match current {
@@ -2532,7 +2530,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard
-            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
                 .unwrap();
             assert!(matches!(
                 slot.txn_state(),
@@ -2570,7 +2568,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard -> Onboarding
-            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
 
@@ -2594,7 +2592,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard
-            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
                 .unwrap();
 
             // Mark for deletion — this is the cancel path in request_finished.
