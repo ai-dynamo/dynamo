@@ -65,6 +65,9 @@ class KvRouterConfigBase(ConfigBase):
     use_remote_indexer: bool = False
     serve_indexer: bool = False
 
+    # Python-only field — NOT in _KV_ROUTER_FIELDS, so it does not flow to Rust.
+    semantic_kv_provider: Optional[str]
+
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
@@ -298,4 +301,17 @@ class KvRouterArgGroup(ArgGroup):
                 "component via the request plane instead of maintaining a local radix tree."
             ),
             dest="use_remote_indexer",
+        )
+        add_argument(
+            g,
+            flag_name="--semantic-kv-provider",
+            env_var="DYN_SEMANTIC_KV_PROVIDER",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Semantic KV cache provider name. When set, the router "
+                "augments exact block-hash matching with semantic similarity-based donor discovery. "
+                "Built-in: 'simple' (Jaccard reference impl). Custom providers must satisfy the "
+                "dynamo.llm.SemanticKvCacheProvider protocol."
+            ),
+            arg_type=str,
         )
