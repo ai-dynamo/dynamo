@@ -1474,6 +1474,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
 
+	effectiveDGDName, err := getDGDNameOverride(dgdr, dgd.Name)
+	if err != nil {
+		return nil, "", err
+	}
+	dgd.Name = effectiveDGDName
+
 	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
 
 	if len(additionalResources) > 0 {
@@ -1590,6 +1596,27 @@ func stripYAMLComments(s string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+func getDGDNameOverride(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, generatedName string) (string, error) {
+	if dgdr.Spec.Overrides == nil || dgdr.Spec.Overrides.DGD == nil || len(dgdr.Spec.Overrides.DGD.Raw) == 0 {
+		return generatedName, nil
+	}
+
+	var override struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+	}
+	if err := sigsyaml.Unmarshal(dgdr.Spec.Overrides.DGD.Raw, &override); err != nil {
+		return "", fmt.Errorf("failed to parse spec.overrides.dgd metadata.name: %w", err)
+	}
+
+	if override.Metadata.Name == "" {
+		return generatedName, nil
+	}
+
+	return override.Metadata.Name, nil
 }
 
 // storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations.

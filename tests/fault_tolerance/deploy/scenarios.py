@@ -95,9 +95,9 @@ WORKER_MAP = {
         "prefill": "prefill",
     },
     "trtllm": {
-        "decode": "TRTLLMDecodeWorker",
+        "decode": "decode",
         "decode_agg": "TRTLLMWorker",  # Aggregated uses different name
-        "prefill": "TRTLLMPrefillWorker",
+        "prefill": "prefill",
     },
 }
 

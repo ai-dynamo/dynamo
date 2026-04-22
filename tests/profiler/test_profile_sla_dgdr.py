@@ -24,6 +24,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
+    from dynamo.planner.defaults import TrtllmComponentName
     from dynamo.profiler.profile_sla import run_profile
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         BackendType,
@@ -57,6 +58,28 @@ def _make_ops(tmp_path, **overrides) -> ProfilerOperationalConfig:
 
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_trtllm_disagg_template_uses_grove_safe_worker_names():
+    config = yaml.safe_load(
+        (project_root / "examples/backends/trtllm/deploy/disagg.yaml").read_text()
+    )
+
+    worker_names = [
+        name for name in config["spec"]["services"].keys() if name != "Frontend"
+    ]
+    assert worker_names == ["prefill", "decode"]
+    assert TrtllmComponentName.prefill_worker_k8s_name == "prefill"
+    assert TrtllmComponentName.decode_worker_k8s_name == "decode"
+
+    dgd_name = config["metadata"]["name"]
+    for worker_name in worker_names:
+        combined_multinode_length = (
+            len(dgd_name) + len(worker_name) + len(f"{worker_name}-ldr")
+        )
+        assert combined_multinode_length <= 45
 
 
 class TestRapidSupported:
@@ -331,13 +354,13 @@ def _save_dummy_npz(output_dir: str):
 _DECODE_SVC_NAMES = {
     "sglang": "decode",
     "vllm": "VllmDecodeWorker",
-    "trtllm": "TRTLLMDecodeWorker",
+    "trtllm": "decode",
 }
 
 
 def _make_thorough_patches(backend: str = "trtllm"):
     """Build mock-patches for thorough mode, parameterised by backend."""
-    svc_name = _DECODE_SVC_NAMES.get(backend, "TRTLLMDecodeWorker")
+    svc_name = _DECODE_SVC_NAMES.get(backend, "decode")
     return [
         patch(
             "dynamo.profiler.thorough.DynamoDeploymentClient",

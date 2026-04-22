@@ -116,10 +116,14 @@ class TrtllmComponentName:
     # Unified frontend architecture (consistent with vLLM/SGLang):
     # - Prefill workers use "prefill" component
     # - Decode workers use "tensorrt_llm" component
-    prefill_worker_k8s_name = "TRTLLMPrefillWorker"
+    prefill_worker_k8s_name = (
+        "prefill"  # use short name to stay within k8s limits with grove
+    )
     prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
-    decode_worker_k8s_name = "TRTLLMDecodeWorker"
+    decode_worker_k8s_name = (
+        "decode"  # use short name to stay within k8s limits with grove
+    )
     decode_worker_component_name = "tensorrt_llm"
     decode_worker_endpoint = "generate"
 
