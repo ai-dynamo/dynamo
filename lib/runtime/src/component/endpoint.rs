@@ -285,16 +285,19 @@ fn build_transport_type_inner(
 ) -> Result<TransportType> {
     match mode {
         RequestPlaneMode::Http => {
-            let http_host = crate::utils::get_http_rpc_host_from_env();
+            let http_host = crate::utils::get_http_rpc_bind_host_from_env();
             // If a fixed port is explicitly configured, use it directly.
             // Otherwise, use the actual bound port (set by HTTP server after binding when port 0 is used).
-            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .filter(|&p| p != 0)
-                .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
-            let rpc_root =
-                std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
+            let http_port =
+                std::env::var(crate::config::environment_names::request_plane::DYN_HTTP_RPC_PORT)
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .filter(|&p| p != 0)
+                    .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
+            let rpc_root = std::env::var(
+                crate::config::environment_names::request_plane::DYN_HTTP_RPC_ROOT_PATH,
+            )
+            .unwrap_or_else(|_| "/v1/rpc".to_string());
 
             let http_endpoint = format!(
                 "http://{http_host}:{http_port}{rpc_root}/{}",
@@ -304,31 +307,40 @@ fn build_transport_type_inner(
             Ok(TransportType::Http(http_endpoint))
         }
         RequestPlaneMode::Tcp => {
-            let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
+            let tcp_host = crate::utils::get_tcp_rpc_advertise_host_from_env();
             // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
             // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
-            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .filter(|&p| p != 0)
-                .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
+            let tcp_port =
+                std::env::var(crate::config::environment_names::request_plane::DYN_TCP_RPC_PORT)
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .filter(|&p| p != 0)
+                    .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
-            // Include instance_id and endpoint name for proper TCP routing.
-            // Format: host:port/instance_id_hex/endpoint_name
-            // This ensures each worker has a unique routing key when multiple workers
-            // share the same TCP server (e.g., --num-workers > 1).
-            let tcp_endpoint = format!(
-                "{}:{}/{:x}/{}",
-                tcp_host, tcp_port, connection_id, endpoint_id.name
-            );
-
-            Ok(TransportType::Tcp(tcp_endpoint))
+            Ok(build_tcp_transport_type(
+                endpoint_id,
+                connection_id,
+                &tcp_host,
+                tcp_port,
+            ))
         }
         RequestPlaneMode::Nats => Ok(TransportType::Nats(nats::instance_subject(
             endpoint_id,
             connection_id,
         ))),
     }
+}
+
+fn build_tcp_transport_type(
+    endpoint_id: &EndpointId,
+    connection_id: u64,
+    tcp_host: &str,
+    tcp_port: u16,
+) -> TransportType {
+    TransportType::Tcp(format!(
+        "{}:{}/{:x}/{}",
+        tcp_host, tcp_port, connection_id, endpoint_id.name
+    ))
 }
 
 /// Build transport type, ensuring TCP server is initialized when needed.
@@ -346,16 +358,20 @@ pub async fn build_transport_type(
     // For TCP and HTTP with OS-assigned ports, we must ensure the server is initialized
     // (bound to a port) before we can construct a correct transport address.
     let has_fixed_port = match mode {
-        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .filter(|&p| p != 0)
-            .is_some(),
-        RequestPlaneMode::Http => std::env::var("DYN_HTTP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .filter(|&p| p != 0)
-            .is_some(),
+        RequestPlaneMode::Tcp => {
+            std::env::var(crate::config::environment_names::request_plane::DYN_TCP_RPC_PORT)
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
+                .is_some()
+        }
+        RequestPlaneMode::Http => {
+            std::env::var(crate::config::environment_names::request_plane::DYN_HTTP_RPC_PORT)
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
+                .is_some()
+        }
         RequestPlaneMode::Nats => true, // NATS doesn't need port init
     };
 
@@ -451,5 +467,42 @@ impl Endpoint {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_tcp_transport_type_uses_advertise_host() {
+        let endpoint_id = EndpointId {
+            namespace: "ns".to_string(),
+            component: "cmp".to_string(),
+            name: "ep".to_string(),
+        };
+
+        let transport = build_tcp_transport_type(&endpoint_id, 0xabc, "frontend.example.com", 4321);
+
+        assert_eq!(
+            transport,
+            TransportType::Tcp("frontend.example.com:4321/abc/ep".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_tcp_transport_type_preserves_bind_host_when_no_override() {
+        let endpoint_id = EndpointId {
+            namespace: "ns".to_string(),
+            component: "cmp".to_string(),
+            name: "ep".to_string(),
+        };
+
+        let transport = build_tcp_transport_type(&endpoint_id, 0xabc, "10.0.0.5", 4321);
+
+        assert_eq!(
+            transport,
+            TransportType::Tcp("10.0.0.5:4321/abc/ep".to_string())
+        );
     }
 }

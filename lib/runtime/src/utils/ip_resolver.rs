@@ -3,6 +3,7 @@
 
 //! IP resolution utilities for getting local IP addresses with fallback support
 
+use crate::config::environment_names::request_plane;
 use crate::pipeline::network::tcp::server::{DefaultIpResolver, IpResolver};
 use local_ip_address::Error;
 use std::net::IpAddr;
@@ -21,11 +22,23 @@ fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
 }
 
 fn format_ip_for_url(addr: IpAddr) -> String {
-    // Wrap IPv6 addresses with brackets for safe URL construction
-    // e.g., "2001:db8::1" becomes "[2001:db8::1]" so that "{host}:{port}" is valid
-    match addr {
-        IpAddr::V6(_) => format!("[{}]", addr),
-        IpAddr::V4(_) => addr.to_string(),
+    format_host_for_address(&addr.to_string())
+}
+
+/// Format a host string for use in `host:port` or URL authority fields.
+///
+/// Raw IPv6 literals are wrapped in brackets. Existing bracketed values and hostnames
+/// are returned unchanged.
+pub fn format_host_for_address(host: &str) -> String {
+    let host = host.trim();
+
+    if host.starts_with('[') && host.ends_with(']') {
+        return host.to_string();
+    }
+
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{}]", host),
+        Ok(IpAddr::V4(_)) | Err(_) => host.to_string(),
     }
 }
 
@@ -74,7 +87,14 @@ pub fn get_http_rpc_host() -> String {
 /// # Returns
 /// A string representation of the HTTP RPC host address
 pub fn get_http_rpc_host_from_env() -> String {
-    std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| get_http_rpc_host())
+    get_http_rpc_bind_host_from_env()
+}
+
+/// Get the HTTP RPC bind host from environment variable or resolve local IP as fallback.
+pub fn get_http_rpc_bind_host_from_env() -> String {
+    std::env::var(request_plane::DYN_HTTP_RPC_HOST)
+        .map(|host| format_host_for_address(&host))
+        .unwrap_or_else(|_| get_http_rpc_host())
 }
 
 /// Get the TCP RPC host from environment variable or resolve local IP as fallback
@@ -85,12 +105,34 @@ pub fn get_http_rpc_host_from_env() -> String {
 /// # Returns
 /// A string representation of the TCP RPC host address
 pub fn get_tcp_rpc_host_from_env() -> String {
-    std::env::var("DYN_TCP_RPC_HOST").unwrap_or_else(|_| get_http_rpc_host())
+    get_tcp_rpc_bind_host_from_env()
+}
+
+/// Get the TCP RPC bind host from environment variable or resolve local IP as fallback.
+pub fn get_tcp_rpc_bind_host_from_env() -> String {
+    std::env::var(request_plane::DYN_TCP_RPC_HOST)
+        .map(|host| format_host_for_address(&host))
+        .unwrap_or_else(|_| get_http_rpc_host())
+}
+
+/// Get the TCP RPC advertised host from environment variables or resolve local IP as fallback.
+///
+/// Precedence:
+/// 1. `DYN_TCP_RPC_ADVERTISE_HOST`
+/// 2. `DYN_TCP_RPC_HOST`
+/// 3. auto-detected local IP
+pub fn get_tcp_rpc_advertise_host_from_env() -> String {
+    std::env::var(request_plane::DYN_TCP_RPC_ADVERTISE_HOST)
+        .or_else(|_| std::env::var(request_plane::DYN_TCP_RPC_HOST))
+        .map(|host| format_host_for_address(&host))
+        .unwrap_or_else(|_| get_http_rpc_host())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::environment_names::request_plane;
+    use crate::utils::TEST_ENV_LOCK;
     use local_ip_address::Error;
 
     // Mock resolver for testing
@@ -153,32 +195,31 @@ mod tests {
 
     #[test]
     fn test_get_http_rpc_host_from_env_with_env_var() {
-        // Set environment variable
-        unsafe {
-            std::env::set_var("DYN_HTTP_RPC_HOST", "10.0.0.1");
-        }
-
-        let result = get_http_rpc_host_from_env();
-        assert_eq!(result, "10.0.0.1");
-
-        // Clean up
-        unsafe {
-            std::env::remove_var("DYN_HTTP_RPC_HOST");
-        }
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap();
+        temp_env::with_vars(
+            [(request_plane::DYN_HTTP_RPC_HOST, Some("10.0.0.1"))],
+            || {
+                let result = get_http_rpc_host_from_env();
+                assert_eq!(result, "10.0.0.1");
+            },
+        );
     }
 
     #[test]
     fn test_get_http_rpc_host_from_env_without_env_var() {
-        // Note: We can't reliably unset environment variables in tests
-        // This test assumes DYN_HTTP_RPC_HOST is not set to a specific test value
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap();
+        temp_env::with_vars(
+            vec![(request_plane::DYN_HTTP_RPC_HOST, None::<&str>)],
+            || {
+                let result = get_http_rpc_host_from_env();
+                // Should return some IP address (either resolved or fallback)
+                assert!(!result.is_empty());
 
-        let result = get_http_rpc_host_from_env();
-        // Should return some IP address (either resolved or fallback)
-        assert!(!result.is_empty());
-
-        // Should be a valid IP address (strip brackets for IPv6 before parsing)
-        let ip_str = result.trim_start_matches('[').trim_end_matches(']');
-        let _: IpAddr = ip_str.parse().expect("Should be a valid IP address");
+                // Should be a valid IP address (strip brackets for IPv6 before parsing)
+                let ip_str = result.trim_start_matches('[').trim_end_matches(']');
+                let _: IpAddr = ip_str.parse().expect("Should be a valid IP address");
+            },
+        );
     }
 
     #[test]
@@ -206,5 +247,49 @@ mod tests {
         // IPv4 should NOT be bracketed
         assert!(!result.contains('['), "IPv4 should not contain '['");
         assert_eq!(result, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_format_host_for_address_brackets_ipv6_literal() {
+        assert_eq!(format_host_for_address("2001:db8::10"), "[2001:db8::10]");
+        assert_eq!(format_host_for_address("[2001:db8::10]"), "[2001:db8::10]");
+        assert_eq!(
+            format_host_for_address("frontend.example.com"),
+            "frontend.example.com"
+        );
+    }
+
+    #[test]
+    fn test_get_tcp_rpc_advertise_host_prefers_override() {
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap();
+        temp_env::with_vars(
+            vec![
+                (request_plane::DYN_TCP_RPC_HOST, Some("10.0.0.5")),
+                (
+                    request_plane::DYN_TCP_RPC_ADVERTISE_HOST,
+                    Some("frontend.example.com"),
+                ),
+            ],
+            || {
+                assert_eq!(
+                    get_tcp_rpc_advertise_host_from_env(),
+                    "frontend.example.com"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_get_tcp_rpc_advertise_host_brackets_ipv6_override() {
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap();
+        temp_env::with_vars(
+            vec![(
+                request_plane::DYN_TCP_RPC_ADVERTISE_HOST,
+                Some("2001:db8::10"),
+            )],
+            || {
+                assert_eq!(get_tcp_rpc_advertise_host_from_env(), "[2001:db8::10]");
+            },
+        );
     }
 }

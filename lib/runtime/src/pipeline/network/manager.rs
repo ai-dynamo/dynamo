@@ -140,21 +140,25 @@ impl NetworkConfig {
         Self {
             // HTTP server configuration
             // If DYN_HTTP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            http_host: std::env::var("DYN_HTTP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
-            http_port: std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok()),
-            http_rpc_root: std::env::var("DYN_HTTP_RPC_ROOT_PATH")
-                .unwrap_or_else(|_| "/v1/rpc".to_string()),
+            http_host: crate::utils::get_http_rpc_bind_host_from_env(),
+            http_port: std::env::var(
+                crate::config::environment_names::request_plane::DYN_HTTP_RPC_PORT,
+            )
+            .ok()
+            .and_then(|p| p.parse().ok()),
+            http_rpc_root: std::env::var(
+                crate::config::environment_names::request_plane::DYN_HTTP_RPC_ROOT_PATH,
+            )
+            .unwrap_or_else(|_| "/v1/rpc".to_string()),
 
             // TCP server configuration
             // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            tcp_host: std::env::var("DYN_TCP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
-            tcp_port: std::env::var("DYN_TCP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok()),
+            tcp_host: crate::utils::get_tcp_rpc_bind_host_from_env(),
+            tcp_port: std::env::var(
+                crate::config::environment_names::request_plane::DYN_TCP_RPC_PORT,
+            )
+            .ok()
+            .and_then(|p| p.parse().ok()),
 
             // HTTP client configuration (reads DYN_HTTP2_* env vars)
             http_client_config: super::egress::http_router::Http2Config::from_env(),

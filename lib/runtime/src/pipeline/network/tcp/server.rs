@@ -37,6 +37,7 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
+use crate::utils::ip_resolver::format_host_for_address;
 use anyhow::{Context, Result, anyhow as error};
 
 // Trait for IP address resolution - allows dependency injection for testing
@@ -68,6 +69,9 @@ pub struct ServerOptions {
 
     #[builder(default)]
     pub interface: Option<String>,
+
+    #[builder(default)]
+    pub advertise_host: Option<String>,
 }
 
 impl ServerOptions {
@@ -82,6 +86,7 @@ impl ServerOptions {
 pub struct TcpStreamServer {
     local_ip: String,
     local_port: u16,
+    advertise_host: String,
     state: Arc<Mutex<State>>,
 }
 
@@ -140,16 +145,27 @@ impl TcpStreamServer {
     ) -> Result<Arc<Self>, PipelineError> {
         let local_ip = match options.interface {
             Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
+                let interface = interface.trim().to_string();
+                let bind_ip = interface
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>();
 
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
+                match bind_ip {
+                    Ok(ip) => ip.to_string(),
+                    Err(_) => {
+                        let interfaces: HashMap<String, std::net::IpAddr> =
+                            list_afinet_netifas()?.into_iter().collect();
+
+                        interfaces
+                            .get(&interface)
+                            .ok_or(PipelineError::Generic(format!(
+                                "Interface or IP address not found: {}",
+                                interface
+                            )))?
+                            .to_string()
+                    }
+                }
             }
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
@@ -179,6 +195,11 @@ impl TcpStreamServer {
             }
         };
 
+        let advertise_host = options
+            .advertise_host
+            .map(|host| format_host_for_address(&host))
+            .unwrap_or_else(|| format_host_for_address(&local_ip));
+
         let state = Arc::new(Mutex::new(State::default()));
 
         let local_port = Self::start(local_ip.clone(), options.port, state.clone())
@@ -192,13 +213,17 @@ impl TcpStreamServer {
         Ok(Arc::new(Self {
             local_ip,
             local_port,
+            advertise_host,
             state,
         }))
     }
 
     #[allow(clippy::await_holding_lock)]
     async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+        let ip = local_ip
+            .parse::<IpAddr>()
+            .context("Failed to parse TCP bind IP address")?;
+        let addr = SocketAddr::new(ip, local_port);
         let state_clone = state.clone();
         let mut guard = state.lock().await;
         if guard.handle.is_some() {
@@ -239,7 +264,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = format!("{}:{}", self.advertise_host, self.local_port);
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -317,7 +342,7 @@ impl ResponseService for TcpStreamServer {
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
@@ -777,5 +802,93 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_advertise_host_override_uses_bound_port() {
+        let options = ServerOptions::builder()
+            .port(0)
+            .advertise_host(Some("frontend.example.com".to_string()))
+            .build()
+            .unwrap();
+
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending_connection = server.register(stream_options).await;
+        let connection_info = pending_connection
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        assert_eq!(
+            tcp_info.address,
+            format!("frontend.example.com:{}", server.local_port)
+        );
+        assert_eq!(server.local_ip, "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_brackets_ipv6_advertise_host() {
+        let options = ServerOptions::builder()
+            .port(0)
+            .advertise_host(Some("2001:db8::10".to_string()))
+            .build()
+            .unwrap();
+
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending_connection = server.register(stream_options).await;
+        let connection_info = pending_connection
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        assert_eq!(
+            tcp_info.address,
+            format!("[2001:db8::10]:{}", server.local_port)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_accepts_literal_bind_ip() {
+        let options = ServerOptions::builder()
+            .port(0)
+            .interface(Some("127.0.0.1".to_string()))
+            .build()
+            .unwrap();
+
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+
+        assert_eq!(server.local_ip, "127.0.0.1");
+        assert!(server.local_port > 0);
     }
 }

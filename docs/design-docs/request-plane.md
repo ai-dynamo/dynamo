@@ -74,9 +74,10 @@ TCP is the default request plane and provides direct, low-latency communication 
 # But you can explicitly set it if desired:
 export DYN_REQUEST_PLANE=tcp
 
-# Optional: Configure TCP server host and port
-export DYN_TCP_RPC_HOST=0.0.0.0  # Default host
-# export DYN_TCP_RPC_PORT=9999   # Optional: specify a fixed port
+# Optional: Configure TCP bind/advertise settings
+export DYN_TCP_RPC_HOST=0.0.0.0                  # Bind interface/address
+# export DYN_TCP_RPC_ADVERTISE_HOST=rpc.example.com  # Published host override
+# export DYN_TCP_RPC_PORT=9999                   # Optional: specify a fixed port
 
 # Run your Dynamo service
 DYN_REQUEST_PLANE=tcp python -m dynamo.frontend --http-port=8000 &
@@ -93,8 +94,12 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 **TCP Configuration Options:**
 
 Additional TCP-specific environment variables:
-- `DYN_TCP_RPC_HOST`: Server host address (default: auto-detected)
-- `DYN_TCP_RPC_PORT`: Server port. If not set, the OS assigns a free port automatically (recommended for most deployments). Set explicitly only if you need a specific port for firewall rules.
+- `DYN_TCP_RPC_HOST`: Request-plane TCP bind host/interface (default: auto-detected local IP)
+- `DYN_TCP_RPC_ADVERTISE_HOST`: Request-plane TCP host published to discovery. Defaults to `DYN_TCP_RPC_HOST`, or the auto-detected bind address when no override is set.
+- `DYN_TCP_RPC_PORT`: Request-plane TCP bind port. If not set, the OS assigns a free port automatically (recommended for most deployments). Set explicitly only if you need a specific port for firewall rules.
+- `DYN_TCP_RESPONSE_STREAM_HOST`: Frontend TCP response-stream bind host/interface. Supports interface names or literal IP addresses.
+- `DYN_TCP_RESPONSE_STREAM_ADVERTISE_HOST`: Frontend TCP response-stream host published to workers. Defaults to the resolved bind address while continuing to publish the actual bound port when port `0` is used.
+- `DYN_TCP_RESPONSE_STREAM_PORT`: Frontend TCP response-stream bind port. If not set, the OS assigns a free port automatically.
 - `DYN_TCP_MAX_MESSAGE_SIZE`: Maximum message size for TCP client (default: 32MB)
 - `DYN_TCP_SHRINK_MESSAGE_SIZE`: Threshold for shrinking the zero-copy decoder buffer back to initial size after processing large messages (default: 8MB, max: DYN_TCP_MAX_MESSAGE_SIZE)
 - `DYN_TCP_REQUEST_TIMEOUT`: Request timeout for TCP client (default: 10 seconds)
@@ -224,7 +229,7 @@ Request plane configuration is loaded from environment variables at startup and 
 
 1. Stop your Dynamo services
 2. Set environment variable `DYN_REQUEST_PLANE=tcp`
-3. Optionally configure TCP-specific settings (e.g., `DYN_TCP_RPC_HOST`). Note: `DYN_TCP_RPC_PORT` is optional; if not set, an OS-assigned free port is used automatically.
+3. Optionally configure TCP-specific bind and advertise settings (for example `DYN_TCP_RPC_HOST`, `DYN_TCP_RPC_ADVERTISE_HOST`, `DYN_TCP_RESPONSE_STREAM_HOST`, and `DYN_TCP_RESPONSE_STREAM_ADVERTISE_HOST`). Note: `DYN_TCP_RPC_PORT` is optional; if not set, an OS-assigned free port is used automatically.
 4. Restart your services
 
 

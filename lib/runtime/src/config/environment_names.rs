@@ -14,6 +14,7 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
+//! - **Request Plane**: HTTP/TCP request plane bind and advertise settings
 //! - **TCP Response Stream**: TCP response stream server (CallHome) port and host
 //! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
@@ -352,6 +353,30 @@ pub mod router {
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
 }
 
+/// Request plane environment variables
+pub mod request_plane {
+    /// Request plane transport selection ("tcp", "http", or "nats")
+    pub const DYN_REQUEST_PLANE: &str = "DYN_REQUEST_PLANE";
+
+    /// HTTP request plane bind host/interface.
+    pub const DYN_HTTP_RPC_HOST: &str = "DYN_HTTP_RPC_HOST";
+
+    /// HTTP request plane bind port.
+    pub const DYN_HTTP_RPC_PORT: &str = "DYN_HTTP_RPC_PORT";
+
+    /// HTTP request plane root path.
+    pub const DYN_HTTP_RPC_ROOT_PATH: &str = "DYN_HTTP_RPC_ROOT_PATH";
+
+    /// TCP request plane bind host/interface.
+    pub const DYN_TCP_RPC_HOST: &str = "DYN_TCP_RPC_HOST";
+
+    /// TCP request plane bind port.
+    pub const DYN_TCP_RPC_PORT: &str = "DYN_TCP_RPC_PORT";
+
+    /// TCP request plane advertised host published to discovery.
+    pub const DYN_TCP_RPC_ADVERTISE_HOST: &str = "DYN_TCP_RPC_ADVERTISE_HOST";
+}
+
 /// TCP response stream server (CallHome listener) environment variables
 pub mod tcp_response_stream {
     /// Port for the TCP response stream server.
@@ -361,6 +386,11 @@ pub mod tcp_response_stream {
     /// Host/interface for the TCP response stream server.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
+
+    /// Advertised host for the TCP response stream server.
+    /// If unset, the server advertises the resolved bind address.
+    pub const DYN_TCP_RESPONSE_STREAM_ADVERTISE_HOST: &str =
+        "DYN_TCP_RESPONSE_STREAM_ADVERTISE_HOST";
 }
 
 /// Event Plane transport environment variables
@@ -526,9 +556,18 @@ mod tests {
             // Router
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
+            // Request Plane
+            request_plane::DYN_REQUEST_PLANE,
+            request_plane::DYN_HTTP_RPC_HOST,
+            request_plane::DYN_HTTP_RPC_PORT,
+            request_plane::DYN_HTTP_RPC_ROOT_PATH,
+            request_plane::DYN_TCP_RPC_HOST,
+            request_plane::DYN_TCP_RPC_PORT,
+            request_plane::DYN_TCP_RPC_ADVERTISE_HOST,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_ADVERTISE_HOST,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

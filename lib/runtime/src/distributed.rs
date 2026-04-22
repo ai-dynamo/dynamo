@@ -363,21 +363,32 @@ impl DistributedRuntime {
                 let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
                     .ok()
                     .filter(|h| !h.is_empty());
+                let advertise_host =
+                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_ADVERTISE_HOST)
+                        .ok()
+                        .filter(|h| !h.is_empty());
 
                 let host_suffix = interface
                     .as_ref()
                     .map_or(String::new(), |h| format!(" on host {h}"));
+                let advertise_suffix = advertise_host
+                    .as_ref()
+                    .map_or(String::new(), |h| format!(", advertising as {h}"));
                 if port == 0 {
                     tracing::info!(
-                        "TCP response stream server using OS-assigned port{host_suffix}"
+                        "TCP response stream server using OS-assigned port{host_suffix}{advertise_suffix}"
                     );
                 } else {
                     tracing::info!(
-                        "TCP response stream server using fixed port {port}{host_suffix}"
+                        "TCP response stream server using fixed port {port}{host_suffix}{advertise_suffix}"
                     );
                 }
 
-                let options = tcp::server::ServerOptions { port, interface };
+                let options = tcp::server::ServerOptions {
+                    port,
+                    interface,
+                    advertise_host,
+                };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
