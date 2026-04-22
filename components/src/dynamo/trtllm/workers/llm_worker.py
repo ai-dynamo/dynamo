@@ -537,9 +537,18 @@ async def init_llm_worker(
 
     shadow_engine_id = os.environ.get("ENGINE_ID", "0")
     shadow_standby = config.gms_shadow_mode and shadow_engine_id != "0"
+    primary_shadow_owner = config.gms_shadow_mode and shadow_engine_id == "0"
+    failover_lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
     startup_lock = None
     standby_generate_proxy = None
     standby_serve_task = None
+    if primary_shadow_owner:
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        startup_lock = FlockFailoverLock(failover_lock_path)
+        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+        logging.info("[Shadow] Primary acquired startup lock, starting engine init")
+
     if shadow_standby:
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
@@ -557,9 +566,9 @@ async def init_llm_worker(
         logging.info(
             "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
         )
-        startup_lock = FlockFailoverLock(
-            os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-        )
+        startup_lock = FlockFailoverLock(failover_lock_path)
+        while await startup_lock.owner() != "engine-0":
+            await asyncio.sleep(0.1)
         await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
         logging.info("[Shadow] Lock acquired, starting engine init")
 
@@ -717,27 +726,6 @@ async def init_llm_worker(
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
 
-            if config.gms_shadow_mode and not shadow_standby:
-                await handler._quiesce_controller.quiesce()
-
-                runtime.set_health_status(True)
-                logging.info(
-                    "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
-                )
-
-                from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-                lock_path = os.environ.get(
-                    "FAILOVER_LOCK_PATH", "/shared/failover.lock"
-                )
-                startup_lock = FlockFailoverLock(lock_path)
-                await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
-                logging.info("[Shadow] Lock acquired, waking engine")
-
-                await handler._quiesce_controller.resume()
-                handler._quiesce_controller.mark_resumed()
-                logging.info("[Shadow] Engine awake, registering with discovery")
-
             # Register the model with runtime config
             # Encode workers do NOT register - they're internal workers only
             # Prefill and decode workers register - frontend detects their role via ModelType
@@ -821,3 +809,6 @@ async def init_llm_worker(
             with suppress(asyncio.CancelledError):
                 await standby_serve_task
         raise
+    finally:
+        if startup_lock is not None:
+            await startup_lock.release()

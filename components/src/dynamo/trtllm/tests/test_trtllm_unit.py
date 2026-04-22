@@ -299,7 +299,7 @@ class StandbyWaitReached(Exception):
 
 
 class ShadowPrimaryLockReached(Exception):
-    """Raised when the primary shadow path reaches the failover lock."""
+    """Raised when the primary shadow path reaches post-init registration."""
 
 
 def test_standby_generate_proxy_answers_health_check_before_delegate():
@@ -349,9 +349,18 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
     class FakeLock:
         def __init__(self, path):
             call_log.append(f"lock_path:{path}")
+            self._owners = iter([None, "engine-0"])
+
+        async def owner(self):
+            owner = next(self._owners)
+            call_log.append(f"owner:{owner}")
+            return owner
 
         async def acquire(self, engine_id):
             call_log.append(f"lock_acquire:{engine_id}")
+
+        async def release(self):
+            return None
 
     class FakeEngineContext:
         async def __aenter__(self):
@@ -405,6 +414,8 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
         "serve_endpoint",
         "health:True",
         "lock_path:/tmp/failover.lock",
+        "owner:None",
+        "owner:engine-0",
         "lock_acquire:engine-1",
         "get_llm_engine",
         "engine_enter",
@@ -412,7 +423,7 @@ def test_init_llm_worker_shadow_standby_serves_endpoint_before_engine_init(
     ]
 
 
-def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch):
+def test_init_llm_worker_shadow_primary_acquires_lock_before_engine_init(monkeypatch):
     monkeypatch.setenv("ENGINE_ID", "0")
     monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/failover.lock")
 
@@ -429,7 +440,6 @@ def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch)
     )
 
     call_log = []
-    engine_state = {"alive": False}
 
     class FakeEndpoint:
         def connection_id(self):
@@ -442,19 +452,17 @@ def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch)
 
     class FakeEngineContext:
         async def __aenter__(self):
-            engine_state["alive"] = True
             call_log.append("engine_enter")
             return FakeEngine()
 
         async def __aexit__(self, exc_type, exc, tb):
             call_log.append("engine_exit")
-            engine_state["alive"] = False
             return False
 
     class FakeQuiesceController:
         async def quiesce(self):
-            assert engine_state["alive"] is True
             call_log.append("quiesce")
+            raise AssertionError("primary startup should not quiesce before serving")
 
     class FakeHandler:
         def __init__(self):
@@ -466,13 +474,12 @@ def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch)
 
         async def acquire(self, engine_id):
             call_log.append(f"lock_acquire:{engine_id}")
-            raise ShadowPrimaryLockReached()
+
+        async def release(self):
+            return None
 
     runtime = mock.MagicMock()
     runtime.endpoint.return_value = FakeEndpoint()
-    runtime.set_health_status.side_effect = lambda ready: call_log.append(
-        f"health:{ready}"
-    )
 
     fake_request_handler_factory = mock.MagicMock()
     fake_request_handler_factory.get_request_handler.return_value = FakeHandler()
@@ -496,6 +503,13 @@ def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch)
         mock.patch("dynamo.trtllm.workers.llm_worker.RequestHandlerFactory") as factory,
         mock.patch("dynamo.trtllm.workers.llm_worker.register_engine_metrics_callback"),
         mock.patch("dynamo.trtllm.workers.llm_worker._register_memory_routes"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.register_model",
+            side_effect=lambda *args, **kwargs: (
+                call_log.append("register_model"),
+                (_ for _ in ()).throw(ShadowPrimaryLockReached()),
+            )[1],
+        ),
         mock.patch("gpu_memory_service.integrations.trtllm.setup_gms"),
         mock.patch(
             "gpu_memory_service.integrations.trtllm.utils.configure_gms_lock_mode"
@@ -517,11 +531,10 @@ def test_init_llm_worker_shadow_primary_quiesces_before_engine_exit(monkeypatch)
             )
 
     assert call_log == [
-        "get_llm_engine",
-        "engine_enter",
-        "quiesce",
-        "health:True",
         "lock_path:/tmp/failover.lock",
         "lock_acquire:engine-0",
+        "get_llm_engine",
+        "engine_enter",
+        "register_model",
         "engine_exit",
     ]
