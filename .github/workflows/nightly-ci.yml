@@ -134,10 +134,10 @@ jobs:
       build_timeout_minutes: 180
     secrets: inherit
 
-  dynamo-rust:
+  dynamo-static-checks:
     name: dynamo
     needs: [dynamo-build]
-    uses: ./.github/workflows/shared-rust.yml
+    uses: ./.github/workflows/shared-container-static-checks.yml
     with:
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '12.9'
@@ -206,7 +206,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-rust, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, create-fresh-builder]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-static-checks, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -229,7 +229,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-rust, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-static-checks, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu ]
     permissions:
       contents: read
     steps:

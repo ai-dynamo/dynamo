@@ -89,7 +89,7 @@ jobs:
     needs:
       - changed-files
       - dynamo-build
-      - dynamo-rust
+      - dynamo-static-checks
       - dynamo-test-parallel
       - dynamo-test-sequential
       - dynamo-test-gpu
@@ -411,7 +411,7 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
-  dynamo-rust:
+  dynamo-static-checks:
     name: dynamo-runtime # This name overlaps with other dynamo jobs to group them in the UI
     needs: [changed-files, dynamo-build]
     if: |
@@ -421,10 +421,13 @@ jobs:
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/shared-rust.yml
+    uses: ./.github/workflows/shared-container-static-checks.yml
     with:
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '12.9'
+      include_sglang: ${{ needs.changed-files.outputs.sglang == 'true' }}
+      include_vllm:   ${{ needs.changed-files.outputs.vllm   == 'true' }}
+      include_trtllm: ${{ needs.changed-files.outputs.trtllm == 'true' }}
     secrets: inherit
 
   dynamo-test-parallel:
@@ -702,7 +705,7 @@ jobs:
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
       - dynamo-build
-      - dynamo-rust
+      - dynamo-static-checks
       - dynamo-test-parallel
       - dynamo-test-sequential
       - dynamo-test-gpu

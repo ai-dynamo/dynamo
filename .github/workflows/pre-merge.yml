@@ -32,12 +32,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.changes.outputs.rust }}
-      core: ${{ steps.changes.outputs.core }}
-      planner: ${{ steps.changes.outputs.planner }}
-      frontend: ${{ steps.changes.outputs.frontend }}
-      sglang: ${{ steps.changes.outputs.sglang }}
-      vllm: ${{ steps.changes.outputs.vllm }}
-      trtllm: ${{ steps.changes.outputs.trtllm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -50,7 +44,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, rust-tests, rust-clippy, mypy]
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -170,35 +164,3 @@ jobs:
       run: |
         cargo-machete --version || cargo install cargo-machete@0.9.1
         cargo machete
-
-  mypy:
-    needs: changed-files
-    if: >-
-      needs.changed-files.outputs.core == 'true' ||
-      needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.sglang == 'true' ||
-      needs.changed-files.outputs.vllm == 'true' ||
-      needs.changed-files.outputs.trtllm == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        with:
-          python-version: '3.12'
-      - name: Install mypy
-        run: pip install mypy
-      - name: Run mypy (components)
-        # Always check shared (non-backend) code; only include the changed backends
-        # so mypy failures in unchanged backends don't block unrelated PRs. Root
-        # pyproject.toml sets ignore_missing_imports for third-party packages,
-        # so no project dependencies need to be installed on the runner.
-        run: |
-          MYPYPATH=components/src
-          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name sglang ! -name vllm ! -name trtllm | sort | tr "\n" " ")
-          ${{ needs.changed-files.outputs.sglang == 'true' && 'TARGETS="$TARGETS components/src/dynamo/sglang"' || ':' }}
-          ${{ needs.changed-files.outputs.vllm   == 'true' && 'TARGETS="$TARGETS components/src/dynamo/vllm"'   || ':' }}
-          ${{ needs.changed-files.outputs.trtllm == 'true' && 'TARGETS="$TARGETS components/src/dynamo/trtllm"' || ':' }}
-          MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS

@@ -132,10 +132,10 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
-  dynamo-rust:
+  dynamo-static-checks:
     name: dynamo
     needs: [dynamo-build]
-    uses: ./.github/workflows/shared-rust.yml
+    uses: ./.github/workflows/shared-container-static-checks.yml
     with:
       target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
       cuda_version: '12.9'
@@ -514,7 +514,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-rust, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-static-checks, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -535,7 +535,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-rust, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
+    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-build, dynamo-static-checks, dynamo-test-parallel, dynamo-test-sequential, dynamo-test-gpu, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:
