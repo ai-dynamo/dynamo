@@ -510,7 +510,7 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 | Aggregated (baseline) | 0 | N/A | No KV transfer needed |
 | Disagg + InfiniBand RDMA with GPUDirect | +200-500ms | 20-50 GB/s | *Expected* based on hardware specs |
 | Disagg + RoCE RDMA with GPUDirect | +300-800ms | 10-25 GB/s | *Expected* based on hardware specs |
-| Disagg + AWS EFA with libfabric + GDRCopy | **+40ms** | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000) |
+| Disagg + AWS EFA with libfabric + GDRCopy | **+37ms** | **~9.6 GB/s** | *Measured* on AWS p5.48xlarge (Llama-3.1-8B, ISL=8000, OSL=50) |
 | Disagg + Host-staged (no GPUDirect) | +1-3s | 1-3 GB/s | *Expected* - CPU bottleneck |
 | Disagg + AWS EFA with UCX (without GPUDirect) | ~3x slower than aggregated | ~1 GB/s | *Measured* on AWS p5.48xlarge |
 | Disagg + TCP fallback | **+90-100s** | ~100 MB/s | *Measured* ~98s TTFT on AWS p5.48xlarge |
@@ -535,16 +535,16 @@ The KV transfer overhead is amortized across output tokens. **Measured data from
 
 ```text
 KV Transfer Overhead (TTFT min, unqueued):
-- Aggregated:    ~175ms
-- Disaggregated: ~215ms
-- KV transfer cost: ~40ms
+- Aggregated:    ~173ms
+- Disaggregated: ~210ms
+- KV transfer cost: ~37ms
 
 Performance at ISL=8000, OSL=50, concurrency=10:
 - ITL improvement: 41% faster per-token generation
 - Throughput gain: 22% higher output throughput
 ```
 
-**Key Insight**: The KV transfer overhead via libfabric+EFA is only **~40ms**. Combined with 41% faster decode (ITL), disaggregated inference delivers **22% higher throughput** for prefill-bound workloads.
+**Key Insight**: The KV transfer overhead via libfabric+EFA is only **~37ms**. Combined with 41% faster decode (ITL), disaggregated inference delivers **22% higher throughput** for prefill-bound workloads.
 
 | Metric | Aggregated | Disaggregated | Difference |
 |--------|------------|---------------|------------|
