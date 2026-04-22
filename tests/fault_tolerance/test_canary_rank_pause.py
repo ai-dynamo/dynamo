@@ -75,7 +75,11 @@ STARTUP_READY_BUDGET_S = 120
 # appear in the engine subprocess's command line. Keep in sync with the
 # `stragglers` declared on each backend's test config.
 _RANK_PATTERNS: dict[str, tuple[str, ...]] = {
-    "trtllm": ("TRTLLM:EngineCore", "tensorrt_llm"),
+    # trtllm's engine ranks are mpi4py.futures.server children of the
+    # `python3 -m dynamo.trtllm` worker (verified locally on Qwen3-0.6B
+    # disagg_same_gpu). The other substrings are defensive in case a
+    # future TRT-LLM release renames.
+    "trtllm": ("mpi4py.futures.server", "TRTLLM:EngineCore", "tensorrt_llm"),
     "vllm": ("VLLM::EngineCore", "EngineCoreProc"),
     "sglang": ("SGLANG:EngineCore", "sgl_scheduler"),
 }
