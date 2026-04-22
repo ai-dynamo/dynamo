@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use dynamo_memory::CudaMemPool;
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
+use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
@@ -59,13 +60,17 @@ pub struct TransferConfig {
     /// If None, no release threshold is set.
     #[builder(default = "Some(64 * 1024 * 1024)")]
     cuda_pool_release_threshold: Option<u64>,
+
+    /// Shared observability registry and metrics.
+    #[builder(default, setter(strip_option))]
+    observability: Option<SharedKvbmObservability>,
 }
 
 impl TransferConfigBuilder {
     /// Initialize builder with event system and tokio handle.
     ///
     /// This sets the event_system and tokio runtime handle, ensuring consistency
-    /// with Nova's event system. Use this when the runtime has already been
+    /// with Velo's event system. Use this when the runtime has already been
     /// constructed and you want components to share the same event notification
     /// infrastructure.
     pub fn from_event_system_and_handle(
@@ -124,21 +129,14 @@ impl TransferConfigBuilder {
         // Derive agent name from worker_id if not provided
         let agent_name = config
             .nixl_agent_name
+            .take()
             .unwrap_or_else(|| format!("worker-{}", worker_id));
 
         let nixl_agent =
-            NixlAgent::from_nixl_backend_config(&agent_name, config.nixl_backend_config)?;
+            NixlAgent::from_nixl_backend_config(&agent_name, config.nixl_backend_config.clone())?;
 
         let cuda_context = CudaContext::new(config.cuda_device_id)?;
-        let context = TransferContext::new(
-            nixl_agent,
-            config.event_system,
-            cuda_context,
-            config.tokio_runtime,
-            config.capabilities,
-            config.cuda_pool_reserve_size,
-            config.cuda_pool_release_threshold,
-        )?;
+        let context = TransferContext::new(nixl_agent, cuda_context, config)?;
         Ok(TransferManager::from_context(context))
     }
 }
@@ -157,15 +155,7 @@ impl TransferConfigBuilderWithAgent {
     pub fn build(self) -> Result<TransferManager> {
         let config = self.builder.build_internal()?;
         let cuda_context = CudaContext::new(config.cuda_device_id)?;
-        let context = TransferContext::new(
-            self.agent,
-            config.event_system,
-            cuda_context,
-            config.tokio_runtime,
-            config.capabilities,
-            config.cuda_pool_reserve_size,
-            config.cuda_pool_release_threshold,
-        )?;
+        let context = TransferContext::new(self.agent, cuda_context, config)?;
         Ok(TransferManager::from_context(context))
     }
 
@@ -231,6 +221,7 @@ pub struct TransferContext {
     tx_cuda_event: mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>>,
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
+    observability: Option<SharedKvbmObservability>,
 }
 
 impl TransferContext {
@@ -240,13 +231,22 @@ impl TransferContext {
 
     pub(crate) fn new(
         nixl_agent: NixlAgent,
-        event_system: Arc<EventManager>,
         cuda_context: Arc<CudaContext>,
-        tokio_runtime: TokioRuntime,
-        capabilities: TransferCapabilities,
-        cuda_pool_reserve_size: usize,
-        cuda_pool_release_threshold: Option<u64>,
+        config: TransferConfig,
     ) -> Result<Self> {
+        let TransferConfig {
+            event_system,
+            tokio_runtime,
+            capabilities,
+            cuda_pool_reserve_size,
+            cuda_pool_release_threshold,
+            observability,
+            // Fields already consumed by the builder path before this fn runs:
+            nixl_agent_name: _,
+            nixl_backend_config: _,
+            cuda_device_id: _,
+        } = config;
+
         unsafe { cuda_context.disable_event_tracking() };
 
         // Create CUDA memory pool for kernel allocations
@@ -314,6 +314,7 @@ impl TransferContext {
             tx_nixl_status,
             tx_cuda_event,
             tx_nixl_events,
+            observability,
         })
     }
 
@@ -385,6 +386,11 @@ impl TransferContext {
     #[doc(hidden)]
     pub fn event_system(&self) -> &Arc<EventManager> {
         &self.event_system
+    }
+
+    #[doc(hidden)]
+    pub fn observability(&self) -> Option<&SharedKvbmObservability> {
+        self.observability.as_ref()
     }
 
     /// Get the CUDA memory pool for kernel allocations.

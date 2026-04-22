@@ -8,6 +8,7 @@ use crate::layout::KvBlockLayout;
 use cudarc::driver::CudaStream;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
+use kvbm_common::KvbmTransferRoute;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -78,6 +79,13 @@ pub struct TransferOptions {
     /// layout's native format.
     #[builder(default, setter(strip_option))]
     pub dst_kv_layout: Option<KvBlockLayout>,
+
+    /// Optional logical route for transfer metrics.
+    ///
+    /// This is attached by higher layers that know the semantic tier movement
+    /// so the physical executor can emit compatibility metrics on completion.
+    #[builder(default, setter(strip_option))]
+    pub metric_route: Option<KvbmTransferRoute>,
 }
 
 impl TransferOptions {

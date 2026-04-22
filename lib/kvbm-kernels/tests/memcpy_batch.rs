@@ -154,8 +154,8 @@ fn h2d_d2h_roundtrip(
 
     let h2d_status = unsafe {
         memcpy_batch(
-            h2d_src_ptrs.as_ptr() as *const *const c_void,
-            h2d_dst_ptrs.as_ptr() as *const *mut c_void,
+            h2d_src_ptrs.as_ptr(),
+            h2d_dst_ptrs.as_ptr(),
             copy_size,
             num_pairs,
             mode,
@@ -173,8 +173,8 @@ fn h2d_d2h_roundtrip(
 
     let d2h_status = unsafe {
         memcpy_batch(
-            d2h_src_ptrs.as_ptr() as *const *const c_void,
-            d2h_dst_ptrs.as_ptr() as *const *mut c_void,
+            d2h_src_ptrs.as_ptr(),
+            d2h_dst_ptrs.as_ptr(),
             copy_size,
             num_pairs,
             mode,

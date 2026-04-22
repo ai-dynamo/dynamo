@@ -7,7 +7,7 @@
 //! all downstream managers and services:
 //! - Tokio runtime (for async execution)
 //! - NixlAgent (for RDMA/UCX transfers)
-//! - Nova (for distributed RPC)
+//! - Velo (for distributed RPC)
 //!
 //! # Usage
 //!
@@ -18,7 +18,7 @@
 //! // Build with custom config and injected components
 //! let config = KvbmConfig::extract_from(
 //!     KvbmConfig::figment()
-//!         .merge(("nova.backend.tcp_port", 8080u16))
+//!         .merge(("velo.backend.tcp_port", 8080u16))
 //! )?;
 //! let runtime = KvbmRuntime::builder(config)
 //!     .with_runtime_handle(Handle::current())
@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use dynamo_memory::nixl::NixlAgent;
 use kvbm_config::KvbmConfig;
+use kvbm_observability::SharedKvbmObservability;
 use tokio::runtime::Handle;
 use velo::Messenger;
 
@@ -49,15 +50,16 @@ use velo::Messenger;
 /// all downstream managers and services:
 /// - Tokio runtime (for async execution)
 /// - NixlAgent (for RDMA/UCX transfers)
-/// - Nova (for distributed RPC)
+/// - Velo (for distributed RPC)
 ///
 /// The `LocalEventSystem` is available via `event_system()` which
-/// returns the system from Nova.
+/// returns the system from Velo.
 pub struct KvbmRuntime {
     pub(crate) config: KvbmConfig,
     pub(crate) runtime: RuntimeHandle,
     pub(crate) messenger: Arc<Messenger>,
     pub(crate) nixl_agent: Option<NixlAgent>,
+    pub(crate) observability: SharedKvbmObservability,
 }
 
 impl KvbmRuntime {
@@ -94,6 +96,11 @@ impl KvbmRuntime {
     /// Get Messenger.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
+    }
+
+    /// Get shared KVBM observability handles and registry.
+    pub fn observability(&self) -> &SharedKvbmObservability {
+        &self.observability
     }
 
     /// Get NixlAgent for RDMA/UCX transfers.

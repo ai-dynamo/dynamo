@@ -13,6 +13,7 @@ repository.workspace = true
 dynamo-memory = { workspace = true }
 kvbm-common = { workspace = true }
 kvbm-kernels = { workspace = true }
+kvbm-observability = { workspace = true }
 velo = { workspace = true }
 
 aligned-vec = "0.6.4"
@@ -34,6 +35,7 @@ validator = { workspace = true }
 [features]
 default = []
 collectives = []
+static-kernels = ["kvbm-kernels/static-kernels"]
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []

@@ -26,3 +26,38 @@ pub enum LogicalLayoutHandle {
     /// outside the control of the KVBM system.
     G4,
 }
+
+/// Compatibility transfer routes used by KVBM metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KvbmTransferRoute {
+    OffloadD2H,
+    OffloadH2D,
+    OffloadD2D,
+    OffloadD2O,
+    OnboardH2D,
+    OnboardD2D,
+    OnboardO2D,
+}
+
+impl KvbmTransferRoute {
+    /// Stable label used by additive metrics.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Self::OffloadD2H => "d2h",
+            Self::OffloadH2D => "h2d",
+            Self::OffloadD2D => "d2d",
+            Self::OffloadD2O => "d2o",
+            Self::OnboardH2D => "h2d",
+            Self::OnboardD2D => "d2d",
+            Self::OnboardO2D => "o2d",
+        }
+    }
+
+    /// Stable operation label used by additive metrics.
+    pub fn operation_label(&self) -> &'static str {
+        match self {
+            Self::OffloadD2H | Self::OffloadH2D | Self::OffloadD2D | Self::OffloadD2O => "offload",
+            Self::OnboardH2D | Self::OnboardD2D | Self::OnboardO2D => "onboard",
+        }
+    }
+}

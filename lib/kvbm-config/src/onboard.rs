@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 pub struct OnboardConfig {
     /// The onboarding mode to use.
     ///
-    /// - `inter`: Async out-of-band loading via Nova messages (default)
+    /// - `inter`: Async out-of-band loading via Velo messages (default)
     /// - `intra`: Synchronous layer-wise loading during forward pass
     #[serde(default)]
     pub mode: OnboardMode,
@@ -30,7 +30,7 @@ pub struct OnboardConfig {
 pub enum OnboardMode {
     /// Inter-pass onboarding (default).
     ///
-    /// Blocks are loaded asynchronously between scheduler passes via Nova
+    /// Blocks are loaded asynchronously between scheduler passes via Velo
     /// active messages to workers. The `get_num_new_matched_tokens` returns
     /// `(Some(n), true)` to indicate async loading is in progress.
     ///

@@ -18,53 +18,23 @@ fewer iterations, run the following command (expected to finish in ~58s + ~152s)
 
     KVBM_MAX_ITERATIONS=2 KVBM_NUM_ITERATIONS=2 KVBM_REQUEST_DELAY=2 \
         pytest tests/kvbm_integration/test_determinism_agg.py -v --tb=short
+
+The harness uses the three-layer fixture decomposition documented in
+`tests/kvbm_integration/README.md` (deps / server / eval). Local iteration
+can run each layer in a separate shell via `tests/kvbm_integration/scripts/`.
 """
 
-import logging
 import os
-import signal
-import subprocess
-import sys
-import threading
-import time
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO
+from typing import List
 
 import pytest
-import requests
 
-from tests.utils.port_utils import allocate_port, deallocate_port
-from tests.utils.test_output import resolve_test_output_path
-
-from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 from .common import check_module_available
+from .fixtures import KvbmModelConfig, KvbmServerSpec
 
 HAS_VLLM_BENCH = check_module_available("vllm")
-
-
-@dataclass
-class KvbmModelConfig:
-    """Describes a model and the vLLM serving flags needed for KVBM testing."""
-
-    model_id: str
-    block_size: Optional[int] = None  # None = let vllm decide
-    attention_backend: Optional[str] = None  # None = let vllm decide
-    max_model_len: int = 8000
-    # Set False for MLA models: VLLM_BATCH_INVARIANT=1 disables prefix caching
-    # for TRITON_MLA in vLLM 0.17.1, defeating KV offload testing.
-    batch_invariant: bool = True
-
-    @property
-    def short_name(self) -> str:
-        return self.model_id.split("/")[-1]
-
-    @property
-    def use_mla(self) -> bool:
-        """True when the model uses Multi-head Latent Attention (e.g. TRITON_MLA)."""
-        return self.attention_backend is not None and "MLA" in self.attention_backend
 
 
 # Models exercised by this test suite.
@@ -109,8 +79,7 @@ _CONCURRENT_TIMEOUT = _SERVER_START_TIMEOUT + 2 * (
     (_KVBM_NUM_ITERATIONS - 1) * _KVBM_REQUEST_DELAY + 150
 )
 
-# Test markers to align with repository conventions
-# Todo: enable the rest when kvbm is built in the ci
+# Test markers to align with repository conventions.
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
@@ -119,460 +88,122 @@ pytestmark = [
 ]
 
 
-class LLMServerManager:
-    """Manages LLM server lifecycle for determinism testing."""
+# Phase 5: v1 and v2 both enumerated. v2 specs are further crossed with
+# both onboard modes so every run exercises intra AND inter paths.
+_KVBM_VERSIONS_UNDER_TEST = ("v1", "v2")
 
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        port: Optional[int] = None,
-        cpu_cache_blocks: Optional[int] = None,
-        gpu_cache_blocks: Optional[int] = None,
-        log_dir: Optional[Path] = None,
-        server_type: Optional[str] = ServerType.vllm,
-        model_config: Optional[KvbmModelConfig] = None,
-    ):
-        self.server_type = server_type
-        self.model_config = model_config or _MODEL_CONFIGS[0]
-        # Use provided port, env var, or allocate a dynamic port to avoid conflicts
-        if port is not None:
-            self.port = port
-            self.port_allocated = False  # Port provided by caller, don't deallocate
-        elif os.environ.get("KVBM_SERVER_PORT"):
-            self.port = int(os.environ["KVBM_SERVER_PORT"])
-            self.port_allocated = False  # Port from env var, don't deallocate
-        else:
-            self.port = allocate_port(start_port=8000)
-            self.port_allocated = True  # Port allocated by us, must deallocate
-        self.base_url = base_url or f"http://localhost:{self.port}"
-        self.metrics_port = allocate_port(start_port=6880)
-        self.metrics_port_allocated = True
-        self.process: Optional[subprocess.Popen] = None
-        self.cpu_cache_blocks = cpu_cache_blocks
-        self.gpu_cache_blocks = gpu_cache_blocks
+# v2 onboard modes enumerated on every run. Phase-4 validated structural
+# bring-up for both; phase 5 validates determinism numerics for both so any
+# mode-specific regression is caught immediately.
+_KVBM_V2_ONBOARD_MODES = ("intra", "inter")
 
-        # Prepare logging
-        self.log_dir = log_dir or Path(".")
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        config_str = (
-            f"cpu{cpu_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
-        )
-        self.server_log_file = (
-            self.log_dir / f"{self.server_type}_server_{config_str}_{timestamp}.log"
-        )
-        self.server_stdout_file: Optional[TextIO] = None
-        self._tee_threads: List[threading.Thread] = []
+# MLA execution is gated for phase 3 (see ACTIVE_PLAN.md). The MLA spec
+# stays in _MODEL_CONFIGS so the test surface is preserved; specs whose
+# model_config.use_mla is True are pytest-skipped unless KVBM_ENABLE_MLA
+# is set. A later phase will flip the gate on.
+_KVBM_ENABLE_MLA = os.environ.get("KVBM_ENABLE_MLA", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+_MLA_SKIP_REASON = (
+    "MLA gated; set KVBM_ENABLE_MLA=1 to enable (see ACTIVE_PLAN.md phase 3)"
+)
 
-        # Environment for the process
-        self.env = os.environ.copy()
-        self.env.update(
-            {
-                "RUST_BACKTRACE": "1",
-                # DynamoConnector connection settings
-                "NATS_SERVER": "nats://localhost:4222",
-                "ETCD_ENDPOINTS": "http://localhost:2379",
-                # Enable KVBM metrics for monitoring offload/onboard
-                "DYN_KVBM_METRICS": "true",
-                "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
-            }
-        )
 
-        # CPU cache blocks override via env
-        if cpu_cache_blocks is not None:
-            self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
-
-        if self.server_type == ServerType.vllm:
-            self._set_up_vllm_config(gpu_cache_blocks, self.model_config)
-        elif self.server_type == ServerType.trtllm:
-            self._set_up_trtllm_config(gpu_cache_blocks)
-        else:
-            raise ValueError(
-                f"{self.server_type} is not supported yet in the KVBM test suite"
-            )
-
-    def _set_up_vllm_config(self, gpu_cache_blocks, model_config: KvbmModelConfig):
-        self.env["VLLM_SERVER_DEV_MODE"] = "1"
-        if model_config.batch_invariant:
-            self.env["VLLM_BATCH_INVARIANT"] = "1"
-        else:
-            self.env.pop("VLLM_BATCH_INVARIANT", None)
-
-        self.server_cmd = [
-            "vllm",
-            "serve",
-            "--port",
-            str(self.port),
-            "--kv-transfer-config",
-            '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
-            model_config.model_id,
-            "--max-model-len",
-            str(model_config.max_model_len),
-        ]
-
-        if model_config.block_size is not None:
-            self.server_cmd.extend(["--block-size", str(model_config.block_size)])
-
-        if model_config.attention_backend is not None:
-            self.server_cmd.extend(
-                ["--attention-config.backend", model_config.attention_backend]
-            )
-
-        if gpu_cache_blocks is not None:
-            self.server_cmd.extend(["--num-gpu-blocks-override", str(gpu_cache_blocks)])
-
-    def _set_up_trtllm_config(self, gpu_cache_blocks):
-        config_path = os.environ.get(
-            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_llm_api_config.yaml"
-        )
-        llm_api_config: Dict[str, Any] = {}
-        llm_api_config[
-            "cuda_graph_config"
-        ] = None  # explicitly disable CUDA graph since Connector API doesn't support CUDA graph yet in TRTLLM
-        llm_api_config["kv_cache_config"] = {
-            "enable_partial_reuse": False,
-            "free_gpu_memory_fraction": 0.10,  # Set a small GPU fraction so that we can evict/reset the on-device kv cache faster
-        }
-        llm_api_config["kv_connector_config"] = {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        }
-
-        # GPU blocks override
-        if gpu_cache_blocks is not None:
-            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
-            llm_api_config["kv_cache_config"]["max_tokens"] = (
-                int(gpu_cache_blocks) * 32
-            )  # TRTLLM defaults 32 tokens per block
-
-        # Construct serve command
-        self.server_cmd = [
-            "trtllm-serve",
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
-            "--host",
-            "localhost",
-            "--port",
-            str(self.port),
-            "--backend",
-            "pytorch",
-            "--extra_llm_api_options",
-            config_path,
-        ]
-
-        import yaml
-
-        with open(config_path, "w") as f:
-            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
-
-    def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
-        """Read from pipe and write to both log file and stdout (tee)."""
-        try:
-            for line in iter(pipe.readline, ""):
-                if not line:
-                    break
-                # Write to log file
-                log_file.write(line)
-                log_file.flush()
-                # Write to stdout with prefix
-                sys.stdout.write(f"[{prefix}] {line}")
-                sys.stdout.flush()
-        except (ValueError, OSError):
-            pass  # Pipe closed
-        finally:
-            pipe.close()
-
-    def start_server(self, timeout: int = 300) -> bool:
-        """Start LLM server and wait for readiness."""
-        if self.is_server_running():
-            self.stop_server()
-            time.sleep(2)
-
-        # Open log file (combined stdout+stderr)
-        self.server_stdout_file = open(self.server_log_file.with_suffix(".log"), "w")
-
-        # Write header
-        header = f"=== {self.server_type} Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
-        self.server_stdout_file.write(header)
-        self.server_stdout_file.flush()
-        print(f"[{self.server_type}] {header}", end="")
-
-        # Launch with pipe, redirect stderr to stdout
-        self.process = subprocess.Popen(
-            self.server_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Redirect stderr to stdout
-            env=self.env,
-            preexec_fn=os.setsid,
-            text=True,
-            bufsize=1,  # Line buffered
-        )
-
-        # Start tee thread for combined output
-        self._tee_threads = [
-            threading.Thread(
-                target=self._tee_output,
-                args=(self.process.stdout, self.server_stdout_file, self.server_type),
-                daemon=True,
-            ),
-        ]
-        for t in self._tee_threads:
-            t.start()
-
-        # Wait for health
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self.is_server_running():
-                # Verify metrics endpoint is reachable (fail fast on wrong port)
-                try:
-                    requests.get(
-                        f"http://localhost:{self.metrics_port}/metrics", timeout=5
+def _specs(cpu_blocks_env: str, cpu_blocks_default: str) -> List[KvbmServerSpec]:
+    cpu_blocks = int(os.environ.get(cpu_blocks_env, cpu_blocks_default))
+    gpu_blocks = int(os.environ.get("KVBM_GPU_BLOCKS", "2048"))
+    specs: List[KvbmServerSpec] = []
+    for version in _KVBM_VERSIONS_UNDER_TEST:
+        for cfg in _MODEL_CONFIGS:
+            if version == "v2":
+                # Cross with both onboard modes — one spec per (model, mode).
+                for mode in _KVBM_V2_ONBOARD_MODES:
+                    specs.append(
+                        KvbmServerSpec(
+                            kvbm_version=version,
+                            model_config=cfg,
+                            cpu_blocks=cpu_blocks,
+                            gpu_blocks=gpu_blocks,
+                            onboard_mode=mode,
+                        )
                     )
-                    return True
-                except requests.exceptions.RequestException:
-                    print(
-                        f"Warning: server healthy but metrics port {self.metrics_port} not reachable yet"
+            else:
+                specs.append(
+                    KvbmServerSpec(
+                        kvbm_version=version,
+                        model_config=cfg,
+                        cpu_blocks=cpu_blocks,
+                        gpu_blocks=gpu_blocks,
                     )
-            if self.process.poll() is not None:
-                # Process exited, wait for tee thread to finish
-                for t in self._tee_threads:
-                    t.join(timeout=2)
-                self._close_log_files()
-                return False
-            time.sleep(5)
-
-        # Timeout
-        self.stop_server()
-        return False
-
-    def stop_server(self):
-        """Stop LLM server and close logs."""
-        if self.process:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                try:
-                    self.process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                    self.process.wait()
-            except (ProcessLookupError, OSError):
-                pass
-            finally:
-                self.process = None
-        # Wait for tee threads to finish
-        for t in self._tee_threads:
-            t.join(timeout=2)
-        self._tee_threads = []
-        self._close_log_files()
-
-        # Deallocate ports if we allocated them
-        if self.port_allocated:
-            deallocate_port(self.port)
-            self.port_allocated = False
-        if self.metrics_port_allocated:
-            deallocate_port(self.metrics_port)
-            self.metrics_port_allocated = False
-
-    def _close_log_files(self):
-        if self.server_stdout_file:
-            self.server_stdout_file.write(
-                f"\n=== Server Stopped at {datetime.now()} ===\n"
-            )
-            self.server_stdout_file.close()
-            self.server_stdout_file = None
-
-    def is_server_running(self) -> bool:
-        try:
-            # First check basic health
-            response = requests.get(f"{self.base_url}/health", timeout=5)
-            if response.status_code != 200:
-                return False
-
-            # Then check if the model endpoint is ready with a simple test request
-            test_payload = {
-                "model": self.model_config.model_id,
-                "messages": [{"role": "user", "content": "test"}],
-                "max_completion_tokens": 1,
-                "temperature": 0,
-            }
-
-            response = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                headers={"Content-Type": "application/json"},
-                json=test_payload,
-                timeout=10,
-            )
-            return response.status_code == 200
-
-        except requests.exceptions.RequestException:
-            return False
+                )
+    return specs
 
 
-class AggDeterminismTester(DeterminismTester):
-    """Aggregated architecture specific determinism tester."""
-
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        model_id: Optional[str] = None,
-        server_type: Optional[str] = ServerType.vllm,
-    ):
-        super().__init__(base_url, model_id, server_type)
-
-    def reset_prefix_cache(self):
-        """Reset the prefix cache."""
-        print("Resetting prefix cache...")
-        if self.server_type == ServerType.trtllm:
-            # TRTLLM doesn't support reset_prefix_cache endpoint API
-            # 300 shakespeare content could evict the 0.1 x 80G (~1700 blocks) on-device cache
-            shakespeare_count = 300
-            for seq_idx in range(1, shakespeare_count + 1):
-                start_word = (seq_idx - 1) * self.word_count
-                content = self.get_shakespeare_content(start_word)
-
-                if content:
-                    print(
-                        f"Resetting Shakespeare sequence {seq_idx} (words {start_word}-{start_word + self.word_count - 1})..."
-                    )
-                    try:
-                        self.make_request(content)
-                    except Exception as e:
-                        print(f"Resetting request failed: {e}")
-        else:
-            response = requests.post(
-                f"{self.base_url}/reset_prefix_cache",
-                timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
-            )
-            response.raise_for_status()
-        print("Cache reset done")
+def _params(specs: List[KvbmServerSpec]):
+    """Wrap specs as pytest.param objects, applying the MLA skip mark when gated."""
+    out = []
+    for spec in specs:
+        marks = []
+        if spec.model_config.use_mla and not _KVBM_ENABLE_MLA:
+            marks.append(pytest.mark.skip(reason=_MLA_SKIP_REASON))
+        out.append(pytest.param(spec, id=spec.id, marks=marks))
+    return out
 
 
-@pytest.fixture(scope="function")
-def llm_server(request, runtime_services):
-    """Start and stop a LLM server for each test with optional cache block overrides.
-
-    To parametrize, use:
-      @pytest.mark.parametrize("llm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
-    """
-    logger = logging.getLogger("pytest")
-    logger.setLevel(logging.INFO)
-
-    cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
-    gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
-    port = getattr(request, "param", {}).get("port", None)
-    model_config = getattr(request, "param", {}).get("model_config", None)
-
-    # Put logs in the per-test directory set up by tests/conftest.py
-    log_dir = Path(resolve_test_output_path(request.node.name))
-
-    if check_module_available("vllm"):
-        server_type = ServerType.vllm
-    elif check_module_available("tensorrt_llm"):
-        server_type = ServerType.trtllm
-    else:
-        raise Exception(
-            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
-        )
-
-    server_manager = LLMServerManager(
-        port=port,
-        cpu_cache_blocks=cpu_blocks,
-        gpu_cache_blocks=gpu_blocks,
-        log_dir=log_dir,
-        server_type=server_type,
-        model_config=model_config,
-    )
-
-    start_timeout = _SERVER_START_TIMEOUT
-    if not server_manager.start_server(timeout=start_timeout):
-        pytest.fail(
-            f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
-        )
-
-    yield server_manager
-
-    server_manager.stop_server()
-
-
-@pytest.fixture(scope="function")
-def tester(llm_server):
-    """Create determinism tester bound to the running server's base URL."""
-    t = AggDeterminismTester(
-        base_url=llm_server.base_url,
-        model_id=llm_server.model_config.model_id,
-        server_type=llm_server.server_type,
-    )
-    t.download_shakespeare_text()
-    return t
+# Raw spec lists are the contract used by tests/kvbm_integration/scripts/run_server.sh
+# to look up a KvbmServerSpec by id without importing pytest internals.
+_CACHE_RESET_SPECS = _specs("KVBM_CPU_BLOCKS", "10000")
+_CONCURRENT_SPECS = _specs("KVBM_CPU_BLOCKS", "30000")
+_CACHE_RESET_PARAMS = _params(_CACHE_RESET_SPECS)
+_CONCURRENT_PARAMS = _params(_CONCURRENT_SPECS)
 
 
 class TestDeterminismAgg(BaseTestDeterminism):
-    """Test class for determinism validation."""
+    """Aggregated-mode determinism validation."""
 
     @pytest.mark.parametrize(
-        "llm_server",
-        [
-            {
-                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")),
-                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048")),
-                "model_config": cfg,
-            }
-            for cfg in _MODEL_CONFIGS
-        ],
+        "kvbm_server_spec",
+        _CACHE_RESET_PARAMS,
         indirect=True,
-        ids=[cfg.short_name for cfg in _MODEL_CONFIGS],
     )
     @pytest.mark.kvbm
-    @pytest.mark.timeout(
-        _CACHE_RESET_TIMEOUT
-    )  # ~368s actual measured on 32-core machine
-    def test_determinism_agg_with_cache_reset(
-        self, tester, llm_server, runtime_services
-    ):
-        """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
-        # Call the base class implementation
-        super().base_test_determinism_with_cache_reset(
-            tester, llm_server, runtime_services
-        )
+    @pytest.mark.timeout(_CACHE_RESET_TIMEOUT)  # ~368s actual on 32-core machine
+    def test_determinism_agg_with_cache_reset(self, kvbm_tester, kvbm_server):
+        """Run test with warmup, reset cache, run again without warmup.
+
+        Note: `runtime_services` is brought up transitively through `kvbm_deps`
+        (see fixtures/deps.py); it is not a direct test parameter so that
+        external-attach mode (KVBM_EXTERNAL_BASE_URL) can fully bypass spawn.
+        The base method's `runtime_services` arg is unused in its body — we
+        pass `None` positionally.
+        """
+        super().base_test_determinism_with_cache_reset(kvbm_tester, kvbm_server, None)
 
     @pytest.mark.parametrize(
-        "llm_server",
-        [
-            {
-                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "30000")),
-                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048")),
-                "model_config": cfg,
-            }
-            for cfg in _MODEL_CONFIGS
-        ],
+        "kvbm_server_spec",
+        _CONCURRENT_PARAMS,
         indirect=True,
-        ids=[cfg.short_name for cfg in _MODEL_CONFIGS],
     )
     @pytest.mark.kvbm_concurrency
     @pytest.mark.skipif(
         not HAS_VLLM_BENCH, reason="requires vllm bench (vllm module not found)"
     )
-    @pytest.mark.timeout(
-        _CONCURRENT_TIMEOUT
-    )  # ~601s actual measured on 32-core machine
-    def test_concurrent_determinism_under_load(
-        self, tester, llm_server, runtime_services
-    ):
-        """Test Spanish prompt determinism under high concurrency load.
+    @pytest.mark.timeout(_CONCURRENT_TIMEOUT)  # ~601s actual on 32-core machine
+    def test_concurrent_determinism_under_load(self, kvbm_tester, kvbm_server):
+        """Spanish prompt determinism under high concurrency load.
 
         Reproduces the bug where Spanish responses become English or corrupted.
         """
-        # Get the Spanish prompt path relative to this test file
         spanish_prompt_path = Path(
             os.path.join(os.path.dirname(__file__), "es_prompt.txt")
         ).absolute()
-
-        # Call the base class implementation
         super().base_test_spanish_prompt_determinism_under_load(
-            tester, llm_server, runtime_services, spanish_prompt_path
+            kvbm_tester, kvbm_server, None, spanish_prompt_path
         )
 
 
 if __name__ == "__main__":
-    # Allow running as script
     pytest.main([__file__, "-v", "-s"])

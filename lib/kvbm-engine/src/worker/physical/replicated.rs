@@ -125,7 +125,7 @@ impl WorkerTransfers for ReplicatedDataWorker {
         }
 
         if !is_rank0 && !use_bcast {
-            return Ok(TransferCompleteNotification::completed());
+            Ok(TransferCompleteNotification::completed())
         } else if is_rank0 {
             let xfer_completion = self.inner.execute_local_transfer(
                 src,
