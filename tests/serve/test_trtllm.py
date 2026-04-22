@@ -652,7 +652,6 @@ def test_aggregated_health_check_priority(
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",
-            "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": '["generate"]',
             "MODEL_PATH": "Qwen/Qwen3-0.6B",
             "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
         },
