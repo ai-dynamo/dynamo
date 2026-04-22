@@ -45,6 +45,19 @@ def _is_cuda13() -> bool:
     return v.startswith("13")
 
 
+def _xfail_lmcache_cuda13():
+    return pytest.mark.xfail(
+        _is_cuda13(),
+        reason=(
+            "Upstream vllm/vllm-openai CUDA 13 images do not currently provide "
+            "working LMCache c_ops: x86_64 links libcudart.so.12, and LMCache "
+            "does not publish aarch64 wheels yet; expected to be fixed by "
+            "LMCache 0.4.4"
+        ),
+        strict=False,
+    )
+
+
 @dataclass
 class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
@@ -159,6 +172,7 @@ vllm_configs = {
         script_name="agg_lmcache.sh",
         marks=[
             pytest.mark.lmcache,
+            _xfail_lmcache_cuda13(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -181,6 +195,7 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.lmcache,
+            _xfail_lmcache_cuda13(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(

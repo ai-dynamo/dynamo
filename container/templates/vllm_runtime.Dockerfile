@@ -18,7 +18,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
-ARG LMCACHE_REF
 ARG VLLM_OMNI_REF
 
 WORKDIR /workspace
@@ -117,15 +116,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
 
-# The upstream CUDA 13 image currently ships an LMCache wheel linked against
-# CUDA 12. Rebuild the same stable LMCache release from source only on CUDA 13
-# so the connector matches the image's torch/CUDA stack without pulling a
-# nightly wheel or changing unrelated dependencies.
-RUN --mount=type=bind,source=./container/deps/vllm/install_lmcache.sh,target=/tmp/install_lmcache.sh \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    bash /tmp/install_lmcache.sh
 {% endif %}
 
 USER dynamo
