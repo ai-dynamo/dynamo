@@ -26,6 +26,7 @@ from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
 )
+from gpu_memory_service.client.torch.module import register_module_tensors
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
@@ -178,11 +179,11 @@ class GMSMemorySaverImpl:
             self.allocators[target_tag].remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
-        """Finalize write mode: register tensors, commit, and switch to read."""
+        """Register tensors, then publish the committed weights read-only."""
         if self.allocators["weights"].granted_lock_type != GrantedLockType.RW:
             # Read-only import mode never republishes weights.
             return
 
-        self.imported_weights_bytes = finalize_gms_write(
-            self.allocators["weights"], model
-        )
+        register_module_tensors(self.allocators["weights"], model)
+        self.imported_weights_bytes = int(self.allocators["weights"].total_bytes)
+        finalize_gms_write(self.allocators["weights"])

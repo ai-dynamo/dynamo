@@ -18,7 +18,10 @@ from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
 )
-from gpu_memory_service.client.torch.module import materialize_module_from_gms
+from gpu_memory_service.client.torch.module import (
+    materialize_module_from_gms,
+    register_module_tensors,
+)
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
@@ -153,7 +156,9 @@ def _load_write_mode(
             process_weights_after_loading(model, model_config, target_device)
             torch.cuda.empty_cache()
 
-    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
+    register_module_tensors(gms_client, model)
+    _last_imported_weights_bytes = int(gms_client.total_bytes)
+    finalize_gms_write(gms_client)
 
     logger.info(
         "[GMS] Write mode: published %.2f GiB",

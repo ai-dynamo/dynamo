@@ -9,8 +9,6 @@ import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-import torch
-from gpu_memory_service.client.torch.module import register_module_tensors
 from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
@@ -56,34 +54,15 @@ def setup_meta_tensor_workaround() -> None:
 
 
 def finalize_gms_write(
-    allocator: "GMSClientMemoryManager", model: torch.nn.Module
-) -> int:
-    """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
-
-    Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
-
-    Args:
-        allocator: The GMS client memory manager in write mode.
-        model: The loaded model with weights to register.
-
-    Returns:
-        Total bytes committed.
-    """
-    register_module_tensors(allocator, model)
-    total_bytes = allocator.total_bytes
-
-    # Synchronize before commit — caller's writes must be visible
-    torch.cuda.synchronize()
-
+    allocator: "GMSClientMemoryManager",
+) -> None:
+    """Commit the current GMS write layout, then reconnect and remap it read-only."""
     allocator.commit()
 
     allocator.connect(RequestedLockType.RO)
     allocator.remap_all_vas()
 
     logger.info(
-        "[GMS] Committed %.2f GiB, switched to read mode with %d mappings",
-        total_bytes / (1 << 30),
-        len(allocator._mappings),
+        "[GMS] Switched published layout to read mode with %d mappings",
+        len(allocator.mappings),
     )
-
-    return int(total_bytes)

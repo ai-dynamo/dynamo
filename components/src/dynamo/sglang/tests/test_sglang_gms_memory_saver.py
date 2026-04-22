@@ -37,6 +37,7 @@ class _FakeManager:
         self.is_unmapped = is_unmapped
         self.granted_lock_type = granted_lock_type
         self.calls: list[object] = []
+        self.total_bytes = 4096
 
     def unmap_all_vas(self) -> None:
         self.calls.append("unmap_all_vas")
@@ -161,3 +162,30 @@ def test_region_requires_rw_allocator(build_impl, tag):
     with pytest.raises(RuntimeError, match=rf"requires '{tag}' to be RW"):
         with impl.region(tag, enable_cpu_backup=False):
             pass
+
+
+def test_finalize_write_mode_registers_then_commits(build_impl, monkeypatch):
+    impl, weights, _, _ = build_impl(weights_lock=GrantedLockType.RW)
+    model = object()
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "register_module_tensors",
+        lambda allocator, target_model: calls.append(
+            ("register_module_tensors", allocator, target_model)
+        ),
+    )
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "finalize_gms_write",
+        lambda allocator: calls.append(("finalize_gms_write", allocator)),
+    )
+
+    impl.finalize_write_mode(model)
+
+    assert calls == [
+        ("register_module_tensors", weights, model),
+        ("finalize_gms_write", weights),
+    ]
+    assert impl.imported_weights_bytes == weights.total_bytes
