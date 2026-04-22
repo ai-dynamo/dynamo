@@ -194,6 +194,8 @@ navigation:
             path: ../pages-dev/backends/sglang/sglang-observability.md
           - page: Agentic Workloads
             path: ../pages-dev/backends/sglang/agents.md
+          - page: HiCache
+            path: ../pages-dev/backends/sglang/sglang-hicache.md
       - section: TensorRT-LLM
         path: ../pages-dev/backends/trtllm/README.md
         contents:
@@ -262,8 +264,6 @@ navigation:
     contents:
       - page: LMCache
         path: ../pages-dev/integrations/lmcache-integration.md
-      - page: SGLang HiCache
-        path: ../pages-dev/integrations/sglang-hicache.md
       - page: FlexKV
         path: ../pages-dev/integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
