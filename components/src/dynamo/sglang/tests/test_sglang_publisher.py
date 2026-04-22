@@ -42,16 +42,17 @@ def test_get_local_dp_rank_range_respects_multinode_dp_attention():
 
 
 def test_set_forward_pass_metrics_worker_id_uses_endpoint_identity():
-    server_args = SimpleNamespace(forward_pass_metrics_port=20380)
+    server_args = SimpleNamespace(enable_forward_pass_metrics=True)
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")
 
     set_forward_pass_metrics_worker_id(server_args, endpoint)
 
     assert server_args.forward_pass_metrics_worker_id == "endpoint-9"
+    assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
 
 
 def test_set_forward_pass_metrics_worker_id_is_noop_when_disabled():
-    server_args = SimpleNamespace(forward_pass_metrics_port=None)
+    server_args = SimpleNamespace(enable_forward_pass_metrics=False)
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")
 
     set_forward_pass_metrics_worker_id(server_args, endpoint)

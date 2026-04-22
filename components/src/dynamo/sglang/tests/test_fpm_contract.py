@@ -22,6 +22,10 @@ pytestmark = [
 
 def test_sglang_fpm_decodes_with_dynamo_schema():
     """Encode with SGLang's ForwardPassMetrics, decode with Dynamo's."""
+    pytest.importorskip(
+        "sglang.srt.observability.forward_pass_metrics",
+        reason="SGLang FPM module not available (requires sglang FPM branch)",
+    )
     from sglang.srt.observability.forward_pass_metrics import (
         ForwardPassMetrics as SglangFPM,
     )
@@ -85,6 +89,10 @@ def test_sglang_fpm_decodes_with_dynamo_schema():
 
 def test_sglang_fpm_field_order_matches_dynamo():
     """Verify struct field names and order are identical."""
+    pytest.importorskip(
+        "sglang.srt.observability.forward_pass_metrics",
+        reason="SGLang FPM module not available (requires sglang FPM branch)",
+    )
     import msgspec
     from sglang.srt.observability.forward_pass_metrics import (
         ForwardPassMetrics as SglangFPM,

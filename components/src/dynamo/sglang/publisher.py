@@ -46,14 +46,18 @@ def get_local_dp_rank_range(server_args) -> range:
     return range(start_dp_rank, end_dp_rank)
 
 
-def set_forward_pass_metrics_worker_id(server_args, generate_endpoint: Endpoint) -> None:
-    """Inject the endpoint instance identity into SGLang before engine init."""
-    if getattr(server_args, "forward_pass_metrics_port", None) is None:
+def set_forward_pass_metrics_worker_id(
+    server_args, generate_endpoint: Endpoint
+) -> None:
+    """Inject the endpoint instance identity and IPC path into SGLang before engine init."""
+    if not getattr(server_args, "enable_forward_pass_metrics", False):
         return
 
-    server_args.forward_pass_metrics_worker_id = str(
-        generate_endpoint.connection_id()
-    )
+    import tempfile
+
+    server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
+    ipc_path = tempfile.NamedTemporaryFile(delete=False).name
+    server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -299,15 +303,15 @@ class DynamoSglangPublisher:
     def init_fpm_relay(self) -> list:
         """Set up forward pass metrics relays for the event plane.
 
-        Creates one FpmEventRelay per local DP rank. Each relay subscribes
-        to the ZMQ PUB from sglang's _FpmPublisherThread (in the scheduler
-        process) and re-publishes to the Dynamo event plane.
+        Connects to the IPC endpoint published by SGLang's _FpmPublisherThread
+        (exposed as server_args.forward_pass_metrics_ipc_name after engine init)
+        and re-publishes to the Dynamo event plane.
 
         Returns:
             List of FpmEventRelay instances, or empty list if not enabled.
         """
-        base_port = getattr(self.server_args, "forward_pass_metrics_port", None)
-        if base_port is None:
+        ipc_name = getattr(self.server_args, "forward_pass_metrics_ipc_name", None)
+        if ipc_name is None:
             return []
 
         try:
@@ -318,20 +322,18 @@ class DynamoSglangPublisher:
                 "Forward pass metrics will not be relayed to the event plane."
             )
             return []
+
         relays = []
         for dp_rank in get_local_dp_rank_range(self.server_args):
-            zmq_ep = f"tcp://127.0.0.1:{base_port + dp_rank}"
+            zmq_ep = f"{ipc_name}.{dp_rank}"
             relay = FpmEventRelay(
                 endpoint=self.generate_endpoint,
                 zmq_endpoint=zmq_ep,
             )
             relays.append(relay)
-            logging.info(
-                f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_ep}"
-            )
-
+            logging.info(f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_ep}")
         self.fpm_relays = relays
-        return relays
+        return self.fpm_relays
 
 
 def setup_prometheus_registry(

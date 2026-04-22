@@ -307,15 +307,13 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
 
 @pytest.mark.asyncio
-async def test_forward_pass_metrics_port_reads_from_env(
-    monkeypatch, mock_sglang_cli
-):
-    """Dynamo should pass the configured FPM port through to SGLang."""
-    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "21380")
+async def test_forward_pass_metrics_enabled_from_env(monkeypatch, mock_sglang_cli):
+    """Dynamo should enable FPM when DYN_FORWARDPASS_METRIC_PORT is set."""
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "1")
     mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
 
     config = await parse_args(sys.argv[1:])
-    assert config.server_args.forward_pass_metrics_port == 21380
+    assert config.server_args.enable_forward_pass_metrics is True
 
 
 @pytest.mark.asyncio
