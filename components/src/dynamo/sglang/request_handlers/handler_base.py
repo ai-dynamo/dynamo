@@ -727,21 +727,15 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
     def _compute_system_fingerprint(self) -> str:
         if self.engine is not None:
-            try:
-                import dataclasses as _dc
-                import sglang as _sgl
-
-                info = {
-                    **_dc.asdict(self.engine.tokenizer_manager.server_args),
-                    **self.engine._scheduler_init_result.scheduler_infos[0],
-                    "version": _sgl.__version__,
-                }
-                digest = hashlib.sha256(
-                    json.dumps(info, sort_keys=True, default=str).encode()
-                ).hexdigest()[:10]
-                return f"fp_{digest}"
-            except Exception as e:
-                logging.warning("Failed to compute system fingerprint: %s", e)
+            info = {
+                **dataclasses.asdict(self.engine.tokenizer_manager.server_args),
+                **self.engine._scheduler_init_result.scheduler_infos[0],
+                "version": sgl.__version__,
+            }
+            digest = hashlib.sha256(
+                json.dumps(info, sort_keys=True, default=str).encode()
+            ).hexdigest()[:10]
+            return f"fp_{digest}"
         return "fp_unknown"
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:

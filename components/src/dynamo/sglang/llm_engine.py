@@ -9,6 +9,7 @@ and feature gap details.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -65,20 +66,15 @@ class SglangLLMEngine(LLMEngine):
 
     def _compute_system_fingerprint(self) -> str:
         if self.engine is not None:
-            try:
-                import dataclasses as _dc
-
-                info = {
-                    **_dc.asdict(self.engine.tokenizer_manager.server_args),
-                    **self.engine._scheduler_init_result.scheduler_infos[0],
-                    "version": sgl.__version__,
-                }
-                digest = hashlib.sha256(
-                    json.dumps(info, sort_keys=True, default=str).encode()
-                ).hexdigest()[:10]
-                return f"fp_{digest}"
-            except Exception:
-                pass
+            info = {
+                **dataclasses.asdict(self.engine.tokenizer_manager.server_args),
+                **self.engine._scheduler_init_result.scheduler_infos[0],
+                "version": sgl.__version__,
+            }
+            digest = hashlib.sha256(
+                json.dumps(info, sort_keys=True, default=str).encode()
+            ).hexdigest()[:10]
+            return f"fp_{digest}"
         return "fp_unknown"
 
     async def start(self) -> EngineConfig:
@@ -133,7 +129,10 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: GenerateChunk = {"token_ids": [], "system_fingerprint": self.system_fingerprint}
+            out: GenerateChunk = {
+                "token_ids": [],
+                "system_fingerprint": self.system_fingerprint,
+            }
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 
