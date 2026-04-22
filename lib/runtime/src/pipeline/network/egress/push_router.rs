@@ -17,10 +17,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 use crate::{
     component::{Client, Endpoint},
     engine::{AsyncEngine, Data},
-    pipeline::{
-        AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
-        error::{PipelineError, PipelineErrorExt},
-    },
+    pipeline::{AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn},
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
 };
@@ -331,26 +328,6 @@ where
                 router_mode = ?self.router_mode,
             )
         };
-
-        // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
-        if self.fault_detection_enabled && self.busy_threshold.is_some() {
-            let free_instances = self.client.instance_ids_free();
-            if free_instances.is_empty() {
-                // Check if we actually have any instances at all
-                let all_instances = self.client.instance_ids();
-                if !all_instances.is_empty() {
-                    tracing::warn!(
-                        instance_id,
-                        total_workers = all_instances.len(),
-                        "Rejecting request: all workers are busy"
-                    );
-                    return Err(PipelineError::ServiceOverloaded(
-                        "All workers are busy, please retry later".to_string(),
-                    )
-                    .into());
-                }
-            }
-        }
 
         // Get the address based on discovered transport type
         let address = {

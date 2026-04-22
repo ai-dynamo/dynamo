@@ -31,13 +31,83 @@ use anyhow::Context as _;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
-    engine::{AsyncEngineStream, Data},
+    engine::{AsyncEngine, AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
-        ServiceEngine, ServiceFrontend, SingleIn, Source,
+        ServiceEngine, ServiceFrontend, SingleIn, Source, error::PipelineError,
     },
 };
 use std::sync::Arc;
+
+trait AdmissionCheck: Send + Sync {
+    fn reject_reason(&self) -> Option<String>;
+}
+
+struct WorkerMonitorAdmissionCheck {
+    monitor: KvWorkerMonitor,
+}
+
+impl AdmissionCheck for WorkerMonitorAdmissionCheck {
+    fn reject_reason(&self) -> Option<String> {
+        self.monitor
+            .is_overloaded()
+            .then_some("All workers are busy, please retry later".to_string())
+    }
+}
+
+struct RouterQueueAdmissionCheck {
+    router: Arc<KvRouter>,
+}
+
+impl AdmissionCheck for RouterQueueAdmissionCheck {
+    fn reject_reason(&self) -> Option<String> {
+        let pending = self.router.pending_count();
+        (pending > 0).then_some(format!(
+            "Request backlog detected in the router queue ({pending} pending), please retry later"
+        ))
+    }
+}
+
+struct RequestAdmissionLayer {
+    checks: Vec<Arc<dyn AdmissionCheck>>,
+}
+
+impl RequestAdmissionLayer {
+    fn new(checks: Vec<Arc<dyn AdmissionCheck>>) -> Arc<Self> {
+        Arc::new(Self { checks })
+    }
+
+    fn reject_reason(&self) -> Option<String> {
+        self.checks.iter().find_map(|check| check.reject_reason())
+    }
+}
+
+#[async_trait::async_trait]
+impl<Req, Resp>
+    Operator<SingleIn<Req>, ManyOut<Annotated<Resp>>, SingleIn<Req>, ManyOut<Annotated<Resp>>>
+    for RequestAdmissionLayer
+where
+    Req: Data,
+    Resp: Data,
+{
+    async fn generate(
+        &self,
+        request: SingleIn<Req>,
+        next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<Req>,
+                    ManyOut<Annotated<Resp>>,
+                    dynamo_runtime::pipeline::Error,
+                >,
+        >,
+    ) -> Result<ManyOut<Annotated<Resp>>, dynamo_runtime::pipeline::Error> {
+        if let Some(reason) = self.reject_reason() {
+            tracing::warn!(request_id = %request.id(), reason = %reason, "Rejecting request before preprocessing");
+            return Err(PipelineError::ServiceOverloaded(reason).into());
+        }
+        next.generate(request).await
+    }
+}
 
 pub struct PreparedEngine {
     pub service_name: String,
@@ -265,13 +335,15 @@ where
         client.clone()
     };
 
-    // Get threshold value and wrap monitor for PushRouter
-    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
+    // Start the shared worker monitor via PushRouter construction, but perform admission
+    // checks in a dedicated layer before tokenization so rejected requests never enter
+    // router bookkeeping or the migration/tokenization path.
     let threshold_value = worker_monitor
         .as_ref()
         .map(|m| m.active_decode_blocks_threshold());
-    let monitor_arc =
-        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
+    let monitor_arc = worker_monitor
+        .clone()
+        .map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
@@ -287,6 +359,7 @@ where
     // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
     // OnceLock), which covers the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
+    let chooser_for_admission = chooser.clone();
 
     let service_backend = match router_mode {
         RouterMode::Direct => {
@@ -303,6 +376,17 @@ where
         }
     };
 
+    let mut admission_checks: Vec<Arc<dyn AdmissionCheck>> = Vec::new();
+    if let Some(monitor) = worker_monitor.clone() {
+        admission_checks.push(Arc::new(WorkerMonitorAdmissionCheck { monitor }));
+    }
+    if router_mode == RouterMode::KV {
+        if let Some(router) = chooser_for_admission {
+            admission_checks.push(Arc::new(RouterQueueAdmissionCheck { router }));
+        }
+    }
+    let admission_op = RequestAdmissionLayer::new(admission_checks).into_operator();
+
     // Use the provided prefill chooser, or create a disabled one if not provided
     let prefill_chooser = prefill_chooser
         .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
@@ -310,6 +394,7 @@ where
 
     // Link with prefill chooser including backward edge for response flow
     let engine = frontend
+        .link(admission_op.forward_edge())?
         .link(preprocessor_op.forward_edge())?
         .link(migration.forward_edge())?
         .link(backend.forward_edge())?
@@ -319,7 +404,75 @@ where
         .link(backend.backward_edge())?
         .link(migration.backward_edge())?
         .link(preprocessor_op.backward_edge())?
+        .link(admission_op.backward_edge())?
         .link(frontend)?;
 
     Ok(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use dynamo_runtime::pipeline::{
+        Context as PipelineContext, PipelineError, PipelineErrorExt, async_trait,
+    };
+
+    struct FakeAdmissionCheck(Option<String>);
+
+    impl AdmissionCheck for FakeAdmissionCheck {
+        fn reject_reason(&self) -> Option<String> {
+            self.0.clone()
+        }
+    }
+
+    struct TrackingEngine {
+        called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<()>, ManyOut<Annotated<()>>, dynamo_runtime::pipeline::Error>
+        for TrackingEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<()>,
+        ) -> Result<ManyOut<Annotated<()>>, dynamo_runtime::pipeline::Error> {
+            self.called.store(true, Ordering::SeqCst);
+            Err(anyhow::anyhow!("sentinel"))
+        }
+    }
+
+    #[tokio::test]
+    async fn request_admission_layer_rejects_before_preprocessing() {
+        let layer = RequestAdmissionLayer::new(vec![Arc::new(FakeAdmissionCheck(Some(
+            "overloaded".to_string(),
+        )))]);
+        let request = PipelineContext::with_id((), "req-1".to_string());
+        let next = Arc::new(TrackingEngine {
+            called: Arc::new(AtomicBool::new(false)),
+        });
+
+        let err = layer.generate(request, next.clone()).await.unwrap_err();
+        let pipeline_err = err.try_into_pipeline_error().unwrap();
+        assert!(
+            matches!(pipeline_err, PipelineError::ServiceOverloaded(msg) if msg == "overloaded")
+        );
+        assert!(!next.called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn request_admission_layer_forwards_when_not_overloaded() {
+        let layer = RequestAdmissionLayer::new(vec![Arc::new(FakeAdmissionCheck(None))]);
+        let request = PipelineContext::with_id((), "req-2".to_string());
+        let called = Arc::new(AtomicBool::new(false));
+        let next = Arc::new(TrackingEngine {
+            called: called.clone(),
+        });
+
+        let err = layer.generate(request, next).await.unwrap_err();
+        assert_eq!(err.to_string(), "sentinel");
+        assert!(called.load(Ordering::SeqCst));
+    }
 }

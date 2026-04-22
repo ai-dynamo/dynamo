@@ -28,6 +28,8 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 
+const FORWARD_PASS_METRICS_SUBJECT: &str = "forward-pass-metrics";
+
 /// Clean up all Prometheus metrics for a worker across the specified dp_ranks.
 ///
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
@@ -93,17 +95,32 @@ pub struct WorkerLoadState {
     pub active_decode_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
+    pub queued_prefill_requests: HashMap<u32, u64>,
+    pub queued_decode_requests: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
 }
 
 impl WorkerLoadState {
+    fn queued_requests(&self, dp_rank: u32) -> u64 {
+        self.queued_prefill_requests
+            .get(&dp_rank)
+            .copied()
+            .unwrap_or(0)
+            + self
+                .queued_decode_requests
+                .get(&dp_rank)
+                .copied()
+                .unwrap_or(0)
+    }
+
     /// Returns true if ALL dp_ranks are considered busy based on the threshold logic.
     ///
     /// For each dp_rank, a dp_rank is busy if ANY of these conditions is met (OR logic):
-    /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute threshold)
-    /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fraction-based threshold)
-    /// 3. `active_decode_blocks / total_blocks > active_decode_blocks_threshold` (blocks threshold)
+    /// 1. `queued_prefill_requests + queued_decode_requests > 0`
+    /// 2. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute threshold)
+    /// 3. `active_prefill_tokens > frac * max_num_batched_tokens` (fraction-based threshold)
+    /// 4. `active_decode_blocks / total_blocks > active_decode_blocks_threshold` (blocks threshold)
     ///
     /// If none of these checks can be performed (missing data), that dp_rank is considered free.
     ///
@@ -119,6 +136,10 @@ impl WorkerLoadState {
             .active_decode_blocks
             .keys()
             .chain(self.active_prefill_tokens.keys())
+            .chain(self.queued_prefill_requests.keys())
+            .chain(self.queued_decode_requests.keys())
+            .chain(self.kv_total_blocks.keys())
+            .chain(self.max_num_batched_tokens.keys())
             .copied()
             .collect();
 
@@ -129,6 +150,10 @@ impl WorkerLoadState {
 
         // Check if ALL dp_ranks are busy
         all_dp_ranks.iter().all(|&dp_rank| {
+            if self.queued_requests(dp_rank) > 0 {
+                return true; // This dp_rank is already backlogged in vLLM's waiting queue
+            }
+
             // Check 1: prefill tokens threshold (absolute token count)
             if let Some(&active_tokens) = self.active_prefill_tokens.get(&dp_rank) {
                 if active_tokens > active_prefill_tokens_threshold {
@@ -163,6 +188,24 @@ impl WorkerLoadState {
             false
         })
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ForwardPassQueuedRequestMetrics {
+    #[serde(default)]
+    num_prefill_requests: u64,
+    #[serde(default)]
+    num_decode_requests: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ForwardPassMetrics {
+    #[serde(default)]
+    worker_id: String,
+    #[serde(default)]
+    dp_rank: u32,
+    #[serde(default)]
+    queued_requests: ForwardPassQueuedRequestMetrics,
 }
 
 /// Worker monitor for tracking KV cache usage and busy states.
@@ -321,6 +364,36 @@ impl KvWorkerMonitor {
             self.set_active_prefill_tokens_threshold_frac(frac);
         }
     }
+
+    /// Returns true when every discovered worker is currently overloaded.
+    ///
+    /// This mirrors the legacy PushRouter check: if there are no discovered workers,
+    /// overload is false so the regular routing path can surface the missing-endpoint error.
+    pub fn is_overloaded(&self) -> bool {
+        let all_instances = self.client.instance_ids();
+        !all_instances.is_empty() && self.client.instance_ids_free().is_empty()
+    }
+
+    fn busy_instances_from_states(
+        worker_load_states: &DashMap<u64, WorkerLoadState>,
+        active_decode_blocks_threshold: f64,
+        active_prefill_tokens_threshold: u64,
+        active_prefill_tokens_threshold_frac: f64,
+    ) -> Vec<u64> {
+        worker_load_states
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .is_busy(
+                        active_decode_blocks_threshold,
+                        active_prefill_tokens_threshold,
+                        active_prefill_tokens_threshold_frac,
+                    )
+                    .then_some(*entry.key())
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -378,6 +451,22 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             }
         };
 
+        let fpm_metrics_rx = match EventSubscriber::for_namespace(
+            component.namespace(),
+            FORWARD_PASS_METRICS_SUBJECT,
+        )
+        .await
+        {
+            Ok(sub) => Some(sub.typed::<ForwardPassMetrics>()),
+            Err(e) => {
+                tracing::warn!(
+                    "KvWorkerMonitor: forward-pass metrics subscriber not available ({}), skipping waiting-queue telemetry.",
+                    e
+                );
+                None
+            }
+        };
+
         // Watch decode endpoint instances for cleanup (ITL metrics)
         let mut decode_instances_rx = self.client.instance_avail_watcher();
 
@@ -393,6 +482,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         // Spawn background monitoring task
         tokio::spawn(async move {
             let mut kv_metrics_rx = kv_metrics_rx; // Move into async block
+            let mut fpm_metrics_rx = fpm_metrics_rx; // Move into async block
             let mut previous_busy_instances = Vec::new(); // Track previous state
 
             // Track decode worker IDs (for ITL cleanup)
@@ -414,6 +504,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         rx.next().await
                     } else {
                         // If no subscriber, pend forever (this branch is effectively disabled)
+                        std::future::pending().await
+                    }
+                };
+                let fpm_event_future = async {
+                    if let Some(ref mut rx) = fpm_metrics_rx {
+                        rx.next().await
+                    } else {
                         std::future::pending().await
                     }
                 };
@@ -479,6 +576,24 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 }
                             }
                         }
+
+                        let current_active_decode_blocks_threshold =
+                            Self::scaled_to_f64(active_decode_blocks_threshold.load(Ordering::Relaxed));
+                        let current_active_prefill_tokens_threshold =
+                            active_prefill_tokens_threshold.load(Ordering::Relaxed);
+                        let current_active_prefill_tokens_threshold_frac =
+                            Self::scaled_to_f64(active_prefill_tokens_threshold_frac.load(Ordering::Relaxed));
+                        let busy_instances = Self::busy_instances_from_states(
+                            &worker_load_states,
+                            current_active_decode_blocks_threshold,
+                            current_active_prefill_tokens_threshold,
+                            current_active_prefill_tokens_threshold_frac,
+                        );
+                        if busy_instances != previous_busy_instances {
+                            tracing::debug!("Busy instances changed: {:?}", busy_instances);
+                            client.update_free_instances(&busy_instances);
+                            previous_busy_instances = busy_instances;
+                        }
                     }
 
                     // Handle KV metrics updates (ActiveLoad) - only if subscriber is available
@@ -525,21 +640,62 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             Self::scaled_to_f64(active_prefill_tokens_threshold_frac.load(Ordering::Relaxed));
 
                         // Recalculate all busy instances and update
-                        let busy_instances: Vec<u64> = worker_load_states
-                            .iter()
-                            .filter_map(|entry| {
-                                entry
-                                    .value()
-                                    .is_busy(
-                                        current_active_decode_blocks_threshold,
-                                        current_active_prefill_tokens_threshold,
-                                        current_active_prefill_tokens_threshold_frac,
-                                    )
-                                    .then_some(*entry.key())
-                            })
-                            .collect();
+                        let busy_instances = Self::busy_instances_from_states(
+                            &worker_load_states,
+                            current_active_decode_blocks_threshold,
+                            current_active_prefill_tokens_threshold,
+                            current_active_prefill_tokens_threshold_frac,
+                        );
 
                         // Only update if busy_instances has changed
+                        if busy_instances != previous_busy_instances {
+                            tracing::debug!("Busy instances changed: {:?}", busy_instances);
+                            client.update_free_instances(&busy_instances);
+                            previous_busy_instances = busy_instances;
+                        }
+                    }
+
+                    // Handle vLLM waiting-queue telemetry updates (ForwardPassMetrics)
+                    fpm_event = fpm_event_future => {
+                        let Some(event_result) = fpm_event else {
+                            tracing::debug!("Forward-pass metrics stream closed");
+                            break;
+                        };
+
+                        let Ok((_envelope, fpm)) = event_result else {
+                            tracing::error!("Error receiving forward-pass metrics event: {event_result:?}");
+                            continue;
+                        };
+
+                        let Ok(worker_id) = fpm.worker_id.parse::<u64>() else {
+                            tracing::trace!(
+                                worker_id = %fpm.worker_id,
+                                "Skipping forward-pass metrics event with non-numeric worker_id"
+                            );
+                            continue;
+                        };
+
+                        let mut state = worker_load_states.entry(worker_id).or_default();
+                        state
+                            .queued_prefill_requests
+                            .insert(fpm.dp_rank, fpm.queued_requests.num_prefill_requests);
+                        state
+                            .queued_decode_requests
+                            .insert(fpm.dp_rank, fpm.queued_requests.num_decode_requests);
+
+                        let current_active_decode_blocks_threshold =
+                            Self::scaled_to_f64(active_decode_blocks_threshold.load(Ordering::Relaxed));
+                        let current_active_prefill_tokens_threshold =
+                            active_prefill_tokens_threshold.load(Ordering::Relaxed);
+                        let current_active_prefill_tokens_threshold_frac =
+                            Self::scaled_to_f64(active_prefill_tokens_threshold_frac.load(Ordering::Relaxed));
+                        let busy_instances = Self::busy_instances_from_states(
+                            &worker_load_states,
+                            current_active_decode_blocks_threshold,
+                            current_active_prefill_tokens_threshold,
+                            current_active_prefill_tokens_threshold_frac,
+                        );
+
                         if busy_instances != previous_busy_instances {
                             tracing::debug!("Busy instances changed: {:?}", busy_instances);
                             client.update_free_instances(&busy_instances);
@@ -646,5 +802,32 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_load_state_marks_backlogged_dp_rank_busy() {
+        let mut state = WorkerLoadState::default();
+        state.queued_prefill_requests.insert(0, 1);
+
+        assert!(state.is_busy(1.0, u64::MAX, 10.0));
+    }
+
+    #[test]
+    fn worker_load_state_requires_all_dp_ranks_to_be_busy() {
+        let mut state = WorkerLoadState::default();
+        state.queued_prefill_requests.insert(0, 1);
+        state.queued_prefill_requests.insert(1, 0);
+        state.max_num_batched_tokens.insert(0, DEFAULT_MAX_TOKENS);
+        state.max_num_batched_tokens.insert(1, DEFAULT_MAX_TOKENS);
+
+        assert!(!state.is_busy(1.0, u64::MAX, 10.0));
+
+        state.queued_decode_requests.insert(1, 1);
+        assert!(state.is_busy(1.0, u64::MAX, 10.0));
     }
 }
