@@ -76,6 +76,9 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_
 echo "Starting frontend..."
 python -m dynamo.frontend &
 
+# Each worker needs its own system port when tests inject DYN_SYSTEM_PORT{1,2}.
+unset DYN_SYSTEM_PORT
+
 EXTRA_ARGS=""
 
 # GPU assignments (override via environment variables)
@@ -96,6 +99,7 @@ fi
 
 # Start encode worker
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
@@ -106,6 +110,7 @@ python -m dynamo.vllm \
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
 echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
