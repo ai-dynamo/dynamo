@@ -1040,3 +1040,211 @@ def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_
     assert prefill_count == 0
     assert decode_count == 0
     assert is_stable is True
+
+
+# Tests for get_worker_info / Service.get_component_name_from_endpoint_arg.
+#
+# Regression: the filter that compares an MDC entry's ``component`` field
+# against the expected value must use the lowercase backend-default name
+# (what the Rust runtime writes to MDC), NOT the DGD ``spec.services``
+# dict key. The DGD key is typically PascalCase (``VllmPrefillWorker``)
+# while MDC carries the Endpoint name (``prefill`` / ``backend`` /
+# ``tensorrt_llm``); comparing those fields would cause every real-world
+# MDC entry to be skipped, leaving WorkerInfo without ``context_length``
+# and silently breaking easy-mode load scaling.
+
+
+def _make_mdc_cr(
+    cr_name: str, component: str, is_prefill: bool, context_length: int = 40960
+) -> dict:
+    """Build a minimal DynamoWorkerMetadata CR dict with one model_card."""
+    return {
+        "metadata": {"name": cr_name},
+        "spec": {
+            "data": {
+                "model_cards": {
+                    "0": {
+                        "type": "Model",
+                        "component": component,
+                        "endpoint": "generate",
+                        "card_json": {
+                            "display_name": "Qwen/Qwen3-8B",
+                            "context_length": context_length,
+                            "kv_cache_block_size": 16,
+                            "model_type": 0x10 if is_prefill else 0x01,
+                            "runtime_config": {
+                                "total_kv_blocks": 49231,
+                                "max_num_seqs": 256,
+                                "max_num_batched_tokens": 8192,
+                            },
+                        },
+                    }
+                }
+            }
+        },
+    }
+
+
+def test_get_worker_info_prefill_finds_mdc_when_dgd_key_is_pascal_case(
+    kubernetes_connector, mock_kube_api
+):
+    """PascalCase DGD key must not prevent matching MDC entry with component="prefill"."""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "VllmPrefillWorker": {
+                    "replicas": 1,
+                    "subComponentType": "prefill",
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.custom_api.list_namespaced_custom_object.return_value = {
+        "items": [_make_mdc_cr("test-graph-0-vllmprefillworker-abc", "prefill", True)]
+    }
+    mock_kube_api.current_namespace = "default"
+
+    info = kubernetes_connector.get_worker_info(
+        SubComponentType.PREFILL, backend="vllm"
+    )
+
+    assert info.context_length == 40960
+    assert info.total_kv_blocks == 49231
+
+
+def test_get_worker_info_decode_matches_backend_component_not_subcomponent_value(
+    kubernetes_connector, mock_kube_api
+):
+    """vLLM decode: MDC carries "backend", NOT "decode". Filter must match "backend"."""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "replicas": 1,
+                    "subComponentType": "decode",
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.custom_api.list_namespaced_custom_object.return_value = {
+        "items": [_make_mdc_cr("test-graph-0-vllmdecodeworker-xyz", "backend", False)]
+    }
+    mock_kube_api.current_namespace = "default"
+
+    info = kubernetes_connector.get_worker_info(SubComponentType.DECODE, backend="vllm")
+
+    # If the filter used sub_component_type.value ("decode") or service.name
+    # ("VllmDecodeWorker") instead of the backend default ("backend"), this
+    # would fall back to defaults with context_length=None.
+    assert info.context_length == 40960
+
+
+def test_get_worker_info_respects_user_endpoint_override(
+    kubernetes_connector, mock_kube_api
+):
+    """User's --endpoint override makes the worker write a custom component name;
+    the filter must match that same value."""
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "VllmPrefillWorker": {
+                    "replicas": 1,
+                    "subComponentType": "prefill",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": [
+                                "--endpoint",
+                                "my-ns.my-custom-prefill.generate",
+                            ]
+                        }
+                    },
+                },
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.custom_api.list_namespaced_custom_object.return_value = {
+        "items": [
+            _make_mdc_cr(
+                "test-graph-0-vllmprefillworker-abc", "my-custom-prefill", True
+            )
+        ]
+    }
+    mock_kube_api.current_namespace = "default"
+
+    info = kubernetes_connector.get_worker_info(
+        SubComponentType.PREFILL, backend="vllm"
+    )
+
+    assert info.context_length == 40960
+
+
+def test_service_get_component_name_from_endpoint_arg_present():
+    service = Service(
+        name="VllmPrefillWorker",
+        service={
+            "extraPodSpec": {
+                "mainContainer": {
+                    "args": [
+                        "--endpoint",
+                        "ns.custom-comp.generate",
+                        "--other",
+                        "flag",
+                    ]
+                }
+            }
+        },
+    )
+    assert service.get_component_name_from_endpoint_arg() == "custom-comp"
+
+
+def test_service_get_component_name_from_endpoint_arg_with_dyn_prefix():
+    """parse_endpoint accepts 'dyn://' prefix; the extracted component must strip it."""
+    service = Service(
+        name="VllmDecodeWorker",
+        service={
+            "extraPodSpec": {
+                "mainContainer": {
+                    "args": ["--endpoint", "dyn://ns.user-decode.generate"]
+                }
+            }
+        },
+    )
+    assert service.get_component_name_from_endpoint_arg() == "user-decode"
+
+
+def test_service_get_component_name_from_endpoint_arg_absent():
+    service = Service(
+        name="VllmPrefillWorker",
+        service={
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--model", "Qwen/Qwen3-8B"]},
+            }
+        },
+    )
+    assert service.get_component_name_from_endpoint_arg() is None
+
+
+def test_service_get_component_name_from_endpoint_arg_missing_value():
+    """--endpoint with no following arg should return None, not raise IndexError."""
+    service = Service(
+        name="VllmPrefillWorker",
+        service={"extraPodSpec": {"mainContainer": {"args": ["--endpoint"]}}},
+    )
+    assert service.get_component_name_from_endpoint_arg() is None
+
+
+def test_service_get_component_name_from_endpoint_arg_malformed():
+    """Malformed endpoint (wrong number of dots) returns None via ValueError."""
+    service = Service(
+        name="VllmPrefillWorker",
+        service={
+            "extraPodSpec": {"mainContainer": {"args": ["--endpoint", "only.two"]}}
+        },
+    )
+    assert service.get_component_name_from_endpoint_arg() is None

@@ -505,17 +505,28 @@ class KubernetesConnector(PlannerConnector):
         # Resolve the expected component name so we can scope card selection
         # and avoid picking up LoRA-adapter cards that share the same CR but
         # carry a different component/model identity.
-        expected_component: Optional[str] = None
+        #
+        # The MDC "component" field is written by the Rust runtime from the
+        # registered Endpoint name (e.g. "prefill" / "backend" /
+        # "tensorrt_llm"), NOT from the DGD spec.services dict key (which
+        # is typically PascalCase like "VllmPrefillWorker"). Source of
+        # truth, in priority order:
+        #   1. The user's --endpoint <ns>.<component>.<ep> override in the
+        #      worker's container args (vllm/sglang/trtllm all honor it).
+        #   2. The backend-specific default from
+        #      build_worker_info_from_defaults.
+        defaults = build_worker_info_from_defaults(backend, sub_component_type)
+        expected_component: Optional[str] = defaults.component_name or None
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_service_from_sub_component_type_or_name(
                 deployment, sub_component_type
             )
-            expected_component = service.name
+            user_component = service.get_component_name_from_endpoint_arg()
+            if user_component:
+                expected_component = user_component
         except PlannerError:
-            expected_component = build_worker_info_from_defaults(
-                backend, sub_component_type
-            ).component_name
+            pass
 
         for entry in entries:
             is_prefill = self._mdc_entry_is_prefill(entry)
