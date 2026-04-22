@@ -453,7 +453,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
-    runs-on: prod-builder-amd-v1
+    runs-on: ubuntu-slim
     if: always() && failure()
     needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:

@@ -13,7 +13,24 @@ use validator::Validate;
 use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::KvCacheEvent;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, SequenceHash, Token};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
+
+/// Metadata marker type for kvbm-logical blocks in the mocker's G1 pool.
+#[derive(Clone, Debug)]
+pub struct G1;
+
+/// Eviction strategy for the kvbm-logical inactive pool.
+///
+/// `Lineage` is the default and matches kvbm-logical's own default — it evicts
+/// leaf blocks first, which subsumes the preemption-priority behaviour that the
+/// mocker's old `LRUEvictor::push_front` provided.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum MockerEvictionBackend {
+    Lru,
+    MultiLru,
+    #[default]
+    Lineage,
+}
 
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
@@ -142,12 +159,20 @@ pub enum MoveBlock {
     Use(
         Vec<UniqueBlock>,
         Vec<BlockHash>,
+        Vec<PositionalLineageHash>,
         Option<Vec<Vec<u32>>>,
         Option<UniqueBlock>,
     ),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),
+    Promote(
+        Uuid,
+        SequenceHash,
+        Option<u64>,
+        BlockHash,
+        PositionalLineageHash,
+        Option<Vec<u32>>,
+    ),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

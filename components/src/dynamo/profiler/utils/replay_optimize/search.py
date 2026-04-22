@@ -30,8 +30,6 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from typing import Literal
 
-import pandas as pd
-
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 
 from . import aic, evaluate
@@ -40,16 +38,17 @@ from .constants import (
     DEFAULT_MAX_PARALLEL_EVALS,
     DEFAULT_OVERLAP_SCORE_WEIGHTS,
     DEFAULT_SEARCH_ROUNDS,
-    SUPPORTED_CONSTRAINTS,
 )
 from .models import (
     DenseAggReplayState,
     DenseReplayOptimizationResult,
     DenseReplayState,
+    ReplayConstraints,
+    ReplayObjective,
     SyntheticReplayWorkload,
     TraceReplayWorkload,
 )
-from .scoring import _pick_best_record
+from .scoring import _finalize_result, _pick_best_record
 
 
 def _validate_backend(backend: str) -> str:
@@ -58,31 +57,6 @@ def _validate_backend(backend: str) -> str:
             f"backend must be one of {sorted(AIC_BACKEND_VERSIONS)}, got {backend!r}"
         )
     return backend
-
-
-def _normalize_constraints(
-    constraints: Mapping[str, float] | None,
-    max_total_gpus: int,
-) -> dict[str, float]:
-    normalized = dict(constraints or {})
-    invalid_keys = sorted(set(normalized) - SUPPORTED_CONSTRAINTS)
-    if invalid_keys:
-        raise ValueError(
-            "unsupported constraints: "
-            + ", ".join(invalid_keys)
-            + f"; supported constraints are {sorted(SUPPORTED_CONSTRAINTS)}"
-        )
-
-    if (
-        "max_total_gpus" in normalized
-        and int(normalized["max_total_gpus"]) != max_total_gpus
-    ):
-        raise ValueError(
-            "constraints['max_total_gpus'] must match max_total_gpus when both are provided"
-        )
-
-    normalized["max_total_gpus"] = float(max_total_gpus)
-    return normalized
 
 
 def _normalize_overlap_score_weights(
@@ -303,6 +277,7 @@ def optimize_dense_disagg_with_replay(
     base_router_config: KvRouterConfig | None = None,
     max_total_gpus: int,
     constraints: Mapping[str, float] | None = None,
+    objective: Literal["throughput", "mean_e2e_latency", "mean_ttft"] = "throughput",
     router_mode: Literal["kv_router", "round_robin", "both"] = "kv_router",
     overlap_score_weights: Sequence[float] | None = None,
     max_parallel_evals: int = DEFAULT_MAX_PARALLEL_EVALS,
@@ -310,8 +285,10 @@ def optimize_dense_disagg_with_replay(
     """Run a heuristic block search over dense disaggregated offline replay configs.
 
     This routine assumes we want to use as much of `max_total_gpus` as possible,
-    then ranks visited states by raw output throughput subject to replay
-    constraints. The descended dimensions are:
+    then ranks visited states by the selected `objective` subject to replay
+    constraints. Supported objectives: `"throughput"` (default, maximize
+    `output_throughput_tok_s`), `"mean_e2e_latency"` and `"mean_ttft"` (minimize
+    the corresponding report metric). The descended dimensions are:
     1. `(prefill_tp, decode_tp)` at equal worker counts that fit the budget.
     2. `(prefill_workers, decode_workers)` on the budget edge for the incumbent TP
        shape.
@@ -321,10 +298,11 @@ def optimize_dense_disagg_with_replay(
     """
     backend = _validate_backend(backend)
     router_mode = _normalize_router_mode(router_mode)
+    typed_objective = ReplayObjective(objective)
     if max_total_gpus < 2:
         raise ValueError("max_total_gpus must be at least 2 for disaggregated replay")
 
-    normalized_constraints = _normalize_constraints(constraints, max_total_gpus)
+    typed_constraints = ReplayConstraints.from_mapping(constraints, max_total_gpus)
     overlap_weights = _normalize_overlap_score_weights(overlap_score_weights)
     if router_mode == "round_robin":
         overlap_weights = (0.0,)
@@ -368,7 +346,8 @@ def optimize_dense_disagg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
-                constraints=normalized_constraints,
+                objective=typed_objective,
+                constraints=typed_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -391,7 +370,8 @@ def optimize_dense_disagg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
-                constraints=normalized_constraints,
+                objective=typed_objective,
+                constraints=typed_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -420,7 +400,8 @@ def optimize_dense_disagg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
-                constraints=normalized_constraints,
+                objective=typed_objective,
+                constraints=typed_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -433,46 +414,7 @@ def optimize_dense_disagg_with_replay(
         if executor is not None:
             executor.shutdown()
 
-    evaluated_df = pd.DataFrame.from_records(list(cache.values()))
-    feasible_df = (
-        evaluated_df[evaluated_df["feasible"]]
-        if not evaluated_df.empty
-        else evaluated_df
-    )
-    if not feasible_df.empty:
-        feasible_df = feasible_df.sort_values(
-            by=[
-                "score",
-                "output_throughput_tok_s",
-                "mean_e2e_latency_ms",
-                "total_gpus_used",
-            ],
-            ascending=[False, False, True, True],
-        ).reset_index(drop=True)
-    best_feasible = feasible_df.iloc[0].to_dict() if not feasible_df.empty else None
-    best_infeasible = None
-    if not evaluated_df.empty:
-        infeasible_df = evaluated_df[~evaluated_df["feasible"]]
-        if not infeasible_df.empty:
-            best_infeasible = (
-                infeasible_df.sort_values(
-                    by=[
-                        "violation_penalty",
-                        "output_throughput_tok_s",
-                        "mean_e2e_latency_ms",
-                    ],
-                    ascending=[True, False, True],
-                )
-                .iloc[0]
-                .to_dict()
-            )
-
-    return DenseReplayOptimizationResult(
-        best_feasible=best_feasible,
-        best_infeasible=best_infeasible,
-        evaluated_df=evaluated_df.reset_index(drop=True),
-        feasible_df=feasible_df,
-    )
+    return _finalize_result(cache)
 
 
 def optimize_dense_agg_with_replay(
@@ -485,6 +427,7 @@ def optimize_dense_agg_with_replay(
     base_router_config: KvRouterConfig | None = None,
     max_total_gpus: int,
     constraints: Mapping[str, float] | None = None,
+    objective: Literal["throughput", "mean_e2e_latency", "mean_ttft"] = "throughput",
     router_mode: Literal["kv_router", "round_robin", "both"] = "kv_router",
     overlap_score_weights: Sequence[float] | None = None,
     max_parallel_evals: int = DEFAULT_MAX_PARALLEL_EVALS,
@@ -492,8 +435,10 @@ def optimize_dense_agg_with_replay(
     """Run a heuristic block search over dense aggregated offline replay configs.
 
     This routine assumes we want to use as much of `max_total_gpus` as possible,
-    then ranks visited states by raw output throughput subject to replay
-    constraints. The descended dimensions are:
+    then ranks visited states by the selected `objective` subject to replay
+    constraints. Supported objectives: `"throughput"` (default, maximize
+    `output_throughput_tok_s`), `"mean_e2e_latency"` and `"mean_ttft"` (minimize
+    the corresponding report metric). The descended dimensions are:
     1. `tp` at the maximum worker count that fits the budget.
     2. `workers` for the incumbent `tp`.
     3. `(router_mode, overlap_score_weight)`.
@@ -502,10 +447,11 @@ def optimize_dense_agg_with_replay(
     """
     backend = _validate_backend(backend)
     router_mode = _normalize_router_mode(router_mode)
+    typed_objective = ReplayObjective(objective)
     if max_total_gpus < 1:
         raise ValueError("max_total_gpus must be at least 1 for aggregated replay")
 
-    normalized_constraints = _normalize_constraints(constraints, max_total_gpus)
+    typed_constraints = ReplayConstraints.from_mapping(constraints, max_total_gpus)
     overlap_weights = _normalize_overlap_score_weights(overlap_score_weights)
     if router_mode == "round_robin":
         overlap_weights = (0.0,)
@@ -542,7 +488,8 @@ def optimize_dense_agg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
-                constraints=normalized_constraints,
+                objective=typed_objective,
+                constraints=typed_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -563,7 +510,8 @@ def optimize_dense_agg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
-                constraints=normalized_constraints,
+                objective=typed_objective,
+                constraints=typed_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -593,7 +541,8 @@ def optimize_dense_agg_with_replay(
                 model=model,
                 backend=backend,
                 system=system,
-                constraints=normalized_constraints,
+                objective=typed_objective,
+                constraints=typed_constraints,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -607,43 +556,4 @@ def optimize_dense_agg_with_replay(
         if executor is not None:
             executor.shutdown()
 
-    evaluated_df = pd.DataFrame.from_records(list(cache.values()))
-    feasible_df = (
-        evaluated_df[evaluated_df["feasible"]]
-        if not evaluated_df.empty
-        else evaluated_df
-    )
-    if not feasible_df.empty:
-        feasible_df = feasible_df.sort_values(
-            by=[
-                "score",
-                "output_throughput_tok_s",
-                "mean_e2e_latency_ms",
-                "total_gpus_used",
-            ],
-            ascending=[False, False, True, True],
-        ).reset_index(drop=True)
-    best_feasible = feasible_df.iloc[0].to_dict() if not feasible_df.empty else None
-    best_infeasible = None
-    if not evaluated_df.empty:
-        infeasible_df = evaluated_df[~evaluated_df["feasible"]]
-        if not infeasible_df.empty:
-            best_infeasible = (
-                infeasible_df.sort_values(
-                    by=[
-                        "violation_penalty",
-                        "output_throughput_tok_s",
-                        "mean_e2e_latency_ms",
-                    ],
-                    ascending=[True, False, True],
-                )
-                .iloc[0]
-                .to_dict()
-            )
-
-    return DenseReplayOptimizationResult(
-        best_feasible=best_feasible,
-        best_infeasible=best_infeasible,
-        evaluated_df=evaluated_df.reset_index(drop=True),
-        feasible_df=feasible_df,
-    )
+    return _finalize_result(cache)

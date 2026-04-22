@@ -88,8 +88,8 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.2.0" }
-modelexpress-common = { version = "0.2.0" }
+modelexpress-client = { version = "0.3.0" }
+modelexpress-common = { version = "0.3.0" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }

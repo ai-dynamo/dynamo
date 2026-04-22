@@ -45,7 +45,8 @@ pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy};
 pub use indexer::{
-    LowerTierContinuation, LowerTierIndexer, MaybeError, SyncIndexer, ThreadPoolIndexer,
+    BranchShardedIndexer, LowerTierContinuation, LowerTierIndexer, MaybeError, SyncIndexer,
+    ThreadPoolIndexer,
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{

@@ -606,6 +606,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
@@ -698,6 +699,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
@@ -780,6 +782,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
@@ -968,6 +971,7 @@ mod tests_startup_helpers {
 
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
+            start_position,
             blocks,
         }) = event.data
         else {
@@ -975,6 +979,7 @@ mod tests_startup_helpers {
         };
 
         assert!(parent_hash.is_none());
+        assert!(start_position.is_none());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash.0, 42);
 
@@ -1094,6 +1099,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
@@ -1166,6 +1172,7 @@ mod tests_startup_helpers {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100), // Shared prefix
@@ -1280,6 +1287,7 @@ mod test_event_dedup_filter {
     fn store_data(hashes: &[u64]) -> KvCacheStoreData {
         KvCacheStoreData {
             parent_hash: None,
+            start_position: None,
             blocks: hashes
                 .iter()
                 .map(|&h| KvCacheStoredBlockData {
@@ -1556,6 +1564,7 @@ mod batching_state_tests {
 
         state.pending_stored = Some(KvCacheStoreData {
             parent_hash: None,
+            start_position: None,
             blocks: vec![],
         });
         assert!(
@@ -1659,6 +1668,7 @@ mod batching_state_tests {
         };
         let first = KvCacheStoreData {
             parent_hash: Some(ExternalSequenceBlockHash(0)),
+            start_position: None,
             blocks: vec![block1],
         };
 
@@ -1872,6 +1882,7 @@ mod event_processor_tests {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash,
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
                         tokens_hash: LocalBlockHash(i as u64 * 100),
@@ -1964,6 +1975,7 @@ mod event_processor_tests {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: Some(ExternalSequenceBlockHash((i + 1) as u64 * 100)),
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
                         tokens_hash: LocalBlockHash(i as u64 * 100),
@@ -2030,6 +2042,7 @@ mod event_processor_tests {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2045,6 +2058,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: Some(11_111),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2060,6 +2074,7 @@ mod event_processor_tests {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: Some(20),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(3),
                     tokens_hash: LocalBlockHash(300),
@@ -2093,6 +2108,11 @@ mod event_processor_tests {
                 data.parent_hash, None,
                 "First batch should preserve the original root parent"
             );
+            assert_eq!(
+                data.start_position,
+                Some(10),
+                "First batch should preserve the original start position"
+            );
         } else {
             panic!("Expected first event to be Stored");
         }
@@ -2107,6 +2127,11 @@ mod event_processor_tests {
                 data.parent_hash,
                 Some(ExternalSequenceBlockHash(1)),
                 "Second batch should preserve the reused parent hash"
+            );
+            assert_eq!(
+                data.start_position,
+                Some(20),
+                "Second batch should keep the new root's start position"
             );
         } else {
             panic!("Expected second event to be Stored");
@@ -2242,6 +2267,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2644,6 +2670,7 @@ mod event_processor_tests {
             event_id: 100,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2659,6 +2686,7 @@ mod event_processor_tests {
             event_id: 101,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2676,6 +2704,7 @@ mod event_processor_tests {
             event_id: 200,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(1000),
@@ -2761,6 +2790,7 @@ mod event_processor_tests {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None, // Root block with no parent
+                start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2777,6 +2807,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
+                start_position: Some(999),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2793,6 +2824,7 @@ mod event_processor_tests {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(2)),
+                start_position: Some(1_234),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(3),
                     tokens_hash: LocalBlockHash(300),
@@ -2822,6 +2854,11 @@ mod event_processor_tests {
             assert_eq!(
                 data.parent_hash, None,
                 "Batch parent_hash should remain None (from first event), NOT overwritten by subsequent events"
+            );
+            assert_eq!(
+                data.start_position,
+                Some(10),
+                "Batch start_position should remain anchored to the first event"
             );
         } else {
             panic!("Expected Stored event");

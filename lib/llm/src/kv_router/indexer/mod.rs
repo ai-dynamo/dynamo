@@ -579,6 +579,7 @@ mod tests {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash,
+                    start_position: None,
                     blocks,
                 }),
                 dp_rank,
