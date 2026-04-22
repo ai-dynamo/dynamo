@@ -697,13 +697,7 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
-        # DECODE: if the request carries explicit top-level disaggregated_params,
-        # use them verbatim instead of decoding from prefill_result. Used by the
-        # canary probe (request_type="context_and_generation") to run locally
-        # without a prefill peer. Real decode traffic instead carries
-        # request.prefill_result.disaggregated_params (nested); the top-level
-        # field is otherwise dormant on the request path (backend author: please
-        # confirm before adding any non-canary writer to request["disaggregated_params"]).
+        # Use top-level disaggregated_params if present — canary probe path.
         top_level_dp = request.get("disaggregated_params")
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
