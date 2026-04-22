@@ -628,12 +628,12 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
 				`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
-				"$LWS_LEADER_ADDRESS",
+				"$(LWS_LEADER_ADDRESS)",
 				commonconsts.DynamoSystemPort,
-				"$LWS_LEADER_ADDRESS",
+				"$(LWS_LEADER_ADDRESS)",
 				VLLMPort,
 			)},
-			description: "Same as Grove worker but uses $LWS_LEADER_ADDRESS instead of the Grove-specific DNS address",
+			description: "Same as Grove worker but uses $(LWS_LEADER_ADDRESS) (kubelet-expanded) instead of the Grove-specific DNS address",
 		},
 	}
 
