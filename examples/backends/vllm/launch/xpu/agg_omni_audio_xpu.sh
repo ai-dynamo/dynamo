@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --no-curl "Launching vLLM-Omni Audio/TTS (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner --no-curl "Launching vLLM-Omni Audio/TTS (1 XPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
   curl -X POST http://localhost:${HTTP_PORT}/v1/audio/speech \\
     -H 'Content-Type: application/json' \\

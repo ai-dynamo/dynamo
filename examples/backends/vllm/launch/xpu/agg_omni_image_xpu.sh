@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --no-curl "Launching vLLM-Omni Image Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner --no-curl "Launching vLLM-Omni Image Generation (1 XPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
 curl -s -X POST http://localhost:${HTTP_PORT}/v1/images/generations \\
   -H 'Content-Type: application/json' \\
@@ -56,7 +56,6 @@ DIFFUSION_SAFE_ARGS=(
 )
 
 echo "Starting Omni worker..."
-ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \

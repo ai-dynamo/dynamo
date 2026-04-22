@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM-Omni Text-to-Text (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching vLLM-Omni Text-to-Text (1 XPU)" "$MODEL" "$HTTP_PORT"
 
 # Disable version check for flashinfer
 export FLASHINFER_DISABLE_VERSION_CHECK=1
@@ -48,7 +48,6 @@ FRONTEND_PID=$!
 sleep 2
 
 echo "Starting Omni worker..."
-ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \

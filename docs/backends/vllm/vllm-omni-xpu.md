@@ -51,9 +51,9 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 | Modality | Models |
 |---|---|
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
-| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B`, `zai-org/GLM-Image` (disagg) |
-| Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
-| Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
+| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
+| Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
+| Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` |
 | Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` |
 
 To run a non-default model, pass `--model` to any launch script:
