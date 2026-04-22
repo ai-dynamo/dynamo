@@ -14,7 +14,7 @@ This module provides:
 - MmKwargsSender: abstract base class for frontend-side transfer
 - MmKwargsNixlSender: NIXL RDMA implementation (cross-node)
 - MmKwargsShmSender: shared memory implementation (same-node, ~2ms)
-- MmKwargsReceiver: pulls tensors via NIXL READ on the backend side
+- MmKwargsNixlReceiver: pulls tensors via NIXL READ on the backend side
 - MmKwargsShmReceiver: reads pickled mm_kwargs from shared memory
 - MmKwargsTransferMetadata: the wire protocol between the two
 """
@@ -246,7 +246,7 @@ _DEFAULT_MAX_ITEM_BYTES = 8 * 1024 * 1024
 _DEFAULT_POOL_SIZE = 16
 
 
-class MmKwargsReceiver:
+class MmKwargsNixlReceiver:
     """Pulls mm_kwargs tensors from the frontend via NIXL READ.
 
     Uses pre-registered descriptor pooling to avoid per-request NIXL
@@ -254,7 +254,7 @@ class MmKwargsReceiver:
 
     Usage::
 
-        receiver = MmKwargsReceiver()
+        receiver = MmKwargsNixlReceiver()
         mm_kwargs = await receiver.receive(transfer_metadata)
         # mm_kwargs is a dict like {"__pickled_kwargs_item__": [bytes, ...]}
     """
@@ -272,7 +272,7 @@ class MmKwargsReceiver:
             self._available = True
         except ImportError:
             self._available = False
-            logger.warning("nixl_connect not available; MmKwargsReceiver disabled")
+            logger.warning("nixl_connect not available; MmKwargsNixlReceiver disabled")
             return
 
         self._max_item_bytes = max_item_bytes
@@ -288,7 +288,7 @@ class MmKwargsReceiver:
             desc.register_with_connector(connection)
             self._pool.put(desc)
         logger.info(
-            "MmKwargsReceiver: pre-registered %d descriptors (%d bytes each)",
+            "MmKwargsNixlReceiver: pre-registered %d descriptors (%d bytes each)",
             pool_size,
             max_item_bytes,
         )

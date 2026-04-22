@@ -300,15 +300,15 @@ class TestMmKwargsShmCleanupErrorHandling:
         handle_ok2.close.assert_called_once()
 
 
-class TestMmKwargsReceiverDescriptorValidation:
+class TestMmKwargsNixlReceiverDescriptorValidation:
     """Tests for _acquire_descriptor RuntimeError (Devin review fix #6)."""
 
     def test_acquire_descriptor_raises_on_none_data_ref(self):
         """Pre-allocated descriptor with None _data_ref raises RuntimeError."""
-        from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsReceiver
+        from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsNixlReceiver
 
         # Create a receiver with a mocked pool
-        receiver = MmKwargsReceiver.__new__(MmKwargsReceiver)
+        receiver = MmKwargsNixlReceiver.__new__(MmKwargsNixlReceiver)
         receiver._available = True
         receiver._max_item_bytes = 1024
 
@@ -329,7 +329,7 @@ class TestMmKwargsReceiverDescriptorValidation:
             receiver._acquire_descriptor(512)
 
 
-class TestMmKwargsReceiverOrdering:
+class TestMmKwargsNixlReceiverOrdering:
     """Tests that NIXL receiver preserves spec order under concurrent reads."""
 
     @pytest.mark.asyncio
@@ -339,7 +339,7 @@ class TestMmKwargsReceiverOrdering:
 
         import torch
 
-        from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsReceiver
+        from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsNixlReceiver
 
         # Prepare 3 pickled items with distinct content
         items = [
@@ -365,7 +365,7 @@ class TestMmKwargsReceiverOrdering:
         )
 
         # Create receiver and mock its internals
-        receiver = MmKwargsReceiver.__new__(MmKwargsReceiver)
+        receiver = MmKwargsNixlReceiver.__new__(MmKwargsNixlReceiver)
         receiver._available = True
 
         # Mock _acquire_descriptor: return a real tensor buffer + metadata
