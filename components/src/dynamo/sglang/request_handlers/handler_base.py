@@ -1062,6 +1062,11 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
                 return {"json_schema": json.dumps(json_schema)}
+            structural_tag = guided_decoding.get("structural_tag")
+            if structural_tag is not None:
+                if hasattr(structural_tag, "model_dump"):
+                    structural_tag = structural_tag.model_dump()
+                return {"structural_tag": json.dumps(structural_tag)}
         return {}
 
     @staticmethod

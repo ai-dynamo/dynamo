@@ -495,7 +495,7 @@ class TestBuildEmbeddingParams:
                 "image_grid_thw": torch.tensor([[1, 16, 16]]),
             }
         }
-        result = handler._build_embedding_params(mm_data)
+        result = handler._build_embedding_params(mm_data, [1, 2, 3])
 
         assert result is not None
         assert "image_grid_thw" in result
@@ -520,7 +520,7 @@ class TestBuildEmbeddingParams:
         )
 
         img = Image.new("RGB", (640, 480))
-        result = handler._build_embedding_params({"image": img})
+        result = handler._build_embedding_params({"image": img}, [1, 2, 3])
 
         assert result is not None
         assert result["image_grid_thw"] == [[1, 30, 40]]
@@ -544,7 +544,7 @@ class TestBuildEmbeddingParams:
         )
 
         imgs = [Image.new("RGB", (640, 480)), Image.new("RGB", (320, 320))]
-        result = handler._build_embedding_params({"image": imgs})
+        result = handler._build_embedding_params({"image": imgs}, [1, 2, 3])
 
         assert result is not None
         assert len(result["image_grid_thw"]) == 2
@@ -559,21 +559,21 @@ class TestBuildEmbeddingParams:
         handler._qwen_grid_params = None
 
         img = Image.new("RGB", (640, 480))
-        result = handler._build_embedding_params({"image": img})
+        result = handler._build_embedding_params({"image": img}, [1, 2, 3])
         assert result is None
 
-    def test_pil_image_list_non_qwen_returns_none(self):
-        """PIL image list for non-Qwen model -> returns None."""
+    def test_pil_image_list_llava_returns_expanded_prompt_token_ids(self):
+        """PIL image list for LLaVA model -> returns expanded prompt token ids."""
         handler = _make_prefill_handler(model="llava-hf/llava-1.5-7b-hf")
         mm_data = {"image": [MagicMock()]}
 
-        result = handler._build_embedding_params(mm_data)
-        assert result is None
+        result = handler._build_embedding_params(mm_data, [1, 2, 3])
+        assert result["expanded_prompt_token_ids"] == [1, 2, 3]
 
     def test_no_image_data_returns_none(self):
         """No image data -> returns None."""
         handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
         mm_data = {}
 
-        result = handler._build_embedding_params(mm_data)
+        result = handler._build_embedding_params(mm_data, [1, 2, 3])
         assert result is None
