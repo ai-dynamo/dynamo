@@ -27,6 +27,7 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
+from dynamo.profiler.utils.aic_compat import patched_aic_model_config
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -320,10 +321,11 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-        if backend == "auto":
-            aic_supported = _check_auto_backend_support(model, system)
-        else:
-            aic_supported = check_model_hardware_support(model, system, backend)
+        with patched_aic_model_config(system):
+            if backend == "auto":
+                aic_supported = _check_auto_backend_support(model, system)
+            else:
+                aic_supported = check_model_hardware_support(model, system, backend)
         # then validate DGDR features based on AIC support
         validate_dgdr_dynamo_features(dgdr, aic_supported)
 

@@ -25,6 +25,7 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
+from dynamo.profiler.utils.aic_compat import patched_aic_model_config
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
@@ -173,18 +174,19 @@ def _run_autoscale_sim(
             "Throughput-based scaling enabled — only disagg mode is supported."
         )
 
-    task = TaskConfig(
-        serving_mode="disagg",
-        model_path=model,
-        system_name=system,
-        backend_name=backend,
-        total_gpus=total_gpus,
-        isl=isl,
-        osl=osl,
-        ttft=target_ttft,
-        tpot=target_tpot,
-        request_latency=request_latency,
-    )
+    with patched_aic_model_config(system):
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path=model,
+            system_name=system,
+            backend_name=backend,
+            total_gpus=total_gpus,
+            isl=isl,
+            osl=osl,
+            ttft=target_ttft,
+            tpot=target_tpot,
+            request_latency=request_latency,
+        )
     runner = TaskRunner()
     sim_result = runner.run(task, autoscale=True)
     pareto_df = sim_result.get("pareto_df", pd.DataFrame())
@@ -221,17 +223,18 @@ def _run_default_sim(
     picking_mode: str,
 ) -> dict:
     """Build default task_configs, apply load_match kwargs, run simulation, generate DGD."""
-    task_configs = build_default_task_configs(
-        model_path=model,
-        total_gpus=total_gpus,
-        system=system,
-        backend=backend,
-        isl=isl,
-        osl=osl,
-        ttft=target_ttft,
-        tpot=target_tpot,
-        request_latency=request_latency,
-    )
+    with patched_aic_model_config(system):
+        task_configs = build_default_task_configs(
+            model_path=model,
+            total_gpus=total_gpus,
+            system=system,
+            backend=backend,
+            isl=isl,
+            osl=osl,
+            ttft=target_ttft,
+            tpot=target_tpot,
+            request_latency=request_latency,
+        )
 
     load_kwargs: dict = {}
     if picking_mode == "load_match" and dgdr.workload is not None:
@@ -239,12 +242,13 @@ def _run_default_sim(
         load_kwargs["target_concurrency"] = dgdr.workload.concurrency
         load_kwargs["max_total_gpus"] = total_gpus
 
-    chosen, best_configs, _, _, best_latencies_map = _execute_task_configs(
-        task_configs,
-        mode="default",
-        top_n=5,
-        **load_kwargs,
-    )
+    with patched_aic_model_config(system):
+        chosen, best_configs, _, _, best_latencies_map = _execute_task_configs(
+            task_configs,
+            mode="default",
+            top_n=5,
+            **load_kwargs,
+        )
 
     # When interpolation data is needed (mocker or throughput-scaling), a
     # disaggregated config is required.  If AIC picked an aggregated config,

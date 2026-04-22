@@ -27,6 +27,7 @@ from aiconfigurator.sdk.task import TaskConfig
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.rapid import _generate_dgd_from_pick
+from dynamo.profiler.utils.aic_compat import patched_aic_model_config
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,
     build_disagg_df_from_static,
@@ -348,19 +349,20 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
-    prefill_candidates, decode_candidates = enumerate_profiling_configs(
-        model_path=model,
-        system=system,
-        backend=backend,
-        image=derive_backend_image(dgdr.image, backend),
-        isl=isl,
-        osl=osl,
-        num_gpus_per_node=dgdr.hardware.numGpusPerNode,
-        total_gpus=total_gpus,
-        k8s_pvc_name=model_cache.pvcName,
-        k8s_pvc_mount_path=model_cache.pvcMountPath,
-        k8s_model_path_in_pvc=model_cache.pvcModelPath,
-    )
+    with patched_aic_model_config(system):
+        prefill_candidates, decode_candidates = enumerate_profiling_configs(
+            model_path=model,
+            system=system,
+            backend=backend,
+            image=derive_backend_image(dgdr.image, backend),
+            isl=isl,
+            osl=osl,
+            num_gpus_per_node=dgdr.hardware.numGpusPerNode,
+            total_gpus=total_gpus,
+            k8s_pvc_name=model_cache.pvcName,
+            k8s_pvc_mount_path=model_cache.pvcMountPath,
+            k8s_model_path_in_pvc=model_cache.pvcModelPath,
+        )
 
     logger.info(
         "Enumerated %d prefill candidates, %d decode candidates",
@@ -473,18 +475,19 @@ async def run_thorough(
     best_config_df = result.get("best_config_df", pd.DataFrame())
 
     # --- Stage 4: DGD generation ---
-    task = TaskConfig(
-        serving_mode="disagg",
-        model_path=model,
-        system_name=system,
-        backend_name=backend,
-        total_gpus=total_gpus,
-        isl=isl,
-        osl=osl,
-        ttft=target_ttft,
-        tpot=target_tpot,
-        request_latency=request_latency,
-    )
+    with patched_aic_model_config(system):
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path=model,
+            system_name=system,
+            backend_name=backend,
+            total_gpus=total_gpus,
+            isl=isl,
+            osl=osl,
+            ttft=target_ttft,
+            tpot=target_tpot,
+            request_latency=request_latency,
+        )
     dgd_config = _generate_dgd_from_pick(
         dgdr, best_config_df, "disagg", {"disagg": task}
     )
