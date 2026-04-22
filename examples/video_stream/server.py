@@ -164,6 +164,7 @@ _HTML = """\
     </div>
     <div class="actions">
       <button id="mp-gen" class="btn-primary">&#9654; Generate</button>
+      <button id="mp-next" class="btn-stop" disabled>&#9654;&#9654; Next Clip</button>
       <div    id="mp-spinner" class="spinner"></div>
       <span   id="mp-status" class="status">Idle</span>
     </div>
@@ -259,6 +260,7 @@ _HTML = """\
 
     // ── MP4 Playback ─────────────────────────────────────────────────────────
     const mpGen     = document.getElementById('mp-gen');
+    const mpNext    = document.getElementById('mp-next');
     const mpSpinner = document.getElementById('mp-spinner');
     const mpStatus  = document.getElementById('mp-status');
     const mpImg     = document.getElementById('mp-img');
@@ -266,12 +268,42 @@ _HTML = """\
     const mpPh      = document.getElementById('mp-placeholder');
     let   mpPrevUrl = null;
 
+    async function playVideoResponse(json) {
+      let url, mime;
+      if (json.b64_json) {
+        const bin   = atob(json.b64_json);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        mime = detectMime(bytes);
+        if (mpPrevUrl) URL.revokeObjectURL(mpPrevUrl);
+        url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        mpPrevUrl = url;
+      } else if (json.url) {
+        url  = json.url;
+        mime = url.endsWith('.jpg') || url.endsWith('.jpeg') ? 'image/jpeg' : 'video/mp4';
+      } else {
+        throw new Error('Response has no b64_json or url field');
+      }
+
+      mpPh.style.display = 'none';
+      if (mime === 'image/jpeg') {
+        mpImg.src           = url;
+        mpImg.style.display = 'block';
+        mpStatus.textContent = 'Done (JPEG frame — worker is in JPEG mode).';
+      } else {
+        mpVideo.src           = url;
+        mpVideo.style.display = 'block';
+        mpVideo.play().catch(() => {});
+        mpStatus.textContent  = 'Playing.';
+      }
+    }
+
     mpGen.addEventListener('click', async () => {
       const model  = document.getElementById('mp-model').value.trim();
       const prompt = document.getElementById('mp-prompt').value.trim();
       if (!model || !prompt) { alert('Model and Prompt are required.'); return; }
 
-      const body    = { model, prompt };
+      const body    = { model, prompt, output_format: "mp4" };
       const size    = document.getElementById('mp-size').value.trim();
       const seconds = document.getElementById('mp-seconds').value;
       if (size)    body.size    = size;
@@ -293,37 +325,8 @@ _HTML = """\
         });
         const json = await resp.json();
         if (!resp.ok) throw new Error(json.error || 'Dynamo error ' + resp.status);
-
-        const item = json.data && json.data[0];
-        if (!item) throw new Error('Response contains no data');
-
-        let url, mime;
-        if (item.b64_json) {
-          const bin   = atob(item.b64_json);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          mime = detectMime(bytes);
-          if (mpPrevUrl) URL.revokeObjectURL(mpPrevUrl);
-          url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-          mpPrevUrl = url;
-        } else if (item.url) {
-          url  = item.url;
-          mime = url.endsWith('.jpg') || url.endsWith('.jpeg') ? 'image/jpeg' : 'video/mp4';
-        } else {
-          throw new Error('Response has no b64_json or url field');
-        }
-
-        mpPh.style.display = 'none';
-        if (mime === 'image/jpeg') {
-          mpImg.src           = url;
-          mpImg.style.display = 'block';
-          mpStatus.textContent = 'Done (JPEG frame — worker is in JPEG mode).';
-        } else {
-          mpVideo.src           = url;
-          mpVideo.style.display = 'block';
-          mpVideo.play().catch(() => {});
-          mpStatus.textContent  = 'Playing.';
-        }
+        await playVideoResponse(json);
+        mpNext.disabled = false;
       } catch (e) {
         mpStatus.textContent = 'Error: ' + e.message;
         mpPh.textContent     = 'Failed.';
@@ -331,6 +334,36 @@ _HTML = """\
         mpGen.disabled          = false;
         mpSpinner.style.display = 'none';
       }
+    });
+
+    async function fetchAndPlayNext() {
+      mpNext.disabled         = true;
+      mpGen.disabled          = true;
+      mpSpinner.style.display = 'block';
+      mpStatus.textContent    = 'Fetching next clip…';
+      try {
+        const resp = await fetch('/api/next');
+        if (resp.status === 404 || resp.status === 501) {
+          mpStatus.textContent = 'No more clips.';
+          mpNext.disabled = true;
+          return;
+        }
+        const json = await resp.json();
+        if (!resp.ok) throw new Error(json.error || 'Error ' + resp.status);
+        await playVideoResponse(json);
+        mpNext.disabled = false;
+      } catch (e) {
+        mpStatus.textContent = 'Error: ' + e.message;
+      } finally {
+        mpGen.disabled          = false;
+        mpSpinner.style.display = 'none';
+      }
+    }
+
+    mpNext.addEventListener('click', fetchAndPlayNext);
+
+    mpVideo.addEventListener('ended', () => {
+      if (!mpNext.disabled) fetchAndPlayNext();
     });
 
     // ── Debug panel polling ──────────────────────────────────────────────────
@@ -481,14 +514,20 @@ async def handle_video(request: web.Request) -> web.Response:
     debug = request.app["debug"]
     debug["request"] = json.dumps(body, indent=2)
     debug["chunks"] = ""
+    request.app["clips"] = []
+    request.app["next_clip"] = 1
 
     dynamo_url = request.app["dynamo_url"]
     timeout = ClientTimeout(total=300, connect=10)
 
     try:
+        # [gluo TODO] parse SSE
         async with ClientSession(timeout=timeout) as session:
             async with session.post(f"{dynamo_url}/v1/videos", json=body) as upstream:
                 json_body = await upstream.json()
+                if isinstance(json_body.get("data"), list):
+                    for item in json_body["data"]:
+                        request.app["clips"].append(item)
                 sanitized = copy.deepcopy(json_body)
                 if isinstance(sanitized.get("data"), list):
                     for i, item in enumerate(sanitized["data"]):
@@ -497,10 +536,22 @@ async def handle_video(request: web.Request) -> web.Response:
                         if "url" in item:
                             item["url"] = f"<video_url_{i}>"
                 debug["chunks"] = json.dumps(sanitized, indent=2)
-                return web.json_response(json_body, status=upstream.status)
+                return web.json_response(
+                    request.app["clips"][0], status=upstream.status
+                )
     except Exception as exc:
         logger.error("Video proxy error: %s", exc)
         raise web.HTTPBadGateway(reason=str(exc))
+
+
+async def handle_next(request: web.Request) -> web.Response:
+    """GET /api/next → return the next video clip (same response shape as /api/video)."""
+    clips = request.app["clips"]
+    if len(clips) == 0 or request.app["next_clip"] >= len(clips):
+        return web.json_response({"error": "No clips available"}, status=404)
+    clip = clips[request.app["next_clip"]]
+    request.app["next_clip"] += 1
+    return web.json_response(clip, status=200)
 
 
 async def handle_debug(request: web.Request) -> web.Response:
@@ -519,6 +570,7 @@ def make_app(dynamo_url: str) -> web.Application:
     app["debug"] = {"request": "", "chunks": ""}
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/debug", handle_debug)
+    app.router.add_get("/api/next", handle_next)
     app.router.add_get("/api/stream", handle_stream)
     app.router.add_post("/api/video", handle_video)
     return app

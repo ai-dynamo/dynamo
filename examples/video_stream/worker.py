@@ -64,10 +64,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "video-stream-model"
 DEFAULT_SIZE = "832x480"
-DEFAULT_FPS = 25
 DEFAULT_SECONDS = 5
-DEFAULT_NUM_INFERENCE_STEPS = 1
-DEFAULT_GUIDANCE_SCALE = 1.0
 
 
 # ── Namespace helper ──────────────────────────────────────────────────────────
@@ -185,6 +182,9 @@ def to_mp4(
         frames[start : start + frames_per_chunk]
         for start in range(0, frames.shape[0], frames_per_chunk)
     ]
+    print(
+        f"Frames per chunk: {frames_per_chunk}, total chunks: {len(chunks)}, total frames: {frames.shape[0]}"
+    )
     return [_encode_chunk(chunk) for chunk in chunks]
 
 
@@ -237,6 +237,8 @@ class VideoStreamBackend:
 
         self.frames: torch.Tensor | None = None
         self.video_fps: float = 0.0
+        self.jpeg_chunks: list[bytes] | None = None
+        self.mp4_chunks: list[list[bytes]] | None = None
 
     async def initialize_model(self) -> None:
         """Load model weights and warm up the generation pipeline."""
@@ -257,6 +259,9 @@ class VideoStreamBackend:
         "in_progress" for all but the last response, which uses "completed".
         """
         nvext = request.nvext
+        output_format = request.output_format or self.output_format
+        if output_format not in ["jpeg", "mp4"]:
+            raise ValueError(f"Invalid output format: {output_format}")
 
         size = request.size or DEFAULT_SIZE
         try:
@@ -270,7 +275,7 @@ class VideoStreamBackend:
                 f"Invalid size '{size}', width and height must be positive"
             )
 
-        fps = nvext.fps if nvext and nvext.fps is not None else DEFAULT_FPS
+        fps = nvext.fps if nvext and nvext.fps is not None else self.video_fps
         seconds = request.seconds or DEFAULT_SECONDS
         num_frames = (
             nvext.num_frames
@@ -306,16 +311,25 @@ class VideoStreamBackend:
 
         t = time.perf_counter()
 
-        if self.output_format == "mp4":
-            encoded = await asyncio.to_thread(
-                to_mp4, frames_slice, fps, self.mp4_interval
-            )
-            chunks: list[bytes] = encoded if isinstance(encoded, list) else [encoded]
+        if output_format == "mp4":
+            if self.mp4_chunks is None:
+                encoded = await asyncio.to_thread(
+                    to_mp4, frames_slice, fps, self.mp4_interval
+                )
+                self.mp4_chunks = encoded if isinstance(encoded, list) else [encoded]
+            # Add artificial generation delay
+            chunks = [
+                (chunk, max(self.mp4_interval - 0.1, 0)) for chunk in self.mp4_chunks
+            ]
         else:
-            chunks = await asyncio.to_thread(to_jpeg, frames_slice)
+            if self.jpeg_chunks is None:
+                encoded = await asyncio.to_thread(to_jpeg, frames_slice)
+                self.jpeg_chunks = encoded if isinstance(encoded, list) else [encoded]
+            chunks = [(chunk, 0) for chunk in self.jpeg_chunks]
 
         total = len(chunks)
-        for i, chunk_bytes in enumerate(chunks):
+        for i, (chunk_bytes, interval) in enumerate(chunks):
+            await asyncio.sleep(interval)
             elapsed = time.perf_counter() - t
             is_last = i == total - 1
             logger.debug(
@@ -331,7 +345,12 @@ class VideoStreamBackend:
                 status="completed" if is_last else "in_progress",
                 progress=int((i + 1) / total * 100),
                 created=created_ts,
-                data=[VideoData(b64_json=base64.b64encode(chunk_bytes).decode())],
+                data=[
+                    VideoData(
+                        output_format=output_format,
+                        b64_json=base64.b64encode(chunk_bytes).decode(),
+                    )
+                ],
                 inference_time_s=elapsed,
             ).model_dump()
 
@@ -339,7 +358,7 @@ class VideoStreamBackend:
             "[%s] Streaming request finished (%d chunks, format=%s)",
             video_id,
             total,
-            self.output_format,
+            output_format,
         )
 
 
