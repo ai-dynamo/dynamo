@@ -49,8 +49,6 @@ pub use numa::{NumaNode, is_numa_disabled, is_numa_enabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
-#[cfg(feature = "level-zero")]
-pub use pool::{ZeMemPool, ZeMemPoolBuilder};
 #[cfg(feature = "sycl")]
 pub use pool::{SyclMemPool, SyclMemPoolBuilder};
 pub use system::SystemStorage;

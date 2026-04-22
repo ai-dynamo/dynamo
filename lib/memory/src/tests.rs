@@ -6,28 +6,15 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Test-only DeviceAllocator — auto-selects Ze (XPU) or CUDA backend
+// Test-only DeviceAllocator — CUDA backend
 // ---------------------------------------------------------------------------
 
-/// Create a test DeviceAllocator: prefers Ze if available, falls back to CUDA.
-#[cfg(any(feature = "testing-cuda", feature = "testing-ze"))]
+/// Create a test DeviceAllocator for CUDA.
+#[cfg(feature = "testing-cuda")]
 fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
-    #[cfg(feature = "testing-ze")]
-    {
-        if let Ok(alloc) = TestZeAllocator::new(0) {
-            return std::sync::Arc::new(alloc);
-        }
-    }
-    #[cfg(feature = "testing-cuda")]
-    {
-        return std::sync::Arc::new(
-            TestCudaAllocator::new(0).expect("CUDA device 0 required for tests"),
-        );
-    }
-    #[cfg(not(feature = "testing-cuda"))]
-    {
-        panic!("No device backend available for tests (need testing-cuda or testing-ze)");
-    }
+    std::sync::Arc::new(
+        TestCudaAllocator::new(0).expect("CUDA device 0 required for tests"),
+    )
 }
 
 // ---- CUDA test allocator ----
@@ -77,88 +64,6 @@ impl DeviceAllocator for TestCudaAllocator {
     fn free_pinned(&self, ptr: u64) -> Result<()> {
         unsafe { cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void) }
             .map_err(|e| StorageError::OperationFailed(e.to_string()))
-    }
-
-    fn device_id(&self) -> u32 {
-        self.device_id
-    }
-}
-
-// ---- Level-Zero (XPU) test allocator ----
-
-#[cfg(feature = "testing-ze")]
-struct TestZeAllocator {
-    context: std::sync::Arc<level_zero::Context>,
-    device: level_zero::Device,
-    device_id: u32,
-    /// Keep host buffers alive (Drop frees via zeMemFree).
-    host_buffers: std::sync::Mutex<std::collections::HashMap<u64, level_zero::HostBuffer>>,
-    /// Keep device buffers alive.
-    device_buffers: std::sync::Mutex<std::collections::HashMap<u64, level_zero::DeviceBuffer>>,
-}
-
-#[cfg(feature = "testing-ze")]
-impl std::fmt::Debug for TestZeAllocator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TestZeAllocator")
-            .field("device_id", &self.device_id)
-            .finish()
-    }
-}
-
-// SAFETY: Device wraps a ze_device_handle_t which is process-global and immutable
-// after discovery. All mutable state is behind Mutex.
-#[cfg(feature = "testing-ze")]
-unsafe impl Send for TestZeAllocator {}
-#[cfg(feature = "testing-ze")]
-unsafe impl Sync for TestZeAllocator {}
-
-#[cfg(feature = "testing-ze")]
-impl TestZeAllocator {
-    fn new(device_id: u32) -> anyhow::Result<Self> {
-        let drivers = level_zero::drivers()?;
-        let driver = drivers.into_iter().next()
-            .ok_or_else(|| anyhow::anyhow!("No Level-Zero drivers found"))?;
-        let devices = driver.devices()?;
-        let device = devices.into_iter().nth(device_id as usize)
-            .ok_or_else(|| anyhow::anyhow!("Level-Zero device {} not found", device_id))?;
-        let context = std::sync::Arc::new(level_zero::Context::create(&driver)?);
-        Ok(Self {
-            context,
-            device,
-            device_id,
-            host_buffers: std::sync::Mutex::new(std::collections::HashMap::new()),
-            device_buffers: std::sync::Mutex::new(std::collections::HashMap::new()),
-        })
-    }
-}
-
-#[cfg(feature = "testing-ze")]
-impl DeviceAllocator for TestZeAllocator {
-    fn allocate_device(&self, size: usize) -> Result<u64> {
-        let buffer = self.context.alloc_device(&self.device, size, 1)
-            .map_err(|e| StorageError::AllocationFailed(format!("Ze device alloc: {:?}", e)))?;
-        let ptr = buffer.as_mut_ptr() as u64;
-        self.device_buffers.lock().unwrap().insert(ptr, buffer);
-        Ok(ptr)
-    }
-
-    fn free_device(&self, ptr: u64) -> Result<()> {
-        self.device_buffers.lock().unwrap().remove(&ptr);
-        Ok(())
-    }
-
-    fn allocate_pinned(&self, size: usize) -> Result<u64> {
-        let buffer = self.context.alloc_host(size, 1)
-            .map_err(|e| StorageError::AllocationFailed(format!("Ze host alloc: {:?}", e)))?;
-        let ptr = buffer.as_mut_ptr() as u64;
-        self.host_buffers.lock().unwrap().insert(ptr, buffer);
-        Ok(ptr)
-    }
-
-    fn free_pinned(&self, ptr: u64) -> Result<()> {
-        self.host_buffers.lock().unwrap().remove(&ptr);
-        Ok(())
     }
 
     fn device_id(&self) -> u32 {
@@ -448,7 +353,7 @@ fn test_disk_storage_unregistered_no_nixl_descriptor() {
     assert!(storage.nixl_descriptor().is_none());
 }
 
-#[cfg(any(feature = "testing-cuda", feature = "testing-ze"))]
+#[cfg(feature = "testing-cuda")]
 mod device_tests {
     use super::*;
 
@@ -572,7 +477,6 @@ mod nixl_tests {
     }
 
     // CUDA tests (when both testing-nixl and testing-cuda are enabled)
-    #[cfg(any(feature = "testing-all", all(feature = "testing-nixl", feature = "testing-ze")))]
     mod device_nixl_tests {
         use super::*;
 
@@ -652,7 +556,7 @@ mod nixl_tests {
         assert_eq!(desc.size, buffer.size());
     }
 
-    #[cfg(any(feature = "testing-cuda", feature = "testing-ze"))]
+    #[cfg(feature = "testing-cuda")]
     #[test]
     fn test_type_erasure_pinned_storage() {
         let storage = PinnedStorage::new(2048, test_device_ctx()).unwrap();
@@ -665,7 +569,7 @@ mod nixl_tests {
         assert_eq!(buffer.storage_kind(), StorageKind::Pinned);
     }
 
-    #[cfg(any(feature = "testing-cuda", feature = "testing-ze"))]
+    #[cfg(feature = "testing-cuda")]
     #[test]
     fn test_type_erasure_device_storage() {
         let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
@@ -817,7 +721,7 @@ mod arena_nixl_tests {
         assert_eq!(desc2.size, PAGE_SIZE * 5);
     }
 
-    #[cfg(any(feature = "testing-cuda", feature = "testing-ze"))]
+    #[cfg(feature = "testing-cuda")]
     mod device_arena_tests {
         use super::*;
 

@@ -4,15 +4,13 @@
 //! Device abstraction layer for multi-backend support.
 //!
 //! This module provides a unified interface for different hardware backends
-//! (CUDA, Level-Zero/XPU) using the Static Enum + Trait Objects pattern.
+//! (CUDA, SYCL/XPU) using the Static Enum + Trait Objects pattern.
 
 pub mod traits;
 pub mod detection;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
-#[cfg(feature = "xpu-ze")]
-pub mod ze;
 #[cfg(feature = "xpu-sycl")]
 pub mod sycl;
 
@@ -26,8 +24,7 @@ pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoo
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceBackend {
     Cuda,
-    Ze,
-    /// SYCL backend — pure SYCL implementation (no Level Zero Rust crate needed).
+    /// SYCL backend — pure SYCL implementation (Intel XPU via SYCL).
     Sycl,
 }
 
@@ -36,7 +33,6 @@ impl DeviceBackend {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Cuda => "CUDA",
-            Self::Ze => "Level-Zero (XPU)",
             Self::Sycl => "SYCL (XPU)",
         }
     }
@@ -48,12 +44,6 @@ impl DeviceBackend {
                 #[cfg(feature = "cuda")]
                 { cuda::is_available() }
                 #[cfg(not(feature = "cuda"))]
-                { false }
-            }
-            Self::Ze => {
-                #[cfg(feature = "xpu-ze")]
-                { ze::is_available() }
-                #[cfg(not(feature = "xpu-ze"))]
                 { false }
             }
             Self::Sycl => {
@@ -72,7 +62,6 @@ impl FromStr for DeviceBackend {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
-            "ze" | "level-zero" => Ok(Self::Ze),
             "sycl" | "xpu" | "intel" => Ok(Self::Sycl),
             _ => bail!("Unknown device backend: {}", s),
         }
@@ -95,12 +84,6 @@ impl DeviceContext {
                 { Box::new(cuda::CudaContext::new(device_id)?) }
                 #[cfg(not(feature = "cuda"))]
                 { bail!("CUDA backend not compiled (enable 'cuda' feature)") }
-            }
-            DeviceBackend::Ze => {
-                #[cfg(feature = "xpu-ze")]
-                { Box::new(ze::ZeContext::new(device_id)?) }
-                #[cfg(not(feature = "xpu-ze"))]
-                { bail!("Level-Zero backend not compiled (enable 'xpu-ze' feature)") }
             }
             DeviceBackend::Sycl => {
                 #[cfg(feature = "xpu-sycl")]

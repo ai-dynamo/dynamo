@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 impl DeviceBackend {
     /// Auto-detect the best available device backend.
     ///
-    /// Priority order: CUDA then Level-Zero (XPU).
+    /// Priority order: CUDA then SYCL (XPU).
     pub fn detect_backend() -> Result<Self> {
         #[cfg(feature = "cuda")]
         {
@@ -27,13 +27,6 @@ impl DeviceBackend {
             }
         }
 
-        #[cfg(feature = "xpu-ze")]
-        {
-            if Self::Ze.is_available() {
-                tracing::info!("Auto-detected Level-Zero (XPU) backend");
-                return Ok(Self::Ze);
-            }
-        }
 
         bail!("No supported device backend available on this system")
     }
@@ -52,10 +45,6 @@ impl DeviceBackend {
             backends.push(Self::Sycl);
         }
 
-        #[cfg(feature = "xpu-ze")]
-        if Self::Ze.is_available() {
-            backends.push(Self::Ze);
-        }
 
         backends
     }

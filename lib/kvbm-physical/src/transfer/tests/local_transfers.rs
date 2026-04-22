@@ -10,14 +10,12 @@
 //!
 //! # Usage for Multiple Backends
 //!
-//! Requires `testing-kvbm` feature plus a device backend (`cuda`, `xpu-ze`, or `xpu-sycl`):
+//! Requires `testing-kvbm` feature plus a device backend (`cuda` or `xpu-sycl`):
 //!
 //! ```sh
 //! # CUDA
 //! cargo test -p kvbm-physical --features testing-kvbm,cuda -- transfer::tests::local_transfers
 //!
-//! # XPU (Level-Zero)
-//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-ze -- transfer::tests::local_transfers
 //!
 //! # XPU (SYCL) — requires KVBM_ENABLE_XPU_KERNELS=1 and icpx
 //! KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl -- transfer::tests::local_transfers

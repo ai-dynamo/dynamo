@@ -2571,7 +2571,6 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "cudarc",
- "level-zero",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -4731,7 +4730,6 @@ dependencies = [
  "clap 4.6.1",
  "cudarc",
  "half 2.7.1",
- "level-zero",
  "ndarray 0.17.2",
  "rand 0.9.4",
  "oneapi-rs",
@@ -4786,7 +4784,6 @@ dependencies = [
  "futures",
  "kvbm-common",
  "kvbm-kernels",
- "level-zero",
  "libc",
  "oneapi-rs",
  "rstest 0.26.1",

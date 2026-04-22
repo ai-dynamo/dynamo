@@ -15,7 +15,7 @@
 
 //! KV-cache transfer benchmark via the `kvbm-physical` TransferManager API.
 //!
-//! Supports CUDA, XPU Level-Zero, and XPU SYCL backends via `--backend cuda|ze|sycl`.
+//! Supports CUDA and XPU SYCL backends via `--backend cuda|sycl`.
 //!
 //! Test matrix:
 //!   - tokens_per_block (tpb): 16, 32, 64
@@ -32,9 +32,6 @@
 //!
 //! Usage:
 //! ```bash
-//! # XPU (Level-Zero)
-//! cargo build --example bench_transfer -p kvbm-physical \
-//!   --no-default-features --features xpu-ze --release
 //! ./target/release/examples/bench_transfer --backend ze --device 0
 //!
 //! # XPU (SYCL)
@@ -72,89 +69,6 @@ const HEAD_DIM: usize = 128;
 const ELEM_SIZE: usize = 2; // bf16
 const OUTER_DIM: usize = 2; // K and V
 
-// ---------------------------------------------------------------------------
-// Device info (Level Zero)
-// ---------------------------------------------------------------------------
-
-/// Print device info for all Level Zero devices, matching kvbench_xpu_ze.rs.
-#[cfg(feature = "xpu-ze")]
-fn print_ze_device_info(device_ordinal: u32) {
-    use level_zero as ze;
-
-    let drivers = match ze::drivers() {
-        Ok(d) if !d.is_empty() => d,
-        _ => {
-            eprintln!("(No Level Zero drivers found — skipping device info)");
-            return;
-        }
-    };
-
-    eprintln!("All Level Zero devices:");
-    for (drv_idx, drv) in drivers.iter().enumerate() {
-        let drv_ctx = match ze::Context::create(drv) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let drv_devs = drv.devices().unwrap_or_default();
-        for (dev_idx, dev) in drv_devs.iter().enumerate() {
-            if let Ok(p) = drv_ctx.device_properties(dev) {
-                let type_str = match p.device_type {
-                    1 => "GPU",
-                    2 => "CPU",
-                    _ => continue,
-                };
-                let total_eus =
-                    p.num_slices * p.num_subslices_per_slice * p.num_eus_per_subslice;
-                eprintln!("  Driver {drv_idx} / Device {dev_idx}: {}", p.name);
-                eprintln!(
-                    "    Type: {type_str}  Vendor: 0x{:04X}  DeviceID: 0x{:04X}",
-                    p.vendor_id, p.device_id,
-                );
-                eprintln!(
-                    "    Slices: {}  SubSlices/Slice: {}  EUs/SubSlice: {}  Total EUs: {}",
-                    p.num_slices, p.num_subslices_per_slice, p.num_eus_per_subslice, total_eus,
-                );
-                eprintln!(
-                    "    Threads/EU: {}  SIMD width: {}  Core clock: {} MHz",
-                    p.num_threads_per_eu, p.physical_eu_simd_width, p.core_clock_rate,
-                );
-                eprintln!(
-                    "    Max mem alloc: {:.1} GB  Max HW contexts: {}",
-                    p.max_mem_alloc_size as f64 / (1024.0 * 1024.0 * 1024.0),
-                    p.max_hardware_contexts,
-                );
-            }
-        }
-    }
-    eprintln!();
-
-    // Print driver-0 device list for quick reference.
-    let driver = &drivers[0];
-    let devices = driver.devices().unwrap_or_default();
-    eprintln!("Benchmark driver: 0  ({} device(s))", devices.len());
-    if let Ok(ctx) = ze::Context::create(driver) {
-        for (i, dev) in devices.iter().enumerate() {
-            if let Ok(p) = ctx.device_properties(dev) {
-                let type_str = match p.device_type {
-                    1 => "GPU",
-                    2 => "CPU",
-                    _ => "?",
-                };
-                eprintln!("  [{i}] {type_str}: {}", p.name);
-            }
-        }
-    }
-
-    if (device_ordinal as usize) >= devices.len() {
-        eprintln!(
-            "WARNING: --device {} is out of range. Only {} device(s) available (0..{}).",
-            device_ordinal, devices.len(), devices.len().saturating_sub(1),
-        );
-    } else {
-        eprintln!("  Selected device: {}", device_ordinal);
-    }
-    eprintln!();
-}
 
 // ---------------------------------------------------------------------------
 // Device info (SYCL)
@@ -293,7 +207,7 @@ impl HostMemKind {
 #[derive(Parser, Debug)]
 #[command(name = "bench_transfer", about = "KV cache TransferManager benchmark (CUDA/XPU)")]
 struct Cli {
-    /// Device backend: cuda, ze (Level Zero), or sycl.
+    /// Device backend: cuda or sycl.
     #[arg(long)]
     backend: String,
 
@@ -447,10 +361,6 @@ async fn main() -> Result<()> {
         Arc::new(DeviceContext::new(device_backend, cli.device)?);
 
     // -- Print device info ----------------------------------------------------
-    #[cfg(feature = "xpu-ze")]
-    if matches!(device_backend, DeviceBackend::Ze) {
-        print_ze_device_info(cli.device);
-    }
     #[cfg(feature = "xpu-sycl")]
     if matches!(device_backend, DeviceBackend::Sycl) {
         print_sycl_device_info(cli.device);

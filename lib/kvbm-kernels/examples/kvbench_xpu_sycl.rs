@@ -62,15 +62,6 @@
 //!   The SYCL runtime stages through an internal buffer, so
 //!   H2D/D2H bandwidth is typically lower.
 //!
-//! # Differences from `kvbench_xpu_ze` (Level-Zero)
-//!
-//! - Uses a single in-order `sycl::queue` instead of separate BCS/CCS
-//!   command lists.
-//! - Cross-device D2D (`d2dx`) uses a second queue bound to the
-//!   destination device.  Only the `memcpy` backend is supported.
-//! - The vectorized kernel is dispatched through C++ FFI
-//!   (`xpu_vectorized_copy`) rather than raw SPIR-V + `zeKernelCreate`.
-//!
 //! Output: CSV on stdout (same schema as `kvbench_xpu`), suitable for
 //! direct comparison.
 //!
