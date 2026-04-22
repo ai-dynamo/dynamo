@@ -197,6 +197,10 @@ spec:
           nvidia.com/gpu.present: "true"
         tolerations:
           - effect: NoSchedule
+            key: schwinns-dra-reserved
+            operator: Equal
+            value: "true"
+          - effect: NoSchedule
             key: nvidia.com/gpu
             operator: Exists
           - effect: NoSchedule

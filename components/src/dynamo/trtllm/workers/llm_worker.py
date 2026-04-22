@@ -304,9 +304,7 @@ async def init_llm_worker(
         from tensorrt_llm.llmapi.llm_args import SleepConfig, prefer_pinned
 
         sleep_config = SleepConfig()
-        default_mode = (
-            RestoreMode.PINNED if prefer_pinned() else RestoreMode.CPU
-        )
+        default_mode = RestoreMode.PINNED if prefer_pinned() else RestoreMode.CPU
         sleep_config.restore_modes = defaultdict(
             partial(RestoreMode, default_mode.value),
             dict(sleep_config.restore_modes),
@@ -347,6 +345,7 @@ async def init_llm_worker(
         from gpu_memory_service.integrations.trtllm.utils import (
             force_nccl_allreduce_for_shadow,
         )
+
         force_nccl_allreduce_for_shadow(arg_map)
 
     if config.publish_events_and_metrics:
@@ -649,6 +648,30 @@ async def init_llm_worker(
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
+        handler = RequestHandlerFactory().get_request_handler(handler_config)
+        if config.load_format == "gms":
+            _register_memory_routes(runtime, handler)
+
+        if config.gms_shadow_mode:
+            await handler._quiesce_controller.quiesce()
+
+            runtime.set_health_status(True)
+            logging.info(
+                "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+            )
+
+            from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+            lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            engine_id = os.environ.get("ENGINE_ID", "0")
+            lock = FlockFailoverLock(lock_path)
+            await lock.acquire(engine_id=f"engine-{engine_id}")
+            logging.info("[Shadow] Lock acquired, waking engine")
+
+            await handler._quiesce_controller.resume()
+            handler._quiesce_controller.mark_resumed()
+            logging.info("[Shadow] Engine awake, registering with discovery")
+
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only
         # Prefill and decode workers register - frontend detects their role via ModelType
@@ -711,10 +734,7 @@ async def init_llm_worker(
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
             ) as publisher:
-                handler_config.publisher = publisher
-                handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.load_format == "gms":
-                    _register_memory_routes(runtime, handler)
+                handler.publisher = publisher
 
                 encoder_cache = getattr(handler, "_encoder_cache", None)
                 if encoder_cache is not None:
@@ -734,9 +754,6 @@ async def init_llm_worker(
             if consolidator_publisher:
                 consolidator_publisher.shutdown()
         else:
-            handler = RequestHandlerFactory().get_request_handler(handler_config)
-            if config.load_format == "gms":
-                _register_memory_routes(runtime, handler)
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )
