@@ -390,27 +390,36 @@ class TestVideoData:
 
     def test_url_only(self):
         """Test VideoData with URL only."""
-        data = VideoData(url="/tmp/video.mp4")
+        data = VideoData(response_format="mp4", url="/tmp/video.mp4")
+        assert data.response_format == "mp4"
         assert data.url == "/tmp/video.mp4"
         assert data.b64_json is None
 
     def test_b64_only(self):
         """Test VideoData with base64 only."""
-        data = VideoData(b64_json="SGVsbG8gV29ybGQ=")
+        data = VideoData(response_format="mp4", b64_json="SGVsbG8gV29ybGQ=")
+        assert data.response_format == "mp4"
         assert data.url is None
         assert data.b64_json == "SGVsbG8gV29ybGQ="
 
     def test_both_fields(self):
         """Test VideoData with both fields (unusual but valid)."""
-        data = VideoData(url="/tmp/video.mp4", b64_json="SGVsbG8=")
+        data = VideoData(response_format="mp4", b64_json="SGVsbG8=")
+        assert data.response_format == "mp4"
         assert data.url == "/tmp/video.mp4"
         assert data.b64_json == "SGVsbG8="
 
     def test_empty_defaults(self):
         """Test VideoData with no arguments."""
-        data = VideoData()
+        data = VideoData(response_format="mp4")
+        assert data.response_format == "mp4"
         assert data.url is None
         assert data.b64_json is None
+
+    def test_required_response_format(self):
+        """Test VideoData requires response_format."""
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            VideoData()  # type: ignore
 
 
 class TestNvVideosResponse:
@@ -450,7 +459,7 @@ class TestNvVideosResponse:
 
     def test_with_video_data(self):
         """Test response with video data."""
-        video = VideoData(url="/tmp/output.mp4")
+        video = VideoData(response_format="mp4", url="/tmp/output.mp4")
         response = NvVideosResponse(
             id="req-789",
             model="wan_t2v",
@@ -469,7 +478,7 @@ class TestNvVideosResponse:
             id="req-123",
             model="wan_t2v",
             created=1234567890,
-            data=[VideoData(url="/tmp/video.mp4")],
+            data=[VideoData(response_format="mp4", url="/tmp/video.mp4")],
         )
 
         dumped = response.model_dump()

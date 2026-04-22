@@ -213,7 +213,7 @@ class VideoGenerationHealthCheckPayload(HealthCheckPayload):
             "model": model_path,
             "seconds": 1,
             "size": "256x256",  # Small size for fast health check
-            "response_format": "b64_json",  # Don't require filesystem for health check
+            "data_source": "b64_json",  # Don't require filesystem for health check
             "nvext": {
                 "fps": 8,
                 "num_frames": 8,  # Minimal frames for fast health check

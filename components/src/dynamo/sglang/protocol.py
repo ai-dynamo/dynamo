@@ -203,11 +203,13 @@ class CreateVideoRequest(BaseModel):
     seconds: Optional[int] = 4
     size: Optional[str] = "832x480"  # WxH format (Wan default: 832x480)
     user: Optional[str] = None
-    response_format: Optional[str] = "url"  # url or b64_json
+    data_source: Optional[str] = "url"  # url or b64_json
+    response_format: Optional[str] = None  # only mp4 is supported
     nvext: Optional[VideoNvExt] = None
 
 
 class VideoData(BaseModel):
+    response_format: str
     url: Optional[str] = None
     b64_json: Optional[str] = None
 

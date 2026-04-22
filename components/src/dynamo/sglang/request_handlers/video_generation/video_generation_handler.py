@@ -120,6 +120,8 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             assert (
                 nvext.num_inference_steps is not None
             ), "Num inference steps is required"
+            response_format = req.response_format or "mp4"
+            assert response_format == "mp4", "Unsupported response format"
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,
@@ -135,12 +137,14 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             video_data = []
-            if req.response_format == "url":
+            if req.data_source == "url":
                 url = await self._upload_to_fs(video_bytes, context_id)
-                video_data.append(VideoData(url=url))
+                video_data.append(VideoData(response_format=response_format, url=url))
             else:  # b64_json
                 b64 = self._encode_base64(video_bytes)
-                video_data.append(VideoData(b64_json=b64))
+                video_data.append(
+                    VideoData(response_format=response_format, b64_json=b64)
+                )
 
             inference_time = time.time() - start_time
 

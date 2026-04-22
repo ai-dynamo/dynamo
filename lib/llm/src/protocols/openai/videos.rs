@@ -36,7 +36,14 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// Response format: "url" or "b64_json" (default: "url")
+    /// How the generated data should be returned: "url" or "b64_json" (default: "url")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_source: Option<String>,
+
+    /// Output container format: "mp4", "webm", "gif", etc.
+    /// This field is used as model hint and the model may not
+    /// return the requested format, should check with response_format
+    /// field in the response data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
@@ -48,11 +55,14 @@ pub struct NvCreateVideoRequest {
 /// Video data in response
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VideoData {
-    /// URL of the generated video (if response_format is "url")
+    /// Actual container format of this video: "mp4", "webm", "gif"
+    pub response_format: String,
+
+    /// URL of the generated video (if data_source is "url")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
-    /// Base64-encoded video (if response_format is "b64_json")
+    /// Base64-encoded video (if data_source is "b64_json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
 }
