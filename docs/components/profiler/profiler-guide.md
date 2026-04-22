@@ -155,7 +155,7 @@ The profiler enforces these rules at startup:
 | Condition | Behavior |
 |-----------|----------|
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
-| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` | Rejected. Throughput-based scaling requires pre-deployment sweeping. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Rejected. Throughput-based scaling requires pre-deployment sweeping. |
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Rejected. AIC does not support this model/hardware/backend combination; switch `pre_deployment_sweeping_mode` to `thorough`. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
 | SLA unachievable | Warning logged, SLA updated to best achievable value. |
