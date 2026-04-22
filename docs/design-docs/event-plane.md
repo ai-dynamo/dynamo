@@ -54,12 +54,19 @@ python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `nats` |
+| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | Context-dependent (see below) |
 | `NATS_SERVER` | NATS server URL (NATS transport only) | `nats://localhost:4222` |
+
+When `DYN_EVENT_PLANE` is not set, the default is chosen based on the discovery backend:
+
+- `--discovery-backend file` or `mem` (local backends): defaults to **zmq** — no external services required.
+- `--discovery-backend etcd` or `kubernetes` (distributed backends): defaults to **nats**.
+
+Set `DYN_EVENT_PLANE` explicitly to override this automatic selection.
 
 ## NATS Transport
 
-When using NATS (`DYN_EVENT_PLANE=nats` or unset):
+When using NATS (`DYN_EVENT_PLANE=nats`, or unset with a distributed backend):
 
 - Requires a running NATS server. Set `NATS_SERVER` if it is not on `localhost:4222`.
 - Events are published to NATS subjects scoped by namespace and component.

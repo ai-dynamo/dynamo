@@ -2,17 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 from typing import Any, List, Optional
 
 import sglang as sgl
+from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
+
+SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
 
 async def _register_model_with_runtime_config(
@@ -114,6 +119,135 @@ def _get_bootstrap_info_for_config(
         return None, None
 
 
+def _parse_hicache_storage_extra_config(
+    raw_extra_config: Optional[Any],
+) -> dict[str, Any]:
+    if raw_extra_config is None:
+        return {}
+
+    if isinstance(raw_extra_config, dict):
+        return dict(raw_extra_config)
+
+    if isinstance(raw_extra_config, str):
+        raw_extra_config = raw_extra_config.strip()
+        if not raw_extra_config:
+            return {}
+        try:
+            parsed = json.loads(raw_extra_config)
+        except json.JSONDecodeError as e:
+            logging.warning(
+                f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
+            )
+            return {}
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        logging.warning(
+            "hicache_storage_backend_extra_config JSON was not an object; ignoring it."
+        )
+        return {}
+
+    logging.warning(
+        "Unsupported hicache_storage_backend_extra_config type %s; ignoring it.",
+        type(raw_extra_config).__name__,
+    )
+    return {}
+
+
+def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
+    if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
+        return None
+
+    extra_config = _parse_hicache_storage_extra_config(
+        getattr(server_args, "hicache_storage_backend_extra_config", None)
+    )
+
+    try:
+        from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
+            MooncakeStoreConfig,
+        )
+    except ImportError as e:
+        logging.warning(f"MooncakeStoreConfig import unavailable: {e}")
+        return None
+
+    # Graceful degradation: Mooncake runtime metadata is optional. If config
+    # resolution fails for any reason (file not found, malformed env vars,
+    # upstream API change), skip publishing the metadata rather than crashing
+    # the worker -- the worker still serves requests, just without HiCache
+    # router hints. Broad catch is intentional per python-guidelines.md.
+    try:
+        if extra_config and (
+            extra_config.get("master_server_address") is not None
+            or extra_config.get("client_server_address") is not None
+        ):
+            mooncake_config = MooncakeStoreConfig.load_from_extra_config(extra_config)
+        elif envs.SGLANG_HICACHE_MOONCAKE_CONFIG_PATH.is_set():
+            mooncake_config = MooncakeStoreConfig.from_file()
+        else:
+            mooncake_config = MooncakeStoreConfig.load_from_env()
+    except Exception as e:
+        logging.warning(f"Failed to resolve Mooncake config for runtime metadata: {e}")
+        return None
+
+    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+    pp_size = int(getattr(server_args, "pp_size", 1) or 1)
+
+    try:
+        is_mla_model = bool(server_args.use_mla_backend())
+    except Exception as e:
+        logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
+        is_mla_model = False
+
+    try:
+        spec_algorithm = SpeculativeAlgorithm.from_string(
+            getattr(server_args, "speculative_algorithm", None)
+        )
+        is_eagle = bool(spec_algorithm.is_eagle())
+    except Exception as e:
+        logging.warning(f"Failed to determine speculative algorithm: {e}")
+        is_eagle = False
+
+    tp_lcm_size = extra_config.get("tp_lcm_size")
+    try:
+        tp_lcm_size = int(tp_lcm_size) if tp_lcm_size is not None else None
+    except (TypeError, ValueError):
+        logging.warning("Ignoring non-integer Mooncake tp_lcm_size=%r", tp_lcm_size)
+        tp_lcm_size = None
+
+    should_split_heads = (
+        not is_mla_model
+        and getattr(server_args, "hicache_mem_layout", None) == "page_head"
+        and tp_lcm_size is not None
+        and tp_lcm_size > tp_size
+        and tp_lcm_size % tp_size == 0
+    )
+
+    extra_backend_tag = extra_config.get("extra_backend_tag")
+    if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
+        extra_backend_tag = None
+
+    master_server_address = getattr(mooncake_config, "master_server_address", None)
+    if not isinstance(master_server_address, str) or not master_server_address:
+        master_server_address = None
+
+    return {
+        "backend": "mooncake",
+        "page_size": int(getattr(server_args, "page_size", 1) or 1),
+        "tp_size": tp_size,
+        "pp_size": pp_size,
+        "is_mla_model": is_mla_model,
+        "is_eagle": is_eagle,
+        "tp_lcm_size": tp_lcm_size,
+        "should_split_heads": should_split_heads,
+        "extra_backend_tag": extra_backend_tag,
+        "master_server_address": master_server_address,
+        "master_metrics_port": int(
+            getattr(mooncake_config, "master_metrics_port", 9003)
+        ),
+    }
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -168,6 +302,19 @@ async def _get_runtime_config(
 
     if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
         runtime_config.enable_eagle = True
+
+    mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
+    if mooncake_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY,
+                json.dumps(mooncake_runtime_data),
+            )
+            logging.info("Published Mooncake HiCache runtime metadata for router use.")
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
+            )
 
     try:
         scheduler_info = get_scheduler_info(engine)

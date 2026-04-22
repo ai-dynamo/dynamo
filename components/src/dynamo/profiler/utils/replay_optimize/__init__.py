@@ -15,6 +15,8 @@ from .models import (
     DenseAggReplayState,
     DenseReplayOptimizationResult,
     DenseReplayState,
+    ReplayConstraints,
+    ReplayObjective,
     SyntheticReplayWorkload,
     TraceReplayWorkload,
 )
@@ -44,6 +46,8 @@ __all__ = [
     "DenseAggReplayState",
     "DenseReplayOptimizationResult",
     "DenseReplayState",
+    "ReplayConstraints",
+    "ReplayObjective",
     "SyntheticReplayWorkload",
     "TraceReplayWorkload",
     "aic",

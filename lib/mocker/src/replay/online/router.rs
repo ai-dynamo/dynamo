@@ -214,6 +214,7 @@ impl KvReplayRouter {
                 ),
                 None,
                 None,
+                None,
             )
             .await?;
         usize::try_from(response.best_worker.worker_id)
