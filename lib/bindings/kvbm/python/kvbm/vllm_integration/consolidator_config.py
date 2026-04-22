@@ -9,11 +9,15 @@ import logging
 import os
 from typing import Optional, Tuple
 
+from kvbm.utils import get_consolidator_mode, is_truthy
 from vllm.distributed.kv_events import ZmqEventPublisher
 
-from kvbm.utils import get_consolidator_mode, is_truthy
-
-__all__ = ["get_consolidator_mode", "is_truthy", "should_enable_consolidator", "get_consolidator_endpoints"]
+__all__ = [
+    "get_consolidator_mode",
+    "is_truthy",
+    "should_enable_consolidator",
+    "get_consolidator_endpoints",
+]
 
 logger = logging.getLogger(__name__)
 

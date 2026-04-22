@@ -931,8 +931,7 @@ mod tests {
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
-        let mut actual =
-            scheduler.get_potential_loads(Some(token_seq), 128, cached_tokens, true);
+        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, cached_tokens, true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -990,8 +989,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(6)).await;
 
-        let loads =
-            scheduler.get_potential_loads(None, 0, HashMap::new(), true);
+        let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 40);
 
@@ -1004,8 +1002,7 @@ mod tests {
             make_scheduler(HashMap::new(), None, false, None);
 
         scheduler.register_workers(&HashSet::from([42]));
-        let loads =
-            scheduler.get_potential_loads(None, 64, HashMap::new(), true);
+        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
 
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].worker_id, 42);

@@ -47,13 +47,13 @@ fn softmax_sample_with_sample(
         return (*worker, *logit);
     }
 
-    let entries: Vec<(WorkerWithDpRank, f64)> =
-        logits.iter().map(|(w, l)| (*w, *l)).collect();
+    let entries: Vec<(WorkerWithDpRank, f64)> = logits.iter().map(|(w, l)| (*w, *l)).collect();
 
-    let (min_val, max_val) = entries.iter().fold(
-        (f64::INFINITY, f64::NEG_INFINITY),
-        |(lo, hi), (_, v)| (lo.min(*v), hi.max(*v)),
-    );
+    let (min_val, max_val) = entries
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, v)| {
+            (lo.min(*v), hi.max(*v))
+        });
 
     let mut probs = if min_val == max_val {
         vec![1.0 / entries.len() as f64; entries.len()]

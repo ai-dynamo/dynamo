@@ -562,6 +562,7 @@ impl SyncIndexer for LowerTierIndexer {
 /// Workers that survive all the way to `next_breakpoint` are placed into
 /// `overflow` so the caller can merge them into the next breakpoint's groups.
 /// Workers that reach the end of `local_hashes` are finalized instead.
+#[allow(clippy::too_many_arguments)]
 fn advance_state_to_breakpoint(
     index: &LowerTierIndexer,
     local_hashes: &[LocalBlockHash],
@@ -688,6 +689,7 @@ fn advance_state_to_breakpoint(
 /// Simplified walk for exactly one worker. Just does sequential edge lookups
 /// without any set operations — either the worker owns each edge and continues,
 /// or it stops.
+#[allow(clippy::too_many_arguments)]
 fn advance_single_worker(
     index: &LowerTierIndexer,
     local_hashes: &[LocalBlockHash],
