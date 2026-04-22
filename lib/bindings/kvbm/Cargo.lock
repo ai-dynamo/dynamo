@@ -1563,6 +1563,7 @@ dependencies = [
  "galil-seiferas",
  "hf-hub",
  "image",
+ "ipnet",
  "json-five",
  "minijinja",
  "minijinja-contrib",

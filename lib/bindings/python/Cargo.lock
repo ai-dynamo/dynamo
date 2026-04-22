@@ -1576,6 +1576,7 @@ dependencies = [
  "galil-seiferas",
  "hf-hub",
  "image",
+ "ipnet",
  "json-five",
  "memfile",
  "minijinja",
