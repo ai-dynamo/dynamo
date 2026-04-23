@@ -593,7 +593,6 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-            disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
