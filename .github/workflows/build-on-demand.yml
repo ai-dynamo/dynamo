@@ -97,10 +97,11 @@ jobs:
       platform: 'linux/amd64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
-      # TRTLLM wheel-from-source builds on an AMD64 builder take ~45-75 min
-      # in addition to the ~30-40 min Dynamo image build, so we need a
-      # comfortably large timeout here.
-      build_timeout_minutes: 180
+      # TRTLLM wheel-from-source on the 16-CPU / 48Gi BuildKit pod runs at
+      # -j 8 (higher parallelism OOMs; see container/build_trtllm_wheel.sh)
+      # which roughly doubles the wall-clock of a 24-CPU Jenkins build. Add
+      # the ~30-40 min Dynamo image build on top and pad generously.
+      build_timeout_minutes: 240
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
@@ -110,12 +111,19 @@ jobs:
       # pod died with "rpc error: code = Unavailable desc = error reading
       # from server: EOF" during CUDA compile). Force a dedicated K8s
       # BuildKit pod for this pipeline and size it up so the wheel build
-      # has both the parallelism and the memory headroom to finish.
+      # has enough memory headroom to finish.
+      #
+      # Sizing note: the dynamo-builder-fallback node pool rejects 64Gi
+      # requests (run 24856663726 hit "waiting for 1 pods to be ready,
+      # timeout: 2 minutes" x3 at 64Gi request / 96Gi limit). Stay inside
+      # the pool's per-node budget with 16 CPU / 40Gi request / 48Gi
+      # limit, which still gives roughly 1.6x the memory of the default
+      # 29Gi remote pool.
       fresh_builder: true
-      builder_requests_cpu: '24'
-      builder_requests_memory: '64Gi'
-      builder_limits_memory: '96Gi'
-      builder_ephemeral_storage: '800Gi'
+      builder_requests_cpu: '16'
+      builder_requests_memory: '40Gi'
+      builder_limits_memory: '48Gi'
+      builder_ephemeral_storage: '600Gi'
     secrets: inherit
 
   # ============================================================================

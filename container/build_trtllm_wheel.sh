@@ -127,15 +127,16 @@ grep "__version__" "$VERSION_FILE"
 # 29Gi limit). Clamp JOBS to something that comfortably fits the BuildKit
 # pod configured for the caller unless the caller has overridden it.
 #
-# With ~2-3 GiB peak per CUDA compile and a 96Gi limit the K8s fallback
-# pool configured by .github/workflows/build-on-demand.yml trtllm-pipeline,
-# -j 24 fits with headroom and cuts the compile wall-clock in half versus
-# -j 12. Callers that want a different parallelism should set JOBS in the
-# environment before invoking this script.
+# With ~2-3 GiB peak per CUDA compile, 8 concurrent compiles use ~16-24 GiB
+# which comfortably fits inside the 48Gi BuildKit pod configured by
+# .github/workflows/build-on-demand.yml trtllm-pipeline (fallback node pool
+# capped the pod at 48Gi -- see comment there). Callers that want a
+# different parallelism should set JOBS in the environment before invoking
+# this script.
 if [ -z "${JOBS:-}" ]; then
     HOST_CPUS="$(nproc 2>/dev/null || echo 16)"
-    if [ "${HOST_CPUS}" -gt 24 ]; then
-        export JOBS=24
+    if [ "${HOST_CPUS}" -gt 8 ]; then
+        export JOBS=8
     else
         export JOBS="${HOST_CPUS}"
     fi
