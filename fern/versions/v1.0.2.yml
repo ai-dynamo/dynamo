@@ -279,8 +279,8 @@ navigation:
         contents:
           - page: KVBM Guide
             path: ../pages-v1.0.2/components/kvbm/kvbm-guide.md
-  # ==================== KV Managers ====================
-  - section: KV Managers
+  # ==================== Integrations ====================
+  - section: Integrations
     contents:
       - page: LMCache
         path: ../pages-v1.0.2/integrations/lmcache-integration.md
