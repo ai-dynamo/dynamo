@@ -83,9 +83,13 @@ async def main(runtime: DistributedRuntime, args):
 
     if args.min_total_gpus >= 0:
         logger.info(f"Min total GPUs: {args.min_total_gpus}")
-        logger.info(f"Intent cache TTL seconds: {args.intent_cache_ttl_seconds}")
     else:
         logger.info("Min total GPUs: DISABLED")
+
+    # Intent cache TTL governs pair freshness for BOTH floor and ceiling
+    # pairing, so log it whenever either bound is active.
+    if args.min_total_gpus >= 0 or args.max_total_gpus >= 0:
+        logger.info(f"Intent cache TTL seconds: {args.intent_cache_ttl_seconds}")
 
     logger.info("=" * 60)
 

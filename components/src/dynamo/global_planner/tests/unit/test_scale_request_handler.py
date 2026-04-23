@@ -717,7 +717,7 @@ async def test_asymmetric_per_worker_gpu_pair_within_tolerance(mock_runtime):
         min_total_gpus=10,
         max_total_gpus=10,
     )
-    # prefill: 4 replicas × 1 GPU = 4; decode: 3 × 2 = 6; total = 10
+    # prefill: 4 replicas * 1 GPU = 4; decode: 3 * 2 = 6; total = 10
     connector = _install_connector(
         handler,
         "default/my-dgd",
@@ -747,7 +747,7 @@ async def test_asymmetric_pair_denied_if_outside_tolerance(mock_runtime):
         min_total_gpus=10,
         max_total_gpus=10,
     )
-    # prefill: 4 × 1 = 4; decode: 3 × 2 = 6; total = 10
+    # prefill: 4 * 1 = 4; decode: 3 * 2 = 6; total = 10
     connector = _install_connector(
         handler,
         "default/my-dgd",
@@ -761,6 +761,36 @@ async def test_asymmetric_pair_denied_if_outside_tolerance(mock_runtime):
     req = _scale_req(caller_ns="default-my-dgd", decode=5)
     results = await _run(handler, req)
     assert results[0]["status"] == "error"
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_asymmetric_pair_denied_if_below_tolerance(mock_runtime):
+    """Symmetric floor-undershoot case for tolerance: paired transfer whose
+    post-pair total falls below min - tolerance is rejected with a 'below
+    floor' reason."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        min_total_gpus=10,
+        max_total_gpus=10,
+    )
+    # prefill=5, decode=5, both 1 GPU/worker. total=10, tolerance=1.
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _dgd_spec(prefill_replicas=5, decode_replicas=5, prefill_gpu=1, decode_gpu=1),
+    )
+    # Decode wants +1 (+1 GPU); request prefill wants -3 (-3 GPUs). Paired
+    # total = 10 - 3 + 1 = 8. min - tolerance = 10 - 1 = 9. 8 < 9 → deny.
+    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+        last_desired=6, last_seen_at=time.time()
+    )
+    req = _scale_req(caller_ns="default-my-dgd", prefill=2)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "error"
+    assert "below floor" in results[0]["message"].lower()
     connector.set_component_replicas.assert_not_called()
 
 
@@ -867,10 +897,9 @@ async def test_pair_preferred_over_standalone_when_both_feasible(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_intent_cache_entry_remains_until_satisfied(mock_runtime):
+async def test_cache_entry_persists_after_standalone_apply(mock_runtime):
     """After a standalone-approved request, the cache entry persists with
-    last_desired equal to what was applied. A later request does not spuriously
-    re-apply it."""
+    last_desired equal to what was applied."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-my-dgd"],
@@ -878,25 +907,41 @@ async def test_intent_cache_entry_remains_until_satisfied(mock_runtime):
         min_total_gpus=0,
         max_total_gpus=100,
     )
-    # Start with prefill=3, decode=3. Prefill applies standalone scale-up to 4.
     dgd_state = _dgd_spec(prefill_replicas=3, decode_replicas=3)
-    connector = _install_connector(handler, "default/my-dgd", dgd_state)
+    _install_connector(handler, "default/my-dgd", dgd_state)
 
-    req_1 = _scale_req(caller_ns="default-my-dgd", prefill=4)
-    await _run(handler, req_1)
+    req = _scale_req(caller_ns="default-my-dgd", prefill=4)
+    await _run(handler, req)
 
-    # Cache should contain prefill=4 (satisfied once K8s reflects it)
     assert handler._intent_cache["default/my-dgd/prefill"].last_desired == 4
 
-    # Simulate the DGD spec now showing prefill=4 (it was applied)
-    dgd_state["spec"]["services"]["prefill-svc"]["replicas"] = 4
 
-    # Decode scale-down that would breach floor=10 and can't pair with prefill
-    # because prefill's cached intent == current K8s (satisfied).
-    handler.min_total_gpus = 7  # 4 prefill + 3 decode = 7, exactly at floor
-    req_2 = _scale_req(caller_ns="default-my-dgd", decode=2)
-    results_2 = await _run(handler, req_2)
-    assert results_2[0]["status"] == "error"
+@pytest.mark.asyncio
+async def test_satisfied_cached_intent_does_not_pair(mock_runtime):
+    """A cached intent whose last_desired == current_k8s (satisfied) is not
+    eligible as a pair partner, so a later scale-down that would breach the
+    floor is denied."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        min_total_gpus=7,
+        max_total_gpus=100,
+    )
+    # prefill=4, decode=3; total = 7, exactly at floor.
+    dgd_state = _dgd_spec(prefill_replicas=4, decode_replicas=3)
+    _install_connector(handler, "default/my-dgd", dgd_state)
+
+    # Seed prefill's cache entry as satisfied (last_desired == current).
+    handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+
+    # Decode scale-down would take total to 6, below floor=7. No usable
+    # partner because prefill's cached intent is satisfied.
+    req = _scale_req(caller_ns="default-my-dgd", decode=2)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "error"
 
 
 @pytest.mark.asyncio

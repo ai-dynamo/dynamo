@@ -74,7 +74,7 @@ Examples:
         type=float,
         default=120.0,
         dest="intent_cache_ttl_seconds",
-        help="Cached scale-intent from a pool is considered fresh for this many seconds (default: 120). Should be at least 2x the local planner tick interval so opposite-direction intents from different pools overlap.",
+        help="Cached scale-intent from a pool is considered fresh for this many seconds (default: 120). This should be at least 2x the local planner tick interval so opposite-direction intents from different pools overlap.",
     )
 
     return parser

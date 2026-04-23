@@ -691,9 +691,11 @@ class ScaleRequestHandler:
                             f"(internally_paired={internally_paired})"
                         )
                     else:
-                        # Budget breach and no feasible pair.
+                        # Budget breach and no feasible pair. (Reachable only
+                        # when standalone is out-of-bounds and either no partner
+                        # was found or pairing would also be out-of-bounds.)
                         deny_reason = standalone_reason
-                        if partner is not None and not paired_ok:
+                        if partner is not None:
                             deny_reason = (
                                 f"{standalone_reason}; paired with "
                                 f"{partner[0]}/{partner[1]} would be: {paired_reason}"
@@ -727,40 +729,79 @@ class ScaleRequestHandler:
                     await connector.set_component_replicas(
                         combined_targets, blocking=request.blocking
                     )
-                else:
-                    # Cross-DGD or no pair: apply request's own targets first,
-                    # then (if cross-DGD partner) apply partner on its connector.
+                elif partner_info is None:
+                    # No pair: just apply the request.
                     await connector.set_component_replicas(
                         list(request.target_replicas), blocking=request.blocking
                     )
-                    if partner_info is not None:
-                        partner_dgd, partner_sub, partner_desired, _ = partner_info
-                        partner_connector = self.connectors.get(partner_dgd)
-                        if partner_connector is None:
+                else:
+                    # Cross-DGD pair: apply the scale-DOWN side first so its
+                    # GPUs are freed before the scale-UP side submits new pods.
+                    # Without this ordering, under a tight ceiling new pods
+                    # can sit Pending waiting for the eventual down-patch.
+                    partner_dgd, partner_sub, partner_desired, _ = partner_info
+                    partner_connector = self.connectors.get(partner_dgd)
+                    partner_targets = [
+                        TargetReplica(
+                            sub_component_type=SubComponentType(partner_sub),
+                            desired_replicas=partner_desired,
+                        )
+                    ]
+                    request_targets = list(request.target_replicas)
+
+                    # Partner's direction is opposite of request's net delta by
+                    # construction of _find_pair_partner. If request is net
+                    # scale-down (net_delta < 0), request is the down side;
+                    # otherwise the partner is.
+                    if net_delta < 0:
+                        first_label = f"request side ({request_key})"
+                        second_label = f"partner side ({partner_dgd}/{partner_sub})"
+                        first_connector, first_targets = connector, request_targets
+                        second_connector, second_targets = (
+                            partner_connector,
+                            partner_targets,
+                        )
+                    else:
+                        first_label = f"partner side ({partner_dgd}/{partner_sub})"
+                        second_label = f"request side ({request_key})"
+                        first_connector, first_targets = (
+                            partner_connector,
+                            partner_targets,
+                        )
+                        second_connector, second_targets = connector, request_targets
+
+                    if first_connector is None:
+                        logger.error(
+                            f"Cross-DGD pair failed before first patch: "
+                            f"no connector for {first_label}; nothing applied."
+                        )
+                        # Skip both — safer to self-correct from unchanged state.
+                    else:
+                        # First patch: let exceptions propagate (outer handler
+                        # reports the error; nothing has been applied yet).
+                        await first_connector.set_component_replicas(
+                            first_targets, blocking=request.blocking
+                        )
+                        # Second patch: scale-up side may fail independently.
+                        # We've already freed (or claimed) GPUs on the first
+                        # side; log loudly so operators can spot the drift.
+                        if second_connector is None:
                             logger.error(
-                                f"Cross-DGD pair failed: no connector for "
-                                f"partner DGD {partner_dgd}; request side "
-                                f"already applied. System will self-correct "
-                                f"from new state."
+                                f"Cross-DGD pair second-patch failed: no "
+                                f"connector for {second_label}; first-patch "
+                                f"({first_label}) already applied. System "
+                                f"will self-correct from new state."
                             )
                         else:
                             try:
-                                await partner_connector.set_component_replicas(
-                                    [
-                                        TargetReplica(
-                                            sub_component_type=SubComponentType(
-                                                partner_sub
-                                            ),
-                                            desired_replicas=partner_desired,
-                                        )
-                                    ],
-                                    blocking=request.blocking,
+                                await second_connector.set_component_replicas(
+                                    second_targets, blocking=request.blocking
                                 )
                             except Exception as pair_err:
                                 logger.error(
-                                    f"Cross-DGD pair second-patch failed on "
-                                    f"{partner_dgd}/{partner_sub}: {pair_err}; "
-                                    f"request side already applied. System "
+                                    f"Cross-DGD pair second-patch failed "
+                                    f"({second_label}): {pair_err}; first-patch "
+                                    f"({first_label}) already applied. System "
                                     f"will self-correct from new state."
                                 )
 
