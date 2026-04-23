@@ -42,9 +42,9 @@ def _router_states(
     router_mode: RouterMode,
     overlap_score_weights: Sequence[float],
 ) -> list[tuple[str, float]]:
-    if router_mode == "round_robin":
+    if router_mode is RouterMode.ROUND_ROBIN:
         return [("round_robin", 0.0)]
-    if router_mode == "kv_router":
+    if router_mode is RouterMode.KV_ROUTER:
         return [("kv_router", float(weight)) for weight in overlap_score_weights]
     return [("round_robin", 0.0)] + [
         ("kv_router", float(weight)) for weight in overlap_score_weights

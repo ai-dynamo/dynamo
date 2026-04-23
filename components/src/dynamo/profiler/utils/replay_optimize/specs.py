@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator, Mapping
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -44,7 +44,19 @@ from .constants import (
     DEFAULT_OVERLAP_SCORE_WEIGHTS,
 )
 
-RouterMode = Literal["kv_router", "round_robin", "both"]
+
+class RouterMode(str, Enum):
+    """Router mode for the replay search.
+
+    `BOTH` triggers a combined sweep across `KV_ROUTER` and `ROUND_ROBIN`;
+    `round_robin` collapses `overlapWeights` to `(0.0,)` (guardrail #5).
+    Subclasses `str` for Pydantic coercion and wire-compatibility with the
+    existing `router_mode` field on `DenseReplayState` / `DenseAggReplayState`.
+    """
+
+    KV_ROUTER = "kv_router"
+    ROUND_ROBIN = "round_robin"
+    BOTH = "both"
 
 
 class ReplayObjective(str, Enum):
@@ -282,7 +294,7 @@ class RouterSpec(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    mode: RouterMode = "kv_router"
+    mode: RouterMode = RouterMode.KV_ROUTER
     # None → fallback to DEFAULT_OVERLAP_SCORE_WEIGHTS (guardrail #3). Empty
     # list rejected (guardrail #4). Round-robin auto-collapse happens in
     # `effectiveOverlapWeights` (guardrail #5).
@@ -299,7 +311,7 @@ class RouterSpec(BaseModel):
     @property
     def effectiveOverlapWeights(self) -> tuple[float, ...]:
         """Resolve to the concrete weight sweep used by the search."""
-        if self.mode == "round_robin":
+        if self.mode is RouterMode.ROUND_ROBIN:
             return (0.0,)
         if self.overlapWeights is None:
             return DEFAULT_OVERLAP_SCORE_WEIGHTS
