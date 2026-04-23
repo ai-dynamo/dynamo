@@ -43,6 +43,17 @@ navigation:
         path: ../pages-v1.0.2/getting-started/examples.md
       - page: Glossary
         path: ../pages-v1.0.2/reference/glossary.md
+  # ==================== Blog ====================
+  - section: Blog
+    path: ../blogs/index.mdx
+    slug: blog
+    contents:
+      - page: "Full-Stack Optimizations for Agentic Inference"
+        path: ../blogs/agentic-inference/agentic-inference.md
+        slug: agentic-inference
+      - page: "Flash Indexer: Inter-Galactic KV Routing"
+        path: ../blogs/flash-indexer/flash-indexer.md
+        slug: flash-indexer
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
@@ -94,20 +105,12 @@ navigation:
   # ==================== User Guides ====================
   - section: User Guides
     contents:
-      - page: KV Cache Aware Routing
-        path: ../pages-v1.0.2/components/router/router-guide.md
       - page: Disaggregated Serving
         path: ../pages-v1.0.2/features/disaggregated-serving/README.md
+      - page: KV Cache Aware Routing
+        path: ../pages-v1.0.2/components/router/router-guide.md
       - page: KV Cache Offloading
         path: ../pages-v1.0.2/components/kvbm/kvbm-guide.md
-      - page: Dynamo Benchmarking
-        path: ../pages-v1.0.2/benchmarks/benchmarking.md
-      - page: Mocker Offline Trace Replay
-        path: ../pages-v1.0.2/benchmarks/mocker-trace-replay.md
-      - section: Testing
-        contents:
-          - page: Mocker
-            path: ../pages-v1.0.2/mocker/mocker.md
       - section: Multimodal
         path: ../pages-v1.0.2/features/multimodal/README.md
         contents:
@@ -130,12 +133,6 @@ navigation:
             path: ../pages-v1.0.2/backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
             path: ../pages-v1.0.2/backends/trtllm/trtllm-diffusion.md
-      - page: Chat Processor Options
-        path: ../pages-v1.0.2/agents/chat-processor-options.md
-      - page: Tool Calling
-        path: ../pages-v1.0.2/agents/tool-calling.md
-      - page: Reasoning
-        path: ../pages-v1.0.2/agents/reasoning.md
       - page: LoRA Adapters
         path: ../pages-v1.0.2/features/lora/README.md
       - section: Agents
@@ -144,6 +141,12 @@ navigation:
         contents:
           - page: SGLang for Agentic Workloads
             path: ../pages-v1.0.2/backends/sglang/agents.md
+      - page: Chat Processors
+        path: ../pages-v1.0.2/agents/chat-processor-options.md
+      - page: Tool Calling
+        path: ../pages-v1.0.2/agents/tool-calling.md
+      - page: Reasoning
+        path: ../pages-v1.0.2/agents/reasoning.md
       - section: Observability (Local)
         path: ../pages-v1.0.2/observability/README.md
         contents:
@@ -172,6 +175,14 @@ navigation:
             path: ../pages-v1.0.2/fault-tolerance/graceful-shutdown.md
           - page: Testing
             path: ../pages-v1.0.2/fault-tolerance/testing.md
+      - page: Benchmarking
+        path: ../pages-v1.0.2/benchmarks/benchmarking.md
+      - section: Testing with Mocker
+        contents:
+          - page: Mocker
+            path: ../pages-v1.0.2/mocker/mocker.md
+          - page: Mocker Offline Trace Replay
+            path: ../pages-v1.0.2/benchmarks/mocker-trace-replay.md
       - page: Writing Python Workers
         path: ../pages-v1.0.2/development/backend-guide.md
   # ==================== Backends ====================
@@ -194,8 +205,6 @@ navigation:
             path: ../pages-v1.0.2/backends/sglang/sglang-observability.md
           - page: Agentic Workloads
             path: ../pages-v1.0.2/backends/sglang/agents.md
-          - page: HiCache
-            path: ../pages-v1.0.2/backends/sglang/sglang-hicache.md
       - section: TensorRT-LLM
         path: ../pages-v1.0.2/backends/trtllm/README.md
         contents:
@@ -259,11 +268,13 @@ navigation:
         contents:
           - page: KVBM Guide
             path: ../pages-v1.0.2/components/kvbm/kvbm-guide.md
-  # ==================== Integrations ====================
-  - section: Integrations
+  # ==================== KV Managers ====================
+  - section: KV Managers
     contents:
       - page: LMCache
         path: ../pages-v1.0.2/integrations/lmcache-integration.md
+      - page: SGLang HiCache
+        path: ../pages-v1.0.2/integrations/sglang-hicache.md
       - page: FlexKV
         path: ../pages-v1.0.2/integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
@@ -295,18 +306,6 @@ navigation:
             path: ../pages-v1.0.2/design-docs/kvbm-design.md
           - page: Planner Design
             path: ../pages-v1.0.2/design-docs/planner-design.md
-  # ==================== Blog ====================
-  - section: Blog
-    collapsed: true
-    path: ../blogs/index.mdx
-    slug: blog
-    contents:
-      - page: "Full-Stack Optimizations for Agentic Inference"
-        path: ../blogs/agentic-inference/agentic-inference.md
-        slug: agentic-inference
-      - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: ../blogs/flash-indexer/flash-indexer.md
-        slug: flash-indexer
   # ==================== Documentation ====================
   - section: Documentation
     contents:
