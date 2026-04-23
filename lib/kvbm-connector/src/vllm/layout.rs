@@ -97,21 +97,22 @@ pub fn determine_kv_layout(
     // `[n_blocks, page_size, latent_dim]` (or the outer-contiguous equivalent),
     // so the neighbouring candidate lands on `page_size` and exceeds 2 — treat
     // as MLA and set outer_dim=1.
-    let (outer_dim, inner_dim) = if let (Some(o), Some(i)) = (explicit_outer_dim, explicit_inner_dim) {
-        (o, i)
-    } else {
-        let candidate_outer = match block_dim {
-            BlockDimension::BlockIsFirstDim => shape[1],
-            BlockDimension::BlockIsSecondDim => shape[0],
-        };
-        let (outer_dim, content_dims_start) = if candidate_outer <= 2 {
-            (candidate_outer, 2)
+    let (outer_dim, inner_dim) =
+        if let (Some(o), Some(i)) = (explicit_outer_dim, explicit_inner_dim) {
+            (o, i)
         } else {
-            (1, 1)
+            let candidate_outer = match block_dim {
+                BlockDimension::BlockIsFirstDim => shape[1],
+                BlockDimension::BlockIsSecondDim => shape[0],
+            };
+            let (outer_dim, content_dims_start) = if candidate_outer <= 2 {
+                (candidate_outer, 2)
+            } else {
+                (1, 1)
+            };
+            let inner_dim = shape[content_dims_start..].iter().product::<usize>() / page_size;
+            (outer_dim, inner_dim)
         };
-        let inner_dim = shape[content_dims_start..].iter().product::<usize>() / page_size;
-        (outer_dim, inner_dim)
-    };
     builder.outer_dim(outer_dim);
     builder.inner_dim(inner_dim);
 
