@@ -730,22 +730,23 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	normalized := strings.ToUpper(strings.ReplaceAll(gpuProduct, "-", ""))
 	normalized = strings.ReplaceAll(normalized, " ", "")
 
-	// Map common NVIDIA datacenter GPU products to AIC hardware system identifiers.
-	patterns := []struct {
-		pattern string
-		system  nvidiacomv1beta1.GPUSKUType
-	}{
-		{"GB200", nvidiacomv1beta1.GPUSKUTypeGB200SXM},
-		{"H200", nvidiacomv1beta1.GPUSKUTypeH200SXM},
-		{"H100", nvidiacomv1beta1.GPUSKUTypeH100SXM},
-		{"B200", nvidiacomv1beta1.GPUSKUTypeB200SXM},
-		{"A100", nvidiacomv1beta1.GPUSKUTypeA100SXM},
-		{"L40S", nvidiacomv1beta1.GPUSKUTypeL40S},
-	}
-
-	for _, p := range patterns {
-		if strings.Contains(normalized, p.pattern) {
-			return p.system
+	for _, rule := range gpuRules {
+		if strings.Contains(normalized, rule.token) {
+			if rule.singleSKU != "" {
+				return rule.singleSKU
+			}
+			if formFactor == formFactorSXM && rule.sxmSKU != "" {
+				return rule.sxmSKU
+			}
+			if rule.pcieSKU != "" {
+				return rule.pcieSKU
+			}
+			// Token matched but no form factor indicator was present in the string
+			// (e.g. "NVIDIA H200" from DCGM has no SXM/HGX/DGX suffix). If the GPU
+			// has no PCIe variant it must be SXM-only (H200, B200, GB200).
+			if rule.sxmSKU != "" {
+				return rule.sxmSKU
+			}
 		}
 	}
 

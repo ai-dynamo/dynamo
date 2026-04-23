@@ -326,22 +326,183 @@ func TestInferHardwareSystem(t *testing.T) {
 		expectedSystem string
 		description    string
 	}{
-		{"H100-SXM5-80GB", "h100_sxm", "H100 SXM variant"},
-		{"H100-PCIE-80GB", "h100_sxm", "H100 PCIe variant (mapped to SXM)"},
-		{"H200-SXM5-141GB", "h200_sxm", "H200 SXM variant"},
-		{"A100-SXM4-40GB", "a100_sxm", "A100 SXM variant"},
-		{"A100-PCIE-80GB", "a100_sxm", "A100 PCIe variant (mapped to SXM)"},
-		{"L40S", "l40s", "L40S"},
-		{"NVIDIA L40S", "l40s", "L40S with prefix"},
-		{"B200-SXM", "b200_sxm", "B200 SXM"},
-		{"GB200", "gb200_sxm", "GB200"},
-		{"Tesla V100-SXM2-16GB", "", "V100 (not in mapping)"},
-		{"RTX 4090", "", "Consumer GPU (not in mapping)"},
-		{"Unknown-GPU", "", "Unknown GPU"},
-		{"", "", "Empty string"},
-		// GFD product names as seen in real cluster labels (regression for GPUSKU bug)
-		{"NVIDIA-B200", "b200_sxm", "B200 with NVIDIA prefix (GFD label format)"},
-		{"NVIDIA-H200-SXM5-141GB", "h200_sxm", "H200 with NVIDIA prefix (GFD label format)"},
+		// --- Empty / unknown ---
+		{
+			name:     "empty input",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "unknown gpu",
+			input:    "random-gpu",
+			expected: "",
+		},
+
+		// --- Blackwell ---
+		{
+			name:     "GB200 SXM",
+			input:    "GB200-SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+		},
+		{
+			name:     "GB200 HGX (implies SXM)",
+			input:    "HGX GB200",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+		},
+		{
+			name:     "B200 SXM",
+			input:    "B200 SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
+		},
+
+		// --- Hopper ---
+		{
+			name:     "H100 SXM",
+			input:    "H100 SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100SXM,
+		},
+		{
+			name:     "H100 PCIe explicit",
+			input:    "H100 PCIe",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
+		{
+			name:     "H100 default PCIe",
+			input:    "H100",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
+		{
+			name:     "H200 SXM",
+			input:    "H200 SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+
+		// --- Ampere ---
+		{
+			name:     "A100 SXM",
+			input:    "A100-SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100SXM,
+		},
+		{
+			name:     "A100 PCIe",
+			input:    "A100 PCIe",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
+		},
+		{
+			name:     "A100 default PCIe",
+			input:    "A100",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
+		},
+
+		// --- Ada ---
+		{
+			name:     "L40S",
+			input:    "L40S",
+			expected: nvidiacomv1beta1.GPUSKUTypeL40S,
+		},
+		{
+			name:     "L40S should not match L40",
+			input:    "L40S",
+			expected: nvidiacomv1beta1.GPUSKUTypeL40S,
+		},
+		{
+			name:     "L40",
+			input:    "L40",
+			expected: nvidiacomv1beta1.GPUSKUTypeL40,
+		},
+		{
+			name:     "L4",
+			input:    "L4",
+			expected: nvidiacomv1beta1.GPUSKUTypeL4,
+		},
+
+		// --- Volta / Turing ---
+		{
+			name:     "V100 SXM",
+			input:    "V100 SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeV100SXM,
+		},
+		{
+			name:     "V100 PCIe",
+			input:    "V100 PCIe",
+			expected: nvidiacomv1beta1.GPUSKUTypeV100PCIe,
+		},
+		{
+			name:     "T4",
+			input:    "T4",
+			expected: nvidiacomv1beta1.GPUSKUTypeT4,
+		},
+
+		// --- AMD ---
+		{
+			name:     "MI300",
+			input:    "MI300",
+			expected: nvidiacomv1beta1.GPUSKUTypeMI300,
+		},
+		{
+			name:     "MI250",
+			input:    "MI250",
+			expected: nvidiacomv1beta1.GPUSKUTypeMI200,
+		},
+		{
+			name:     "MI200",
+			input:    "MI200",
+			expected: nvidiacomv1beta1.GPUSKUTypeMI200,
+		},
+
+		// --- Bare DCGM model names (no form factor suffix) ---
+		// DCGM often reports "NVIDIA H200" / "NVIDIA B200" with system="" because
+		// there is no SXM/HGX/DGX token in the string. GPUs that have no PCIe
+		// variant must still resolve to their SXM SKU.
+		{
+			name:     "NVIDIA H200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA H200",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+		{
+			name:     "NVIDIA B200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA B200",
+			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
+		},
+		{
+			name:     "NVIDIA GB200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA GB200",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+		},
+		{
+			name:     "H200 bare without vendor prefix",
+			input:    "H200",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+		// H100/A100 still default to PCIe when no form factor indicator is present,
+		// because those GPUs have a real PCIe variant.
+		{
+			name:     "H100 bare still defaults to PCIe (has PCIe variant)",
+			input:    "H100",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
+		{
+			name:     "A100 bare still defaults to PCIe (has PCIe variant)",
+			input:    "A100",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
+		},
+
+		// --- Normalization tests ---
+		{
+			name:     "lowercase + spaces",
+			input:    "h100 sxm",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100SXM,
+		},
+		{
+			name:     "mixed case + dash",
+			input:    "A100-sXm",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100SXM,
+		},
+		{
+			name:     "with extra spaces",
+			input:    "  H100   PCIe ",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
 	}
 
 	for _, tt := range tests {

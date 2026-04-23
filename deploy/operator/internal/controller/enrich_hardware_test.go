@@ -67,6 +67,18 @@ func intStr(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
+func dcgmPod(name, ip string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "gpu-operator",
+			Labels: map[string]string{gpupkg.LabelApp: gpupkg.LabelValueNvidiaDCGMExporter}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+	}
+}
+
+func intStr(n int) string {
+	return fmt.Sprintf("%d", n)
+}
+
 // TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier is the regression test for the
 // bug where GPUSKU was set to the raw GFD product name (e.g. "NVIDIA-B200") instead of
 // the AIC system identifier (e.g. "b200_sxm"), causing AIC support checks to always fail
@@ -114,19 +126,93 @@ func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
 	}
 }
 
+// TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM is the regression test for
+// the bug where DCGM reports "NVIDIA H200" (no SXM suffix, system="") and the controller
+// serialized the raw string into the profiling job config instead of normalizing it to
+// "h200_sxm", causing the Python profiler's Pydantic enum validation to fail.
+func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
+	tests := []struct {
+		name           string
+		dcgmModel      string
+		expectedGPUSKU string
+	}{
+		{
+			name:           "NVIDIA H200 from DCGM normalizes to h200_sxm",
+			dcgmModel:      "NVIDIA H200",
+			expectedGPUSKU: "h200_sxm",
+		},
+		{
+			name:           "NVIDIA B200 from DCGM normalizes to b200_sxm",
+			dcgmModel:      "NVIDIA B200",
+			expectedGPUSKU: "b200_sxm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+
+			dcgmPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dcgm-exporter",
+					Namespace: "default",
+					Labels: map[string]string{
+						gpupkg.LabelApp: gpupkg.LabelValueNvidiaDCGMExporter,
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					PodIP: "10.0.0.1",
+				},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dcgmPod).Build()
+
+			// Mock scraper returns System="" to simulate the scenario where
+			// DCGM metrics lack a form factor suffix (e.g. "NVIDIA H200").
+			mockScraper := func(_ context.Context, _ string) (*gpupkg.GPUInfo, error) {
+				return &gpupkg.GPUInfo{
+					NodeName:    "gpu-node",
+					GPUsPerNode: 8,
+					Model:       tt.dcgmModel,
+					VRAMPerGPU:  143770,
+					System:      "",
+				}, nil
+			}
+
+			r := &DynamoGraphDeploymentRequestReconciler{
+				Client:            fakeClient,
+				APIReader:         fakeClient,
+				Recorder:          &record.FakeRecorder{},
+				GPUDiscovery:      gpupkg.NewGPUDiscovery(mockScraper),
+				GPUDiscoveryCache: gpupkg.NewGPUDiscoveryCache(),
+			}
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{},
+			}
+
+			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+			require.NoError(t, err)
+			require.NotNil(t, dgdr.Spec.Hardware)
+			assert.Equal(t, tt.expectedGPUSKU, string(dgdr.Spec.Hardware.GPUSKU),
+				"gpuSku must be a valid profiler enum, not the raw DCGM model string %q", tt.dcgmModel)
+		})
+	}
+}
+
 // TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU verifies that for GPUs
 // not in the AIC support matrix, the raw GFD product name is used as a fallback.
 func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T) {
 	r := newFakeReconciler(gpuNode("gpu-node-1", "Tesla-V100-SXM2-16GB", 8, 16384))
-	vram := float64(16384)
-	gpus := int32(8)
 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 			Hardware: &nvidiacomv1beta1.HardwareSpec{
 				GPUSKU:         "Tesla-V100-SXM2-16GB",
-				VRAMMB:         &vram,
-				NumGPUsPerNode: &gpus,
+				VRAMMB:         ptr.To(float64(16384)),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(8)),
 			},
 		},
 	}
