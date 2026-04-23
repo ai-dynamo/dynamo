@@ -114,14 +114,14 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	container.Command = []string{}
 
 	container.Args = []string{
-		"-pool-name", poolName,
-		"-pool-namespace", poolNamespace,
-		"-pool-group", epp.InferencePoolGroup,
+		"--pool-name", poolName,
+		"--pool-namespace", poolNamespace,
+		"--pool-group", epp.InferencePoolGroup,
 		"-v", "4",
 		"--zap-encoder", "json",
-		"-grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
-		"-grpc-health-port", "9003",
-		"-config-file", configFilePath,
+		"--grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
+		"--grpc-health-port", "9003",
+		"--config-file", configFilePath,
 	}
 
 	// Mount EPP config

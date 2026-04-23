@@ -8,16 +8,20 @@ from collections.abc import Sequence
 
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.profiler.utils.replay_optimize import (
-    SyntheticReplayWorkload,
-    TraceReplayWorkload,
+    EngineSpec,
+    HardwareSpec,
+    ReplayOptimizeSpec,
+    RouterSpec,
+    SLASpec,
+    WorkloadSpec,
     optimize_dense_disagg_with_replay,
 )
 
 MODEL = "Qwen/Qwen3-32B"
 BACKEND = "vllm"
-SYSTEM = "h200_sxm"
-MAX_TOTAL_GPUS = 16
-OVERLAP_SCORE_WEIGHTS = (0.0, 0.5, 1.0, 2.0)
+GPU_SKU = "h200_sxm"
+TOTAL_GPUS = 16
+OVERLAP_WEIGHTS = [0.0, 0.5, 1.0, 2.0]
 RESULT_COLUMNS: Sequence[str] = (
     "prefill_tp",
     "decode_tp",
@@ -37,24 +41,24 @@ def _build_workload(
     *,
     trace_file: str | None,
     arrival_speedup_ratio: float,
-) -> SyntheticReplayWorkload | TraceReplayWorkload:
+) -> WorkloadSpec:
     if trace_file is not None:
-        return TraceReplayWorkload(
-            trace_file=trace_file,
-            arrival_speedup_ratio=arrival_speedup_ratio,
+        return WorkloadSpec(
+            traceFile=trace_file,
+            arrivalSpeedupRatio=arrival_speedup_ratio,
         )
 
-    return SyntheticReplayWorkload(
+    return WorkloadSpec(
         isl=32768,
         osl=256,
-        request_count=5000,
-        replay_concurrency=200,
-        shared_prefix_ratio=0.5,
-        num_prefix_groups=50,
+        requestCount=5000,
+        concurrency=200,
+        sharedPrefixRatio=0.5,
+        numPrefixGroups=50,
     )
 
 
-def _build_engine_args(*, worker_type: str) -> MockEngineArgs:
+def _engine_args(worker_type: str) -> MockEngineArgs:
     return MockEngineArgs(
         block_size=512,
         num_gpu_blocks=20000,
@@ -69,26 +73,27 @@ def run_example(
     arrival_speedup_ratio: float = 1.0,
     max_parallel_evals: int = 1,
 ) -> None:
-    result = optimize_dense_disagg_with_replay(
-        model=MODEL,
-        backend=BACKEND,
-        system=SYSTEM,
+    spec = ReplayOptimizeSpec(
+        engine=EngineSpec(
+            model=MODEL,
+            backend=BACKEND,
+            basePrefillEngineArgs=_engine_args("prefill"),
+            baseDecodeEngineArgs=_engine_args("decode"),
+        ),
+        hardware=HardwareSpec(gpuSku=GPU_SKU, totalGpus=TOTAL_GPUS),
         workload=_build_workload(
             trace_file=trace_file,
             arrival_speedup_ratio=arrival_speedup_ratio,
         ),
-        base_prefill_engine_args=_build_engine_args(worker_type="prefill"),
-        base_decode_engine_args=_build_engine_args(worker_type="decode"),
-        base_router_config=KvRouterConfig(),
-        max_total_gpus=MAX_TOTAL_GPUS,
-        constraints={
-            "mean_ttft_ms": 50000.0,
-            "mean_tpot_ms": 100.0,
-            "mean_e2e_latency_ms": 60000.0,
-        },
-        overlap_score_weights=OVERLAP_SCORE_WEIGHTS,
-        max_parallel_evals=max_parallel_evals,
+        sla=SLASpec(ttft=50000.0, itl=100.0, e2eLatency=60000.0),
+        router=RouterSpec(
+            baseRouterConfig=KvRouterConfig(),
+            overlapWeights=OVERLAP_WEIGHTS,
+        ),
+        maxParallelEvals=max_parallel_evals,
     )
+
+    result = optimize_dense_disagg_with_replay(spec)
 
     print("Best feasible:")
     print(result.best_feasible)
