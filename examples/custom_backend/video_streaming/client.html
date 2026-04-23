@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dynamo Video Streaming POC Client</title>
+  <style>
+    :root {
+      --bg: #101820;
+      --panel: #17242f;
+      --panel-2: #1f3240;
+      --text: #f3f6f9;
+      --muted: #a8b8c5;
+      --accent: #4dd0a8;
+      --accent-2: #6ec1ff;
+      --danger: #ff7d6e;
+      --border: rgba(255, 255, 255, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(77, 208, 168, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(110, 193, 255, 0.18), transparent 24%),
+        linear-gradient(180deg, #0c1218 0%, var(--bg) 100%);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .app {
+      width: min(1100px, 100%);
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 20px;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+    }
+
+    .controls {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .controls h1 {
+      margin: 0;
+      font-size: 1.6rem;
+      line-height: 1.1;
+    }
+
+    .controls p,
+    .hint {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.4;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    input,
+    textarea,
+    button {
+      font: inherit;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+    }
+
+    textarea {
+      min-height: 82px;
+      resize: vertical;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      cursor: pointer;
+      transition: transform 150ms ease, opacity 150ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #08110d;
+      font-weight: 700;
+    }
+
+    .secondary {
+      background: var(--accent-2);
+      color: #07111b;
+      font-weight: 700;
+    }
+
+    .ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    .player {
+      display: grid;
+      gap: 14px;
+    }
+
+    video {
+      width: 100%;
+      background: #000;
+      border-radius: 16px;
+      aspect-ratio: 16 / 9;
+    }
+
+    .stats {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    pre {
+      margin: 0;
+      min-height: 220px;
+      max-height: 420px;
+      overflow: auto;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(3, 7, 12, 0.6);
+      padding: 16px;
+      color: #dce7f0;
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 900px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="panel controls">
+      <h1>Dynamo Video Stream POC</h1>
+      <p>POST one prompt, then continuously play replayable MP4 clips from either the canonical SSE route or the experimental binary route.</p>
+
+      <label>
+        Frontend Base URL
+        <input id="baseUrl" value="http://localhost:8000" />
+      </label>
+
+      <label>
+        Model
+        <input id="model" value="synthetic-video-stream" />
+      </label>
+
+      <label>
+        Prompt
+        <textarea id="prompt">Replay the synthetic MP4 clip stream.</textarea>
+      </label>
+
+      <div class="actions">
+        <button class="primary" id="startSse">Start SSE Stream</button>
+        <button class="secondary" id="startBinary">Start Binary Stream</button>
+        <button class="ghost" id="stop">Stop</button>
+      </div>
+
+      <p class="hint">This client uses plain sequential playback of standalone MP4 clips. It is intentionally validating replayable units first, not gapless MSE playback.</p>
+    </section>
+
+    <section class="panel player">
+      <video id="player" controls muted playsinline></video>
+      <div class="stats">
+        <div class="pill">Queued clips: <span id="queued">0</span></div>
+        <div class="pill">Played clips: <span id="played">0</span></div>
+        <div class="pill">Mode: <span id="mode">idle</span></div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </div>
+
+  <script>
+    const player = document.getElementById("player");
+    const queuedEl = document.getElementById("queued");
+    const playedEl = document.getElementById("played");
+    const modeEl = document.getElementById("mode");
+    const logEl = document.getElementById("log");
+
+    const queue = [];
+    let currentUrl = null;
+    let currentAbortController = null;
+    let playedCount = 0;
+
+    function log(message, isError = false) {
+      const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logEl.textContent += `${line}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+      if (isError) {
+        logEl.classList.add("error");
+      }
+    }
+
+    function resetLogStyle() {
+      logEl.classList.remove("error");
+    }
+
+    function updateStats(mode = modeEl.textContent) {
+      queuedEl.textContent = String(queue.length);
+      playedEl.textContent = String(playedCount);
+      modeEl.textContent = mode;
+    }
+
+    function base64ToBytes(base64) {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    function enqueueClip(bytes, mimeType = "video/mp4") {
+      const blob = new Blob([bytes], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      queue.push(url);
+      updateStats();
+      if (player.paused && !player.src) {
+        void playNextClip();
+      }
+    }
+
+    async function playNextClip() {
+      if (queue.length === 0) {
+        player.removeAttribute("src");
+        player.load();
+        updateStats();
+        return;
+      }
+
+      if (currentUrl) {
+        URL.revokeObjectURL(currentUrl);
+      }
+
+      currentUrl = queue.shift();
+      player.src = currentUrl;
+      updateStats();
+
+      try {
+        await player.play();
+      } catch (error) {
+        log(`Playback failed: ${error}`, true);
+      }
+    }
+
+    player.addEventListener("ended", () => {
+      playedCount += 1;
+      updateStats();
+      void playNextClip();
+    });
+
+    async function stopStream() {
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+      }
+      queue.splice(0, queue.length);
+      if (currentUrl) {
+        URL.revokeObjectURL(currentUrl);
+        currentUrl = null;
+      }
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+      updateStats("idle");
+      log("Stopped stream");
+    }
+
+    function buildPayload() {
+      return {
+        prompt: document.getElementById("prompt").value,
+        model: document.getElementById("model").value,
+      };
+    }
+
+    async function startSseStream() {
+      await stopStream();
+      resetLogStyle();
+      currentAbortController = new AbortController();
+      updateStats("sse");
+
+      const url = `${document.getElementById("baseUrl").value}/v1/videos/stream`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildPayload()),
+        signal: currentAbortController.signal,
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`SSE request failed with status ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      log("Connected to canonical SSE stream");
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          log("SSE stream closed");
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const rawEvent of events) {
+          const lines = rawEvent.split("\n");
+          let eventType = "message";
+          const dataLines = [];
+
+          for (const line of lines) {
+            if (line.startsWith("event: ")) {
+              eventType = line.slice(7);
+            } else if (line.startsWith("data: ")) {
+              dataLines.push(line.slice(6));
+            }
+          }
+
+          if (dataLines.length === 0) {
+            continue;
+          }
+
+          const data = dataLines.join("\n");
+          if (data === "[DONE]") {
+            log("Received SSE [DONE]");
+            continue;
+          }
+
+          const payload = JSON.parse(data);
+          if (eventType === "error" || payload.error) {
+            log(`SSE error: ${payload.error?.message || payload.error || data}`, true);
+            continue;
+          }
+
+          const clip = payload.data?.[0];
+          if (!clip?.b64_json) {
+            log(`Skipping SSE event without MP4 payload: ${data}`);
+            continue;
+          }
+
+          enqueueClip(base64ToBytes(clip.b64_json));
+          log(`Queued SSE clip (video/mp4) progress=${payload.progress}`);
+        }
+      }
+    }
+
+    async function startBinaryStream() {
+      await stopStream();
+      resetLogStyle();
+      currentAbortController = new AbortController();
+      updateStats("binary");
+
+      const url = `${document.getElementById("baseUrl").value}/v1/videos/stream/binary`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildPayload()),
+        signal: currentAbortController.signal,
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`Binary request failed with status ${response.status}`);
+      }
+
+      const protocol = response.headers.get("x-dynamo-video-binary-protocol") || "unknown";
+      log(`Connected to binary stream (${protocol})`);
+
+      const reader = response.body.getReader();
+      const textDecoder = new TextDecoder();
+      let buffer = new Uint8Array(0);
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          log("Binary stream closed");
+          break;
+        }
+
+        const next = new Uint8Array(buffer.length + value.length);
+        next.set(buffer);
+        next.set(value, buffer.length);
+        buffer = next;
+
+        while (buffer.length >= 5) {
+          const kind = buffer[0];
+          const length = new DataView(buffer.buffer, buffer.byteOffset + 1, 4).getUint32(0);
+          if (buffer.length < 5 + length) {
+            break;
+          }
+
+          const payload = buffer.slice(5, 5 + length);
+          buffer = buffer.slice(5 + length);
+
+          if (kind === 0x01) {
+            enqueueClip(payload, "video/mp4");
+            log(`Queued binary clip (${payload.length} bytes)`);
+          } else if (kind === 0x02) {
+            log(`Binary error: ${textDecoder.decode(payload)}`, true);
+          } else if (kind === 0x03) {
+            log("Received binary done frame");
+          } else {
+            log(`Unknown binary frame kind: ${kind}`, true);
+          }
+        }
+      }
+    }
+
+    document.getElementById("startSse").addEventListener("click", async () => {
+      try {
+        await startSseStream();
+      } catch (error) {
+        log(`Failed to start SSE stream: ${error}`, true);
+      }
+    });
+
+    document.getElementById("startBinary").addEventListener("click", async () => {
+      try {
+        await startBinaryStream();
+      } catch (error) {
+        log(`Failed to start binary stream: ${error}`, true);
+      }
+    });
+
+    document.getElementById("stop").addEventListener("click", () => {
+      void stopStream();
+    });
+
+    updateStats();
+  </script>
+</body>
+</html>

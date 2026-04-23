@@ -1379,6 +1379,105 @@ class VideoGenerationPayload(BasePayload):
 
 
 @dataclass
+class VideoStreamPayload(BasePayload):
+    """Streaming payload for /v1/videos/stream."""
+
+    endpoint: str = "/v1/videos/stream"
+    timeout: int = 600
+    http_stream: bool = True
+
+    def response_handler(self, response: Any) -> str:
+        import json
+
+        response.raise_for_status()
+
+        clips = 0
+        done = False
+        event_type = ""
+
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: ") :]
+                continue
+            if not line.startswith("data: "):
+                continue
+
+            data_str = line[len("data: ") :]
+            if data_str == "[DONE]":
+                done = True
+                continue
+
+            payload = json.loads(data_str)
+            if event_type == "error" or payload.get("error"):
+                raise AssertionError(f"Video stream error payload: {payload}")
+
+            assert payload.get("object") == "video", f"Unexpected object: {payload}"
+            data = payload.get("data", [])
+            assert data, f"Streaming payload missing data array: {payload}"
+            clip = data[0]
+            assert clip.get(
+                "b64_json"
+            ), f"Streaming payload missing b64_json: {payload}"
+            clips += 1
+
+        assert clips > 0, "Expected at least one streamed video clip"
+        assert done, "Expected SSE [DONE] terminator in video stream"
+        return f"{clips}_video_clips"
+
+
+@dataclass
+class BinaryVideoStreamPayload(BasePayload):
+    """Streaming payload for /v1/videos/stream/binary."""
+
+    endpoint: str = "/v1/videos/stream/binary"
+    timeout: int = 600
+    http_stream: bool = True
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        protocol = response.headers.get("x-dynamo-video-binary-protocol")
+        assert (
+            protocol == "dynamo-video-binary-v1"
+        ), f"Unexpected binary protocol header: {protocol}"
+
+        clips = 0
+        done = False
+        buffer = bytearray()
+
+        for chunk in response.iter_content(chunk_size=None):
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+
+            while len(buffer) >= 5:
+                kind = buffer[0]
+                length = int.from_bytes(buffer[1:5], "big")
+                if len(buffer) < 5 + length:
+                    break
+
+                payload = bytes(buffer[5 : 5 + length])
+                del buffer[: 5 + length]
+
+                if kind == 0x01:
+                    assert payload, "Binary MP4 payload is empty"
+                    clips += 1
+                elif kind == 0x02:
+                    raise AssertionError(
+                        f"Binary video stream error payload: {payload.decode('utf-8', errors='replace')}"
+                    )
+                elif kind == 0x03:
+                    done = True
+                else:
+                    raise AssertionError(f"Unknown binary video frame kind: {kind}")
+
+        assert clips > 0, "Expected at least one binary streamed video clip"
+        assert done, "Expected binary done frame"
+        return f"{clips}_binary_video_clips"
+
+
+@dataclass
 class I2VPayload(VideoGenerationPayload):
     """Payload for image-to-video via /v1/videos with input_reference."""
 

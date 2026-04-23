@@ -51,8 +51,30 @@ impl DeltaAggregator {
                     // or we accumulate data from multiple responses
                     match &mut aggregator.response {
                         Some(existing) => {
-                            // Merge video data if we have multiple responses
-                            existing.data.extend(response.data);
+                            // Merge video data and keep top-level status/progress fields
+                            // from the latest chunk so folded non-streaming responses reflect
+                            // the end state of a streamed backend.
+                            let super::NvVideosResponse {
+                                id: _,
+                                object: _,
+                                model: _,
+                                status,
+                                progress,
+                                created,
+                                data,
+                                error,
+                                inference_time_s,
+                            } = response;
+                            existing.status = status;
+                            existing.progress = progress;
+                            existing.created = created;
+                            if error.is_some() {
+                                existing.error = error;
+                            }
+                            if inference_time_s.is_some() {
+                                existing.inference_time_s = inference_time_s;
+                            }
+                            existing.data.extend(data);
                         }
                         None => {
                             aggregator.response = Some(response);

@@ -2286,19 +2286,83 @@ async fn videos(
     Ok(Json(response).into_response())
 }
 
-/// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
+const VIDEO_STREAM_BINARY_KIND_MP4: u8 = 0x01;
+const VIDEO_STREAM_BINARY_KIND_ERROR: u8 = 0x02;
+const VIDEO_STREAM_BINARY_KIND_DONE: u8 = 0x03;
+const VIDEO_STREAM_BINARY_PROTOCOL: &str = "dynamo-video-binary-v1";
+
+fn force_streaming_video_response_format(request: &mut NvCreateVideoRequest) {
+    request.response_format = Some("b64_json".to_string());
+}
+
+fn normalize_video_stream_response(
+    mut response: NvVideosResponse,
+) -> Result<NvVideosResponse, String> {
+    for item in &mut response.data {
+        if item.b64_json.is_none() {
+            return Err(
+                "video streaming requires replayable MP4 chunks in data[*].b64_json".to_string(),
+            );
+        }
+    }
+
+    Ok(response)
+}
+
+fn decode_video_stream_payloads(response: NvVideosResponse) -> Result<Vec<Vec<u8>>, String> {
+    response
+        .data
+        .into_iter()
+        .map(|item| {
+            let b64 = item.b64_json.ok_or_else(|| {
+                "video streaming requires replayable MP4 chunks in data[*].b64_json"
+                    .to_string()
+            })?;
+
+            base64::prelude::BASE64_STANDARD
+                .decode(&b64)
+                .map_err(|e| format!("failed to decode video chunk base64: {e}"))
+        })
+        .collect()
+}
+
+fn encode_binary_video_frame(kind: u8, payload: &[u8]) -> Bytes {
+    let mut frame = Vec::with_capacity(1 + 4 + payload.len());
+    frame.push(kind);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    Bytes::from(frame)
+}
+
+fn encode_binary_video_error_frame(message: impl Into<String>) -> Bytes {
+    let payload = serde_json::json!({
+        "error": {
+            "message": message.into(),
+        }
+    });
+    encode_binary_video_frame(
+        VIDEO_STREAM_BINARY_KIND_ERROR,
+        payload.to_string().as_bytes(),
+    )
+}
+
+fn encode_binary_video_done_frame() -> Bytes {
+    encode_binary_video_frame(VIDEO_STREAM_BINARY_KIND_DONE, &[])
+}
+
+/// Canonical SSE streaming handler for `/v1/videos/stream`.
 ///
-/// The backend is expected to yield one [`NvVideosResponse`] per frame, carrying a
-/// JPEG-encoded frame as `data[0].b64_json`. This handler decodes each frame and
-/// writes it as an MJPEG multipart boundary so the client receives a live
-/// `multipart/x-mixed-replace` stream viewable directly in a browser `<img>` tag
-/// or via `ffplay http://.../v1/videos/stream`.
+/// The backend yields one [`NvVideosResponse`] per replayable fragment. For this
+/// POC we intentionally use self-contained MP4 clips as the replayable unit to
+/// validate the RFC contract directly, rather than low-latency fragmented MP4.
 async fn video_stream(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    Json(mut request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
+
+    force_streaming_video_response_format(&mut request);
 
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
@@ -2336,13 +2400,96 @@ async fn video_stream(
     // video_stream returns the streaming body directly (graceful handler exit).
     // The stream_handle is armed below and lives inside the monitored stream so that
     // a client disconnect (body drop) signals the engine context to cancel.
-    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
         ctx.clone(),
         Some(state.metrics_clone()),
         CancellationLabels {
             model: model.clone(),
             endpoint: Endpoint::Videos.to_string(),
             request_type: "stream".to_string(),
+        },
+    )
+    .await;
+    connection_handle.disarm();
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream
+        .map(|response| response.map_data(normalize_video_stream_response))
+        .filter_map(move |response| {
+            futures::future::ready(
+                match process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                ) {
+                    Ok(Some(event)) => Some(Ok(event)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                },
+            )
+        });
+    let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
+
+    let mut sse_stream = Sse::new(stream);
+    if let Some(keep_alive) = state.sse_keep_alive() {
+        sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+    }
+
+    Ok(sse_stream.into_response())
+}
+
+/// Experimental binary streaming handler for `/v1/videos/stream/binary`.
+///
+/// The payload format is a simple framed byte stream:
+/// `[kind:1][len_be_u32:4][payload:len]`
+/// where `kind=0x01` is an MP4 clip, `0x02` is an error JSON payload, and
+/// `0x03` is an end-of-stream marker.
+async fn video_stream_binary(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    force_streaming_video_response_format(&mut request);
+
+    let request_id = get_or_create_request_id(&headers);
+    let request = Context::with_id(request, request_id);
+    let model = request.model.clone();
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
+
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start binary video stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let ctx = stream.context();
+    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+        ctx.clone(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Videos.to_string(),
+            request_type: "stream_binary".to_string(),
         },
     )
     .await;
@@ -2357,59 +2504,64 @@ async fn video_stream(
         );
     });
 
-    // Map each annotated NvVideosResponse to an MJPEG boundary chunk.
-    // The backend yields one response per frame with the JPEG in data[0].b64_json.
-    let mjpeg_stream = stream.filter_map(|annotated| async move {
-        let ann = match annotated.ok() {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("Video stream error: {e}");
-                return None;
-            }
-        };
-        let response = ann.data?;
-        let frame = response.data.into_iter().next()?;
-        let b64 = frame.b64_json?;
-        let jpeg_bytes = match base64::prelude::BASE64_STANDARD.decode(&b64) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("Failed to decode frame base64: {e}");
-                return None;
-            }
-        };
-        let header = format!(
-            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-            jpeg_bytes.len()
-        );
-        let mut chunk = Vec::with_capacity(header.len() + jpeg_bytes.len() + 2);
-        chunk.extend_from_slice(header.as_bytes());
-        chunk.extend_from_slice(&jpeg_bytes);
-        chunk.extend_from_slice(b"\r\n");
-        Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)))
-    });
-
-    // Arm the stream handle and monitor for client disconnects or context cancellation.
-    // inflight.mark_ok() is deferred until the stream ends naturally. If the stream is
-    // dropped early (client disconnect), the armed stream_handle signals the connection
-    // monitor, which cancels the engine context.
     stream_handle.arm();
-    let monitored_stream = async_stream::stream! {
-        tokio::pin!(mjpeg_stream);
+    let binary_stream = async_stream::stream! {
+        tokio::pin!(stream);
         loop {
             tokio::select! {
-                frame = mjpeg_stream.next() => {
-                    match frame {
-                        Some(item) => yield item,
+                item = stream.next() => {
+                    match item {
+                        Some(annotated) => {
+                            let annotated = annotated.map_data(normalize_video_stream_response);
+                            match annotated.into_result() {
+                                Ok(Some(response)) => {
+                                    match decode_video_stream_payloads(response) {
+                                        Ok(payloads) => {
+                                            for payload in payloads {
+                                                yield Ok::<Bytes, std::convert::Infallible>(
+                                                    encode_binary_video_frame(VIDEO_STREAM_BINARY_KIND_MP4, &payload)
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            inflight.mark_error(ErrorType::Internal);
+                                            stream_handle.disarm();
+                                            yield Ok::<Bytes, std::convert::Infallible>(
+                                                encode_binary_video_error_frame(e.to_string())
+                                            );
+                                            yield Ok::<Bytes, std::convert::Infallible>(
+                                                encode_binary_video_done_frame()
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    inflight.mark_error(ErrorType::Internal);
+                                    stream_handle.disarm();
+                                    yield Ok::<Bytes, std::convert::Infallible>(
+                                        encode_binary_video_error_frame(e.to_string())
+                                    );
+                                    yield Ok::<Bytes, std::convert::Infallible>(
+                                        encode_binary_video_done_frame()
+                                    );
+                                    break;
+                                }
+                            }
+                        }
                         None => {
-                            // Stream ended naturally: mark inflight OK and disarm the handle.
                             inflight.mark_ok();
                             stream_handle.disarm();
+                            yield Ok::<Bytes, std::convert::Infallible>(
+                                encode_binary_video_done_frame()
+                            );
                             break;
                         }
                     }
                 }
                 _ = ctx.stopped() => {
-                    tracing::trace!("Context stopped; breaking MJPEG stream");
+                    tracing::trace!("Context stopped; breaking binary video stream");
                     inflight.mark_error(ErrorType::Cancelled);
                     break;
                 }
@@ -2419,40 +2571,45 @@ async fn video_stream(
 
     axum::http::Response::builder()
         .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
         .header(
-            axum::http::header::CONTENT_TYPE,
-            "multipart/x-mixed-replace; boundary=frame",
+            "x-dynamo-video-binary-protocol",
+            VIDEO_STREAM_BINARY_PROTOCOL,
         )
-        .body(Body::from_stream(monitored_stream))
+        .body(Body::from_stream(binary_stream))
         .map(|r| r.into_response())
         .map_err(|e| {
-            // inflight is already owned by the monitored_stream which handles
-            // mark_ok (stream end) and mark_error (cancellation).
-            ErrorMessage::internal_server_error(&format!("Failed to build MJPEG response: {e}"))
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to build binary video response: {e}"
+            ))
         })
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Videos endpoint
 /// If no path is provided, the default path is `/v1/videos`
 ///
-/// Two routes are registered:
-/// - `POST /v1/videos`        — non-streaming, returns a single JSON response
-/// - `POST /v1/videos/stream` — MJPEG streaming via `multipart/x-mixed-replace`
+/// Three routes are registered:
+/// - `POST /v1/videos`               — non-streaming, returns a single JSON response
+/// - `POST /v1/videos/stream`        — canonical SSE streaming with `NvVideosResponse` payloads
+/// - `POST /v1/videos/stream/binary` — experimental framed binary MP4 streaming
 pub fn videos_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/videos".to_string());
     let stream_path = format!("{}/stream", path);
+    let binary_stream_path = format!("{}/binary", stream_path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let stream_doc = RouteDoc::new(axum::http::Method::POST, &stream_path);
+    let binary_stream_doc = RouteDoc::new(axum::http::Method::POST, &binary_stream_path);
     let router = Router::new()
         .route(&path, post(videos))
         .route(&stream_path, post(video_stream))
+        .route(&binary_stream_path, post(video_stream_binary))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc, stream_doc], router)
+    (vec![doc, stream_doc, binary_stream_doc], router)
 }
 
 async fn audio_speech(
@@ -3539,6 +3696,97 @@ mod tests {
         CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, FunctionType,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
+
+    use crate::protocols::openai::videos::VideoData;
+
+    #[test]
+    fn test_force_streaming_video_response_format_overrides_to_b64_json() {
+        let mut request = NvCreateVideoRequest {
+            prompt: "hello".to_string(),
+            model: "video-model".to_string(),
+            input_reference: None,
+            seconds: None,
+            size: None,
+            user: None,
+            response_format: Some("url".to_string()),
+            nvext: None,
+        };
+
+        force_streaming_video_response_format(&mut request);
+        assert_eq!(request.response_format.as_deref(), Some("b64_json"));
+    }
+
+    #[test]
+    fn test_normalize_video_stream_response_accepts_b64_payload() {
+        let response = NvVideosResponse {
+            id: "vid-1".to_string(),
+            object: "video".to_string(),
+            model: "video-model".to_string(),
+            status: "in_progress".to_string(),
+            progress: 25,
+            created: 0,
+            data: vec![VideoData {
+                url: None,
+                b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"clip")),
+            }],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let normalized = normalize_video_stream_response(response).unwrap();
+        assert_eq!(normalized.data.len(), 1);
+        assert!(normalized.data[0].b64_json.is_some());
+    }
+
+    #[test]
+    fn test_normalize_video_stream_response_rejects_missing_b64_payload() {
+        let response = NvVideosResponse {
+            id: "vid-1".to_string(),
+            object: "video".to_string(),
+            model: "video-model".to_string(),
+            status: "in_progress".to_string(),
+            progress: 25,
+            created: 0,
+            data: vec![VideoData {
+                url: Some("https://example.com/video.mp4".to_string()),
+                b64_json: None,
+            }],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let err = normalize_video_stream_response(response).unwrap_err();
+        assert!(err.contains("b64_json"));
+    }
+
+    #[test]
+    fn test_decode_video_stream_payloads_decodes_mp4_bytes() {
+        let response = NvVideosResponse {
+            id: "vid-1".to_string(),
+            object: "video".to_string(),
+            model: "video-model".to_string(),
+            status: "completed".to_string(),
+            progress: 100,
+            created: 0,
+            data: vec![VideoData {
+                url: None,
+                b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"mp4-bytes")),
+            }],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let payloads = decode_video_stream_payloads(response).unwrap();
+        assert_eq!(payloads, vec![b"mp4-bytes".to_vec()]);
+    }
+
+    #[test]
+    fn test_encode_binary_video_frame_layout() {
+        let frame = encode_binary_video_frame(VIDEO_STREAM_BINARY_KIND_MP4, b"abc");
+        assert_eq!(frame[0], VIDEO_STREAM_BINARY_KIND_MP4);
+        assert_eq!(&frame[1..5], &(3_u32.to_be_bytes()));
+        assert_eq!(&frame[5..], b"abc");
+    }
 
     /// Extract the JSON data payload from an SSE Event's Debug output.
     ///
