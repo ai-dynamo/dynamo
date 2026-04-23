@@ -200,9 +200,19 @@ EOF
     TRITON_IMAGE_VAL="$(arg_default TRITON_IMAGE)"
     TRITON_BASE_TAG_VAL="$(arg_default TRITON_BASE_TAG)"
 
+    # TRT_LLM_VER is derived from tensorrt_llm/version.py::__version__ just
+    # like docker/Makefile does (TRT_LLM_VERSION). The devel stage's
+    # generate_container_oss_attribution.sh treats it as a required TAG arg.
+    TRT_LLM_VER_VAL="$(grep '^__version__' tensorrt_llm/version.py | grep -o '=.*' | tr -d '= "')"
+    if [ -z "${TRT_LLM_VER_VAL}" ]; then
+        echo "Error: could not parse __version__ from tensorrt_llm/version.py" >&2
+        exit 1
+    fi
+
     echo "buildx wheel build: arch=${ARCH} devel_stage=${DEVEL_STAGE} platform=${TARGETPLATFORM}"
     echo "  BASE_IMAGE=${BASE_IMAGE_VAL}:${BASE_TAG_VAL}"
     echo "  TRITON_IMAGE=${TRITON_IMAGE_VAL}:${TRITON_BASE_TAG_VAL}"
+    echo "  TRT_LLM_VER=${TRT_LLM_VER_VAL}"
     echo "  BUILD_WHEEL_ARGS=${WHEEL_ARGS}"
 
     WHEEL_STAGE_DIR="${OUTPUT_DIR}/_wheel_stage"
@@ -219,6 +229,7 @@ EOF
         --build-arg "TRITON_IMAGE=${TRITON_IMAGE_VAL}" \
         --build-arg "TRITON_BASE_TAG=${TRITON_BASE_TAG_VAL}" \
         --build-arg "DEVEL_IMAGE=${DEVEL_STAGE}" \
+        --build-arg "TRT_LLM_VER=${TRT_LLM_VER_VAL}" \
         --build-arg "BUILD_WHEEL_ARGS=${WHEEL_ARGS}" \
         --output "type=local,dest=${WHEEL_STAGE_DIR}" \
         .
