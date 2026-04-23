@@ -94,6 +94,60 @@ pub struct NvVideosResponse {
     pub inference_time_s: Option<f64>,
 }
 
+/// Public kickoff response for the experimental HLS/CMAF video stream route.
+#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+pub struct NvVideoHlsStreamResponse {
+    /// Opaque stream identifier returned by the worker kickoff response.
+    pub stream_id: String,
+
+    /// Frontend playlist URL that the browser should hand to an HLS player.
+    pub playlist_url: String,
+
+    /// Model used for generation.
+    pub model: String,
+
+    /// Unix timestamp of creation.
+    pub created: i64,
+
+    /// HLS target duration advertised by the synthetic stream.
+    pub target_duration_seconds: u32,
+
+    /// Unix timestamp when the synthetic session expires.
+    pub expires_at: i64,
+}
+
+/// Internal frontend-to-worker request for the current live playlist.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvVideoHlsPlaylistRequest {
+    pub session_id: String,
+}
+
+/// Internal worker response containing a rendered playlist body.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvVideoHlsPlaylistResponse {
+    pub playlist: String,
+}
+
+/// Internal frontend-to-worker request for the CMAF init fragment.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvVideoHlsInitRequest {
+    pub session_id: String,
+}
+
+/// Internal frontend-to-worker request for a CMAF media fragment.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvVideoHlsSegmentRequest {
+    pub session_id: String,
+    pub segment_id: u32,
+}
+
+/// Internal worker response carrying raw binary HLS fragment bytes.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NvVideoHlsFragmentResponse {
+    #[serde(with = "serde_bytes")]
+    pub bytes: Vec<u8>,
+}
+
 fn default_object_type() -> String {
     "video".to_string()
 }

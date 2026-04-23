@@ -25,6 +25,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
@@ -58,6 +59,7 @@ pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
+    distributed_runtime: Option<DistributedRuntime>,
     flags: StateFlags,
     cancel_token: CancellationToken,
 }
@@ -124,12 +126,14 @@ impl State {
     pub fn new(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
+        distributed_runtime: Option<DistributedRuntime>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             discovery_client,
+            distributed_runtime,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -159,6 +163,10 @@ impl State {
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
+    }
+
+    pub fn runtime(&self) -> Option<DistributedRuntime> {
+        self.distributed_runtime.clone()
     }
 
     /// Check if the service is shutting down
@@ -251,6 +259,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     discovery: Option<Arc<dyn Discovery>>,
+
+    #[builder(default = "None")]
+    distributed_runtime: Option<DistributedRuntime>,
 
     #[builder(default = "None")]
     cancel_token: Option<CancellationToken>,
@@ -444,7 +455,12 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            config.distributed_runtime,
+            cancel_token,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);

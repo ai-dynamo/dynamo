@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dynamo HLS/CMAF POC Client</title>
+  <style>
+    :root {
+      --bg: #0f1720;
+      --panel: rgba(12, 22, 33, 0.88);
+      --panel-2: rgba(18, 31, 46, 0.92);
+      --text: #eef4f7;
+      --muted: #a9bcc8;
+      --border: rgba(255, 255, 255, 0.12);
+      --accent: #7ad2b4;
+      --accent-2: #7bbcff;
+      --danger: #ff8a7b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(122, 210, 180, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(123, 188, 255, 0.16), transparent 24%),
+        linear-gradient(180deg, #091119 0%, var(--bg) 100%);
+      padding: 24px;
+      display: grid;
+      place-items: center;
+    }
+
+    .app {
+      width: min(1120px, 100%);
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 22px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 20px 72px rgba(0, 0, 0, 0.32);
+    }
+
+    .controls {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.65rem;
+      line-height: 1.1;
+    }
+
+    p,
+    .hint {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    input,
+    textarea,
+    button {
+      font: inherit;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+    }
+
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      cursor: pointer;
+      transition: transform 160ms ease, opacity 160ms ease;
+      font-weight: 700;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #08100d;
+    }
+
+    .ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .player {
+      display: grid;
+      gap: 14px;
+    }
+
+    video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 18px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      font-size: 0.86rem;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    pre {
+      margin: 0;
+      min-height: 240px;
+      max-height: 440px;
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(4, 8, 13, 0.72);
+      padding: 16px;
+      color: #d9e6ee;
+      font-size: 0.83rem;
+      line-height: 1.46;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 920px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="panel controls">
+      <h1>Dynamo HLS/CMAF Stream POC</h1>
+      <p>Kick off a synthetic video generation request, then hand the returned live playlist to either native HLS playback or <code>hls.js</code>.</p>
+
+      <label>
+        Frontend Base URL
+        <input id="baseUrl" placeholder="http://localhost:8000" />
+      </label>
+
+      <label>
+        Model
+        <input id="model" value="synthetic-hls-cmaf-video-stream" />
+      </label>
+
+      <label>
+        Prompt
+        <textarea id="prompt">Replay the synthetic CMAF stream.</textarea>
+      </label>
+
+      <div class="actions">
+        <button class="primary" id="start">Start HLS Stream</button>
+        <button class="ghost" id="stop">Stop</button>
+      </div>
+
+      <p class="hint">This page expects the experimental <code>/v1/videos/stream/hls</code> route. If you serve this page from a different origin than Dynamo, use a same-origin reverse proxy for local testing.</p>
+    </section>
+
+    <section class="panel player">
+      <video id="player" controls autoplay muted playsinline></video>
+      <div class="stats">
+        <div class="pill">Mode: <span id="mode">idle</span></div>
+        <div class="pill">Stream ID: <span id="streamId">none</span></div>
+        <div class="pill">Playlist: <span id="playlistStatus">not started</span></div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <script>
+    const player = document.getElementById("player");
+    const modeEl = document.getElementById("mode");
+    const streamIdEl = document.getElementById("streamId");
+    const playlistStatusEl = document.getElementById("playlistStatus");
+    const logEl = document.getElementById("log");
+
+    const KICKOFF_TIMEOUT_MS = 15000;
+
+    let activeHls = null;
+    let kickoffAbortController = null;
+    let kickoffAbortReason = null;
+
+    function inferDefaultBaseUrl() {
+      const queryBaseUrl = new URLSearchParams(window.location.search).get("baseUrl");
+      if (queryBaseUrl) {
+        return queryBaseUrl;
+      }
+
+      if (window.location.protocol === "file:") {
+        return "http://localhost:8000";
+      }
+
+      const inferred = new URL(window.location.href);
+      inferred.pathname = "";
+      inferred.search = "";
+      inferred.hash = "";
+
+      if (!inferred.port || inferred.port === "8080") {
+        inferred.port = "8000";
+      }
+
+      return inferred.origin;
+    }
+
+    function initializeBaseUrl() {
+      const baseUrlInput = document.getElementById("baseUrl");
+      if (!baseUrlInput.value.trim()) {
+        baseUrlInput.value = inferDefaultBaseUrl();
+      }
+    }
+
+    function log(message, isError = false) {
+      const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logEl.textContent += `${line}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+      if (isError) {
+        logEl.classList.add("error");
+      }
+    }
+
+    function resetLogStyle() {
+      logEl.classList.remove("error");
+    }
+
+    function setMode(mode) {
+      modeEl.textContent = mode;
+    }
+
+    function stopPlayback() {
+      if (kickoffAbortController) {
+        kickoffAbortReason = "stopped";
+        kickoffAbortController.abort();
+        kickoffAbortController = null;
+        log("Cancelled pending kickoff request");
+      }
+      if (activeHls) {
+        activeHls.destroy();
+        activeHls = null;
+      }
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+      streamIdEl.textContent = "none";
+      setMode("idle");
+      playlistStatusEl.textContent = "stopped";
+    }
+
+    async function startStream() {
+      stopPlayback();
+      resetLogStyle();
+      logEl.textContent = "";
+
+      const baseUrl = document.getElementById("baseUrl").value.trim();
+      const pageOrigin = window.location.origin;
+      if (!baseUrl) {
+        log("Frontend Base URL is empty", true);
+        playlistStatusEl.textContent = "error";
+        streamIdEl.textContent = "none";
+        setMode("error");
+        return;
+      }
+
+      if (
+        window.location.protocol !== "file:" &&
+        !window.location.hostname.match(/^(localhost|127\.0\.0\.1)$/) &&
+        baseUrl.includes("localhost")
+      ) {
+        log(
+          `Frontend Base URL ${baseUrl} points at localhost, but this page is loaded from ${pageOrigin}. ` +
+          "In remote IDE or forwarded-port setups, browser localhost is usually not the same machine as the shell. Use the browser-reachable frontend URL instead.",
+          true
+        );
+      }
+
+      const kickoffUrl = new URL("/v1/videos/stream/hls", baseUrl).toString();
+      const requestBody = {
+        model: document.getElementById("model").value.trim(),
+        prompt: document.getElementById("prompt").value.trim(),
+        seconds: 6,
+        size: "832x480"
+      };
+
+      setMode("kickoff");
+      playlistStatusEl.textContent = "starting";
+      streamIdEl.textContent = "pending";
+      log(`POST ${kickoffUrl}`);
+      log(`Waiting for kickoff response (timeout ${KICKOFF_TIMEOUT_MS / 1000}s)`);
+
+      let kickoff;
+      const abortController = new AbortController();
+      kickoffAbortController = abortController;
+      kickoffAbortReason = null;
+      const timeoutId = window.setTimeout(() => {
+        kickoffAbortReason = "timeout";
+        abortController.abort();
+      }, KICKOFF_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(kickoffUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+          signal: abortController.signal
+        });
+        window.clearTimeout(timeoutId);
+        kickoffAbortController = null;
+        kickoffAbortReason = null;
+        log(`Kickoff HTTP status: ${response.status}`);
+        if (!response.ok) {
+          const errorBody = (await response.text()).trim();
+          if (response.status === 404) {
+            throw new Error(
+              errorBody ||
+              "Route not found. The frontend may be running an older build, or video endpoints may still be disabled because the synthetic model has not been discovered yet. Check /v1/models and the worker/frontend logs."
+            );
+          }
+          throw new Error(
+            errorBody
+              ? `Kickoff failed with ${response.status}: ${errorBody}`
+              : `Kickoff failed with ${response.status} and an empty response body`
+          );
+        }
+        kickoff = await response.json();
+      } catch (error) {
+        window.clearTimeout(timeoutId);
+        kickoffAbortController = null;
+
+        if (error && error.name === "AbortError" && kickoffAbortReason === "stopped") {
+          kickoffAbortReason = null;
+          return;
+        }
+
+        let message = error && error.message ? error.message : String(error);
+        if (error && error.name === "AbortError") {
+          message =
+            `Kickoff request timed out after ${KICKOFF_TIMEOUT_MS / 1000}s. ` +
+            "If curl to the same URL also hangs or 404s, check that the frontend was rebuilt and that /v1/models includes synthetic-hls-cmaf-video-stream. " +
+            "If curl works from the shell but the browser still times out, the page may be using the wrong frontend base URL for your browser environment.";
+        } else if (error instanceof TypeError) {
+          message =
+            `${message}. If client.html is being served from a different origin than Dynamo, ` +
+            "this is often a browser CORS/preflight issue. Try curl against the same URL or serve the page from the same origin.";
+        }
+
+        kickoffAbortReason = null;
+        log(`Kickoff error: ${message}`, true);
+        playlistStatusEl.textContent = "error";
+        streamIdEl.textContent = "none";
+        setMode("error");
+        return;
+      }
+
+      const playlistUrl = new URL(kickoff.playlist_url, baseUrl).toString();
+      streamIdEl.textContent = kickoff.stream_id;
+      playlistStatusEl.textContent = playlistUrl;
+      log(`Kickoff response: ${JSON.stringify(kickoff, null, 2)}`);
+      const nativeHlsSupport = player.canPlayType("application/vnd.apple.mpegurl");
+      const hlsJsSupport = Boolean(window.Hls && window.Hls.isSupported());
+      log(
+        `Playback capabilities: native=${nativeHlsSupport || "no"} hls.js=${hlsJsSupport ? "yes" : "no"}`
+      );
+
+      if (hlsJsSupport) {
+        log("Using hls.js playback");
+        setMode("hls.js");
+        activeHls = new window.Hls({
+          lowLatencyMode: false,
+          backBufferLength: 90
+        });
+
+        activeHls.on(window.Hls.Events.MANIFEST_LOADING, () => {
+          log("Loading live playlist");
+        });
+        activeHls.on(window.Hls.Events.MANIFEST_PARSED, (_, data) => {
+          log(`Manifest parsed, ${data.levels.length} level(s) available`);
+          player.play().catch((error) => {
+            log(`Playback start failed: ${error.message}`, true);
+          });
+        });
+        activeHls.on(window.Hls.Events.LEVEL_UPDATED, (_, data) => {
+          playlistStatusEl.textContent = `mediaSequence=${data.details.mediaSequence}`;
+          log(
+            `Playlist updated: live=${data.details.live} fragments=${data.details.fragments.length} seq=${data.details.mediaSequence}`
+          );
+        });
+        activeHls.on(window.Hls.Events.FRAG_LOADED, (_, data) => {
+          log(`Loaded fragment sn=${data.frag.sn} url=${data.frag.url}`);
+        });
+        activeHls.on(window.Hls.Events.ERROR, (_, data) => {
+          log(`hls.js error (${data.type}/${data.details}): ${data.reason || "unknown"}`, true);
+          if (data.fatal) {
+            setMode("fatal-error");
+            switch (data.type) {
+              case window.Hls.ErrorTypes.NETWORK_ERROR:
+                activeHls.startLoad();
+                break;
+              case window.Hls.ErrorTypes.MEDIA_ERROR:
+                activeHls.recoverMediaError();
+                break;
+              default:
+                stopPlayback();
+                break;
+            }
+          }
+        });
+
+        activeHls.attachMedia(player);
+        activeHls.loadSource(playlistUrl);
+        return;
+      }
+
+      if (!nativeHlsSupport) {
+        log("This browser does not support native HLS or hls.js MSE playback", true);
+        setMode("unsupported");
+        return;
+      }
+
+      log("Using native HLS playback");
+      setMode("native-hls");
+      player.addEventListener("error", () => {
+        const mediaError = player.error;
+        const detail = mediaError ? ` code=${mediaError.code}` : "";
+        log(`Native playback error${detail}: Failed to load HLS stream`, true);
+      }, { once: true });
+      player.src = playlistUrl;
+      player.play().catch((error) => {
+        log(`Native playback error: ${error.message}`, true);
+      });
+    }
+
+    document.getElementById("start").addEventListener("click", startStream);
+    document.getElementById("stop").addEventListener("click", stopPlayback);
+    initializeBaseUrl();
+  </script>
+</body>
+</html>

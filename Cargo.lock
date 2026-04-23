@@ -2456,6 +2456,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "rustls 0.23.37",
  "serde",
+ "serde_bytes",
  "serde_json",
  "serial_test",
  "sha2",

@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{OriginalUri, Path, State},
     http::Request,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -25,11 +25,13 @@ use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::{
-    pipeline::{AsyncEngineContextProvider, Context},
+    DistributedRuntime,
+    pipeline::{AsyncEngineContextProvider, Context, PushRouter, SingleIn},
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{Any, CorsLayer};
 
 use super::{
     RouteDoc,
@@ -55,7 +57,11 @@ use crate::protocols::openai::{
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
-    videos::{NvCreateVideoRequest, NvVideosResponse},
+    videos::{
+        NvCreateVideoRequest, NvVideoHlsFragmentResponse, NvVideoHlsInitRequest,
+        NvVideoHlsPlaylistRequest, NvVideoHlsPlaylistResponse, NvVideoHlsSegmentRequest,
+        NvVideoHlsStreamResponse, NvVideosResponse,
+    },
 };
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
@@ -2290,6 +2296,201 @@ const VIDEO_STREAM_BINARY_KIND_MP4: u8 = 0x01;
 const VIDEO_STREAM_BINARY_KIND_ERROR: u8 = 0x02;
 const VIDEO_STREAM_BINARY_KIND_DONE: u8 = 0x03;
 const VIDEO_STREAM_BINARY_PROTOCOL: &str = "dynamo-video-binary-v1";
+const VIDEO_STREAM_HLS_CMAF_ANNOTATION: &str = "experimental_hls_cmaf";
+const VIDEO_STREAM_HLS_PLAYLIST_CONTENT_TYPE: &str = "application/vnd.apple.mpegurl";
+const VIDEO_STREAM_HLS_FRAGMENT_CONTENT_TYPE: &str = "video/mp4";
+const VIDEO_STREAM_HLS_PLAYLIST_ENDPOINT: &str = "playlist";
+const VIDEO_STREAM_HLS_INIT_ENDPOINT: &str = "init_fragment";
+const VIDEO_STREAM_HLS_SEGMENT_ENDPOINT: &str = "segment";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct VideoHlsStreamLocator {
+    session_id: String,
+    worker_id: u64,
+    namespace: String,
+    component: String,
+    created: i64,
+    expires_at: i64,
+    target_duration_seconds: u32,
+}
+
+fn add_video_hls_cmaf_annotation(request: &mut NvCreateVideoRequest) {
+    let nvext = request.nvext.get_or_insert_with(Default::default);
+    let annotations = nvext.annotations.get_or_insert_with(Vec::new);
+    if !annotations
+        .iter()
+        .any(|annotation| annotation == VIDEO_STREAM_HLS_CMAF_ANNOTATION)
+    {
+        annotations.push(VIDEO_STREAM_HLS_CMAF_ANNOTATION.to_string());
+    }
+}
+
+#[cfg(test)]
+fn encode_video_hls_stream_id(locator: &VideoHlsStreamLocator) -> Result<String, String> {
+    let payload = serde_json::to_vec(locator)
+        .map_err(|e| format!("failed to serialize HLS stream locator: {e}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload))
+}
+
+fn decode_video_hls_stream_id(stream_id: &str) -> Result<VideoHlsStreamLocator, String> {
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(stream_id)
+        .map_err(|e| format!("invalid HLS stream id encoding: {e}"))?;
+    let locator: VideoHlsStreamLocator = serde_json::from_slice(&payload)
+        .map_err(|e| format!("invalid HLS stream id payload: {e}"))?;
+
+    if locator.session_id.trim().is_empty() {
+        return Err("HLS stream id is missing session_id".to_string());
+    }
+    if locator.worker_id == 0 {
+        return Err("HLS stream id is missing worker_id".to_string());
+    }
+    if locator.namespace.trim().is_empty() {
+        return Err("HLS stream id is missing namespace".to_string());
+    }
+    if locator.component.trim().is_empty() {
+        return Err("HLS stream id is missing component".to_string());
+    }
+    if locator.target_duration_seconds == 0 {
+        return Err("HLS stream id is missing target_duration_seconds".to_string());
+    }
+    if locator.expires_at < locator.created {
+        return Err("HLS stream id has expires_at earlier than created".to_string());
+    }
+
+    Ok(locator)
+}
+
+fn parse_video_hls_segment_id(segment_id: &str) -> Result<u32, HttpError> {
+    let raw_segment_id = segment_id.strip_suffix(".m4s").ok_or_else(|| HttpError {
+        code: StatusCode::BAD_REQUEST.as_u16(),
+        message: "segment path must end with .m4s".to_string(),
+    })?;
+
+    raw_segment_id.parse::<u32>().map_err(|_| HttpError {
+        code: StatusCode::BAD_REQUEST.as_u16(),
+        message: "segment_id must be an unsigned integer".to_string(),
+    })
+}
+
+fn hls_missing_resource_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("not found")
+        || lower.contains("expired")
+        || lower.contains("not available")
+        || lower.contains("unknown session")
+        || lower.contains("missing session")
+        || lower.contains("instance_id=")
+}
+
+fn map_hls_worker_error(err: anyhow::Error, fallback: &str) -> ErrorResponse {
+    let message = err.to_string();
+    if hls_missing_resource_message(&message) {
+        return ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::NOT_FOUND.as_u16(),
+            message,
+        });
+    }
+    ErrorMessage::from_anyhow(err, fallback)
+}
+
+fn video_hls_bad_request(message: impl Into<String>) -> ErrorResponse {
+    ErrorMessage::from_http_error(HttpError {
+        code: StatusCode::BAD_REQUEST.as_u16(),
+        message: message.into(),
+    })
+}
+
+fn build_video_hls_text_response(
+    body: String,
+    content_type: &'static str,
+) -> Result<Response, ErrorResponse> {
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!("Failed to build HLS text response: {e}"))
+        })
+}
+
+fn build_video_hls_binary_response(
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> Result<Response, ErrorResponse> {
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to build HLS binary response: {e}"
+            ))
+        })
+}
+
+fn hls_runtime(state: &service_v2::State) -> Result<DistributedRuntime, ErrorResponse> {
+    state.runtime().ok_or_else(|| {
+        ErrorMessage::not_implemented_error(
+            "HLS/CMAF pull routes require a distributed runtime-backed frontend",
+        )
+    })
+}
+
+async fn fetch_video_hls_worker_response<Req, Resp>(
+    state: &service_v2::State,
+    locator: &VideoHlsStreamLocator,
+    endpoint_name: &str,
+    request: Req,
+) -> Result<Resp, ErrorResponse>
+where
+    Req: serde::Serialize + Send + Sync + 'static,
+    Resp: for<'de> serde::Deserialize<'de> + Send + Sync + 'static,
+{
+    let runtime = hls_runtime(state)?;
+    let namespace = runtime.namespace(&locator.namespace).map_err(|e| {
+        ErrorMessage::internal_server_error(&format!(
+            "Failed to resolve HLS namespace {}: {e}",
+            locator.namespace
+        ))
+    })?;
+    let component = namespace.component(&locator.component).map_err(|e| {
+        ErrorMessage::internal_server_error(&format!(
+            "Failed to resolve HLS component {}/{}: {e}",
+            locator.namespace, locator.component
+        ))
+    })?;
+    let endpoint = component.endpoint(endpoint_name);
+    let client = endpoint
+        .client()
+        .await
+        .map_err(|e| map_hls_worker_error(e, "Failed to connect to HLS worker endpoint"))?;
+    client
+        .wait_for_instances()
+        .await
+        .map_err(|e| map_hls_worker_error(e, "No HLS worker instances are available"))?;
+
+    let router = PushRouter::<Req, Annotated<Resp>>::from_client(client, Default::default())
+        .await
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to create HLS worker router"))?;
+    let mut stream = router
+        .direct(SingleIn::new(request), locator.worker_id)
+        .await
+        .map_err(|e| map_hls_worker_error(e, "Failed to dispatch HLS worker request"))?;
+    let response = stream.next().await.ok_or_else(|| {
+        ErrorMessage::internal_server_error("HLS worker returned an empty response stream")
+    })?;
+
+    match response.into_result() {
+        Ok(Some(data)) => Ok(data),
+        Ok(None) => Err(ErrorMessage::internal_server_error(
+            "HLS worker returned no data",
+        )),
+        Err(err) => Err(map_hls_worker_error(err, "HLS worker request failed")),
+    }
+}
 
 fn force_streaming_video_response_format(request: &mut NvCreateVideoRequest) {
     request.response_format = Some("b64_json".to_string());
@@ -2315,8 +2516,7 @@ fn decode_video_stream_payloads(response: NvVideosResponse) -> Result<Vec<Vec<u8
         .into_iter()
         .map(|item| {
             let b64 = item.b64_json.ok_or_else(|| {
-                "video streaming requires replayable MP4 chunks in data[*].b64_json"
-                    .to_string()
+                "video streaming requires replayable MP4 chunks in data[*].b64_json".to_string()
             })?;
 
             base64::prelude::BASE64_STANDARD
@@ -2585,13 +2785,175 @@ async fn video_stream_binary(
         })
 }
 
+/// Experimental HLS/CMAF kickoff route for `/v1/videos/stream/hls`.
+///
+/// The worker returns a single `NvVideosResponse` whose `id` is an opaque stream
+/// token. The frontend decodes that token to find the owning worker and exposes
+/// pull-based playlist / fragment routes for the browser.
+async fn video_stream_hls(
+    State(state): State<Arc<service_v2::State>>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    add_video_hls_cmaf_annotation(&mut request);
+
+    let request_id = get_or_create_request_id(&headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
+    let model = request.model.clone();
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, false, &request_id);
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start HLS stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    let response = NvVideosResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fold HLS kickoff stream for {}: {:?}",
+                request_id,
+                e
+            );
+            let err_response =
+                ErrorMessage::internal_server_error("Failed to fold HLS kickoff stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    let stream_locator = decode_video_hls_stream_id(&response.id).map_err(|e| {
+        let err_response = video_hls_bad_request(format!("Invalid HLS kickoff response: {e}"));
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let playlist_url = format!(
+        "{}/{}/playlist.m3u8",
+        uri.path().trim_end_matches('/'),
+        response.id
+    );
+    let payload = NvVideoHlsStreamResponse {
+        stream_id: response.id,
+        playlist_url,
+        model: response.model,
+        created: stream_locator.created,
+        target_duration_seconds: stream_locator.target_duration_seconds,
+        expires_at: stream_locator.expires_at,
+    };
+
+    inflight.mark_ok();
+    Ok(Json(payload).into_response())
+}
+
+async fn video_stream_hls_playlist(
+    State(state): State<Arc<service_v2::State>>,
+    Path(stream_id): Path<String>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let locator = decode_video_hls_stream_id(&stream_id)
+        .map_err(|e| video_hls_bad_request(format!("Invalid HLS stream_id: {e}")))?;
+    let playlist =
+        fetch_video_hls_worker_response::<NvVideoHlsPlaylistRequest, NvVideoHlsPlaylistResponse>(
+            &state,
+            &locator,
+            VIDEO_STREAM_HLS_PLAYLIST_ENDPOINT,
+            NvVideoHlsPlaylistRequest {
+                session_id: locator.session_id.clone(),
+            },
+        )
+        .await?;
+
+    build_video_hls_text_response(playlist.playlist, VIDEO_STREAM_HLS_PLAYLIST_CONTENT_TYPE)
+}
+
+async fn video_stream_hls_init_fragment(
+    State(state): State<Arc<service_v2::State>>,
+    Path(stream_id): Path<String>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let locator = decode_video_hls_stream_id(&stream_id)
+        .map_err(|e| video_hls_bad_request(format!("Invalid HLS stream_id: {e}")))?;
+    let fragment =
+        fetch_video_hls_worker_response::<NvVideoHlsInitRequest, NvVideoHlsFragmentResponse>(
+            &state,
+            &locator,
+            VIDEO_STREAM_HLS_INIT_ENDPOINT,
+            NvVideoHlsInitRequest {
+                session_id: locator.session_id.clone(),
+            },
+        )
+        .await?;
+
+    build_video_hls_binary_response(fragment.bytes, VIDEO_STREAM_HLS_FRAGMENT_CONTENT_TYPE)
+}
+
+async fn video_stream_hls_segment(
+    State(state): State<Arc<service_v2::State>>,
+    Path((stream_id, segment_id)): Path<(String, String)>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let locator = decode_video_hls_stream_id(&stream_id)
+        .map_err(|e| video_hls_bad_request(format!("Invalid HLS stream_id: {e}")))?;
+    let segment_id =
+        parse_video_hls_segment_id(&segment_id).map_err(ErrorMessage::from_http_error)?;
+    let fragment =
+        fetch_video_hls_worker_response::<NvVideoHlsSegmentRequest, NvVideoHlsFragmentResponse>(
+            &state,
+            &locator,
+            VIDEO_STREAM_HLS_SEGMENT_ENDPOINT,
+            NvVideoHlsSegmentRequest {
+                session_id: locator.session_id.clone(),
+                segment_id,
+            },
+        )
+        .await?;
+
+    build_video_hls_binary_response(fragment.bytes, VIDEO_STREAM_HLS_FRAGMENT_CONTENT_TYPE)
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Videos endpoint
 /// If no path is provided, the default path is `/v1/videos`
 ///
-/// Three routes are registered:
+/// Experimental sibling routes are also registered for HLS/CMAF playback:
 /// - `POST /v1/videos`               — non-streaming, returns a single JSON response
 /// - `POST /v1/videos/stream`        — canonical SSE streaming with `NvVideosResponse` payloads
 /// - `POST /v1/videos/stream/binary` — experimental framed binary MP4 streaming
+/// - `POST /v1/videos/stream/hls`    — HLS/CMAF kickoff, returns a playlist URL + stream id
+/// - `GET  /v1/videos/stream/hls/{stream_id}/playlist.m3u8`
+/// - `GET  /v1/videos/stream/hls/{stream_id}/init.mp4`
+/// - `GET  /v1/videos/stream/hls/{stream_id}/segment/{segment_id}.m4s`
 pub fn videos_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
@@ -2599,17 +2961,54 @@ pub fn videos_router(
     let path = path.unwrap_or("/v1/videos".to_string());
     let stream_path = format!("{}/stream", path);
     let binary_stream_path = format!("{}/binary", stream_path);
+    let hls_path = format!("{}/hls", stream_path);
+    let hls_playlist_path = format!("{}/{{stream_id}}/playlist.m3u8", hls_path);
+    let hls_init_path = format!("{}/{{stream_id}}/init.mp4", hls_path);
+    let hls_segment_route_path = format!("{}/{{stream_id}}/segment/{{segment_id}}", hls_path);
+    let hls_segment_doc_path = format!("{}/{{stream_id}}/segment/{{segment_id}}.m4s", hls_path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let stream_doc = RouteDoc::new(axum::http::Method::POST, &stream_path);
     let binary_stream_doc = RouteDoc::new(axum::http::Method::POST, &binary_stream_path);
+    let hls_doc = RouteDoc::new(axum::http::Method::POST, &hls_path);
+    let hls_playlist_doc = RouteDoc::new(axum::http::Method::GET, &hls_playlist_path);
+    let hls_init_doc = RouteDoc::new(axum::http::Method::GET, &hls_init_path);
+    let hls_segment_doc = RouteDoc::new(axum::http::Method::GET, &hls_segment_doc_path);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers(Any)
+        .expose_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::HeaderName::from_static("x-dynamo-video-binary-protocol"),
+        ]);
     let router = Router::new()
         .route(&path, post(videos))
         .route(&stream_path, post(video_stream))
         .route(&binary_stream_path, post(video_stream_binary))
+        .route(&hls_path, post(video_stream_hls))
+        .route(&hls_playlist_path, get(video_stream_hls_playlist))
+        .route(&hls_init_path, get(video_stream_hls_init_fragment))
+        .route(&hls_segment_route_path, get(video_stream_hls_segment))
+        .layer(cors)
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc, stream_doc, binary_stream_doc], router)
+    (
+        vec![
+            doc,
+            stream_doc,
+            binary_stream_doc,
+            hls_doc,
+            hls_playlist_doc,
+            hls_init_doc,
+            hls_segment_doc,
+        ],
+        router,
+    )
 }
 
 async fn audio_speech(
@@ -3714,6 +4113,123 @@ mod tests {
 
         force_streaming_video_response_format(&mut request);
         assert_eq!(request.response_format.as_deref(), Some("b64_json"));
+    }
+
+    #[test]
+    fn test_add_video_hls_cmaf_annotation_sets_nvext_annotation_once() {
+        let mut request = NvCreateVideoRequest {
+            prompt: "hello".to_string(),
+            model: "video-model".to_string(),
+            input_reference: None,
+            seconds: None,
+            size: None,
+            user: None,
+            response_format: None,
+            nvext: None,
+        };
+
+        add_video_hls_cmaf_annotation(&mut request);
+        add_video_hls_cmaf_annotation(&mut request);
+
+        let annotations = request
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.annotations.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            annotations,
+            vec![VIDEO_STREAM_HLS_CMAF_ANNOTATION.to_string()]
+        );
+    }
+
+    #[test]
+    fn test_video_hls_stream_id_round_trip() {
+        let locator = VideoHlsStreamLocator {
+            session_id: "session-123".to_string(),
+            worker_id: 42,
+            namespace: "dynamo".to_string(),
+            component: "backend".to_string(),
+            created: 1_700_000_000,
+            expires_at: 1_700_000_600,
+            target_duration_seconds: 2,
+        };
+
+        let encoded = encode_video_hls_stream_id(&locator).unwrap();
+        let decoded = decode_video_hls_stream_id(&encoded).unwrap();
+        assert_eq!(decoded, locator);
+    }
+
+    #[test]
+    fn test_video_hls_stream_id_rejects_malformed_payload() {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "session_id": "",
+                "worker_id": 0,
+                "namespace": "",
+                "component": "",
+                "created": 10,
+                "expires_at": 1,
+                "target_duration_seconds": 0
+            })
+            .to_string(),
+        );
+
+        let err = decode_video_hls_stream_id(&encoded).unwrap_err();
+        assert!(err.contains("session_id"));
+    }
+
+    #[tokio::test]
+    async fn test_build_video_hls_playlist_response_sets_hls_mime_type() {
+        let response = build_video_hls_text_response(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.0,\nsegment/0.m4s\n".to_string(),
+            VIDEO_STREAM_HLS_PLAYLIST_CONTENT_TYPE,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            VIDEO_STREAM_HLS_PLAYLIST_CONTENT_TYPE
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("#EXT-X-MAP"));
+        assert!(body.contains(".m4s"));
+    }
+
+    #[tokio::test]
+    async fn test_build_video_hls_binary_response_sets_mp4_mime_type() {
+        let response = build_video_hls_binary_response(
+            b"fragment".to_vec(),
+            VIDEO_STREAM_HLS_FRAGMENT_CONTENT_TYPE,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            VIDEO_STREAM_HLS_FRAGMENT_CONTENT_TYPE
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"fragment");
+    }
+
+    #[test]
+    fn test_parse_video_hls_segment_id_requires_m4s_suffix() {
+        let err = parse_video_hls_segment_id("3").unwrap_err();
+        assert_eq!(err.code, StatusCode::BAD_REQUEST.as_u16());
+
+        let parsed = parse_video_hls_segment_id("3.m4s").unwrap();
+        assert_eq!(parsed, 3);
     }
 
     #[test]

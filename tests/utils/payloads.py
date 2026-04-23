@@ -1478,6 +1478,127 @@ class BinaryVideoStreamPayload(BasePayload):
 
 
 @dataclass
+class VideoHlsKickoffPayload(BasePayload):
+    """Kickoff payload for /v1/videos/stream/hls."""
+
+    body: Dict[str, Any] = field(default_factory=dict)
+    expected_response: List[Any] = field(default_factory=list)
+    expected_log: List[str] = field(default_factory=list)
+    endpoint: str = "/v1/videos/stream/hls"
+    timeout: int = 600
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+
+        stream_id = result.get("stream_id")
+        playlist_url = result.get("playlist_url")
+        assert stream_id, f"Missing HLS stream_id in response: {result}"
+        assert playlist_url, f"Missing HLS playlist_url in response: {result}"
+        assert playlist_url.endswith(
+            "/playlist.m3u8"
+        ), f"Unexpected HLS playlist_url: {playlist_url}"
+        assert (
+            result.get("target_duration_seconds", 0) > 0
+        ), f"Missing target_duration_seconds in response: {result}"
+        assert result.get("expires_at"), f"Missing expires_at in response: {result}"
+        return stream_id
+
+
+@dataclass
+class VideoHlsPlaylistPayload(BasePayload):
+    """Pull payload for /v1/videos/stream/hls/{stream_id}/playlist.m3u8."""
+
+    body: Dict[str, Any] = field(default_factory=dict)
+    expected_response: List[Any] = field(default_factory=list)
+    expected_log: List[str] = field(default_factory=list)
+    endpoint: str = "/v1/videos/stream/hls"
+    method: str = "GET"
+    timeout: int = 120
+    stream_id: str = ""
+
+    def url(self) -> str:
+        assert self.stream_id, "stream_id must be set for HLS playlist fetches"
+        ep = self.endpoint.lstrip("/")
+        return f"http://{self.host}:{self.port}/{ep}/{self.stream_id}/playlist.m3u8"
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "")
+        assert (
+            "application/vnd.apple.mpegurl" in content_type
+        ), f"Unexpected HLS playlist content type: {content_type}"
+
+        manifest = response.text
+        assert "#EXTM3U" in manifest, f"Invalid HLS playlist: {manifest!r}"
+        assert "#EXT-X-MAP" in manifest, f"Missing EXT-X-MAP: {manifest!r}"
+        assert ".m4s" in manifest, f"Missing CMAF segment URI: {manifest!r}"
+        return manifest
+
+
+@dataclass
+class VideoHlsInitFragmentPayload(BasePayload):
+    """Pull payload for /v1/videos/stream/hls/{stream_id}/init.mp4."""
+
+    body: Dict[str, Any] = field(default_factory=dict)
+    expected_response: List[Any] = field(default_factory=list)
+    expected_log: List[str] = field(default_factory=list)
+    endpoint: str = "/v1/videos/stream/hls"
+    method: str = "GET"
+    timeout: int = 120
+    stream_id: str = ""
+
+    def url(self) -> str:
+        assert self.stream_id, "stream_id must be set for HLS init fragment fetches"
+        ep = self.endpoint.lstrip("/")
+        return f"http://{self.host}:{self.port}/{ep}/{self.stream_id}/init.mp4"
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "")
+        assert (
+            "video/mp4" in content_type
+        ), f"Unexpected HLS init fragment content type: {content_type}"
+        payload = response.content
+        assert payload, "HLS init fragment is empty"
+        return f"{len(payload)}_init_bytes"
+
+
+@dataclass
+class VideoHlsSegmentPayload(BasePayload):
+    """Pull payload for /v1/videos/stream/hls/{stream_id}/segment/{segment_id}.m4s."""
+
+    body: Dict[str, Any] = field(default_factory=dict)
+    expected_response: List[Any] = field(default_factory=list)
+    expected_log: List[str] = field(default_factory=list)
+    endpoint: str = "/v1/videos/stream/hls"
+    method: str = "GET"
+    timeout: int = 120
+    stream_id: str = ""
+    segment_id: str = "0.m4s"
+
+    def url(self) -> str:
+        assert self.stream_id, "stream_id must be set for HLS segment fetches"
+        segment_id = self.segment_id
+        if not segment_id.endswith(".m4s"):
+            segment_id = f"{segment_id}.m4s"
+        ep = self.endpoint.lstrip("/")
+        return (
+            f"http://{self.host}:{self.port}/{ep}/{self.stream_id}/segment/{segment_id}"
+        )
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "")
+        assert (
+            "video/mp4" in content_type
+        ), f"Unexpected HLS segment content type: {content_type}"
+        payload = response.content
+        assert payload, "HLS media segment is empty"
+        return f"{len(payload)}_segment_bytes"
+
+
+@dataclass
 class I2VPayload(VideoGenerationPayload):
     """Payload for image-to-video via /v1/videos with input_reference."""
 

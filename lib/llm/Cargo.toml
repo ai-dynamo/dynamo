@@ -80,6 +80,7 @@ oneshot = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 strum = { workspace = true }
