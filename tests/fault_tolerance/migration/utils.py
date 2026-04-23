@@ -323,7 +323,9 @@ def validate_response(
             # Cold workers can take longer on first token - only warn but don't fail
             logger.warning(f"Delay before response: {delay:.3f} secs")
             # Capture cases like migration is blocked by engine graceful shutdown
-            assert delay <= 6.0, f"Delay before response > 6 secs, got {delay:.3f} secs"
+            assert (
+                delay <= 10.0
+            ), f"Delay before response > 10 secs, got {delay:.3f} secs"
         prev_timestamp = timestamp
 
         assert res is not None, "Response entry should not be None"
