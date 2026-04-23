@@ -117,13 +117,21 @@ class OmniStageWorker:
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
             else:
-                try:
-                    prompt = self._build_engine_core_request_from_upstream(
-                        stage_list, request_id, sampling_params_list_override
-                    )
-                except RuntimeError as e:
-                    yield {"error": str(e), "finished": True}
-                    return
+                # No processor: check if the upstream output has the
+                # structure needed to build an OmniEngineCoreRequest
+                # (e.g. code2wav receiving token_ids from talker).
+                # Otherwise fall back to passing the raw data directly.
+                upstream = stage_list[-1].engine_outputs[0]
+                if hasattr(upstream, "outputs") and upstream.outputs:
+                    try:
+                        prompt = self._build_engine_core_request_from_upstream(
+                            stage_list, request_id, sampling_params_list_override
+                        )
+                    except RuntimeError as e:
+                        yield {"error": str(e), "finished": True}
+                        return
+                else:
+                    prompt = upstream
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
             parsed = await parse_omni_request(
