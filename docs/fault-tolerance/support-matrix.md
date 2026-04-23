@@ -12,19 +12,18 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 **Legend:**
 
 - ✅ Supported
-- 🚧 Work in Progress / Experimental / Limited
-- (blank) Not yet started
+- 🚧 In Progress
+- ⬜ Not Started
 
 ## Support Matrix
 
 | Backend | [GPU Memory Service](#gpu-memory-service-gms) | [Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover) | [Dynamo Snapshot](#dynamo-snapshot-chrek) |
 | :--- | :---: | :---: | :---: |
 | **vLLM** | ✅ | ✅ | 🚧 |
-| **SGLang** | ✅ | 🚧 [^bulwark-sglang-trtllm] | 🚧 |
-| **TensorRT-LLM** | 🚧 [^gms-trtllm] | 🚧 [^bulwark-sglang-trtllm] | 🚧 |
+| **SGLang** | ✅ | 🚧 | 🚧 |
+| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
 
-[^gms-trtllm]: TensorRT-LLM supports GMS on single-node today; multi-node support and KV cache management through GMS are pending. See the [GMS detailed matrix](#per-backend-gms-status) below.
-[^bulwark-sglang-trtllm]: Shadow-engine failover for SGLang and TensorRT-LLM is in progress; parity with vLLM is the next milestone.
+See the per-feature sections below for detailed per-backend status.
 
 ## Features
 
@@ -50,29 +49,22 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
-- Warm, pre-initialized "shadow" engines share weights (and, in the near term, KV cache) with the primary, and take over within seconds when the primary dies, using a kernel-mediated flock for leader election.
-- Depends on [GMS](#gpu-memory-service-gms); Bulwark support for a backend is upper-bounded by that backend's GMS row above.
-- Configured via the `gpuMemoryService` and `failover` fields on the `DynamoGraphDeployment` CR.
-
-Supported topologies:
-
-- **Intra-pod**: active + standby engine containers within a single pod, sharing GPUs and the GMS sidecar.
-- **Inter-pod**: rank-dedicated GMS weight servers with N shadow engine pods per rank, for large-scale redundancy and as the basis for hardware-fault recovery.
+- Shadow engines share weights (and soon KV) with a primary via [GMS](#gpu-memory-service-gms) and take over within seconds on primary failure using a kernel-mediated flock for leader election. [Architecture](bulwark.md)
+- In Kubernetes, configured through the `failover` field on the `DynamoGraphDeployment` CR (on top of `gpuMemoryService`). [Operator usage](../kubernetes/bulwark.md)
 
 #### Status
 
-| Backend | Intra-pod failover | Multi-node | Upstream integration¹ |
-| :--- | :---: | :---: | :--- |
-| **vLLM** | ✅ | 🚧² | ✅ upstream |
-| **SGLang** | 🚧 | 🚧 | 🚧 patches needed³ |
-| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 patches needed⁴ |
+| Backend | Single Node | Multi-node | Upstream Integration¹ | KV-Cache Reuse² | Hardware Fault Tolerance³ |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **vLLM** | ✅ | ✅ | ✅ | ⬜ | ⬜ |
+| **SGLang** | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 | 🚧 | 🚧 |
 
 **Notes:**
 
-1. **Upstream integration**: whether the backend's integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream. Shared definition with the GMS table.
-2. Inter-pod Bulwark for vLLM is in progress, reusing the same Grove/DRA plumbing as intra-pod.
-3. SGLang Bulwark integration inherits the monkey-patching requirements flagged for SGLang GMS.
-4. TensorRT-LLM Bulwark flow requires out-of-tree patches, targeted for upstream once shadow-engine parity with vLLM is validated end-to-end.
+1. **Upstream Integration**: whether the backend's integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream. Shared definition with the GMS table.
+2. **KV-Cache Reuse**: whether KV cache is remapped across engines on failover (preserving in-flight requests) rather than each shadow starting from a fresh allocation.
+3. **Hardware Fault Tolerance**: whether shadow engines are placed on disjoint hardware from the primary, so GPU/node failures are recoverable rather than taking out primary and shadow together.
 
 ### Dynamo Snapshot (ChReK)
 
