@@ -260,9 +260,10 @@ def test_sglang_kv_router_basic(
     )
 
 
-@pytest.mark.skip(
-    reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2784"
-)  # Worker #2 dies during startup; KvRouter blocks forever waiting for min_initial_workers=2.
+# DEBUG: skip commented out for PR #8468 to observe PR/post-merge vs nightly behaviour.
+# @pytest.mark.skip(
+#     reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2784"
+# )  # Worker #2 dies during startup; KvRouter blocks forever waiting for min_initial_workers=2.
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -292,9 +293,10 @@ def test_router_decisions_sglang_multiple_workers(
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
-@pytest.mark.skip(
-    reason="DYN-2265"
-)  # Currently fails probably due to SGLang startup issues when multiple workers on same GPU; re-enable when fixed
+# DEBUG: skip commented out for PR #8468 to observe PR/post-merge vs nightly behaviour.
+# @pytest.mark.skip(
+#     reason="DYN-2265"
+# )  # Currently fails probably due to SGLang startup issues when multiple workers on same GPU; re-enable when fixed
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
@@ -325,7 +327,8 @@ def test_router_decisions_sglang_dp(
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
+# DEBUG: skip commented out for PR #8468 to observe PR/post-merge vs nightly behaviour.
+# @pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
@@ -360,6 +363,10 @@ def test_router_decisions_sglang_disagg(
     )
 
 
+# DEBUG: skip commented out for PR #8468 to observe PR/post-merge vs nightly behaviour.
+# @pytest.mark.skip(
+#     reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2784"
+# )  # Same num_workers=2 / worker #2 startup / KvRouter min_initial_workers hang as test_router_decisions_sglang_multiple_workers.
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(
