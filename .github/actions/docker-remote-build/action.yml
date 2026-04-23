@@ -51,6 +51,15 @@ inputs:
     description: 'Additional Docker build args (newline-separated list of KEY=VALUE pairs)'
     required: false
     default: ''
+  trtllm_wheel_context_path:
+    description: >-
+      Absolute path on the runner to a directory containing a prebuilt
+      TensorRT-LLM wheel. When non-empty, this is passed to buildx as
+      `--build-context trtllm_wheel=<path>` so the trtllm framework Dockerfile
+      can COPY --from=trtllm_wheel without attempting to resolve the name as
+      a remote image.
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -169,12 +178,25 @@ runs:
           fi
         fi
 
+        # If the caller prebuilt a TensorRT-LLM wheel, hand it to buildx as a
+        # named build context so the Dockerfile's `COPY --from=trtllm_wheel`
+        # resolves to that directory instead of being treated as an image.
+        BUILD_CONTEXT_ARGS=""
+        TRTLLM_WHEEL_CONTEXT_PATH="${{ inputs.trtllm_wheel_context_path }}"
+        if [ -n "${TRTLLM_WHEEL_CONTEXT_PATH}" ]; then
+          if [ ! -d "${TRTLLM_WHEEL_CONTEXT_PATH}" ]; then
+            echo "::error::trtllm_wheel_context_path '${TRTLLM_WHEEL_CONTEXT_PATH}' is not a directory"
+            exit 1
+          fi
+          BUILD_CONTEXT_ARGS="--build-context trtllm_wheel=${TRTLLM_WHEEL_CONTEXT_PATH}"
+        fi
+
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $CACHE_ARGS $EXTRA_ARGS $BUILD_CONTEXT_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 

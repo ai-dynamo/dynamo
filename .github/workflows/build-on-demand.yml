@@ -88,10 +88,19 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: 'linux/amd64,linux/arm64'
+      # The Kimi K2.5 + Eagle3 proof pins a TensorRT-LLM fork commit that
+      # lives only on a feature branch of the fork, so this pipeline must
+      # build the TRTLLM wheel from source via container/build_trtllm_wheel.sh.
+      # That wheel build uses host docker and can only produce its native
+      # architecture per runner, so we limit this pipeline to linux/amd64.
+      # arm64 requires a separate pipeline running on an arm64 builder.
+      platform: 'linux/amd64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
+      # TRTLLM wheel-from-source builds on an AMD64 builder take ~45-75 min
+      # in addition to the ~30-40 min Dynamo image build, so we need a
+      # comfortably large timeout here.
+      build_timeout_minutes: 180
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true

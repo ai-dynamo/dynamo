@@ -219,6 +219,67 @@ runs:
             ${MAKE_EFA_FLAG} \
             --show-result \
             --output-short-filename
+    # The TRTLLM framework Dockerfile has a `COPY --from=trtllm_wheel /` that,
+    # when container/context.yaml::trtllm.has_trtllm_context is "1", expects
+    # the caller to provide a buildx named build context populated with a
+    # prebuilt TensorRT-LLM wheel. Build that wheel here using the pinned
+    # commit/URL from context.yaml, and then hand the output directory to
+    # docker-remote-build as trtllm_wheel_context_path.
+    - name: Prebuild TensorRT-LLM wheel (if required by context)
+      id: prebuild-trtllm-wheel
+      if: ${{ inputs.framework == 'trtllm' }}
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        HAS_CONTEXT=$(python3 -c 'import yaml,sys; d=yaml.safe_load(open("container/context.yaml")); print(d.get("trtllm", {}).get("has_trtllm_context", "0"))')
+        if [ "${HAS_CONTEXT}" != "1" ]; then
+          echo "has_trtllm_context=${HAS_CONTEXT}; skipping TRTLLM wheel prebuild"
+          echo "wheel_dir=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        TRTLLM_COMMIT=$(python3 -c 'import yaml; d=yaml.safe_load(open("container/context.yaml")); print(d["trtllm"]["github_trtllm_commit"])')
+        if [ -z "${TRTLLM_COMMIT}" ]; then
+          echo "::error::github_trtllm_commit missing from container/context.yaml under trtllm"
+          exit 1
+        fi
+
+        # Allow context.yaml to pin the fork URL explicitly, otherwise fall
+        # back to the script's default (galletas1712/TensorRT-LLM).
+        TRTLLM_GIT_URL=$(python3 -c 'import yaml; d=yaml.safe_load(open("container/context.yaml")); print(d["trtllm"].get("github_trtllm_git_url", ""))')
+
+        # Only a single-platform wheel can be produced per native builder run.
+        # The CI matrix dispatches amd64 and arm64 to separate native runners,
+        # so this step is expected to execute once per arch.
+        case "${PLATFORM}" in
+          linux/amd64|amd64) ARCH=amd64 ;;
+          linux/arm64|arm64) ARCH=arm64 ;;
+          *)
+            echo "::error::Cannot prebuild TRTLLM wheel for multi-arch platform '${PLATFORM}'. Dispatch the trtllm pipeline per-arch."
+            exit 1
+            ;;
+        esac
+
+        OUTPUT_DIR="${GITHUB_WORKSPACE}/trtllm_wheel"
+        rm -rf "${OUTPUT_DIR}"
+        mkdir -p "${OUTPUT_DIR}"
+
+        echo "Building TRTLLM wheel: commit=${TRTLLM_COMMIT} arch=${ARCH} url=${TRTLLM_GIT_URL:-<default>}"
+        URL_FLAG=""
+        if [ -n "${TRTLLM_GIT_URL}" ]; then
+          URL_FLAG="-u ${TRTLLM_GIT_URL}"
+        fi
+        bash container/build_trtllm_wheel.sh -c "${TRTLLM_COMMIT}" -a "${ARCH}" -o "${OUTPUT_DIR}" ${URL_FLAG}
+
+        echo "TRTLLM wheel output:"
+        ls -al "${OUTPUT_DIR}"
+        if ! find "${OUTPUT_DIR}" -maxdepth 2 -name '*.whl' | grep -q .; then
+          echo "::error::No .whl produced under ${OUTPUT_DIR}"
+          exit 1
+        fi
+        echo "wheel_dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
     - name: Build and Push Image
       id: build-image
       uses: ./.github/actions/docker-remote-build
@@ -235,6 +296,7 @@ runs:
         extra_tags: ${{ steps.extra-tags.outputs.tags }}
         push_image: ${{ inputs.push_image }}
         no_load: ${{ inputs.no_load }}
+        trtllm_wheel_context_path: ${{ steps.prebuild-trtllm-wheel.outputs.wheel_dir }}
         extra_build_args: |
           DYNAMO_COMMIT_SHA=${{ github.sha }}
           ${{ inputs.extra_build_args }}

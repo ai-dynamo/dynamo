@@ -53,17 +53,28 @@ MAIN_DIR=$(dirname "$(readlink -f "$0")")
 
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
+# Use a bare fetch-and-checkout flow so that ${TRTLLM_COMMIT} does not need
+# to be reachable from ${TRTLLM_GIT_URL}'s default branch. The Kimi K2.5 +
+# Eagle3 proof pins a SHA that lives only on a feature branch of the fork
+# (see container/context.yaml::trtllm.github_trtllm_commit), so the previous
+# 'checkout main; pull; checkout <sha>' flow would fail on any SHA that is
+# not yet merged to main on the selected remote.
 if [ ! -d "TensorRT-LLM" ]; then
-  git clone "${TRTLLM_GIT_URL}"
+  git init TensorRT-LLM
+  (cd TensorRT-LLM && git remote add origin "${TRTLLM_GIT_URL}")
 fi
 
 cd TensorRT-LLM
 
-# Checkout the specified commit.
-# Switch to the main branch to pull the latest changes.
-git checkout main
-git pull
-git checkout $TRTLLM_COMMIT
+# Make sure the remote URL matches the requested URL in case the directory was
+# reused from a previous build that targeted a different fork.
+git remote set-url origin "${TRTLLM_GIT_URL}"
+
+# Fetch the exact commit directly. This works for any reachable SHA on the
+# remote (branches, tags, or PR heads) without having to enumerate refs or
+# pull the entire history of main first.
+git fetch --no-tags --prune --depth=1 origin "${TRTLLM_COMMIT}"
+git checkout --detach FETCH_HEAD
 
 # Update the submodules.
 git submodule update --init --recursive
@@ -93,14 +104,25 @@ sed -i "s/__version__ = \"\(.*\)\"/__version__ = \"\1+dev${COMMIT_VERSION}\"/" "
 echo "Updated version:"
 grep "__version__" "$VERSION_FILE"
 
+# Maximize parallelism for the wheel build. TRTLLM's wheel build_wheel.py
+# reads JOBS from the environment, and cmake/make rules accept MAKEFLAGS.
+# The CI builders have plenty of CPU, so push -j high when the caller has
+# not already set one.
+if [ -z "${JOBS:-}" ]; then
+    export JOBS="$(nproc 2>/dev/null || echo 16)"
+fi
+if [ -z "${MAKEFLAGS:-}" ]; then
+    export MAKEFLAGS="-j${JOBS}"
+fi
+
 if [ "$ARCH" = "amd64" ]; then
     # Need to build in the Triton Devel Image for NIXL support.
     make -C docker tritondevel_build
-    make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS='--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl'
+    make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS="--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl --job_count ${JOBS}"
 else
     # NIXL backend is not supported on arm64 for TensorRT-LLM.
     # See here: https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
-    make -C docker wheel_build
+    make -C docker wheel_build BUILD_WHEEL_OPTS="--job_count ${JOBS}"
 fi
 
 # Copy the wheel to the host
