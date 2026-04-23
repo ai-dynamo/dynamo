@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
-import binascii
-import io
 import logging
 import os
 import tempfile
@@ -16,10 +13,11 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -125,8 +123,10 @@ def _compute_mm_uuids(
     """
     Compute multi_modal_uuids from multi_modal_data.
 
-    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
-    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    Each image gets a blake3 hex digest as its UUID (computed by
+    compute_mm_uuids_from_images over a fixed-length header + pixel
+    preimage), ensuring consistent hashing across the MM Router, vLLM
+    handler, and Rust KV publisher.
     """
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
@@ -191,7 +191,8 @@ def build_sampling_params(
     sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
-    guided_decoding = request["sampling_options"].get("guided_decoding")
+    sampling_options = request.get("sampling_options", {})
+    guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         sampling_params.structured_outputs = StructuredOutputsParams(
             json=guided_decoding.get("json"),
@@ -202,7 +203,7 @@ def build_sampling_params(
         )
 
     # Apply remaining sampling_options
-    for key, value in request["sampling_options"].items():
+    for key, value in sampling_options.items():
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
             continue
@@ -210,7 +211,7 @@ def build_sampling_params(
             setattr(sampling_params, key, value)
 
     # Apply stop_conditions
-    for key, value in request["stop_conditions"].items():
+    for key, value in request.get("stop_conditions", {}).items():
         if value is not None and hasattr(sampling_params, key):
             # Do not add stop key to sampling params - dynamo handles stop conditions directly
             if key == "stop":
@@ -370,6 +371,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -387,6 +389,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
+        self.model_config = model_config
         self.enable_multimodal = enable_multimodal
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
@@ -411,6 +414,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
+        # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
+        # bootstrap creates a fresh TCPStore per scale operation and stores it
+        # in engine_client._coord_store.  When two callers race through
+        # _setup_elastic_ep_reconfig_bootstrap concurrently the first caller's
+        # store gets garbage-collected before the new Ray actor has had a chance
+        # to connect, causing a 300 s TCPStore timeout on the worker node.
+        # One handler is created per worker process (worker_factory.py), so all
+        # concurrent HTTP callers share this lock and only one scale operation
+        # can mutate _coord_store at a time.
+        self._scale_ep_lock = asyncio.Lock()
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -543,52 +556,78 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
             }
+        if new_dp_size < 2:
+            return {
+                "status": "error",
+                "message": (
+                    "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled"
+                ),
+            }
 
         logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
-        try:
-            # TODO(upstream-vllm): remove this patch once vLLM fixes
-            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
-            # instead of ray.util.state.list_nodes().
-            #
-            # Patch ray.util.state.list_nodes to use the GCS API instead of the
-            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
-            # installs ray core only (not ray[default]), so the dashboard HTTP server
-            # starts in --minimal mode with the HTTP server disabled. vLLM's
-            # add_dp_placement_groups calls list_nodes() which requires that HTTP
-            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
-            # API server".
-            #
-            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
-            # needed) and returns the same information. Imported lazily so ray is not
-            # required at module load time (absent in non-elastic-EP deployments).
-            #
-            # Format mapping:
-            #   list_nodes() → objects with .node_ip and .node_id
-            #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
-            import ray
-            import ray.util.state as _ray_util_state
 
-            class _NodeInfo:
-                __slots__ = ("node_id", "node_ip")
+        # Early-reject if another scale is already in progress rather than
+        # queuing behind it: a queued caller would garbage-collect the first
+        # caller's TCPStore before its Ray actor connects, causing a 300 s
+        # timeout on the worker node.
+        # The locked() check followed immediately by async with is safe:
+        # asyncio.Lock.acquire() only suspends (yields to the event loop) when
+        # the lock is already held. When locked() returns False the lock is
+        # free, so acquire() completes synchronously — no other coroutine can
+        # run between the check and the acquisition.
+        if self._scale_ep_lock.locked():
+            msg = (
+                f"A scale_elastic_ep operation is already in progress; "
+                f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+            )
+            logger.warning(f"[ElasticEP] {msg}")
+            return {"status": "error", "message": msg}
 
-                def __init__(self, d: dict) -> None:
-                    self.node_ip: str = d["NodeManagerAddress"]
-                    self.node_id: str = d["NodeID"]
+        async with self._scale_ep_lock:
+            try:
+                # TODO(upstream-vllm): remove this patch once vLLM fixes
+                # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+                # instead of ray.util.state.list_nodes().
+                #
+                # Patch ray.util.state.list_nodes to use the GCS API instead of the
+                # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+                # installs ray core only (not ray[default]), so the dashboard HTTP server
+                # starts in --minimal mode with the HTTP server disabled. vLLM's
+                # add_dp_placement_groups calls list_nodes() which requires that HTTP
+                # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+                # API server".
+                #
+                # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+                # needed) and returns the same information. Imported lazily so ray is not
+                # required at module load time (absent in non-elastic-EP deployments).
+                #
+                # Format mapping:
+                #   list_nodes() → objects with .node_ip and .node_id
+                #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+                import ray
+                import ray.util.state as _ray_util_state
 
-            _ray_util_state.list_nodes = lambda **kw: [
-                _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-            ]
+                class _NodeInfo:
+                    __slots__ = ("node_id", "node_ip")
 
-            await self.engine_client.scale_elastic_ep(new_dp_size)
-            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
-            return {
-                "status": "ok",
-                "message": f"Scaled to data_parallel_size={new_dp_size}",
-                "new_data_parallel_size": new_dp_size,
-            }
-        except Exception as e:
-            logger.error(f"[ElasticEP] Scaling failed: {e}")
-            return {"status": "error", "message": str(e)}
+                    def __init__(self, d: dict) -> None:
+                        self.node_ip: str = d["NodeManagerAddress"]
+                        self.node_id: str = d["NodeID"]
+
+                _ray_util_state.list_nodes = lambda **kw: [
+                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                ]
+
+                await self.engine_client.scale_elastic_ep(new_dp_size)
+                logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+                return {
+                    "status": "ok",
+                    "message": f"Scaled to data_parallel_size={new_dp_size}",
+                    "new_data_parallel_size": new_dp_size,
+                }
+            except Exception as e:
+                logger.error(f"[ElasticEP] Scaling failed: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
@@ -623,6 +662,34 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters. Supported keys:
+                - profile_prefix (str|None): Optional prefix for profile output files.
+        """
+        profile_prefix = body.get("profile_prefix")
+        try:
+            await self.engine_client.start_profile(profile_prefix=profile_prefix)
+            return {"status": "ok", "message": "Profiling started"}
+        except Exception as e:
+            logger.error(f"Failed to start profiling: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        try:
+            await self.engine_client.stop_profile()
+            return {"status": "ok", "message": "Profiling stopped"}
+        except Exception as e:
+            logger.error(f"Failed to stop profiling: {e}")
+            return {"status": "error", "message": str(e)}
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -1104,41 +1171,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         Decode base64-encoded prompt embeddings in PyTorch format.
 
+        Use vllm's safe loader to prevent out-of-bounds writes from maliciously crafted tensors.
+
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor
 
         Returns:
-            torch.Tensor: Decoded prompt embeddings with preserved shape and dtype
+            torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
             ValueError: If decoding fails or format is invalid
         """
-        try:
-            # Step 1: Decode base64 to bytes
-            embeds_bytes = base64.b64decode(prompt_embeds_base64)
-
-            # Step 2: Load PyTorch tensor from bytes
-            buffer = io.BytesIO(embeds_bytes)
-            embeddings_tensor = torch.load(buffer, weights_only=True)
-
-            # Step 3: Validate it's a tensor
-            if not isinstance(embeddings_tensor, torch.Tensor):
-                raise ValueError(
-                    f"prompt_embeds must be a torch.Tensor, got {type(embeddings_tensor)}"
-                )
-
-            logger.debug(
-                f"Decoded PyTorch format embeddings: shape={embeddings_tensor.shape}, "
-                f"dtype={embeddings_tensor.dtype}, size={len(embeds_bytes)} bytes"
+        if not isinstance(prompt_embeds_base64, str):
+            raise ValueError(
+                f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
             )
 
-            return embeddings_tensor
+        if self.model_config is None:
+            raise ValueError("ModelConfig is unavailable for prompt_embeds validation.")
 
-        except binascii.Error as e:
-            logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
-            raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
+        try:
+            return safe_load_prompt_embeds(
+                self.model_config, prompt_embeds_base64.encode()
+            )
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
             raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
@@ -1162,24 +1219,41 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             ValueError: If decoding fails or tensor is invalid
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
+        if embeddings_tensor.dim() != 2:
+            raise ValueError(
+                f"prompt embeds should have dim 2 after vllm processing, but found dim {embeddings_tensor.dim()}"
+            )
 
         # Extract sequence length from tensor shape for usage reporting
-        # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
-        if embeddings_tensor.dim() == 2:
-            sequence_length = embeddings_tensor.shape[0]
-        elif embeddings_tensor.dim() == 3:
-            sequence_length = embeddings_tensor.shape[1]
-        else:
-            # Fallback for unexpected shapes
-            sequence_length = embeddings_tensor.shape[0]
+        sequence_length = embeddings_tensor.shape[0]
 
         # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
         prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
 
         return prompt, sequence_length, embeddings_tensor
 
+    @staticmethod
+    def _get_mm_processor_kwargs(
+        request: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        """Extract mm_processor_kwargs from a request dict.
+
+        Checks the top-level key (client router / Rust preprocessor path)
+        and falls back to ``extra_args`` (KV router path).
+        """
+        mm_processor_kwargs = request.get("mm_processor_kwargs")
+        if mm_processor_kwargs is None:
+            req_extra_args = request.get("extra_args")
+            if isinstance(req_extra_args, dict):
+                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+        return mm_processor_kwargs
+
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any], request_id: str, context
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        context,
+        mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -1253,6 +1327,54 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Extracted {len(audios)} audio item(s) for multimodal processing"
                 )
 
+        # Extract audio from video URLs when use_audio_in_video is set.
+        # Models expect 1:1 audio/video pairing in the same order.
+        # We load per-video sequentially to preserve ordering; a video
+        # without an audio track raises immediately to avoid corrupting
+        # the alignment.
+        if (
+            video_mm_items
+            and mm_processor_kwargs
+            and mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
+            video_audios: list = []
+            for item in video_mm_items:
+                url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
+                if not url:
+                    raise ValueError(
+                        "use_audio_in_video requires all video items to be "
+                        "URL-based. Got a non-URL video item (e.g. frontend-"
+                        "decoded). Audio extraction from decoded video data "
+                        "is not yet supported."
+                    )
+                try:
+                    audio = await self.audio_loader.load_audio(url)
+                    video_audios.append(audio)
+                except Exception:
+                    logger.error(
+                        "Failed to extract audio from video %s. "
+                        "use_audio_in_video requires every video to "
+                        "contain an audio stream.",
+                        url[:80],
+                    )
+                    raise
+            if video_audios:
+                existing = vllm_mm_data.get("audio")
+                if existing is not None:
+                    all_audios = (
+                        existing if isinstance(existing, list) else [existing]
+                    ) + video_audios
+                else:
+                    all_audios = video_audios
+                vllm_mm_data["audio"] = (
+                    all_audios[0] if len(all_audios) == 1 else all_audios
+                )
+                logger.debug(
+                    "Extracted %d audio track(s) from video URL(s) "
+                    "(use_audio_in_video=True)",
+                    len(video_audios),
+                )
+
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
@@ -1261,6 +1383,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id: str,
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
+        mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -1270,6 +1393,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request_id: Request ID for logging
             multi_modal_data: Optional multimodal data to attach to TokensPrompt
             log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
+            mm_processor_kwargs: Optional multimodal processor kwargs (e.g.
+                use_audio_in_video) forwarded to the vLLM engine.
 
         Returns:
             Tuple of (prompt, embedding_sequence_length, error_dict) where:
@@ -1279,6 +1404,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length = None
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
+            if not self.config.engine_args.enable_prompt_embeds:
+                msg = (
+                    "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
+                )
+                logger.error(
+                    f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
+                    f"{request_id}: {msg}"
+                )
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
+                        "token_ids": [],
+                    },
+                )
             try:
                 (
                     prompt,
@@ -1304,14 +1445,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "token_ids": [],
                     },
                 )
-        # Normal path: use token IDs
-        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        # Normal path: use token IDs.
+        # In EPD mode multi_modal_data carries pre-computed embeddings from the
+        # encode worker, not raw images — skip UUID production here; raw-image
+        # identity lives upstream at the Router / URL-keyed encoder cache.
+        if self.embedding_loader is None:
+            mm_uuids = _compute_mm_uuids(multi_modal_data)
+        else:
+            mm_uuids = None
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
         )
         if mm_uuids is not None:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
+        if mm_processor_kwargs is not None:
+            prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
 
         prompt = TokensPrompt(**prompt_kwargs)
         return prompt, embedding_sequence_length, None
@@ -1553,6 +1702,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -1565,13 +1715,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             engine,
             default_sampling_params,
-            model_max_len,
-            enable_multimodal,
-            generate_endpoint,
-            use_vllm_tokenizer,
-            shutdown_event,
-            enable_frontend_decoding,
-            encode_worker_client,
+            model_max_len=model_max_len,
+            model_config=model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
         )
 
     async def generate(self, request, context):
@@ -1606,6 +1757,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = prefill_result.get("disaggregated_params", {}).get(
                 "embedding_params"
             )
+            # Normalize embedding_params to None if it is an empty dict
+            if not embedding_params:
+                embedding_params = None
         else:
             kv_params = None
             embedding_params = None
@@ -1614,6 +1768,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         has_mm_data = (
             "multi_modal_data" in request and request["multi_modal_data"] is not None
         )
+
+        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
 
         multi_modal_data = None
         if is_decode_only:
@@ -1642,6 +1798,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.error("Request %s: %s", request_id, msg)
                     yield {"status": "error", "message": msg}
                     return
+            else:
+                # Non-qwen model, assume the multi_modal_data has been consumed
+                # in prefill, so we can use the expanded prompt token ids
+                # without multimodal data
+                if embedding_params and "expanded_prompt_token_ids" in embedding_params:
+                    request["token_ids"] = embedding_params["expanded_prompt_token_ids"]
+                    has_mm_data = False
             # TODO(DIS-1661): video/audio re-downloaded on decode.
             # TODO(DIS-1664): mixed image+video in disagg decode is not
             # supported — synthetic image data would be overwritten.
@@ -1649,17 +1812,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 mm = request["multi_modal_data"]
                 if mm.get(VIDEO_URL_KEY) or mm.get(AUDIO_URL_KEY):
                     multi_modal_data = await self._extract_multimodal_data(
-                        request, request_id, context
+                        request,
+                        request_id,
+                        context,
+                        mm_processor_kwargs=mm_processor_kwargs,
                     )
         else:
             # Aggregated mode: load images normally
             multi_modal_data = await self._extract_multimodal_data(
-                request, request_id, context
+                request,
+                request_id,
+                context,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data
+            request,
+            request_id,
+            multi_modal_data,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         if error is not None:
             yield error
@@ -1819,6 +1991,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -1831,13 +2004,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             config,
             engine,
             default_sampling_params,
-            model_max_len,
-            enable_multimodal,
-            generate_endpoint,
-            use_vllm_tokenizer,
-            shutdown_event,
-            enable_frontend_decoding,
-            encode_worker_client,
+            model_max_len=model_max_len,
+            model_config=model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
         )
 
         # Cache Qwen VL grid parameters for computing image_grid_thw from
@@ -1866,15 +2040,23 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
+
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(
-            request, request_id, context
+            request,
+            request_id,
+            context,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
-        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data, log_prefix="Prefill "
+            request,
+            request_id,
+            multi_modal_data,
+            log_prefix="Prefill ",
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         if error is not None:
             # Prefill errors need disaggregated_params field
@@ -1948,10 +2130,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                # For prefill worker, only one res will be generated,
+                # so we can always build embedding params here without conditionals
+                embedding_params = self._build_embedding_params(
+                    multi_modal_data or {}, res.prompt_token_ids
+                )
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params, embedding_params
+                        res.kv_transfer_params,
+                        embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -1972,18 +2160,36 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 yield output
 
-    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+    def _build_disaggregated_params(
+        self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None
+    ):
         disaggregated_params = {}
         if kv_transfer_params is not None:
             disaggregated_params["kv_transfer_params"] = kv_transfer_params
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
+        if expanded_prompt_token_ids is not None:
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 
     def _build_embedding_params(
-        self, multi_modal_data: dict[str, Any]
+        self, multi_modal_data: dict[str, Any], prompt_token_ids: list[int]
     ) -> Dict[str, Any] | None:
+        # [gluo NOTE] there could be different model architectures that
+        # need different embedding params, will add more logic if needed
         if not is_qwen_vl_model(self.config.model):
-            return None
-        return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+            # For non-qwen models, vLLM doesn't trigger mm preprocess so
+            # decode worker only needs expanded prompt to properly fetch KV blocks
+            # from prefill.
+            if multi_modal_data:
+                return {"expanded_prompt_token_ids": prompt_token_ids}
+        else:
+            # For qwen models, vLLM triggers mm preprocess so decode worker will
+            # perform token expansion unconditionally, so we need to pass
+            # original prompt and sufficient metadata to reconstruct mm embedding
+            # as request input.
+            return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+        return None

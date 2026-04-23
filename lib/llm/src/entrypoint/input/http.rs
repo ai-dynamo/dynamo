@@ -196,6 +196,7 @@ async fn run_watcher(
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     watch_obj.set_notify_on_model_update(tx);
+    let watch_obj = Arc::new(watch_obj);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {

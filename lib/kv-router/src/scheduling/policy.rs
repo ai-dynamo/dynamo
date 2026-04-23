@@ -3,10 +3,9 @@
 
 use std::time::Duration;
 
-use ordered_float::OrderedFloat;
-
 use super::config::RouterQueuePolicy;
 use super::types::SchedulingRequest;
+use ordered_float::OrderedFloat;
 /// Pluggable scheduling policy that determines queue ordering.
 /// Monomorphized for zero-cost inlining on the hot comparison path.
 ///
@@ -115,8 +114,6 @@ impl SchedulingPolicy for RouterSchedulingPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rustc_hash::FxHashMap;
 
     use super::*;
@@ -132,8 +129,8 @@ mod tests {
             token_seq: None,
             isl_tokens,
             overlaps,
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: false,
@@ -142,6 +139,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: None,
         }
     }

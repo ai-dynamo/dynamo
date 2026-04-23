@@ -73,8 +73,17 @@ pub fn add_blocks(
     hashes: Vec<u64>,
     parent_hash: Option<ExternalSequenceBlockHash>,
 ) -> KvCacheEventData {
+    add_blocks_with_start_position(hashes, parent_hash, None)
+}
+
+pub fn add_blocks_with_start_position(
+    hashes: Vec<u64>,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+    start_position: Option<u32>,
+) -> KvCacheEventData {
     KvCacheEventData::Stored(KvCacheStoreData {
         parent_hash,
+        start_position,
         blocks: make_blocks(hashes),
     })
 }
@@ -86,6 +95,21 @@ pub fn create_store_event(
     parent: Option<ExternalSequenceBlockHash>,
 ) -> RouterEvent {
     router_event(worker_id, event_id, 0, add_blocks(hashes, parent))
+}
+
+pub fn create_store_event_with_start_position(
+    worker_id: WorkerId,
+    event_id: u64,
+    hashes: Vec<u64>,
+    parent: Option<ExternalSequenceBlockHash>,
+    start_position: Option<u32>,
+) -> RouterEvent {
+    router_event(
+        worker_id,
+        event_id,
+        0,
+        add_blocks_with_start_position(hashes, parent, start_position),
+    )
 }
 
 pub fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {

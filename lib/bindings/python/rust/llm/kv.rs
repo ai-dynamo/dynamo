@@ -306,6 +306,7 @@ impl KvEventPublisher {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    start_position: None,
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,

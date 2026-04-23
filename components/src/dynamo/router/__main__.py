@@ -113,6 +113,7 @@ class StandaloneRouterHandler:
             "prefill_result": request.get("prefill_result"),
             "bootstrap_info": request.get("bootstrap_info"),
             "extra_args": request.get("extra_args"),
+            "mm_processor_kwargs": request.get("mm_processor_kwargs"),
         }
 
         async for worker_output in await self.kv_router.generate_from_request(

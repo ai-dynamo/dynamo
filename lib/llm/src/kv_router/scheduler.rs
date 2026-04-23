@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::protocols::SharedCacheHits;
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, PotentialLoad, SchedulingRequest, SchedulingResponse,
@@ -138,6 +139,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
             .inner
@@ -153,6 +155,7 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                shared_cache_hits,
             )
             .await;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
