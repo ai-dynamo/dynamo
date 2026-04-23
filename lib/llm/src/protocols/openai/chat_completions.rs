@@ -426,4 +426,40 @@ mod tests {
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
         }
     }
+
+    #[test]
+    fn test_unknown_params_silently_ignored() {
+        use crate::engines::ValidateRequest;
+
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "foo": "bar"
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert!(request.unsupported_fields.contains_key("foo"));
+        ValidateRequest::validate(&request)
+            .expect("Unknown params should be silently ignored for OpenAI compat");
+    }
+
+    #[test]
+    fn test_unknown_params_multiple_fields_ignored() {
+        use crate::engines::ValidateRequest;
+
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Extract data"}],
+            "response_model": {"name": "User", "fields": ["name", "age"]},
+            "max_retries": 3
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request)
+            .expect("Multiple unknown params should be silently ignored");
+    }
 }

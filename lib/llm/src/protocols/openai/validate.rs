@@ -97,16 +97,15 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Validates that no unsupported fields are present in the request
+/// Logs unsupported fields at debug level but does not reject the request.
+/// OpenAI silently ignores unknown parameters; rejecting them breaks
+/// LangChain, LlamaIndex, Instructor, and other third-party clients.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
     if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
-        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+        let fields: Vec<_> = unsupported_fields.keys().collect();
+        tracing::debug!("Ignoring unsupported parameter(s): {:?}", fields);
     }
     Ok(())
 }

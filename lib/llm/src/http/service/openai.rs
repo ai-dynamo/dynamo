@@ -3214,8 +3214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_completions_unknown_fields_rejected() {
-        // Test that known unsupported fields are rejected and all shown in error message
+    fn test_chat_completions_unknown_fields_ignored() {
         let json = r#"{
             "messages": [{"role": "user", "content": "Hello"}],
             "model": "test-model",
@@ -3226,31 +3225,18 @@ mod tests {
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
 
-        // Verify all unsupported fields were captured
-        assert!(
-            request
-                .unsupported_fields
-                .contains_key("add_special_tokens")
-        );
+        // Unsupported fields are still captured
+        assert!(request.unsupported_fields.contains_key("add_special_tokens"));
         assert!(request.unsupported_fields.contains_key("documents"));
         assert!(request.unsupported_fields.contains_key("chat_template"));
 
+        // But validation succeeds (OpenAI compat: silently ignore unknown params)
         let result = validate_chat_completion_fields_generic(&request);
-        assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-            let msg = &error_response.1.message;
-            assert!(msg.contains("Unsupported parameter"));
-            // Verify all fields appear in the error message
-            assert!(msg.contains("add_special_tokens"));
-            assert!(msg.contains("documents"));
-            assert!(msg.contains("chat_template"));
-        }
+        assert!(result.is_ok(), "Unknown fields should be silently ignored");
     }
 
     #[test]
-    fn test_completions_unsupported_fields_rejected() {
-        // Test that known unsupported fields are rejected and all shown in error message
+    fn test_completions_unsupported_fields_ignored() {
         let json = r#"{
             "model": "test-model",
             "prompt": "Hello",
@@ -3260,24 +3246,13 @@ mod tests {
 
         let request: NvCreateCompletionRequest = serde_json::from_str(json).unwrap();
 
-        // Verify both unsupported fields were captured
-        assert!(
-            request
-                .unsupported_fields
-                .contains_key("add_special_tokens")
-        );
+        // Unsupported fields are still captured
+        assert!(request.unsupported_fields.contains_key("add_special_tokens"));
         assert!(request.unsupported_fields.contains_key("response_format"));
 
+        // But validation succeeds (OpenAI compat: silently ignore unknown params)
         let result = validate_completion_fields_generic(&request);
-        assert!(result.is_err());
-        if let Err(error_response) = result {
-            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-            let msg = &error_response.1.message;
-            assert!(msg.contains("Unsupported parameter"));
-            // Verify both fields appear in error message
-            assert!(msg.contains("add_special_tokens"));
-            assert!(msg.contains("response_format"));
-        }
+        assert!(result.is_ok(), "Unknown fields should be silently ignored");
     }
 
     #[tokio::test]

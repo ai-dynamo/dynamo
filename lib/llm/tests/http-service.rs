@@ -907,3 +907,57 @@ async fn test_request_id_annotation() {
     cancel_token.cancel();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn test_unknown_params_accepted_openai_compat() {
+    let port = get_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("test-model");
+    let engine = Arc::new(CounterEngine {});
+    manager
+        .add_chat_completions_model("test-model", card.mdcsum(), engine)
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    // Request with unknown params like LangChain/Instructor would send
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": false,
+        "max_tokens": 10,
+        "foo": "bar",
+        "response_model": {"name": "User"},
+        "max_retries": 3
+    });
+
+    let response = client
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Unknown params should be silently ignored (OpenAI compat), got: {}",
+        response.status()
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
