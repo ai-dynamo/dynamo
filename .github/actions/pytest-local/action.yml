@@ -36,16 +36,20 @@ inputs:
     description: 'Path inside the container to run pytest from. The image ships the dynamo source/tests here; kept separate from the GitHub Actions checkout at $GITHUB_WORKSPACE.'
     required: false
     default: '/workspace'
-  verify_gpu:
+  gpu_tests:
     description: 'Whether to verify GPU visibility via torch before running tests'
     required: false
     default: 'false'
+  local_models_dir:
+    description: 'Path to a pre-staged, read-only HuggingFace model cache on the runner. When set and the path exists, --models-dir is passed to pytest (offline mode, no downloads). Only used when gpu_tests=true.'
+    required: false
+    default: '/models/ci/models'
 
 runs:
   using: "composite"
   steps:
     - name: verify minio
-      if: inputs.verify_gpu == 'true' # only gpu tests require minio
+      if: inputs.gpu_tests == 'true' # only gpu tests require minio
       shell: bash
       run: |
         # Wait for MinIO to be ready
@@ -65,7 +69,7 @@ runs:
           sleep 1
         done
     - name: Verify GPU visibility
-      if: inputs.verify_gpu == 'true'
+      if: inputs.gpu_tests == 'true'
       shell: python
       run: |
         import sys
@@ -128,6 +132,17 @@ runs:
         mkdir -p "${XDG_CACHE_HOME}"
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
+        # Pre-staged model cache: GPU test runners mount a read-only volume at
+        # /models/ci/models containing all models needed by the test suite.
+        # Passing --models-dir short-circuits predownload_models/predownload_tokenizers
+        # (no network downloads) and sets HF_HUB_OFFLINE=1 for the test session.
+        # Only enabled for GPU tests (verify_gpu=true); CPU tests do not need it.
+        MODELS_DIR_ARG=""
+        if [[ "${{ inputs.gpu_tests }}" == "true" && -d "${{ inputs.local_models_dir }}" ]]; then
+          MODELS_DIR_ARG="--models-dir=${{ inputs.local_models_dir }}"
+          echo "📁 Using pre-staged model cache at ${{ inputs.local_models_dir }} (offline mode)"
+        fi
+
         CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
         if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
           echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
@@ -137,7 +152,7 @@ runs:
 
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest -v --collect-only ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           case "${{ inputs.parallel_mode }}" in
@@ -155,7 +170,7 @@ runs:
               ;;
           esac
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
