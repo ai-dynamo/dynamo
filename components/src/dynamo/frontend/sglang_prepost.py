@@ -675,6 +675,23 @@ class SglangStreamingPostProcessor:
                         if tc.parameters:
                             self._tool_call_args[seq_idx] = [tc.parameters]
 
+            # Do not emit partial tool calls. A streaming parser can detect a
+            # tool name before the model finishes malformed JSON; if the
+            # finish-time re-parse cannot recover valid arguments, treat the
+            # response as plain text instead of surfacing name + empty args.
+            dropped_names = []
+            for idx in list(self._tool_call_names):
+                if not "".join(self._tool_call_args.get(idx, [])):
+                    dropped_names.append(self._tool_call_names[idx])
+                    del self._tool_call_names[idx]
+                    self._tool_call_ids.pop(idx, None)
+                    self._tool_call_args.pop(idx, None)
+            if dropped_names:
+                logger.warning(
+                    "Dropping incomplete SGLang tool calls with no valid arguments: %s",
+                    dropped_names,
+                )
+
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []
             for idx in sorted(self._tool_call_names):

@@ -228,11 +228,15 @@ Dynamo exports several metrics useful for autoscaling. These are available at th
 
 | Metric | Type | Description | Good for scaling |
 |--------|------|-------------|------------------|
-| `dynamo_frontend_queued_requests` | Gauge | Requests waiting in HTTP queue | ✅ Workers |
-| `dynamo_frontend_inflight_requests` | Gauge | Concurrent requests to engine | ✅ All services |
+| `dynamo_frontend_active_requests` | Gauge | Total concurrent requests from HTTP entry to response complete | ✅ All services |
+| `dynamo_frontend_stage_requests{stage,phase}` | Gauge | Requests currently in a given frontend pipeline stage (`preprocess`, `route`, `dispatch`) | ✅ Workers — use `sum(...)` for queue-depth behavior, or `stage="dispatch"` for backend-prefill saturation |
 | `dynamo_frontend_time_to_first_token_seconds` | Histogram | TTFT latency | ✅ Workers |
 | `dynamo_frontend_inter_token_latency_seconds` | Histogram | ITL latency | ✅ Decode |
 | `dynamo_frontend_request_duration_seconds` | Histogram | Total request duration | ⚠️ General |
+| `dynamo_frontend_inflight_requests` | Gauge | Concurrent requests to engine | ⚠️ **Deprecated** — use `dynamo_frontend_active_requests` |
+| `dynamo_frontend_queued_requests` | Gauge | Requests waiting in HTTP queue | ⚠️ **Deprecated** — use `sum(dynamo_frontend_stage_requests)` across `preprocess` + `route` + `dispatch` |
+
+For the full definition of the `stage` and `phase` labels and derived-signal formulas, see [Stage and phase labels](../observability/metrics.md#stage-and-phase-labels) in the Metrics Reference.
 
 #### Metric Labels
 
@@ -344,16 +348,18 @@ spec:
 
 #### Example: Scale Based on Queue Depth
 
+"Queue depth" here means the number of requests that have entered the frontend but haven't yet received a first token — i.e. the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages. This replaces the deprecated `dynamo_frontend_queued_requests` gauge.
+
 Add this rule to your `prometheus-adapter-values.yaml` (alongside the TTFT rule):
 
 ```yaml
 # Add to rules.external in prometheus-adapter-values.yaml
-- seriesQuery: 'dynamo_frontend_queued_requests{namespace!=""}'
+- seriesQuery: 'dynamo_frontend_stage_requests{namespace!="",stage=~"preprocess|route|dispatch"}'
   resources:
     overrides:
       namespace: {resource: "namespace"}
   name:
-    as: "dynamo_queued_requests"
+    as: "dynamo_frontend_pending_requests"
   metricsQuery: |
     sum(<<.Series>>{<<.LabelMatchers>>}) by (namespace, dynamo_namespace)
 ```
@@ -377,7 +383,7 @@ spec:
   - type: External
     external:
       metric:
-        name: dynamo_queued_requests
+        name: dynamo_frontend_pending_requests
         selector:
           matchLabels:
             dynamo_namespace: "default-sglang-agg"
@@ -500,9 +506,9 @@ spec:
   - type: prometheus
     metadata:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
-      metricName: dynamo_queued_requests
+      metricName: dynamo_frontend_pending_requests
       query: |
-        sum(dynamo_frontend_queued_requests{dynamo_namespace="default-sglang-agg"})
+        sum(dynamo_frontend_stage_requests{dynamo_namespace="default-sglang-agg",stage=~"preprocess|route|dispatch"})
       threshold: "10"    # Scale up when queue > 10 requests
 ```
 
@@ -651,8 +657,8 @@ Avoid configuring multiple autoscalers for the same service:
 | Service Type | Recommended Metrics | Dynamo Metric |
 |--------------|---------------------|---------------|
 | Frontend | CPU utilization, request rate | `dynamo_frontend_requests_total` |
-| Prefill | Queue depth, TTFT | `dynamo_frontend_queued_requests`, `dynamo_frontend_time_to_first_token_seconds` |
-| Decode | ITL | `dynamo_frontend_inter_token_latency_seconds` |
+| Prefill | Dispatch-stage depth (backend prefill saturation), TTFT | `dynamo_frontend_stage_requests{stage="dispatch"}`, `dynamo_frontend_time_to_first_token_seconds` |
+| Decode | ITL, active concurrency | `dynamo_frontend_inter_token_latency_seconds`, `dynamo_frontend_active_requests` |
 
 ### 3. Configure Stabilization Windows
 
@@ -712,9 +718,13 @@ If HPA/KEDA shows `<unknown>` for metrics:
 kubectl port-forward -n default svc/sglang-agg-frontend 8000:8000
 curl http://localhost:8000/metrics | grep dynamo_frontend
 
-# Example output:
-# dynamo_frontend_queued_requests{model="Qwen/Qwen3-0.6B"} 2
-# dynamo_frontend_inflight_requests{model="Qwen/Qwen3-0.6B"} 5
+# Example output (note: stage_requests has no `model` label — it's per frontend pod):
+# dynamo_frontend_active_requests{model="Qwen/Qwen3-0.6B"} 5
+# dynamo_frontend_stage_requests{stage="preprocess",phase=""} 0
+# dynamo_frontend_stage_requests{stage="route",phase="aggregated"} 0
+# dynamo_frontend_stage_requests{stage="dispatch",phase="aggregated"} 2
+# dynamo_frontend_queued_requests{model="Qwen/Qwen3-0.6B"} 2        # deprecated
+# dynamo_frontend_inflight_requests{model="Qwen/Qwen3-0.6B"} 5      # deprecated
 
 # Verify Prometheus is scraping the metrics
 kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090

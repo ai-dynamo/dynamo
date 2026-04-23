@@ -454,7 +454,7 @@ helm uninstall kgateway --namespace kgateway-system
 kubectl delete namespace kgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs
-IGW_LATEST_RELEASE=v1.2.1
+IGW_LATEST_RELEASE=v1.5.0-rc.2
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
 # 5. Delete the Gateway API CRDs
@@ -464,7 +464,7 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 
 ## Gateway API Inference Extension Integration
 
-This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.5.0-rc.2**.
 
 ### Router bookkeeping operations
 
@@ -473,8 +473,9 @@ EPP performs Dynamo router book keeping operations so the FrontEnd's Router does
 
 ### Header Routing Hints
 
-Since v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
-The plugins set HTTP headers that are forwarded to the backend workers.
+Since v1.5.0-rc.1, the EPP uses **headers and body mutations** for communicating routing decisions.
+The plugins set HTTP headers for worker targeting and inject pre-computed token IDs
+into the request body (`nvext.token_data`) so the frontend sidecar can skip redundant tokenization.
 
 #### Headers Set by Dynamo Plugins
 
