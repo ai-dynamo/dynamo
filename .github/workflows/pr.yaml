@@ -400,15 +400,6 @@ jobs:
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      # CPU tests only run when core/planner/frontend changes are relevant.
-      run_cpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true' }}
-      # GPU tests are heavier — only on core changes.
-      run_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' }}
-      # Backend mypy targets also run when core changes — core code is imported
-      # by every backend, so a type-breaking change there would otherwise slip.
-      include_sglang: ${{ needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.core == 'true' }}
-      include_vllm:   ${{ needs.changed-files.outputs.vllm   == 'true' || needs.changed-files.outputs.core == 'true' }}
-      include_trtllm: ${{ needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.core == 'true' }}
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'

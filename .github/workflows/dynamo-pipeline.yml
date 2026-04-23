@@ -36,33 +36,6 @@ on:
         type: boolean
         default: false
 
-      # ----- per-step enables (caller can skip based on its change-file gating)
-      run_cpu_tests:
-        description: 'Run pytest parallel + sequential CPU jobs'
-        required: false
-        type: boolean
-        default: true
-      run_gpu_tests:
-        description: 'Run pytest GPU job'
-        required: false
-        type: boolean
-        default: true
-
-      # ----- mypy target inclusion
-      include_sglang:
-        required: false
-        type: boolean
-        default: true
-      include_vllm:
-        required: false
-        type: boolean
-        default: true
-      include_trtllm:
-        required: false
-        type: boolean
-        default: true
-
-      # ----- test markers (caller specifies; no defaults so intent is explicit)
       cpu_parallel_test_markers:
         required: true
         type: string
@@ -89,7 +62,7 @@ on:
         required: false
 
 jobs:
-  build:
+  image:
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -102,27 +75,11 @@ jobs:
       build_timeout_minutes: ${{ inputs.build_timeout_minutes }}
     secrets: inherit
 
-  # ----- Static checks that must run inside the built images -----
-  #
-  # rust-gpu-checks  — cargo clippy + test with features block-manager,
-  #                    media-ffmpeg, testing-nixl, integration + kvbm-physical.
-  #                    Needs native libs (NIXL, ffmpeg, CUDA), a pinned Rust
-  #                    toolchain, and a real NVIDIA GPU for integration tests —
-  #                    all baked into the runtime image.
-  #
-  # mypy             — needs the exact pinned versions of pydantic, msgspec,
-  #                    nixl, and the pyo3 dynamo._core/_internal stubs. Running
-  #                    on ubuntu-latest would need maturin develop + a heavy
-  #                    pip install and still surfaces package-drift errors. The
-  #                    test image guarantees the same resolver state as what
-  #                    we ship.
-  #
-  # pre-merge.yml already runs lightweight cargo fmt / clippy / test on
-  # ubuntu-latest; the jobs below are the feature-gated / GPU-dependent checks.
-
-  rust-gpu-checks:
-    name: Rust GPU Checks
-    needs: build
+  # rust-gpu-checks + mypy run inside the built images because they depend on
+  # native libs (NIXL, ffmpeg, CUDA) and pinned Python package versions that
+  # aren't reproducible on plain ubuntu-latest runners.
+  rust-gpu:
+    needs: image
     runs-on: prod-tester-amd-gpu-v1
     timeout-minutes: 30
     env:
@@ -138,7 +95,7 @@ jobs:
         run: |
           CUDA_VERSION="${{ inputs.cuda_version }}"
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          IMAGE_TAG=${{ github.sha }}-${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}
+          IMAGE_TAG=${{ github.sha }}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}
           echo "runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -173,8 +130,7 @@ jobs:
                       /workspace/container/use-sccache.sh show-stats "Rust Checks"'
 
   mypy:
-    name: Mypy
-    needs: build
+    needs: image
     runs-on: prod-tester-amd-v1
     timeout-minutes: 15
     steps:
@@ -188,7 +144,7 @@ jobs:
         run: |
           CUDA_VERSION="${{ inputs.cuda_version }}"
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          IMAGE_TAG=${{ github.sha }}-${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}-test
+          IMAGE_TAG=${{ github.sha }}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}-test
           echo "test_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -200,22 +156,13 @@ jobs:
           source ./.github/scripts/retry_docker.sh
           retry_pull ${{ steps.image.outputs.test_image }}
       - name: Run mypy (components)
-        # Always type-check shared (non-backend) code; conditionally include
-        # sglang/vllm/trtllm so unrelated backend breakage doesn't block PRs
-        # that don't touch those dirs.
         run: |
           docker run --rm -w /workspace \
             --name mypy_${{ github.run_id }}_${{ github.run_attempt }} \
             ${{ steps.image.outputs.test_image }} \
             bash -c '
               MYPYPATH=components/src:lib/bindings/python/src
-
-              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name sglang ! -name vllm ! -name trtllm | sort | tr "\n" " ")
-
-              ${{ inputs.include_sglang && 'TARGETS="$TARGETS components/src/dynamo/sglang"' || ':' }}
-              ${{ inputs.include_vllm   && 'TARGETS="$TARGETS components/src/dynamo/vllm"'   || ':' }}
-              ${{ inputs.include_trtllm && 'TARGETS="$TARGETS components/src/dynamo/trtllm"' || ':' }}
-
+              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
               MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
             '
       - name: Run mypy (bindings)
@@ -225,37 +172,35 @@ jobs:
             ${{ steps.image.outputs.test_image }} \
             bash -c 'MYPYPATH=lib/bindings/python/src mypy -p dynamo'
 
-  test-parallel:
-    if: ${{ inputs.run_cpu_tests }}
-    needs: build
+  # TODO: real xdist parallelism is blocked on the bindings conftest (needs
+  # ENABLE_ISOLATED_ETCD_AND_NATS=1 + pytest-forked). cpu_parallel_mode='none'
+  # below runs -n 0, so this job is NOT actually parallel right now.
+  parallel:
+    needs: image
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
-      test_type: Pytest (parallel)
+      test_type: Pytest
       amd_runner: prod-tester-amd-v1
-      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
       cpu_only_test_timeout_minutes: 30
-      # 'none' runs pytest with `-n 0` (xdist loaded, 0 workers) = single-process
-      # sequential. Real xdist parallelism is blocked until the bindings conftest
-      # supports ENABLE_ISOLATED_ETCD_AND_NATS=1 + pytest-forked.
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
     secrets: inherit
 
-  test-sequential:
-    if: ${{ inputs.run_cpu_tests }}
-    needs: build
+  sequential:
+    needs: image
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
-      test_type: Pytest (sequential)
+      test_type: Pytest
       amd_runner: prod-tester-amd-v1
-      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
@@ -266,15 +211,14 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
-  test-gpu:
-    if: ${{ inputs.run_gpu_tests }}
-    needs: build
+  gpu:
+    needs: image
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
-      test_type: Pytest (GPU)
+      test_type: Pytest
       amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'
       run_sanity_check: false
