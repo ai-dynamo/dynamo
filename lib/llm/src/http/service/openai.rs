@@ -3226,7 +3226,11 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
 
         // Unsupported fields are still captured
-        assert!(request.unsupported_fields.contains_key("add_special_tokens"));
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
         assert!(request.unsupported_fields.contains_key("documents"));
         assert!(request.unsupported_fields.contains_key("chat_template"));
 
@@ -3247,7 +3251,11 @@ mod tests {
         let request: NvCreateCompletionRequest = serde_json::from_str(json).unwrap();
 
         // Unsupported fields are still captured
-        assert!(request.unsupported_fields.contains_key("add_special_tokens"));
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
         assert!(request.unsupported_fields.contains_key("response_format"));
 
         // But validation succeeds (OpenAI compat: silently ignore unknown params)
