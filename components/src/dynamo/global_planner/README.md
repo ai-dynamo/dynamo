@@ -107,7 +107,7 @@ CLI arguments:
 - `--no-operation`: Log incoming scale requests and return success without applying Kubernetes scaling.
 - `--max-total-gpus <n>`: Reject scale requests that would push the managed pools above the configured total GPU cap.
 - `--min-total-gpus <n>`: Floor for total GPUs across managed pools. Scale-down requests that would drop below the floor are denied unless they can be paired with a pending scale-up on another pool (intra-DGD or cross-DGD). `-1` (default) disables the floor.
-- `--intent-cache-ttl-seconds <s>`: How long a cached scale intent from a pool is considered fresh for pairing (default `120`). Should be at least `2x` the local planner tick interval.
+- `--intent-cache-ttl-seconds <s>`: How long a cached scale intent from a pool is considered fresh for pairing (default `120`). This should be at least `2x` the local planner tick interval.
 
 ## Scale Request Contract
 
