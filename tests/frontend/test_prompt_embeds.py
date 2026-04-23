@@ -8,7 +8,7 @@ These tests validate behavior that cannot be covered by Rust unit tests:
 - Streaming responses with embeddings
 - Python-side tensor decoding errors
 - Usage statistics from worker (the v2.0.4 bug fix)
-- Large payload handling through NATS
+- Large payload handling through the local request path
 - Concurrent request handling
 
 Validation tests (base64, size limits, empty prompt) are covered by Rust unit tests
@@ -52,7 +52,8 @@ pytestmark = [
 class VllmPromptEmbedsWorkerProcess(ManagedProcess):
     """Vllm Worker process configured for prompt embeddings testing.
 
-    Uses file-based KV store and TCP request plane (no NATS/etcd required).
+    Uses file-based KV store and TCP request plane. No NATS or etcd required:
+    the file backend automatically defaults the event plane to ZMQ.
     """
 
     def __init__(
@@ -135,8 +136,9 @@ def start_services(
 ) -> Generator[ServicePorts, None, None]:
     """Start frontend and vllm worker processes for prompt embeds testing.
 
-    Uses file-based KV store and TCP request plane (no NATS/etcd needed).
-    This makes tests simpler and faster by avoiding external dependencies.
+    Uses file-based KV store and TCP request plane. No NATS or etcd needed:
+    the file backend automatically defaults the event plane to ZMQ, avoiding
+    all external service dependencies and keeping tests simpler and faster.
 
     The `file_storage_backend` fixture sets up a temporary directory and
     configures DYN_FILE_KV environment variable.
@@ -268,14 +270,14 @@ class TestPromptEmbedsE2E:
             response.usage.prompt_tokens + response.usage.completion_tokens
         ), "total_tokens should equal prompt_tokens + completion_tokens"
 
-    def test_large_embeddings_through_nats(self, dynamo_client):
+    def test_large_embeddings_through_local_request_path(self, dynamo_client):
         """
-        Test large embeddings are handled correctly through NATS.
+        Test large embeddings are handled correctly through the local request path.
 
-        This validates the NATS max_payload configuration (15MB) handles
-        large embedding payloads. Rust unit tests can't test this E2E path.
+        This validates the E2E frontend-to-worker path handles large embedding
+        payloads. Rust unit tests can't test this E2E path.
         """
-        # Create ~7MB embeddings (well under 10MB limit, but large enough to stress NATS)
+        # Create ~7MB embeddings (well under 10MB limit, but large enough to stress the path)
         large_shape = (1700, 1024)  # ~6.6MB of float32 data
         large_embeds = torch.randn(large_shape, dtype=torch.float32)
 

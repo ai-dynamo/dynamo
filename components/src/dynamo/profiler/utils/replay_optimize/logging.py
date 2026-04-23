@@ -9,7 +9,8 @@ from typing import Any
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .models import DenseAggReplayState, DenseReplayState, ReplayConstraints
+from .models import DenseAggReplayState, DenseReplayState
+from .specs import HardwareSpec, SLASpec
 
 logger = logging.getLogger(__name__)
 _LOGGING_CONFIGURED = False
@@ -27,20 +28,31 @@ def log_state_start(state: DenseReplayState | DenseAggReplayState) -> None:
     logger.info("Replay optimize evaluating %s", state.format_summary())
 
 
+def _budget_summary(
+    state: DenseReplayState | DenseAggReplayState, hardware: HardwareSpec
+) -> str:
+    used = state.total_gpus_used
+    budget = hardware.totalGpus
+    status = "satisfied" if used <= budget else "unsatisfied"
+    return f"totalGpus={used}<={budget} {status}"
+
+
 def log_state_finish(
     *,
     state: DenseReplayState | DenseAggReplayState,
     report: Mapping[str, Any],
-    constraints: ReplayConstraints,
+    sla: SLASpec,
+    hardware: HardwareSpec,
     score: float,
     feasible: bool,
     violation_penalty: float,
 ) -> None:
     logger.info(
-        "Replay optimize finished %s score=%.3f feasible=%s violation_penalty=%.6f %s",
+        "Replay optimize finished %s score=%.3f feasible=%s violation_penalty=%.6f %s %s",
         state.format_summary(),
         score,
         feasible,
         violation_penalty,
-        constraints.summarize(report, state.total_gpus_used),
+        sla.summarize(report),
+        _budget_summary(state, hardware),
     )
