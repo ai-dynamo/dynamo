@@ -755,37 +755,38 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // tool_choice=required/named forces the backend into guided decoding,
-        // which produces a bare JSON shape (no reasoning wrapper) regardless
-        // of whether the chat template injected <think>. Entering the reasoning
-        // parser in force-reasoning mode would swallow that JSON into
-        // reasoning_content and the tool-call jail would see nothing — so
-        // gate the prompt-injected flag off for those tool_choice values.
-        //
-        // Tool-continuation turns (last message role=tool) are also gated
-        // off: the model produces the final user-facing answer directly from
-        // the tool result and typically does not re-enter reasoning, so
-        // leaving the parser in forced-reasoning mode would mislabel the
-        // final answer as reasoning_content. Matches SGLang's observed
-        // behavior for Kimi K2.5 tool-result follow-ups.
+        // Tool-continuation turns (last message role=tool) gate the force-
+        // reasoning flag off: the model produces the final user-facing answer
+        // directly from the tool result and typically does not re-enter
+        // reasoning, so leaving the parser in forced-reasoning mode would
+        // mislabel the final answer as reasoning_content. Matches SGLang's
+        // observed behavior for Kimi K2.5 tool-result follow-ups.
         let last_is_tool = matches!(
             request.inner.messages.last(),
             Some(ChatCompletionRequestMessage::Tool(_))
         );
-        let prompt_injected_reasoning = prompt_injected_reasoning
-            && !last_is_tool
-            && !matches!(
-                request.inner.tool_choice,
-                Some(ChatCompletionToolChoiceOption::Required)
-                    | Some(ChatCompletionToolChoiceOption::Named(_))
-            );
+        let prompt_injected_reasoning = prompt_injected_reasoning && !last_is_tool;
 
-        // Try to parse reasoning content only if parser is configured
+        // tool_choice=required/named forces the backend into guided decoding,
+        // which constrains output to a bare JSON shape with no reasoning
+        // wrapper. Running the reasoning parser on that output is both
+        // pointless (nothing to extract) and actively harmful for parsers
+        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
+        // append-think), because the prefix would contaminate the
+        // tool-call JSON fed into the jail.
+        let tool_choice_forces_guided_json = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+
+        // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !Self::is_reasoning_disabled_by_request(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
-            );
+            )
+            && !tool_choice_forces_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
