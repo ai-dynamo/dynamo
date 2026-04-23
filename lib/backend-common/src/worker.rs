@@ -100,6 +100,7 @@ impl Worker {
                     format!("distributed runtime: {e}"),
                 )
             })?;
+        tracing::debug!("distributed runtime connected");
 
         let component = drt
             .namespace(&config.namespace)
@@ -111,9 +112,16 @@ impl Worker {
                 )
             })?;
         let endpoint = component.endpoint(&config.endpoint);
+        tracing::debug!(
+            namespace = %config.namespace,
+            component = %config.component,
+            endpoint = %config.endpoint,
+            "component and endpoint resolved"
+        );
 
         // engine.start() returns a DynamoError directly — propagate as-is.
         let engine_config = engine.start().await?;
+        tracing::debug!(model = %engine_config.model, "engine.start() complete");
 
         // Cleanup must run even when registration or serve fails, so wrap
         // post-start work in a helper whose result is propagated after cleanup.
@@ -138,6 +146,7 @@ async fn serve(
     let model_type = parse_endpoint_types(&config.endpoint_types)?;
 
     let mut local_model = build_local_model(config, engine_config).await?;
+    tracing::debug!("local model built");
     local_model
         .attach(&endpoint, model_type, config.model_input, None)
         .await
@@ -147,6 +156,7 @@ async fn serve(
                 format!("model attach: {e}"),
             )
         })?;
+    tracing::debug!("model registered with discovery");
 
     let served = config
         .served_model_name

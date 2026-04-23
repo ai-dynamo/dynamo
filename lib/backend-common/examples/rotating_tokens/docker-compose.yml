@@ -12,6 +12,15 @@
 #
 # First `up` is slow (Rust build + HF tokenizer download). Subsequent
 # runs reuse the layer cache and the huggingface-cache volume.
+#
+# DYN_LOG=debug is set on the frontend and rotating-tokens services to
+# surface the debug-level lifecycle / cancellation / stream-complete
+# traces added in dynamo-backend-common. This is intentional for the
+# demo — DO NOT ship a production deployment with DYN_LOG=debug; the
+# per-request debug traces become noisy and expensive at scale. In
+# production, let DYN_LOG default to `info` (or scope via filters, e.g.
+# `DYN_LOG=info,dynamo_backend_common=debug` if you want targeted
+# backend-common visibility).
 
 networks:
   dynamo:
@@ -46,6 +55,8 @@ services:
     environment:
       - NATS_SERVER=nats://nats-server:4222
       - ETCD_ENDPOINTS=http://etcd-server:2379
+      # Demo-only: verbose tracing. DO NOT use DYN_LOG=debug in production.
+      - DYN_LOG=debug
     ports:
       - "8000:8000"
     depends_on:
@@ -78,6 +89,8 @@ services:
       - HF_HOME=/cache/huggingface
       # Set HF_TOKEN in your shell if you hit HuggingFace rate limits.
       - HF_TOKEN=${HF_TOKEN:-}
+      # Demo-only: verbose tracing. DO NOT use DYN_LOG=debug in production.
+      - DYN_LOG=debug
     volumes:
       - huggingface-cache:/cache/huggingface
     depends_on:

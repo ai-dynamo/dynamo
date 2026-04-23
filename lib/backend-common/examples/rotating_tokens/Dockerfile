@@ -25,10 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY . .
 
-# BuildKit cache mount speeds up incremental rebuilds by persisting the
-# cargo registry (crates.io index + downloaded crate sources) across builds.
+# BuildKit cache mounts persist across builds:
+#   /usr/local/cargo/registry — downloaded crate sources (avoids redownloading)
+#   /build/target             — compiled artifacts (avoids full recompile)
+# Cache mounts are NOT part of the resulting image, so copy the binary out
+# of the cache to /out/ within the same RUN so later stages can COPY it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build -p dynamo-rotating-tokens --release
+    --mount=type=cache,target=/build/target \
+    mkdir -p /out \
+    && cargo build -p dynamo-rotating-tokens --release \
+    && cp /build/target/release/dynamo-rotating-tokens /out/
 
 FROM debian:bookworm-slim
 
@@ -36,6 +42,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/dynamo-rotating-tokens /usr/local/bin/
+COPY --from=builder /out/dynamo-rotating-tokens /usr/local/bin/
 
 ENTRYPOINT ["dynamo-rotating-tokens"]

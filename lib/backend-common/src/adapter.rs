@@ -65,8 +65,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let abort_ctx = ctx.clone();
         let monitor = tokio::spawn(async move {
             tokio::select! {
-                _ = abort_ctx.stopped() => {}
-                _ = abort_ctx.killed() => {}
+                _ = abort_ctx.stopped() => {
+                    tracing::debug!(
+                        request_id = abort_ctx.id(),
+                        "cancellation observed (stopped)"
+                    );
+                }
+                _ = abort_ctx.killed() => {
+                    tracing::debug!(
+                        request_id = abort_ctx.id(),
+                        "cancellation observed (killed)"
+                    );
+                }
             }
             abort_engine.abort(abort_ctx.clone()).await;
         });
@@ -79,17 +89,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let mapped = async_stream::stream! {
             let _guard = guard;
             let mut inner = chunks;
+            let mut chunk_count: usize = 0;
+            let mut cancelled = false;
             while let Some(chunk) = inner.next().await {
                 // Forward every chunk we receive — including a terminal
                 // cancel chunk the engine may have emitted in response to
                 // stop_generating(). We break AFTER the yield so downstream
                 // always sees the engine's final frame.
+                chunk_count += 1;
                 let should_break = ctx_for_stream.is_stopped();
                 yield Annotated::from_data(chunk);
                 if should_break {
+                    cancelled = true;
                     break;
                 }
             }
+            tracing::debug!(
+                request_id = ctx_for_stream.id(),
+                chunks = chunk_count,
+                cancelled,
+                "stream complete"
+            );
         };
 
         Ok(ResponseStream::new(Box::pin(mapped), ctx))
