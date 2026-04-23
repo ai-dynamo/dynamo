@@ -432,7 +432,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 sampling_params=sampling_params,
                 stream=True,
                 external_trace_header=trace_header,
-                )
+            )
 
             rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
             first_token = True
@@ -632,7 +632,7 @@ class MultimodalPrefillWorkerHandler(
                 bootstrap_port=self.bootstrap_port,
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
-                )
+            )
 
         # Consume results without yielding (prefill doesn't return text, just coordinates)
         asyncio.create_task(self._consume_results(results, tensor_id))
