@@ -104,6 +104,8 @@ navigation:
         path: ../pages-dev/benchmarks/benchmarking.md
       - page: Mocker Offline Trace Replay
         path: ../pages-dev/benchmarks/mocker-trace-replay.md
+      - page: Planner Replay Benchmarking
+        path: ../pages-dev/benchmarks/planner-replay-benchmarking.md
       - section: Testing
         contents:
           - page: Mocker
