@@ -251,6 +251,12 @@ runs:
       shell: bash
       env:
         PLATFORM: ${{ inputs.platform }}
+        # Enable BuildKit registry caching for the fork wheel build so the
+        # expensive CUDA compile (cutlass kernels etc.) is reused across
+        # runs. The cache ref lives alongside the framework images in the
+        # same ECR repo; per-branch+commit+arch isolation happens inside
+        # container/build_trtllm_wheel.sh via the CACHE_KEY derivation.
+        TRTLLM_WHEEL_CACHE_REF: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com/ai-dynamo/dynamo
       run: |
         set -euo pipefail
         HAS_CONTEXT=$(python3 -c 'import yaml,sys; d=yaml.safe_load(open("container/context.yaml")); print(d.get("trtllm", {}).get("has_trtllm_context", "0"))')

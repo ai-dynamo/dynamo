@@ -193,16 +193,30 @@ COPY --from=wheel /src/tensorrt_llm/build/ /
 EOF
     fi
 
-    # Assemble BUILD_WHEEL_ARGS the way docker/Makefile's %_build rule does.
+    # Assemble BUILD_WHEEL_ARGS the way docker/Makefile's %_build rule does,
+    # but restrict the CUDA architecture set by default. The fork's
+    # cutlass_kernels instantiations compile a separate .cu.o per (sm, tile)
+    # combination; the stock build target "all" (SM70/75/80/86/89/90/100/120)
+    # expands to ~thousands of translation units and dominates wheel build
+    # wall-clock. The Kimi K2.5 + Eagle3 shadow-failover proof that this
+    # fork wheel exists for targets H200 (SM90) only, so compiling only
+    # SM90 kernels cuts the CUDA compile count to the subset we actually
+    # ship without changing which runtime symbols end up in
+    # libtensorrt_llm.so (the VMM rollback fix in virtualMemory.cpp is
+    # independent of CUDA arch).
+    #
+    # Callers that want broader arch coverage can override TRTLLM_CUDA_ARCHS
+    # in the environment, e.g. TRTLLM_CUDA_ARCHS='90-real;100-real'.
+    TRTLLM_CUDA_ARCHS="${TRTLLM_CUDA_ARCHS:-90-real}"
+
     WHEEL_ARGS="--clean --benchmarks"
+    WHEEL_ARGS+=" --cuda_architectures '${TRTLLM_CUDA_ARCHS}'"
     if [ "$ARCH" = "amd64" ]; then
         # Triton-devel-based build picks up NIXL at /opt/nvidia/nvda_nixl.
         WHEEL_ARGS+=" --extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl"
         DEVEL_STAGE="tritondevel"
         TARGETPLATFORM="linux/amd64"
     else
-        # arm64 builds a subset of CUDA archs (see docker/Makefile CUDA_ARCHS).
-        WHEEL_ARGS+=" --cuda_architectures '90-real;100-real;120-real'"
         DEVEL_STAGE="devel"
         TARGETPLATFORM="linux/arm64"
     fi
@@ -236,6 +250,20 @@ EOF
     rm -rf "${WHEEL_STAGE_DIR}"
     mkdir -p "${WHEEL_STAGE_DIR}"
 
+    # Optional BuildKit registry cache so subsequent runs skip the CUDA
+    # compile entirely. Caller sets TRTLLM_WHEEL_CACHE_REF=<registry>/<repo>
+    # and we derive a per-(arch,commit,cuda_archs,jobs) tag. mode=max stores
+    # every intermediate layer (including the ccache / pip caches baked into
+    # the build), which is what makes the second run cheap.
+    CACHE_ARGS=""
+    if [ -n "${TRTLLM_WHEEL_CACHE_REF:-}" ]; then
+        CACHE_KEY="$(echo "${ARCH}-${TRTLLM_COMMIT}-${TRTLLM_CUDA_ARCHS}-j${JOBS}" | tr -c 'A-Za-z0-9_.-' '_')"
+        echo "Using BuildKit registry cache: ${TRTLLM_WHEEL_CACHE_REF}:${CACHE_KEY}"
+        CACHE_ARGS="--cache-from type=registry,ref=${TRTLLM_WHEEL_CACHE_REF}:${CACHE_KEY} "
+        CACHE_ARGS+="--cache-to type=registry,ref=${TRTLLM_WHEEL_CACHE_REF}:${CACHE_KEY},mode=max"
+    fi
+
+    # shellcheck disable=SC2086
     docker buildx build \
         --progress=plain \
         --platform "${TARGETPLATFORM}" \
@@ -248,6 +276,7 @@ EOF
         --build-arg "DEVEL_IMAGE=${DEVEL_STAGE}" \
         --build-arg "TRT_LLM_VER=${TRT_LLM_VER_VAL}" \
         --build-arg "BUILD_WHEEL_ARGS=${WHEEL_ARGS}" \
+        ${CACHE_ARGS} \
         --output "type=local,dest=${WHEEL_STAGE_DIR}" \
         .
 
