@@ -611,9 +611,6 @@ async def init_llm_worker(
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
             media_fetcher = MediaFetcher()
             media_fetcher.timeout_ms(30000)
-            # DYN_MM_ALLOW_INTERNAL relaxes the Rust MediaFetcher's SSRF checks the same
-            # way it relaxes the Python url_validator. Intended for on-prem / local-dev
-            # setups. Never enable in public-facing deployments.
             allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
             media_fetcher.allow_direct_ip(allow_internal)
             media_fetcher.allow_direct_port(allow_internal)
