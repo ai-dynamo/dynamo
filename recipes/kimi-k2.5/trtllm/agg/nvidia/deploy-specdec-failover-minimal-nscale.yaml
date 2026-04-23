@@ -56,7 +56,7 @@ data:
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k25-nscale-failover-minimal-pr8572
+  name: kimi-k25-failover-pr8572
   annotations:
     nvidia.com/dynamo-kube-discovery-mode: container
 spec:
