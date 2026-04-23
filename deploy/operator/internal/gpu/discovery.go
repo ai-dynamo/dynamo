@@ -164,11 +164,19 @@ type GPUInfo struct {
 }
 
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
-type GPUDiscoveryCache struct {
-	mu        sync.RWMutex
+
+type gpuCacheEntry struct {
 	value     *GPUInfo
 	expiresAt time.Time
 }
+
+// GPUDiscoveryCache caches discovery results keyed by SKU filter.
+// Bounded by the GPUSKUType enum (≤7 values incl. empty for unfiltered).
+type GPUDiscoveryCache struct {
+	mu      sync.RWMutex
+	entries map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry
+}
+
 type GPUDiscovery struct {
 	Scraper ScrapeMetricsFunc
 }
@@ -181,24 +189,28 @@ func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
 
 // NewGPUDiscoveryCache creates a new GPUDiscoveryCache instance.
 //
-// The cache stores a single discovered GPUInfo value with an expiration time.
-// It is safe for concurrent use and is intended to reduce repeated DCGM
-// scraping during reconciliation loops.
+// The cache stores discovered GPUInfo values keyed by SKU filter with an
+// expiration time. It is safe for concurrent use and is intended to reduce
+// repeated DCGM scraping during reconciliation loops.
 func NewGPUDiscoveryCache() *GPUDiscoveryCache {
-	return &GPUDiscoveryCache{}
+	return &GPUDiscoveryCache{
+		entries: make(map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry),
+	}
 }
 
-// Get returns the cached GPUInfo if it exists and has not expired.
+// Get returns the cached GPUInfo for the given SKU filter if it exists and
+// has not expired.
 //
 // The boolean return value indicates whether a valid cached value was found.
 // If the cache is empty or expired, it returns (nil, false).
 //
 // This method is safe for concurrent use.
-func (c *GPUDiscoveryCache) Get() (*GPUInfo, bool) {
+func (c *GPUDiscoveryCache) Get(sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if time.Now().Before(c.expiresAt) && c.value != nil {
-		return c.value, true
+	e, ok := c.entries[sku]
+	c.mu.RUnlock()
+	if ok && time.Now().Before(e.expiresAt) && e.value != nil {
+		return e.value, true
 	}
 	return nil, false
 }
@@ -209,27 +221,38 @@ func (c *GPUDiscoveryCache) Get() (*GPUInfo, bool) {
 // After expiration, Get will return (nil, false) until a new value is set.
 //
 // This method is safe for concurrent use.
-func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
+func (c *GPUDiscoveryCache) Set(sku nvidiacomv1beta1.GPUSKUType, info *GPUInfo, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.value = info
-	c.expiresAt = time.Now().Add(ttl)
+	c.entries[sku] = gpuCacheEntry{value: info, expiresAt: time.Now().Add(ttl)}
 }
 
-// DiscoverGPUsFromDCGM discovers GPU information by scraping metrics directly
-// from DCGM exporter pods running in the cluster.
+// DiscoverGPUsFromDCGM is a convenience wrapper that calls
+// DiscoverGPUsFromDCGMFiltered with no SKU filter.
+// See DiscoverGPUsFromDCGMFiltered for full documentation.
+func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+	return g.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, "")
+}
+
+// DiscoverGPUsFromDCGMFiltered discovers GPU information by scraping metrics
+// directly from DCGM exporter pods running in the cluster.
+//
+// When filterSKU is non-empty, only nodes whose inferred SKU matches are
+// considered. When empty, the best node is selected first (highest GPU count,
+// then VRAM) and then only nodes with the same SKU are counted.
 //
 // The function performs the following:
 //
-//  1. Returns cached GPU information if still valid.
+//  1. Returns cached GPU information if still valid (keyed by filterSKU).
 //  2. Lists DCGM exporter pods across all namespaces using supported labels.
 //  3. If no pods are found, attempts to find if GPU operator is installed and DCGM is enabled via Helm.
 //  4. Warns user appropriately.
 //  5. Scrapes each running pods metrics endpoint (http://<podIP>:9400/metrics).
-//  6. Selects the "best" GPU node based on:
+//  6. Selects the "best" GPU node (filtered by SKU when set) based on:
 //     - Highest GPU count
 //     - Highest VRAM per GPU (tie-breaker)
-//  7. Caches the result for a short duration to avoid repeated scraping.
+//  7. Counts only nodes matching the selected SKU for NodesWithGPUs.
+//  8. Caches the result per SKU for a short duration to avoid repeated scraping.
 //
 // Behavior Notes:
 //
@@ -238,27 +261,17 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 //   - If at least one pod is successfully scraped, partial failures are tolerated.
 //   - If all pods fail to scrape, an aggregated error is returned.
 //   - Assumes DCGM exporter runs as a DaemonSet (one pod per GPU node).
-//   - Designed for homogeneous clusters; heterogeneous cluster aggregation
-//     is not yet implemented.
 //
 // Returns:
 //   - *GPUInfo for the selected node
 //   - error if no GPU data can be retrieved
-//
-// TODO: Current implementation selects a single "best" GPU node (highest GPU count,
-// tie-broken by VRAM). This works for homogeneous clusters where all GPU
-// nodes are identical.
-// For Heterogeneous GPU Support (mixed GPU models or capacities), this logic
-// does not represent full cluster GPU inventory. Future improvements should
-// aggregate and return GPU information for all nodes instead of selecting
-// only one.
-func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	if cache != nil {
-		// Return cached result if still valid
-		if cached, ok := cache.Get(); ok {
+		if cached, ok := cache.Get(filterSKU); ok {
 			return cached, nil
 		}
 	}
+
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
@@ -272,12 +285,16 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 		}
 		return nil, err
 	}
-	// Scrape each running pod individually
-	var bestNode *GPUInfo
+
+	// Scrape each running pod and collect per-node GPU info.
+	type nodeInfo struct {
+		info     *GPUInfo
+		sku      nvidiacomv1beta1.GPUSKUType
+		nodeName string
+	}
+	allNodes := make([]nodeInfo, 0, len(dcgmPods))
 	var scrapeErrors []error
-	var rdmaDetected bool
-	var rdmaType string
-	nodesWithGPUs := 0
+
 	for _, pod := range dcgmPods {
 		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			continue
@@ -288,46 +305,78 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
 			continue
 		}
-		// Detect RDMA on the node of this pod
-		rdma, rType := detectRDMAFromNode(ctx, k8sClient, pod.Spec.NodeName)
-		if rdma {
-			rdmaDetected = true
-			rdmaType = rType
-		}
-		// Increment NodesWithGPUs for every node that successfully reports GPU metrics
-		nodesWithGPUs++
-		// Select best node: highest GPU count, tie-breaker by VRAM
-		if bestNode == nil ||
-			info.GPUsPerNode > bestNode.GPUsPerNode ||
-			(info.GPUsPerNode == bestNode.GPUsPerNode &&
-				info.VRAMPerGPU > bestNode.VRAMPerGPU) {
-			bestNode = info
-		}
+
+		allNodes = append(allNodes, nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName})
 	}
-	if bestNode == nil {
+
+	if len(allNodes) == 0 {
 		if len(scrapeErrors) > 0 {
 			return nil, fmt.Errorf("failed to scrape any DCGM exporter pod: %v", scrapeErrors)
 		}
 		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
-	// --- Detect RDMA and InfiniBand presence ---
+
+	// Select best node (only from matching SKU when filtered).
+	var bestNode *GPUInfo
+	var bestSKU nvidiacomv1beta1.GPUSKUType
+	for _, n := range allNodes {
+		if filterSKU != "" && n.sku != filterSKU {
+			continue
+		}
+		if bestNode == nil ||
+			n.info.GPUsPerNode > bestNode.GPUsPerNode ||
+			(n.info.GPUsPerNode == bestNode.GPUsPerNode &&
+				n.info.VRAMPerGPU > bestNode.VRAMPerGPU) {
+			bestNode = n.info
+			bestSKU = n.sku
+		}
+	}
+
+	if bestNode == nil {
+		if filterSKU != "" {
+			return nil, fmt.Errorf("no GPU nodes matching SKU %q found", filterSKU)
+		}
+		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
+	}
+
+	// Count only nodes with the same SKU as the selected best node,
+	// and detect RDMA on matching nodes only.
+	nodesWithGPUs := 0
+	var rdmaDetected bool
+	var rdmaType string
+	for _, n := range allNodes {
+		if n.sku != bestSKU {
+			continue
+		}
+		nodesWithGPUs++
+		if !rdmaDetected {
+			rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.nodeName)
+			if rdma {
+				rdmaDetected = true
+				rdmaType = rType
+			}
+		}
+	}
+
+	// Detect InfiniBand presence
 	ib := detectIBPods(ctx, k8sClient)
 	if ib {
 		rdmaType = "infiniband"
 		rdmaDetected = true
 	}
-	// Infer cloud provider for the best node
+
 	cloudProvider, err := GetCloudProviderInfo(ctx, k8sClient)
 	if err != nil {
 		cloudProvider = CloudProviderUnknown
 	}
+	bestNode.System = bestSKU
 	bestNode.CloudProvider = cloudProvider
 	bestNode.NodesWithGPUs = nodesWithGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
+
 	if cache != nil {
-		// Cache result for 60 seconds
-		cache.Set(bestNode, 60*time.Second)
+		cache.Set(filterSKU, bestNode, 60*time.Second)
 	}
 	return bestNode, nil
 }

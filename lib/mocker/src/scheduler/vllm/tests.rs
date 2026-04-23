@@ -579,11 +579,21 @@ mod live_scheduler {
             .build()
             .unwrap();
 
+        // Side-channel router indexer: the mocker's emitted KV event stream is
+        // forwarded in real time into `LocalKvIndexer`, which applies Stored/
+        // Removed events against its own radix tree. If the mocker ever emits
+        // an invalid event (dangling parent, re-Stored of a present block, or
+        // Removed of an unknown block), the indexer's per-status counters tick
+        // — `assert_no_event_errors()` turns those into a test failure.
+        let harness = RouterIndexerHarness::new(64, ROUTER_TEST_WORKER_ID);
+        let (forwarder_sink, forwarder_task) = harness.spawn_forwarder();
+        let publishers = KvEventPublishers::new(Some(forwarder_sink as _), None);
+
         let scheduler = Scheduler::new(
             args,
             0,
             Some(output_tx),
-            KvEventPublishers::default(),
+            publishers,
             None,
             FpmPublisher::default(),
         );
@@ -597,6 +607,17 @@ mod live_scheduler {
             use_shared_tokens,
         )
         .await;
+
+        // Stop the scheduler so no new events fire, then drop the forwarder's
+        // sender by dropping the scheduler → forwarder task drains and exits.
+        drop(scheduler);
+        let _ = tokio::time::timeout(Duration::from_secs(2), forwarder_task).await;
+        harness.flush().await;
+        harness.assert_no_event_errors();
+        // NOTE: we do NOT assert `dump_events().is_empty()` here because
+        // mocker's protocol does not emit router `Removed` events on
+        // request completion.
+        harness.shutdown();
     }
 
     #[tokio::test]
