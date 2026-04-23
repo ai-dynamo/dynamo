@@ -9,6 +9,7 @@ on:
     - main
     - 'release/*.*.*'
     - "pull-request/[0-9]+"
+    - test-epp
     # Note: release/* branches always build (change detection skipped)
   workflow_call:
     inputs:
@@ -91,6 +92,7 @@ jobs:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
           arch: 'linux/amd64,linux/arm64'
+          fresh_builder: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
