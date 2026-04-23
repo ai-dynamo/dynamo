@@ -154,7 +154,7 @@ mod tests {
 
     fn build_engine(max_tokens: usize) -> RotatingTokensEngine {
         RotatingTokensEngine {
-            model_name: "sample".to_string(),
+            model_name: "sample-model".to_string(),
             max_tokens,
             delay: Duration::from_millis(0),
         }
@@ -162,7 +162,7 @@ mod tests {
 
     fn request(max_tokens: Option<u32>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
-            .model("sample".to_string())
+            .model("sample-model".to_string())
             .token_ids(vec![1, 2, 3])
             .stop_conditions(StopConditions {
                 max_tokens,
@@ -238,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn generate_cancellation_yields_cancelled_chunk() {
         let engine = RotatingTokensEngine {
-            model_name: "sample".to_string(),
+            model_name: "sample-model".to_string(),
             max_tokens: 100,
             delay: Duration::from_millis(20),
         };
@@ -265,7 +265,7 @@ mod tests {
     async fn start_returns_advertised_metadata() {
         let engine = build_engine(16);
         let cfg = engine.start().await.unwrap();
-        assert_eq!(cfg.model, "sample");
+        assert_eq!(cfg.model, "sample-model");
         assert_eq!(cfg.context_length, Some(2048));
         assert_eq!(cfg.kv_cache_block_size, Some(16));
     }

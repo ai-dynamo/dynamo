@@ -340,7 +340,7 @@ mod tests {
             abort_calls: Arc::new(AtomicUsize::new(0)),
             setup_err: Some(|| {
                 DynamoError::builder()
-                    .error_type(ErrorType::InvalidArgument)
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
                     .message("bad param")
                     .build()
             }),
@@ -350,7 +350,7 @@ mod tests {
         let input = Context::new(make_request(vec![1]));
         let err = adapter.generate(input).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("InvalidArgument"), "got: {msg}");
+        assert!(msg.contains("BackendInvalidArgument"), "got: {msg}");
         assert!(msg.contains("bad param"), "got: {msg}");
     }
 }

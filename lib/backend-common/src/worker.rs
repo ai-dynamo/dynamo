@@ -127,8 +127,8 @@ impl Worker {
         // post-start work in a helper whose result is propagated after cleanup.
         let serve_result = serve(&engine, &config, &engine_config, endpoint).await;
 
-        if let Err(err) = engine.cleanup().await {
-            tracing::error!(error = %err, "engine cleanup failed");
+        if let Err(cleanup_err) = engine.cleanup().await {
+            tracing::error!(error = %cleanup_err, "engine cleanup failed");
         } else {
             tracing::info!("Engine cleanup complete");
         }
