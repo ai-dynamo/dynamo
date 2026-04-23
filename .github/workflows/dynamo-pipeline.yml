@@ -3,9 +3,7 @@
 
 # Dynamo Pipeline — single entry point for building the dynamo runtime image
 # and running all of its associated checks (rust, mypy, pytest parallel/
-# sequential/GPU). Callers invoke this as one top-level job so the UI folds
-# everything under a single "dynamo-runtime" group, matching how
-# vllm-pipeline / sglang-pipeline / trtllm-pipeline are organized.
+# sequential/GPU).
 
 name: Dynamo Pipeline
 
@@ -35,7 +33,6 @@ on:
         required: false
         type: boolean
         default: false
-
       cpu_parallel_test_markers:
         required: true
         type: string
@@ -172,8 +169,7 @@ jobs:
             ${{ steps.image.outputs.test_image }} \
             bash -c 'MYPYPATH=lib/bindings/python/src mypy -p dynamo'
 
-  # TODO: real xdist parallelism is blocked on the bindings conftest (needs
-  # ENABLE_ISOLATED_ETCD_AND_NATS=1 + pytest-forked). cpu_parallel_mode='none'
+  # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.
   parallel:
     needs: image
