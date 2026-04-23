@@ -81,12 +81,25 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
 class _StandbyGenerateProxy:
+    """Stand-in generate handler for a shadow engine waiting on the failover lock.
+
+    The standby publishes its MDC before acquiring the flock so ``/v1/models``
+    stays populated across failover. In steady state the KV router's tiebreak
+    rules can route real requests to the standby's endpoint even while the
+    primary is alive (see ``lib/kv-router/src/scheduling/selector.rs`` for the
+    min-logit + min-tree-size tiebreak). Those requests block here on
+    ``_delegate_ready_event`` until the real handler is wired in via
+    :meth:`set_delegate`. Health-check probes short-circuit without blocking.
+    """
+
     def __init__(self, health_check_payload: dict | None = None):
         self._delegate = None
         self._health_check_payload = health_check_payload
+        self._delegate_ready_event = asyncio.Event()
 
     def set_delegate(self, delegate) -> None:
         self._delegate = delegate
+        self._delegate_ready_event.set()
 
     async def generate(self, request: dict, context):
         if self._delegate is None:
@@ -96,7 +109,10 @@ class _StandbyGenerateProxy:
             ):
                 yield {"status": "ok"}
                 return
-            raise RuntimeError("Shadow standby is waiting for failover lock")
+            # Real request arrived before the engine finished initialization.
+            # Block until set_delegate() is called instead of raising; raising
+            # would surface as a 500 at the frontend.
+            await self._delegate_ready_event.wait()
 
         async for response in self._delegate(request, context):
             yield response

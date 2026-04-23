@@ -22,7 +22,7 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update
-from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from dynamo.trtllm.workers.llm_worker import _StandbyGenerateProxy, init_llm_worker
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -368,3 +368,67 @@ async def test_init_llm_worker_creates_multimodal_processor():
                 config=config,
                 shutdown_event=asyncio.Event(),
             )
+
+
+# ---- Tests for _StandbyGenerateProxy ----
+
+
+@pytest.mark.asyncio
+async def test_standby_proxy_health_check_short_circuits():
+    """Health-check probes must return ok without waiting for a delegate."""
+    health = {"health": True}
+    proxy = _StandbyGenerateProxy(health_check_payload=health)
+    results = [chunk async for chunk in proxy.generate(health, context=None)]
+    assert results == [{"status": "ok"}]
+
+
+@pytest.mark.asyncio
+async def test_standby_proxy_awaits_delegate_for_real_request():
+    """Real requests arriving before the engine is up must block until set_delegate."""
+    proxy = _StandbyGenerateProxy(health_check_payload={"health": True})
+
+    async def fake_delegate(request, context):
+        yield {"token": 1}
+        yield {"token": 2}
+
+    request = {"prompt": "hello"}
+
+    async def consume():
+        return [chunk async for chunk in proxy.generate(request, context=None)]
+
+    consumer_task = asyncio.create_task(consume())
+
+    # Let the consumer enter proxy.generate and start awaiting the event.
+    await asyncio.sleep(0)
+    assert (
+        not consumer_task.done()
+    ), "generate must block on delegate-ready event instead of raising"
+
+    proxy.set_delegate(fake_delegate)
+    results = await asyncio.wait_for(consumer_task, timeout=1.0)
+    assert results == [{"token": 1}, {"token": 2}]
+
+
+@pytest.mark.asyncio
+async def test_standby_proxy_cancellation_releases_pending_generate():
+    """Cancelling a pending generate() must propagate cleanly, leaving no wedged state."""
+    proxy = _StandbyGenerateProxy(health_check_payload={"health": True})
+
+    async def consume():
+        return [chunk async for chunk in proxy.generate({"prompt": "x"}, context=None)]
+
+    consumer_task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    assert not consumer_task.done()
+
+    consumer_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer_task
+
+    # Subsequent set_delegate + new request must still work.
+    async def fake_delegate(request, context):
+        yield {"token": "ok"}
+
+    proxy.set_delegate(fake_delegate)
+    results = [chunk async for chunk in proxy.generate({"prompt": "y"}, context=None)]
+    assert results == [{"token": "ok"}]
