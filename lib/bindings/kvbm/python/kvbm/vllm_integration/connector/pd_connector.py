@@ -8,9 +8,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
+    MultiKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnector,
@@ -147,6 +149,29 @@ class PdConnector(MultiConnector):
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
+
+    def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
+        """
+        Collect stats from child connectors, skipping FlexKV.
+
+        FlexKV's stats type is not stable across scheduler iterations,
+        causing MultiKVConnectorStats.aggregate() to fail its type
+        assertion. Since stats are only used for monitoring, we skip
+        FlexKV and only report stats from connectors with consistent types.
+        """
+        stats_by_connector: MultiKVConnectorStats | None = None
+        for c in self._connectors:
+            if _FlexKVConnectorV1 is not None and isinstance(
+                c, _FlexKVConnectorV1
+            ):
+                continue
+            stats = c.get_kv_connector_stats()
+            if stats is None:
+                continue
+            if stats_by_connector is None:
+                stats_by_connector = MultiKVConnectorStats()
+            stats_by_connector[c.__class__.__name__] = stats
+        return stats_by_connector
 
     # ==============================
     # Scheduler-side methods
