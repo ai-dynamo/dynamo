@@ -81,6 +81,12 @@ async def main(runtime: DistributedRuntime, args):
     else:
         logger.info("Max total GPUs: UNLIMITED")
 
+    if args.min_total_gpus >= 0:
+        logger.info(f"Min total GPUs: {args.min_total_gpus}")
+        logger.info(f"Intent cache TTL seconds: {args.intent_cache_ttl_seconds}")
+    else:
+        logger.info("Min total GPUs: DISABLED")
+
     logger.info("=" * 60)
 
     # Get K8s namespace (where GlobalPlanner pod is running)
@@ -94,6 +100,8 @@ async def main(runtime: DistributedRuntime, args):
         k8s_namespace=k8s_namespace,
         no_operation=args.no_operation,
         max_total_gpus=args.max_total_gpus,
+        min_total_gpus=args.min_total_gpus,
+        intent_cache_ttl_seconds=args.intent_cache_ttl_seconds,
     )
 
     # Serve scale_request endpoint
