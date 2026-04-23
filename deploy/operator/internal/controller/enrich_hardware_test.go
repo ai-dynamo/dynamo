@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -44,6 +45,23 @@ func newFakeReconciler(objs ...client.Object) *DynamoGraphDeploymentRequestRecon
 		APIReader: fakeClient,
 		Recorder:  &record.FakeRecorder{},
 	}
+}
+
+func gpuNode(name, product string, gpuCount int, vramMiB int) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				gpupkg.LabelGPUCount:   intStr(gpuCount),
+				gpupkg.LabelGPUProduct: product,
+				gpupkg.LabelGPUMemory:  intStr(vramMiB),
+			},
+		},
+	}
+}
+
+func intStr(n int) string {
+	return fmt.Sprintf("%d", n)
 }
 
 func dcgmPod(name, ip string) *corev1.Pod {
@@ -255,15 +273,14 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 // not in the AIC support matrix, the raw GFD product name is used as a fallback.
 func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T) {
 	r := newFakeReconciler(gpuNode("gpu-node-1", "Tesla-V100-SXM2-16GB", 8, 16384))
-	vram := float64(16384)
-	gpus := int32(8)
 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 			Hardware: &nvidiacomv1beta1.HardwareSpec{
 				GPUSKU:         "Tesla-V100-SXM2-16GB",
-				VRAMMB:         &vram,
-				NumGPUsPerNode: &gpus,
+				VRAMMB:         ptr.To(float64(16384)),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(8)),
 			},
 		},
 	}
