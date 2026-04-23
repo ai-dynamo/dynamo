@@ -7130,19 +7130,21 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	envFromSecret := "hf-token-secret"
 
 	tests := []struct {
-		name               string
-		component          *v1alpha1.DynamoComponentDeploymentSharedSpec
-		parentDGDName      string
-		namespace          string
-		wantSidecarCount   int
-		wantSidecarName    string
-		wantSidecarImage   string
-		wantSidecarArgs    []string
-		wantSidecarEnvVars map[string]string
-		wantSidecarEnvFrom int
-		wantSidecarProbes  bool
-		wantSidecarPorts   bool
-		wantErr            bool
+		name                string
+		component           *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentDGDName       string
+		namespace           string
+		wantSidecarCount    int
+		wantSidecarName     string
+		wantSidecarImage    string
+		wantSidecarArgs     []string
+		wantSidecarEnvVars  map[string]string
+		wantSidecarEnvFrom  int
+		wantSidecarProbes   bool
+		wantSidecarPorts    bool
+		wantSidecarMounts   []corev1.VolumeMount
+		wantUniqueVolumes   map[string]int
+		wantErr             bool
 	}{
 		{
 			name: "worker without frontendSidecar has no sidecar",
@@ -7216,6 +7218,60 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarImage: "my-frontend:latest",
 			wantSidecarEnvVars: map[string]string{
 				"CUSTOM_VAR": "custom_value",
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar inherits worker PVC volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+				},
+				SharedMemory: &v1alpha1.SharedMemorySpec{Disabled: true},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+			},
+			wantUniqueVolumes: map[string]int{"model-cache": 1},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar inherits multiple PVC mounts and shared memory",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+					{Name: "extra-data", MountPoint: "/mnt/data"},
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+				{Name: "extra-data", MountPath: "/mnt/data"},
+				{Name: commonconsts.KubeValueNameSharedMemory, MountPath: commonconsts.DefaultSharedMemoryMountPath},
+			},
+			wantUniqueVolumes: map[string]int{
+				"model-cache":                           1,
+				"extra-data":                            1,
+				commonconsts.KubeValueNameSharedMemory: 1,
 			},
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,
@@ -7301,6 +7357,29 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			}
 			for name, found := range hasDownwardAPI {
 				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			}
+
+			// Verify the sidecar inherited the expected volume mounts from the worker.
+			for _, want := range tt.wantSidecarMounts {
+				found := false
+				for _, got := range sidecar.VolumeMounts {
+					if got.Name == want.Name && got.MountPath == want.MountPath {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "sidecar should have volume mount %s at %s", want.Name, want.MountPath)
+			}
+
+			// Verify pod-level volumes aren't duplicated when propagating to the sidecar.
+			if tt.wantUniqueVolumes != nil {
+				counts := make(map[string]int)
+				for _, v := range podSpec.Volumes {
+					counts[v.Name]++
+				}
+				for name, want := range tt.wantUniqueVolumes {
+					assert.Equal(t, want, counts[name], "pod volume %s count", name)
+				}
 			}
 		})
 	}

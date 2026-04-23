@@ -1170,7 +1170,7 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
-		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig, container.VolumeMounts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
 		}
@@ -1243,6 +1243,7 @@ func generateFrontendSidecar(
 	spec *v1alpha1.FrontendSidecarSpec,
 	parentContext ComponentContext,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
+	parentMounts []corev1.VolumeMount,
 ) (corev1.Container, error) {
 	frontendContext := ComponentContext{
 		numberOfNodes:                  1,
@@ -1279,6 +1280,11 @@ func generateFrontendSidecar(
 	}
 
 	AddStandardEnvVars(&container, operatorConfig)
+
+	// Mirror the worker's VolumeMounts so the sidecar can read files the worker
+	// registers in its ModelDeploymentCard (tokenizer, config, chat_template)
+	// when those live on a PVC.
+	container.VolumeMounts = append(container.VolumeMounts, parentMounts...)
 
 	return container, nil
 }
