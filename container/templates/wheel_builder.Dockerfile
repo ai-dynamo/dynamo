@@ -426,7 +426,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
-# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
+# Builds ai-dynamo and gpu_memory_service wheels. Non-vLLM targets also build
+# ai-dynamo-runtime here; vLLM builds it later after NIXL is installed.
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
@@ -437,7 +438,8 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+# Build ai-dynamo (pure Python) and, for most frameworks, ai-dynamo-runtime.
+# vLLM builds ai-dynamo-runtime later in the NIXL-aware wheel_builder stage.
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -454,13 +456,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist && \
+    uv build --wheel --out-dir /opt/dynamo/dist{% if framework != "vllm" %} && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer" --out /opt/dynamo/dist; \
     else \
         maturin build --release --features "kv-indexer" --out /opt/dynamo/dist; \
-    fi && \
+    fi{% endif %} && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 {% else %}
@@ -495,7 +497,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ##################################
 ##### wheel_builder ##############
 ##################################
-# Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
+# Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
+# consolidates all wheels.
 # Runtime templates COPY from this stage.
 
 FROM wheel_builder_base AS wheel_builder
@@ -624,13 +627,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "Dynamo KVBM"
 {% endif %}
 
-# Consolidate all wheels from the runtime wheel builder stage
-COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
-
 {% if framework == "vllm" and target not in ("dev", "local-dev") %}
-# vLLM uses NIXL from the upstream runtime image, but ai-dynamo-runtime still
-# needs to compile with NIXL headers/libs present. Otherwise nixl_sys falls back
-# to stub mode and frontend-decoding cannot create a Rust NIXL agent.
+# Build ai-dynamo-runtime after NIXL is installed so nixl_sys links against real
+# NIXL instead of producing a stub-mode _core extension.
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -645,7 +644,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    rm -f /opt/dynamo/dist/ai_dynamo_runtime*.whl && \
     cd /opt/dynamo/lib/bindings/python && \
     RUNTIME_WHEEL_DIR="$(mktemp -d)" && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -665,3 +663,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     rm -rf "${RUNTIME_WHEEL_DIR}" && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime (NIXL)"
 {% endif %}
+
+# Consolidate all wheels from the runtime wheel builder stage
+COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
