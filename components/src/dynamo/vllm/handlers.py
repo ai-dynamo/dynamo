@@ -748,6 +748,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     old_id = self.loaded_loras[lora_name].id
                     try:
                         await self.engine_client.remove_lora(old_id)
+                        # Invalidate the cache entry immediately after remove succeeds.
+                        # If add_lora below fails, this prevents a stale entry pointing
+                        # at an adapter the engine no longer holds from poisoning future
+                        # rollouts with wrong importance ratios (Tier-1 RL correctness risk).
+                        self.loaded_loras.pop(lora_name, None)
                     except Exception as e:
                         logger.warning(
                             f"[RL] remove_lora({lora_name}, id={old_id}) failed during hot-swap: {e}"
@@ -768,7 +773,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     try:
                         await self.engine_client.reset_prefix_cache()
                     except Exception as e:
-                        logger.warning(f"[RL] reset_prefix_cache after LoRA swap failed: {e}")
+                        # ERROR not WARNING: a failed cache reset means subsequent requests
+                        # sharing a prefix with an old rollout can reuse KV state computed
+                        # under the previous adapter — causing silent logprobs mismatch.
+                        logger.error(
+                            f"[RL] reset_prefix_cache after LoRA swap failed — KV cache may "
+                            f"be contaminated with stale entries from the old adapter. "
+                            f"Rollouts on this worker are unreliable until the next successful "
+                            f"swap: {e}"
+                        )
 
                 # Publish an MDC for the LoRA on first load so Dynamo's frontend
                 # can route requests with model=<lora_name> to this worker.
@@ -800,8 +813,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         try:
                             await self.engine_client.remove_lora(lora_id)
-                        except Exception:
-                            pass
+                        except Exception as rollback_err:
+                            # The adapter is now leaked in the engine: it is registered but
+                            # unreachable via loaded_loras (we pop it below). Log at ERROR
+                            # so this doesn't go unnoticed in production.
+                            logger.error(
+                                f"[RL] Rollback remove_lora({lora_name}, id={lora_id}) failed "
+                                f"— adapter is leaked in the engine: {rollback_err}"
+                            )
                         self.loaded_loras.pop(lora_name, None)
                         return {
                             "status": "error",

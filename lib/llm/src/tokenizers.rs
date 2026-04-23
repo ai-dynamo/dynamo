@@ -139,7 +139,10 @@ pub mod traits {
             // `impl From<DecodeResult> for String` unwraps to the inner string.
             token_ids
                 .iter()
-                .map(|id| self.decode(std::slice::from_ref(id), false).map(String::from))
+                .map(|id| {
+                    self.decode(std::slice::from_ref(id), false)
+                        .map(String::from)
+                })
                 .collect()
         }
     }

@@ -27,13 +27,18 @@ impl HuggingFaceTokenizer {
 
 impl Encoder for HuggingFaceTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
-        self.encode_with_special_tokens(input, false)
+        // Use add_special_tokens=true to match TikTokenTokenizer::encode() behaviour.
+        // Both backends must agree on whether BOS/EOS are included so that callers
+        // (e.g. /v1/tokenize, rl_tokenize_prompt) get consistent token counts
+        // regardless of which backend is active.  Callers that explicitly need no
+        // special tokens should call encode_with_special_tokens(input, false) directly.
+        self.encode_with_special_tokens(input, true)
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
         let hf_encodings = self
             .tokenizer
-            .encode_batch(inputs.to_vec(), false)
+            .encode_batch(inputs.to_vec(), true) // true to match encode() above
             .map_err(|err| Error::msg(format!("Error batch tokenizing input: {err}")))?;
 
         let encodings = hf_encodings

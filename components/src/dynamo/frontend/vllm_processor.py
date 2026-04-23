@@ -387,17 +387,25 @@ class VllmProcessor:
                             oai_logprobs_content = []
                             new_tids = engine_response.get("token_ids", [])
                             for i, lp in enumerate(worker_log_probs):
-                                entry: dict = {"logprob": lp}
-                                # Add token string if we have top_logprobs
+                                # Always populate token/bytes so consumers never see a
+                                # missing key.  If top_logprobs is absent or the token
+                                # string cannot be resolved we fall back to the numeric
+                                # ID as a string — better than a KeyError / silent None.
+                                tid_str = str(new_tids[i]) if i < len(new_tids) else ""
+                                entry: dict = {
+                                    "logprob": lp,
+                                    "token": tid_str,
+                                    "bytes": None,
+                                }
+                                # Resolve the human-readable token string and top_logprobs
+                                # from the engine's top_logprobs table when available.
                                 if worker_top_logprobs and i < len(worker_top_logprobs):
                                     tops = worker_top_logprobs[i]
                                     entry["top_logprobs"] = tops
-                                    # Find the selected token in tops
                                     if i < len(new_tids):
-                                        entry["token"] = str(new_tids[i])
                                         for tp in tops:
                                             if tp.get("token_id") == new_tids[i]:
-                                                entry["token"] = tp.get("token", str(new_tids[i]))
+                                                entry["token"] = tp.get("token", tid_str)
                                                 break
                                 oai_logprobs_content.append(entry)
                             choice["logprobs"] = {"content": oai_logprobs_content}

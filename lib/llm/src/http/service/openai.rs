@@ -1485,9 +1485,22 @@ async fn chat_completions(
             // return the wrong IDs.
             response.prompt_token_ids =
                 rl_tito_token_ids.or_else(|| rl_tokenize_prompt(&state, &model, messages));
-            if let Ok(mut json_val) = serde_json::to_value(&response) {
-                rl_promote_token_ids_in_response(&mut json_val);
-                return Ok(Json(json_val).into_response());
+            match serde_json::to_value(&response) {
+                Ok(mut json_val) => {
+                    rl_promote_token_ids_in_response(&mut json_val);
+                    return Ok(Json(json_val).into_response());
+                }
+                Err(e) => {
+                    // This path means choice.token_ids will NOT be promoted — Prime-RL
+                    // will see None for completion token IDs and may silently drop the
+                    // rollout or crash. Log at error so data-loss does not go unnoticed.
+                    tracing::error!(
+                        request_id,
+                        "rl_promote_token_ids: serde_json serialization failed — \
+                         choice.token_ids will NOT be promoted to top-level; \
+                         Prime-RL rollout may be dropped or corrupt: {e}"
+                    );
+                }
             }
             response
         } else {

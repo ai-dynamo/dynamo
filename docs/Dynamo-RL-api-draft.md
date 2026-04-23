@@ -1,6 +1,11 @@
 # Dynamo RL API Draft
 
-**Branch:** `bis/parity-tokenize-tcp` (HEAD: `19d1bf13d`)
+**Branch:** `bis/parity-tokenize-tcp` (HEAD: `d837fbd67`)
+
+Commit `70f84570b` (the current auto-enable-token-ids commit on HEAD) is an
+equivalent cherry-pick of the earlier `19d1bf13d` referenced in prior drafts —
+same subject, same patch semantics, different parent tree after rebase onto
+`origin/main`.
 
 ---
 
@@ -52,10 +57,12 @@ Zero Python in the inference or admin data path. The Rust frontend handles all H
 
 ### What Changed vs. Stock Dynamo
 
-All changes are on `bis/parity-tokenize-tcp` (12 commits, 25 files, +1725/-40). Nothing touches Dynamo's core serving pipeline (NATS, scheduler, KV cache, disaggregation). The changes are additive:
+All changes are on `bis/parity-tokenize-tcp` (18 commits, 26 files, +3030/-41 — the diff counts include this doc). Nothing touches Dynamo's core serving pipeline (NATS, scheduler, KV cache, disaggregation). The changes are additive:
 
-- **Rust frontend** (`lib/llm/`): New routes, response post-processing, tokenization endpoints
-- **vLLM worker** (`components/`): 5 engine route handlers, publisher crash guard
+- **Rust frontend** (`lib/llm/`): New routes, response post-processing, tokenization endpoints, LoRA hot-swap admin routes
+- **vLLM worker** (`components/`): 7 engine route handlers (5 weight-lifecycle + 2 LoRA), publisher crash guard
+- **Deps** (`container/`): default `VLLM_VER` bumped 0.19.0 → 0.19.1; prime-rl plugin installed via `pip` so `vllm.general_plugins` patches apply at engine start
+- **Compat fixes**: `/v1/tokenize` and `/v1/detokenize` adapted to upstream `DecodeResult`-returning decoder (main commit `2cabf4414`, #8022)
 
 ---
 
@@ -932,7 +939,7 @@ The `DynamoStatLoggerPublisher.record()` method includes a guard for `scheduler_
 | `prompt_token_ids` only injected for non-streaming responses | Use non-streaming mode for RL rollouts (the default) | Streaming final-chunk injection is planned |
 | Weight version `"initial"` before first update | Do not depend on version string for correctness; use `/v1/rl/ready` for readiness | |
 | NCCL weight broadcast is a no-op on Dynamo side | Use `type = "filesystem"` in `[weight_broadcast]` for all current deployments | |
-| `VLLM_USE_V1=0` required | Set `VLLM_USE_V1=0` in worker env | vLLM V1 engine + CUDA 13.0 has Meta tensor crashes with `--enforce-eager` |
+| ~~`VLLM_USE_V1=0` required~~ **Resolved on vLLM 0.19.1** | Set `VLLM_USE_V1=1` on images shipping `VLLM_VER≥0.19.1` (current default). Keep `VLLM_USE_V1=0` only on legacy 0.18.x images where Meta-tensor crash with `--enforce-eager` still reproduces. | Verified under Run D (Qwen3.5-35B-A3B-FP8, 12 workers, batch=64) with V1 enabled and CUDA graphs for LoRA decode. |
 | Filesystem weight broadcast scales poorly for large models | Acceptable for 0.6B (257ms load); marginal at 7B (~25s); impractical at 70B (~5 min) | RDMA pull transfer planned |
 
 ---
