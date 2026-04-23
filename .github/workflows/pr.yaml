@@ -85,14 +85,10 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
 
   dynamo-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     needs:
       - changed-files
-      - dynamo-build
-      - dynamo-static-checks
-      - dynamo-test-parallel
-      - dynamo-test-sequential
-      - dynamo-test-gpu
+      - dynamo-pipeline
     if: always()
     steps:
       - name: Check all dynamo jobs
@@ -391,8 +387,8 @@ jobs:
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
 
-  dynamo-build:
-    name: dynamo-runtime # This name overlaps with other dynamo jobs to group them in the UI
+  dynamo-pipeline:
+    name: dynamo-runtime
     needs: [changed-files]
     if: |
       needs.changed-files.outputs.core == 'true' ||
@@ -401,99 +397,21 @@ jobs:
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: ./.github/workflows/dynamo-pipeline.yml
     with:
-      framework: dynamo
-      target: runtime
-      cuda_version: '["12.9"]'
-      platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  dynamo-static-checks:
-    name: dynamo-runtime # This name overlaps with other dynamo jobs to group them in the UI
-    needs: [changed-files, dynamo-build]
-    if: |
-      needs.changed-files.outputs.core == 'true' ||
-      needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.vllm == 'true' ||
-      needs.changed-files.outputs.sglang == 'true' ||
-      needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/shared-container-static-checks.yml
-    with:
-      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
-      cuda_version: '12.9'
-      # Backends also run mypy when core changes — core code (e.g.
-      # components/src/dynamo/common/**) is imported by every backend, so
-      # a type-breaking change there can silently break backend typing.
+      # CPU tests only run when core/planner/frontend changes are relevant.
+      run_cpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true' }}
+      # GPU tests are heavier — only on core changes.
+      run_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' }}
+      # Backend mypy targets also run when core changes — core code is imported
+      # by every backend, so a type-breaking change there would otherwise slip.
       include_sglang: ${{ needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.core == 'true' }}
       include_vllm:   ${{ needs.changed-files.outputs.vllm   == 'true' || needs.changed-files.outputs.core == 'true' }}
       include_trtllm: ${{ needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.core == 'true' }}
-    secrets: inherit
-
-  dynamo-test-parallel:
-    name: dynamo-runtime # This name overlaps with other dynamo jobs to group them in the UI
-    needs: [changed-files, dynamo-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: dynamo
-      test_type: Pytest (parallel)
-      amd_runner: prod-builder-amd-v1
-      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
-      platform: '["amd64", "arm64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: true
-      cpu_only_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_only_test_timeout_minutes: 30
-      # 'none' runs pytest with `-n 0` (xdist loaded, 0 workers) = single-process
-      # sequential. Real xdist parallelism is blocked until the bindings conftest
-      # supports ENABLE_ISOLATED_ETCD_AND_NATS=1 + pytest-forked; right now 4
-      # workers race on the fixed NATS port 4222.
-      cpu_parallel_mode: 'none'
-      run_gpu_tests: false
-    secrets: inherit
-
-  dynamo-test-sequential:
-    name: dynamo-runtime # This name overlaps with other dynamo jobs to group them in the UI
-    needs: [changed-files, dynamo-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.frontend == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: dynamo
-      test_type: Pytest (sequential)
-      amd_runner: prod-builder-amd-v1
-      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
-      platform: '["amd64", "arm64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: true
-      cpu_only_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_only_test_timeout_minutes: 30
-      cpu_parallel_mode: 'none'
-      run_gpu_tests: false
-    secrets: inherit
-
-  dynamo-test-gpu:
-    name: dynamo-runtime # This name overlaps with other dynamo jobs to group them in the UI
-    needs: [changed-files, dynamo-build]
-    if: needs.changed-files.outputs.core == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: dynamo
-      test_type: Pytest (GPU)
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
-      platform: '["amd64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      run_gpu_tests: true
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
-      gpu_test_timeout_minutes: 30
     secrets: inherit
 
   # ============================================================================
@@ -711,11 +629,7 @@ jobs:
       - sglang-multi-gpu-test
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
-      - dynamo-build
-      - dynamo-static-checks
-      - dynamo-test-parallel
-      - dynamo-test-sequential
-      - dynamo-test-gpu
+      - dynamo-pipeline
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
