@@ -56,18 +56,18 @@ pub(super) fn build_decode_router_override(
         .map(|v| !matches!(v.as_str(), "" | "0" | "false" | "FALSE"))
         .unwrap_or(false);
 
-    let base = RouterConfigOverride {
-        track_prefill_tokens: Some(false),
-        ..existing_override.unwrap_or_default()
-    };
-
     if decode_kv_aware {
-        base
+        // Inherit overlap_score_weight, assume_kv_reuse, AND track_prefill_tokens from the
+        // frontend config. The overlap term is `overlap_weight * (isl - overlap*block_size)
+        // / block_size`; if track_prefill_tokens is false, prefill_token is 0 and the
+        // overlap term vanishes regardless of overlap_weight. So we must let it fall through.
+        existing_override.unwrap_or_default()
     } else {
         RouterConfigOverride {
             overlap_score_weight: Some(0.0),
             assume_kv_reuse: Some(false),
-            ..base
+            track_prefill_tokens: Some(false),
+            ..existing_override.unwrap_or_default()
         }
     }
 }
