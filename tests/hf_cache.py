@@ -167,6 +167,40 @@ def _restore_models_dir_env(orig: dict) -> None:
             os.environ[k] = v
 
 
+def _get_original_hf_hub_cache(orig: dict) -> str:
+    """Compute the HF hub cache path from the env snapshot taken before _apply_models_dir_env.
+
+    Mirrors the resolution order used by huggingface_hub and dynamo_llm::hub::get_model_express_cache_dir.
+    """
+    if orig.get("HF_HUB_CACHE"):
+        return orig["HF_HUB_CACHE"]
+    if orig.get("HF_HOME"):
+        return str(Path(orig["HF_HOME"]) / "hub")
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or "."
+    return str(Path(home) / ".cache/huggingface/hub")
+
+
+def _merge_models_dir_into_writable_cache(models_dir: str, writable_cache: str) -> None:
+    """Symlink models--* entries from models_dir into writable_cache.
+
+    Lets the read-only volume stay read-only while making all its models accessible
+    via the single HF_HUB_CACHE path that subprocesses will use. Handles both
+    HF_HOME layout (models_dir/hub/models--*) and bare layout (models_dir/models--*).
+    Existing entries in writable_cache are left untouched.
+    """
+    src = Path(models_dir)
+    if (src / "hub").is_dir():
+        src = src / "hub"
+    dst = Path(writable_cache)
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in src.iterdir():
+        if entry.name.startswith("models--"):
+            link = dst / entry.name
+            if not link.exists():
+                link.symlink_to(entry.resolve())
+                logging.info("Symlinked %s -> %s", link, entry.resolve())
+
+
 def _missing_from_hf_cache(model_ids: list) -> list:
     """Return the subset of model_ids not present in the current HF hub cache.
 

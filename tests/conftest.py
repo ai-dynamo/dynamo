@@ -16,6 +16,8 @@ from tests.hf_cache import (
     _apply_models_dir_env,
     _disable_offline_with_mistral_patch,
     _enable_offline_with_mistral_patch,
+    _get_original_hf_hub_cache,
+    _merge_models_dir_into_writable_cache,
     _missing_from_hf_cache,
     _restore_models_dir_env,
 )
@@ -296,12 +298,14 @@ def set_ucx_tls_no_mm():
     mp.undo()
 
 
-def download_models(model_list=None, ignore_weights=False):
+def download_models(model_list=None, ignore_weights=False, cache_dir=None):
     """Download models - can be called directly or via fixture
 
     Args:
         model_list: List of model IDs to download. If None, downloads TEST_MODELS.
         ignore_weights: If True, skips downloading model weight files. Default is False.
+        cache_dir: Override the download destination. When None, snapshot_download
+            respects HF_HUB_CACHE / HF_HOME from the environment.
     """
     if model_list is None:
         model_list = TEST_MODELS
@@ -346,11 +350,13 @@ def download_models(model_list=None, ignore_weights=False):
                 snapshot_download(
                     repo_id=model_id,
                     ignore_patterns=weight_patterns,
+                    cache_dir=cache_dir,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
                     repo_id=model_id,
+                    cache_dir=cache_dir,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
@@ -381,6 +387,8 @@ def _models_dir_env(pytestconfig):
         yield
         return
     orig = _apply_models_dir_env(models_dir)
+    pytestconfig._original_hf_hub_cache = _get_original_hf_hub_cache(orig)
+    pytestconfig._models_dir_value = models_dir
     try:
         yield
     finally:
@@ -411,10 +419,16 @@ def predownload_models(pytestconfig, _models_dir_env):
             )
         with FileLock(_download_lock_path):
             if missing:
+                original_cache = pytestconfig._original_hf_hub_cache
+                models_dir = pytestconfig._models_dir_value
                 logging.info(
-                    f"Downloading {len(missing)} models missing from --models-dir cache\nModels: {missing}"
+                    f"Downloading {len(missing)} models missing from --models-dir cache "
+                    f"to writable cache {original_cache}\nModels: {missing}"
                 )
-                download_models(model_list=missing)
+                download_models(model_list=missing, cache_dir=original_cache)
+                if original_cache != os.environ.get("HF_HUB_CACHE"):
+                    _merge_models_dir_into_writable_cache(models_dir, original_cache)
+                    os.environ["HF_HUB_CACHE"] = original_cache
         _enable_offline_with_mistral_patch()
         try:
             yield
@@ -458,10 +472,16 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
             )
         with FileLock(_download_lock_path):
             if missing:
+                original_cache = pytestconfig._original_hf_hub_cache
+                models_dir = pytestconfig._models_dir_value
                 logging.info(
-                    f"Downloading tokenizers for {len(missing)} models missing from --models-dir cache\nModels: {missing}"
+                    f"Downloading tokenizers for {len(missing)} models missing from --models-dir cache "
+                    f"to writable cache {original_cache}\nModels: {missing}"
                 )
-                download_models(model_list=missing, ignore_weights=True)
+                download_models(model_list=missing, ignore_weights=True, cache_dir=original_cache)
+                if original_cache != os.environ.get("HF_HUB_CACHE"):
+                    _merge_models_dir_into_writable_cache(models_dir, original_cache)
+                    os.environ["HF_HUB_CACHE"] = original_cache
         _enable_offline_with_mistral_patch()
         try:
             yield
