@@ -1085,6 +1085,10 @@ func GenerateBasePodSpec(
 	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+	// Track only the user-declared mounts so we can propagate exactly these to the
+	// frontend sidecar — backend.UpdateContainer may later add container mounts
+	// (e.g. TRT-LLM's /ssh-pk secret) that must not leak into the sidecar.
+	userMounts := make([]corev1.VolumeMount, 0, len(component.VolumeMounts))
 
 	for _, volumeMount := range component.VolumeMounts {
 		if volumeMount.Name == "" {
@@ -1113,10 +1117,12 @@ func GenerateBasePodSpec(
 			},
 		})
 
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		mount := corev1.VolumeMount{
 			Name:      volumeMount.Name,
 			MountPath: mountPoint,
-		})
+		}
+		container.VolumeMounts = append(container.VolumeMounts, mount)
+		userMounts = append(userMounts, mount)
 	}
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
@@ -1170,7 +1176,7 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
-		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig, container.VolumeMounts)
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig, userMounts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
 		}
