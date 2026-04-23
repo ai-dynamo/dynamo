@@ -619,8 +619,41 @@ mod tests {
         )
     }
 
+    fn make_mgr_capturing_with_backend(
+        capacity: usize,
+        block_size: usize,
+        backend: MockerEvictionBackend,
+    ) -> (KvManager, Arc<CapturingSink>) {
+        let sink = Arc::new(CapturingSink::default());
+        let publishers = KvEventPublishers::new(Some(sink.clone() as _), None);
+        (
+            KvManager::new_with_eviction_backend(capacity, block_size, publishers, 0, backend),
+            sink,
+        )
+    }
+
     fn plh(v: u64) -> PositionalLineageHash {
         PositionalLineageHash::new(v, None, 0)
+    }
+
+    fn lineage_plh(id: u64) -> PositionalLineageHash {
+        match id {
+            0 => PositionalLineageHash::new(0, None, 0),
+            1 => PositionalLineageHash::new(1, Some(0), 1),
+            2 => PositionalLineageHash::new(2, Some(1), 2),
+            3 => PositionalLineageHash::new(3, Some(2), 3),
+            4 => PositionalLineageHash::new(4, Some(3), 4),
+            5 => PositionalLineageHash::new(5, Some(1), 2),
+            6 => PositionalLineageHash::new(6, Some(5), 3),
+            7 => PositionalLineageHash::new(7, Some(2), 3),
+            8 => PositionalLineageHash::new(8, Some(7), 4),
+            9 => PositionalLineageHash::new(9, Some(8), 5),
+            10 => PositionalLineageHash::new(10, None, 0),
+            11 => PositionalLineageHash::new(11, Some(10), 1),
+            12 => PositionalLineageHash::new(12, Some(11), 2),
+            13 => PositionalLineageHash::new(13, None, 0),
+            _ => plh(id),
+        }
     }
 
     fn use_full(mgr: &mut KvManager, seq_hash: u64, p: PositionalLineageHash) -> usize {
@@ -810,12 +843,10 @@ mod tests {
 
     #[test]
     fn test_block_lifecycle_stringent() {
-        // Batch helpers local to this test. Each FullBlock gets a unique PLH
-        // derived from its id so the PLH->SequenceHash mapping stays 1:1.
-        fn use_blocks(mgr: &mut KvManager, ids: &[u64]) {
+        fn use_blocks(mgr: &mut KvManager, ids: &[u64]) -> usize {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
-            let plhs: Vec<_> = ids.iter().map(|&id| plh(id)).collect();
-            mgr.process(&MoveBlock::Use(blocks, vec![], plhs, None, None));
+            let plhs: Vec<_> = ids.iter().map(|&id| lineage_plh(id)).collect();
+            mgr.process(&MoveBlock::Use(blocks, vec![], plhs, None, None))
         }
         fn deref_blocks(mgr: &mut KvManager, ids: &[u64]) {
             let blocks = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
@@ -855,7 +886,7 @@ mod tests {
                 expected_ids.len(),
                 "inactive count mismatch; expected={expected_ids:?}"
             );
-            let plhs: Vec<_> = expected_ids.iter().map(|&id| plh(id)).collect();
+            let plhs: Vec<_> = expected_ids.iter().map(|&id| lineage_plh(id)).collect();
             let presence = mgr
                 .block_manager
                 .block_registry()
@@ -871,46 +902,123 @@ mod tests {
                 );
             }
         }
+        fn drain_events(sink: &Arc<CapturingSink>) -> Vec<KvCacheEvent> {
+            std::mem::take(&mut *sink.events.lock().unwrap())
+        }
+        fn assert_stored_event(
+            event: &KvCacheEvent,
+            expected_blocks: &[u64],
+            expected_parent: Option<u64>,
+        ) {
+            let KvCacheEventData::Stored(data) = &event.data else {
+                panic!("expected Stored event, got {:?}", event.data);
+            };
+            let actual_blocks: Vec<u64> =
+                data.blocks.iter().map(|block| block.block_hash.0).collect();
+            assert_eq!(actual_blocks, expected_blocks, "stored blocks mismatch");
+            assert_eq!(
+                data.parent_hash.map(|hash| hash.0),
+                expected_parent,
+                "stored parent_hash mismatch"
+            );
+        }
+        fn assert_removed_event(event: &KvCacheEvent, expected_blocks: &[u64]) {
+            let KvCacheEventData::Removed(data) = &event.data else {
+                panic!("expected Removed event, got {:?}", event.data);
+            };
+            let actual_blocks: Vec<u64> = data.block_hashes.iter().map(|hash| hash.0).collect();
+            assert_eq!(actual_blocks, expected_blocks, "removed blocks mismatch");
+        }
 
-        let mut mgr = make_mgr(10, 16);
+        let (mut mgr, sink) =
+            make_mgr_capturing_with_backend(10, 16, MockerEvictionBackend::Lineage);
 
         // Use blocks 0..=4, then 0, 1, 5, 6 — 0 and 1 bump refcount to 2.
-        use_blocks(&mut mgr, &[0, 1, 2, 3, 4]);
-        use_blocks(&mut mgr, &[0, 1, 5, 6]);
+        assert_eq!(use_blocks(&mut mgr, &[0, 1, 2, 3, 4]), 5);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 1, "expected one Stored event for [0..=4]");
+        assert_stored_event(&events[0], &[0, 1, 2, 3, 4], None);
+
+        assert_eq!(use_blocks(&mut mgr, &[0, 1, 5, 6]), 4);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 1, "expected one Stored event for [5, 6]");
+        assert_stored_event(&events[0], &[5, 6], Some(1));
         assert_active(
             &mgr,
             &[(0, 2), (1, 2), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)],
         );
 
-        // Deref block 4; deref 0, 1, 2, 3. 2, 3, and 4 drop to inactive via
-        // RAII because their last active handle is released.
-        deref_blocks(&mut mgr, &[4]);
-        deref_blocks(&mut mgr, &[0, 1, 2, 3]);
+        // Leaf-to-root release order is what makes the resulting inactive set
+        // deterministic under the Lineage backend.
+        deref_blocks(&mut mgr, &[4, 3, 2, 1, 0]);
+        let events = drain_events(&sink);
+        assert!(events.is_empty(), "Deref should not emit KV events");
         assert_active(&mgr, &[(0, 1), (1, 1), (5, 1), (6, 1)]);
         assert_inactive_blocks(&mgr, &[2, 3, 4]);
 
-        // Deref block 6; deref 0, 1, 5. Active drains; inactive = {0..=6}.
-        deref_blocks(&mut mgr, &[6]);
-        deref_blocks(&mut mgr, &[0, 1, 5]);
+        // Release the second branch leaf-to-root too. Active drains; inactive = {0..=6}.
+        deref_blocks(&mut mgr, &[6, 5, 1, 0]);
+        let events = drain_events(&sink);
+        assert!(events.is_empty(), "Deref should not emit KV events");
         assert_active(&mgr, &[]);
         assert_inactive_blocks(&mgr, &[0, 1, 2, 3, 4, 5, 6]);
 
         // Re-use 0, 1, 2 (reactivates from inactive) + 7, 8, 9 (new, 3 free
         // slots). No eviction needed — inactive shrinks to {3, 4, 5, 6}.
-        use_blocks(&mut mgr, &[0, 1, 2, 7, 8, 9]);
+        assert_eq!(use_blocks(&mut mgr, &[0, 1, 2, 7, 8, 9]), 6);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 1, "expected one Stored event for [7, 8, 9]");
+        assert_stored_event(&events[0], &[7, 8, 9], Some(2));
         assert_active(&mgr, &[(0, 1), (1, 1), (2, 1), (7, 1), (8, 1), (9, 1)]);
         assert_inactive_blocks(&mgr, &[3, 4, 5, 6]);
 
-        // Allocate through capacity: 10, 11, 12 force eviction of 3 inactive
-        // entries. Exact survivor depends on eviction order (Lineage/LRU), so
-        // only assert count.
-        use_blocks(&mut mgr, &[10, 11, 12]);
-        assert_eq!(mgr.num_active_blocks(), 9);
-        assert_eq!(mgr.num_inactive_blocks(), 1);
+        // Capacity pressure now forces exact leaf-first evictions: 4, then 3,
+        // then 6. The sole inactive survivor is 5.
+        assert_eq!(use_blocks(&mut mgr, &[10, 11, 12]), 3);
+        let events = drain_events(&sink);
+        assert_eq!(
+            events.len(),
+            2,
+            "expected Stored + Removed for [10, 11, 12]"
+        );
+        assert_stored_event(&events[0], &[10, 11, 12], None);
+        assert_removed_event(&events[1], &[4, 3, 6]);
+        assert_active(
+            &mgr,
+            &[
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (7, 1),
+                (8, 1),
+                (9, 1),
+                (10, 1),
+                (11, 1),
+                (12, 1),
+            ],
+        );
+        assert_inactive_blocks(&mgr, &[5]);
 
-        // One more block keeps us at full capacity without panicking.
-        use_blocks(&mut mgr, &[13]);
-        assert_eq!(mgr.num_active_blocks(), 10);
+        assert_eq!(use_blocks(&mut mgr, &[13]), 1);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 2, "expected Stored + Removed for [13]");
+        assert_stored_event(&events[0], &[13], None);
+        assert_removed_event(&events[1], &[5]);
+        assert_active(
+            &mgr,
+            &[
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (7, 1),
+                (8, 1),
+                (9, 1),
+                (10, 1),
+                (11, 1),
+                (12, 1),
+                (13, 1),
+            ],
+        );
         assert_eq!(mgr.num_inactive_blocks(), 0);
     }
 
