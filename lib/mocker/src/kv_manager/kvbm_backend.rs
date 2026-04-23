@@ -30,7 +30,6 @@
 //! - `Lru` — simple recency-based LRU.
 //! - `MultiLru` — 4-tier frequency-aware LRU (requires TinyLFU tracker).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_kv_router::protocols::{
@@ -42,6 +41,7 @@ use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash};
 use kvbm_logical::registry::BlockRegistry;
 use kvbm_logical::tinylfu::TinyLFUTracker;
 use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
+use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::common::kv_cache_trace;
@@ -79,13 +79,13 @@ pub struct KvManager {
 
     /// PartialBlocks (still filling tokens) held as `MutableBlock`.
     /// Dropped blocks return to kvbm-logical's reset pool.
-    active_partial: HashMap<Uuid, MutableBlock<G1>>,
+    active_partial: FxHashMap<Uuid, MutableBlock<G1>>,
 
     /// FullBlocks held as `ImmutableBlock`, keyed by `SequenceHash`. The vec
     /// length is the mocker's reference count — each `Use` pushes a clone,
     /// each `Deref` pops one. When the vec empties, the block transitions to
     /// kvbm-logical's inactive pool (RAII return on drop of the last clone).
-    active_full: HashMap<SequenceHash, Vec<ImmutableBlock<G1>>>,
+    active_full: FxHashMap<SequenceHash, Vec<ImmutableBlock<G1>>>,
 
     /// Shadow registry of (PLH → mocker u64 seq_hash) for every block that has
     /// been registered in kvbm-logical. kvbm-logical's registry is keyed by
@@ -93,7 +93,7 @@ pub struct KvManager {
     /// mocker's u64 `SequenceHash` on `UniqueBlock::FullBlock`. We keep this
     /// map so we can emit router-compatible `Removed` events when kvbm-logical
     /// evicts inactive blocks as a side effect of `allocate_blocks_with_evictions`.
-    registered_plhs: HashMap<PositionalLineageHash, SequenceHash>,
+    registered_plhs: FxHashMap<PositionalLineageHash, SequenceHash>,
 }
 
 impl KvManager {
@@ -152,9 +152,9 @@ impl KvManager {
             kv_event_publishers,
             dp_rank,
             next_event_id: 0,
-            active_partial: HashMap::new(),
-            active_full: HashMap::new(),
-            registered_plhs: HashMap::new(),
+            active_partial: FxHashMap::default(),
+            active_full: FxHashMap::default(),
+            registered_plhs: FxHashMap::default(),
         }
     }
 
@@ -554,14 +554,10 @@ impl KvManager {
                             overlap += 1;
                             continue;
                         }
-                        let Some(plh) = plhs.get(i).copied() else {
+                        let Some(plh) = plhs.get(i) else {
                             break;
                         };
-                        let presence = self
-                            .block_manager
-                            .block_registry()
-                            .check_presence::<G1>(&[plh]);
-                        if presence.first().is_some_and(|(_, present)| *present) {
+                        if self.registered_plhs.contains_key(plh) {
                             overlap += 1;
                         } else {
                             break;
