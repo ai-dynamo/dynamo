@@ -30,66 +30,21 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from typing import Literal
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
-
 from . import aic, evaluate
-from .constants import (
-    AIC_BACKEND_VERSIONS,
-    DEFAULT_MAX_PARALLEL_EVALS,
-    DEFAULT_OVERLAP_SCORE_WEIGHTS,
-    DEFAULT_SEARCH_ROUNDS,
-)
-from .models import (
-    DenseAggReplayState,
-    DenseReplayOptimizationResult,
-    DenseReplayState,
-    ReplayConstraints,
-    ReplayObjective,
-    SyntheticReplayWorkload,
-    TraceReplayWorkload,
-)
+from .constants import DEFAULT_SEARCH_ROUNDS
+from .models import DenseAggReplayState, DenseReplayOptimizationResult, DenseReplayState
 from .scoring import _finalize_result, _pick_best_record
-
-
-def _validate_backend(backend: str) -> str:
-    if backend not in AIC_BACKEND_VERSIONS:
-        raise ValueError(
-            f"backend must be one of {sorted(AIC_BACKEND_VERSIONS)}, got {backend!r}"
-        )
-    return backend
-
-
-def _normalize_overlap_score_weights(
-    overlap_score_weights: Sequence[float] | None,
-) -> tuple[float, ...]:
-    if overlap_score_weights is None:
-        return DEFAULT_OVERLAP_SCORE_WEIGHTS
-
-    weights = tuple(float(weight) for weight in overlap_score_weights)
-    if not weights:
-        raise ValueError("overlap_score_weights must not be empty")
-    return weights
-
-
-def _normalize_router_mode(
-    router_mode: str,
-) -> Literal["kv_router", "round_robin", "both"]:
-    if router_mode not in {"kv_router", "round_robin", "both"}:
-        raise ValueError(
-            "router_mode must be one of ['kv_router', 'round_robin', 'both'], "
-            f"got {router_mode!r}"
-        )
-    return router_mode
+from .specs import ReplayOptimizeSpec, RouterMode
 
 
 def _router_states(
     *,
-    router_mode: Literal["kv_router", "round_robin", "both"],
+    router_mode: RouterMode,
     overlap_score_weights: Sequence[float],
 ) -> list[tuple[str, float]]:
-    if router_mode == "round_robin":
+    if router_mode is RouterMode.ROUND_ROBIN:
         return [("round_robin", 0.0)]
-    if router_mode == "kv_router":
+    if router_mode is RouterMode.KV_ROUTER:
         return [("kv_router", float(weight)) for weight in overlap_score_weights]
     return [("round_robin", 0.0)] + [
         ("kv_router", float(weight)) for weight in overlap_score_weights
@@ -267,27 +222,15 @@ def _record_to_agg_state(
 
 
 def optimize_dense_disagg_with_replay(
-    *,
-    model: str,
-    backend: Literal["vllm", "sglang"],
-    system: str,
-    workload: SyntheticReplayWorkload | TraceReplayWorkload,
-    base_prefill_engine_args: MockEngineArgs,
-    base_decode_engine_args: MockEngineArgs,
-    base_router_config: KvRouterConfig | None = None,
-    max_total_gpus: int,
-    constraints: Mapping[str, float] | None = None,
-    objective: Literal["throughput", "mean_e2e_latency", "mean_ttft"] = "throughput",
-    router_mode: Literal["kv_router", "round_robin", "both"] = "kv_router",
-    overlap_score_weights: Sequence[float] | None = None,
-    max_parallel_evals: int = DEFAULT_MAX_PARALLEL_EVALS,
+    spec: ReplayOptimizeSpec,
 ) -> DenseReplayOptimizationResult:
     """Run a heuristic block search over dense disaggregated offline replay configs.
 
-    This routine assumes we want to use as much of `max_total_gpus` as possible,
-    then ranks visited states by the selected `objective` subject to replay
-    constraints. Supported objectives: `"throughput"` (default, maximize
-    `output_throughput_tok_s`), `"mean_e2e_latency"` and `"mean_ttft"` (minimize
+    Assumes the optimizer should consume as much of `spec.hardware.totalGpus` as
+    possible, then ranks visited states by `spec.objective` subject to the SLA
+    bounds in `spec.sla`. Supported objectives: `ReplayObjective.THROUGHPUT`
+    (default, maximize `output_throughput_tok_s`),
+    `ReplayObjective.MEAN_E2E_LATENCY` and `ReplayObjective.MEAN_TTFT` (minimize
     the corresponding report metric). The descended dimensions are:
     1. `(prefill_tp, decode_tp)` at equal worker counts that fit the budget.
     2. `(prefill_workers, decode_workers)` on the budget edge for the incumbent TP
@@ -296,17 +239,24 @@ def optimize_dense_disagg_with_replay(
 
     Returned "best" records are best among visited states, not a global optimum.
     """
-    backend = _validate_backend(backend)
-    router_mode = _normalize_router_mode(router_mode)
-    typed_objective = ReplayObjective(objective)
-    if max_total_gpus < 2:
-        raise ValueError("max_total_gpus must be at least 2 for disaggregated replay")
+    # Guardrail #8: disagg path requires both prefill and decode engine args.
+    if (
+        spec.engine.basePrefillEngineArgs is None
+        or spec.engine.baseDecodeEngineArgs is None
+    ):
+        raise ValueError(
+            "optimize_dense_disagg_with_replay requires both "
+            "EngineSpec.basePrefillEngineArgs and EngineSpec.baseDecodeEngineArgs"
+        )
+    if spec.hardware.totalGpus < 2:
+        raise ValueError(
+            "hardware.totalGpus must be at least 2 for disaggregated replay"
+        )
 
-    typed_constraints = ReplayConstraints.from_mapping(constraints, max_total_gpus)
-    overlap_weights = _normalize_overlap_score_weights(overlap_score_weights)
-    if router_mode == "round_robin":
-        overlap_weights = (0.0,)
-    max_parallel_evals = max(1, int(max_parallel_evals))
+    backend = spec.engine.backend.value
+    system = str(spec.hardware.gpuSku)
+    overlap_weights = spec.router.effectiveOverlapWeights
+    max_parallel_evals = max(1, int(spec.maxParallelEvals))
     prefill_tps, decode_tps = aic._enumerate_dense_tp_candidates(backend, system)
     if not prefill_tps or not decode_tps:
         raise ValueError(
@@ -318,7 +268,7 @@ def optimize_dense_disagg_with_replay(
         prefill_tps=prefill_tps,
         decode_tps=decode_tps,
         overlap_score_weight=overlap_weights[0],
-        max_total_gpus=max_total_gpus,
+        max_total_gpus=spec.hardware.totalGpus,
     )
 
     executor = (
@@ -335,19 +285,11 @@ def optimize_dense_disagg_with_replay(
                 decode_tps=decode_tps,
                 router_mode=incumbent.router_mode,
                 overlap_score_weight=incumbent.overlap_score_weight,
-                max_total_gpus=max_total_gpus,
+                max_total_gpus=spec.hardware.totalGpus,
             )
             tp_records = evaluate._evaluate_states(
                 states=tp_states,
-                workload=workload,
-                base_prefill_engine_args=base_prefill_engine_args,
-                base_decode_engine_args=base_decode_engine_args,
-                base_router_config=base_router_config,
-                model=model,
-                backend=backend,
-                system=system,
-                objective=typed_objective,
-                constraints=typed_constraints,
+                spec=spec,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -359,19 +301,11 @@ def optimize_dense_disagg_with_replay(
                 decode_tp=incumbent.decode_tp,
                 router_mode=incumbent.router_mode,
                 overlap_score_weight=incumbent.overlap_score_weight,
-                max_total_gpus=max_total_gpus,
+                max_total_gpus=spec.hardware.totalGpus,
             )
             worker_records = evaluate._evaluate_states(
                 states=worker_states,
-                workload=workload,
-                base_prefill_engine_args=base_prefill_engine_args,
-                base_decode_engine_args=base_decode_engine_args,
-                base_router_config=base_router_config,
-                model=model,
-                backend=backend,
-                system=system,
-                objective=typed_objective,
-                constraints=typed_constraints,
+                spec=spec,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -389,19 +323,11 @@ def optimize_dense_disagg_with_replay(
                         router_mode=mode,
                     )
                     for mode, weight in _router_states(
-                        router_mode=router_mode,
+                        router_mode=spec.router.mode,
                         overlap_score_weights=overlap_weights,
                     )
                 ],
-                workload=workload,
-                base_prefill_engine_args=base_prefill_engine_args,
-                base_decode_engine_args=base_decode_engine_args,
-                base_router_config=base_router_config,
-                model=model,
-                backend=backend,
-                system=system,
-                objective=typed_objective,
-                constraints=typed_constraints,
+                spec=spec,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -418,44 +344,31 @@ def optimize_dense_disagg_with_replay(
 
 
 def optimize_dense_agg_with_replay(
-    *,
-    model: str,
-    backend: Literal["vllm", "sglang"],
-    system: str,
-    workload: SyntheticReplayWorkload | TraceReplayWorkload,
-    base_engine_args: MockEngineArgs,
-    base_router_config: KvRouterConfig | None = None,
-    max_total_gpus: int,
-    constraints: Mapping[str, float] | None = None,
-    objective: Literal["throughput", "mean_e2e_latency", "mean_ttft"] = "throughput",
-    router_mode: Literal["kv_router", "round_robin", "both"] = "kv_router",
-    overlap_score_weights: Sequence[float] | None = None,
-    max_parallel_evals: int = DEFAULT_MAX_PARALLEL_EVALS,
+    spec: ReplayOptimizeSpec,
 ) -> DenseReplayOptimizationResult:
     """Run a heuristic block search over dense aggregated offline replay configs.
 
-    This routine assumes we want to use as much of `max_total_gpus` as possible,
-    then ranks visited states by the selected `objective` subject to replay
-    constraints. Supported objectives: `"throughput"` (default, maximize
-    `output_throughput_tok_s`), `"mean_e2e_latency"` and `"mean_ttft"` (minimize
-    the corresponding report metric). The descended dimensions are:
+    Assumes the optimizer should consume as much of `spec.hardware.totalGpus` as
+    possible, then ranks visited states by `spec.objective` subject to the SLA
+    bounds in `spec.sla`. The descended dimensions are:
     1. `tp` at the maximum worker count that fits the budget.
     2. `workers` for the incumbent `tp`.
     3. `(router_mode, overlap_score_weight)`.
 
     Returned "best" records are best among visited states, not a global optimum.
     """
-    backend = _validate_backend(backend)
-    router_mode = _normalize_router_mode(router_mode)
-    typed_objective = ReplayObjective(objective)
-    if max_total_gpus < 1:
-        raise ValueError("max_total_gpus must be at least 1 for aggregated replay")
+    # Guardrail #8: agg path requires the single baseEngineArgs.
+    if spec.engine.baseEngineArgs is None:
+        raise ValueError(
+            "optimize_dense_agg_with_replay requires EngineSpec.baseEngineArgs"
+        )
+    if spec.hardware.totalGpus < 1:
+        raise ValueError("hardware.totalGpus must be at least 1 for aggregated replay")
 
-    typed_constraints = ReplayConstraints.from_mapping(constraints, max_total_gpus)
-    overlap_weights = _normalize_overlap_score_weights(overlap_score_weights)
-    if router_mode == "round_robin":
-        overlap_weights = (0.0,)
-    max_parallel_evals = max(1, int(max_parallel_evals))
+    backend = spec.engine.backend.value
+    system = str(spec.hardware.gpuSku)
+    overlap_weights = spec.router.effectiveOverlapWeights
+    max_parallel_evals = max(1, int(spec.maxParallelEvals))
     tps, _ = aic._enumerate_dense_tp_candidates(backend, system)
     if not tps:
         raise ValueError(
@@ -463,7 +376,9 @@ def optimize_dense_agg_with_replay(
         )
 
     cache: dict[DenseAggReplayState, dict[str, float | int | bool | str]] = {}
-    incumbent = _select_initial_agg_state(tps=tps, max_total_gpus=max_total_gpus)
+    incumbent = _select_initial_agg_state(
+        tps=tps, max_total_gpus=spec.hardware.totalGpus
+    )
 
     executor = (
         ProcessPoolExecutor(max_workers=max_parallel_evals)
@@ -478,18 +393,11 @@ def optimize_dense_agg_with_replay(
                 tps=tps,
                 router_mode=incumbent.router_mode,
                 overlap_score_weight=incumbent.overlap_score_weight,
-                max_total_gpus=max_total_gpus,
+                max_total_gpus=spec.hardware.totalGpus,
             )
             tp_records = evaluate._evaluate_agg_states(
                 states=tp_states,
-                workload=workload,
-                base_engine_args=base_engine_args,
-                base_router_config=base_router_config,
-                model=model,
-                backend=backend,
-                system=system,
-                objective=typed_objective,
-                constraints=typed_constraints,
+                spec=spec,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -500,18 +408,11 @@ def optimize_dense_agg_with_replay(
                 tp=incumbent.tp,
                 router_mode=incumbent.router_mode,
                 overlap_score_weight=incumbent.overlap_score_weight,
-                max_total_gpus=max_total_gpus,
+                max_total_gpus=spec.hardware.totalGpus,
             )
             worker_records = evaluate._evaluate_agg_states(
                 states=worker_states,
-                workload=workload,
-                base_engine_args=base_engine_args,
-                base_router_config=base_router_config,
-                model=model,
-                backend=backend,
-                system=system,
-                objective=typed_objective,
-                constraints=typed_constraints,
+                spec=spec,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
@@ -527,7 +428,7 @@ def optimize_dense_agg_with_replay(
                         overlap_score_weight=weight,
                     )
                     for mode, weight in _router_states(
-                        router_mode=router_mode,
+                        router_mode=spec.router.mode,
                         overlap_score_weights=overlap_weights,
                     )
                     if _supports_agg_router_mode(
@@ -535,14 +436,7 @@ def optimize_dense_agg_with_replay(
                         router_mode=mode,
                     )
                 ],
-                workload=workload,
-                base_engine_args=base_engine_args,
-                base_router_config=base_router_config,
-                model=model,
-                backend=backend,
-                system=system,
-                objective=typed_objective,
-                constraints=typed_constraints,
+                spec=spec,
                 cache=cache,
                 max_parallel_evals=max_parallel_evals,
                 executor=executor,
