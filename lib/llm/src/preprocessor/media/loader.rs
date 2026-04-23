@@ -132,10 +132,7 @@ impl MediaFetcher {
     /// `allow_direct_port`, and `allow_private_ips` all to `true` at
     /// once.
     pub fn from_env() -> Self {
-        let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL")
-            .ok()
-            .as_deref()
-            == Some("1");
+        let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL").ok().as_deref() == Some("1");
         Self {
             allow_direct_ip: allow_internal,
             allow_direct_port: allow_internal,
