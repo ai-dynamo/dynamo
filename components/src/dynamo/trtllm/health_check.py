@@ -102,7 +102,5 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             DisaggregationMode.PREFILL,
             DisaggregationMode.DECODE,
         ):
-            payload["disaggregated_params"] = {
-                "request_type": "context_and_generation"
-            }
+            payload["disaggregated_params"] = {"request_type": "context_and_generation"}
         return payload
