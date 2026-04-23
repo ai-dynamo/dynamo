@@ -91,6 +91,18 @@ pub struct MediaFetcher {
     pub user_agent: String,
     pub allow_direct_ip: bool,
     pub allow_direct_port: bool,
+    /// When `false` (default), reject URLs that target blocked locations:
+    /// an IP literal in the RFC-range blocklist (`BLOCKED_IP_NETWORKS`),
+    /// a hostname in the literal blocklist (`BLOCKED_HOSTS`, e.g.
+    /// `localhost` / `metadata.google.internal`), or — in
+    /// `check_if_url_allowed_with_dns` — a hostname that DNS-resolves
+    /// to a blocked IP. The name reads "IP" but semantically this is a
+    /// single "allow internal / on-prem targets" switch that covers
+    /// both IP and hostname blocklists together: real on-prem
+    /// deployments need both at once (private CIDRs *and* internal
+    /// service names), and splitting them would give no useful config
+    /// while doubling the footgun surface. **Never** set on anything
+    /// public-facing.
     pub allow_private_ips: bool,
     pub allowed_media_domains: Option<HashSet<String>>,
     pub timeout: Option<Duration>,
