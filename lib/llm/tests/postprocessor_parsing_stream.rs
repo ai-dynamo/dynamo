@@ -599,5 +599,8 @@ async fn postprocessor_parsing_stream_minimax_named_bare_parameters() {
     assert_eq!(tool_calls.len(), 1, "expected one tool call");
     assert_eq!(tool_calls[0].name.as_deref(), Some("get_weather"));
     let args: Value = serde_json::from_str(&tool_calls[0].arguments).unwrap();
-    assert_eq!(args, serde_json::json!({"location": "Paris", "unit": "celsius"}));
+    assert_eq!(
+        args,
+        serde_json::json!({"location": "Paris", "unit": "celsius"})
+    );
 }

@@ -3652,5 +3652,4 @@ fahrenheit
             "wrong-tool JSON leaked to content: {emitted_text:?}"
         );
     }
-
 }
