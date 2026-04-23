@@ -36,7 +36,34 @@ flowchart LR
     H --> TC[Trace Collector]
 ```
 
-The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with the vLLM engine; multi-engine simulation (`MES`) covers aggregated multi-worker replay, disaggregated prefill/decode replay, and KV-router replay. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis. See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for what SES/MES actually simulate.
+The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with the vLLM engine; multi-engine simulation (`MES`) covers aggregated multi-worker replay, disaggregated prefill/decode replay, and KV-router replay. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
+
+Each simulation composes a different set of components. SES drives the engine core directly (scheduler + forward-pass modeling). MES composes multiple engine cores with KV transfer/offloading, KV routing, and planner simulation layered on top:
+
+```mermaid
+flowchart TD
+    subgraph SEC[Single Engine Core]
+        subgraph SCH[Scheduler Modeling]
+            F[Fwd Pass Modeling]
+        end
+    end
+
+    KV[KV Transfer + Offloading Simulation]
+    KR[KV Router Simulation]
+    P[Planner Simulation]
+
+    SES[Single Engine Simulation]
+    MES[Multi Engine Simulation]
+
+    SES --> SEC
+
+    MES --> SEC
+    MES --> KV
+    MES --> KR
+    MES --> P
+```
+
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
 
 ## Quick Start
 
