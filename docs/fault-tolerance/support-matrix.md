@@ -35,29 +35,44 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 
 #### Status
 
-| Backend | Managed memory | Multi-node | Upstream integration<a href="#gms-note-1"><sup>1</sup></a> |
+| Backend | Managed memory | Multi-node | Upstream integration¹ |
 | :--- | :--- | :---: | :--- |
 | **vLLM** | weights, KV | ✅ | ✅ upstream |
-| **SGLang** | weights, KV | ✅ | 🚧 patches needed<a href="#gms-note-2"><sup>2</sup></a> |
-| **TensorRT-LLM** | weights<a href="#gms-note-3"><sup>3</sup></a> | 🚧 | 🚧 patches needed<a href="#gms-note-4"><sup>4</sup></a> |
+| **SGLang** | weights, KV | ✅ | 🚧 patches needed² |
+| **TensorRT-LLM** | weights³ | 🚧 | 🚧 patches needed⁴ |
 
 **Notes:**
 
-1. <a id="gms-note-1"></a>**Upstream integration**: whether the backend's GMS integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream.
-2. <a id="gms-note-2"></a>SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
-3. <a id="gms-note-3"></a>TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
-4. <a id="gms-note-4"></a>TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
+1. **Upstream integration**: whether the backend's integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream.
+2. SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
+3. TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
+4. TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
-Dynamo Bulwark keeps LLM deployments serving through software failures without request disruption. Warm, pre-initialized "shadow" engines share weights (and, in the near term, KV cache) with the primary via GMS + DRA, and take over within seconds when the primary dies, using a kernel-mediated flock for leader election.
+- Warm, pre-initialized "shadow" engines share weights (and, in the near term, KV cache) with the primary, and take over within seconds when the primary dies, using a kernel-mediated flock for leader election.
+- Depends on [GMS](#gpu-memory-service-gms); Bulwark support for a backend is upper-bounded by that backend's GMS row above.
+- Configured via the `gpuMemoryService` and `failover` fields on the `DynamoGraphDeployment` CR.
 
 Supported topologies:
 
-- **Intra-pod:** active + standby engine containers within a single pod, sharing GPUs and the GMS sidecar.
-- **Inter-pod:** rank-dedicated GMS weight servers with N shadow engine pods per rank, for large-scale redundancy and as the basis for hardware-fault recovery.
+- **Intra-pod**: active + standby engine containers within a single pod, sharing GPUs and the GMS sidecar.
+- **Inter-pod**: rank-dedicated GMS weight servers with N shadow engine pods per rank, for large-scale redundancy and as the basis for hardware-fault recovery.
 
-Configured via the `gpuMemoryService` and `failover` fields on the `DynamoGraphDeployment` CR.
+#### Status
+
+| Backend | Intra-pod failover | Multi-node | Upstream integration¹ |
+| :--- | :---: | :---: | :--- |
+| **vLLM** | ✅ | 🚧² | ✅ upstream |
+| **SGLang** | 🚧 | 🚧 | 🚧 patches needed³ |
+| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 patches needed⁴ |
+
+**Notes:**
+
+1. **Upstream integration**: whether the backend's integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream. Shared definition with the GMS table.
+2. Inter-pod Bulwark for vLLM is in progress, reusing the same Grove/DRA plumbing as intra-pod.
+3. SGLang Bulwark integration inherits the monkey-patching requirements flagged for SGLang GMS.
+4. TensorRT-LLM Bulwark flow requires out-of-tree patches, targeted for upstream once shadow-engine parity with vLLM is validated end-to-end.
 
 ### Dynamo Snapshot (ChReK)
 
