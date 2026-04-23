@@ -360,6 +360,13 @@ def test_router_decisions_sglang_disagg(
     )
 
 
+# DYN-2784: Fixture setup hangs silently in nightly only (worker #2 dies
+# in SGLangProcess launch, KvRouter blocks forever on min_initial_workers=2;
+# pytest.mark.timeout signal gets swallowed at the C-level syscall).
+# Passes reliably in pre_merge/post_merge runs, so scope the skip to the
+# nightly pipeline via skip_in_nightly, which nightly-ci.yml excludes from
+# its sglang single-GPU marker filter. Remove once DYN-2784 lands a real fix.
+@pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(

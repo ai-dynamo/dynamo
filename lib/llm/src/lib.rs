@@ -6,10 +6,6 @@
 //! The `dynamo.llm` crate is a Rust library that provides a set of traits and types for building
 //! distributed LLM inference solutions.
 
-use std::{fs::File, io::BufReader, path::Path};
-
-use anyhow::Context as _;
-
 pub mod backend;
 pub mod common;
 pub mod discovery;
@@ -35,7 +31,8 @@ pub mod preprocessor;
 pub mod protocols;
 pub mod recorder;
 pub mod request_template;
-pub mod tokenizers;
+pub use dynamo_tokenizers as tokenizers;
+pub use dynamo_tokenizers::{file_json_field, log_json_err};
 pub mod tokens;
 pub mod types;
 pub mod utils;
@@ -45,111 +42,6 @@ pub mod block_manager;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
-
-/// Reads a JSON file, extracts a specific field, and deserializes it into type T.
-///
-/// # Arguments
-///
-/// * `json_file_path`: Path to the JSON file.
-/// * `field_name`: The name of the field to extract from the JSON map.
-///
-/// # Returns
-///
-/// A `Result` containing the deserialized value of type `T` if successful,
-/// or an `anyhow::Error` if any step fails (file I/O, JSON parsing, field not found,
-/// or deserialization to `T` fails).
-///
-/// # Type Parameters
-///
-/// * `T`: The expected type of the field's value. `T` must implement `serde::de::DeserializeOwned`.
-pub fn file_json_field<T: serde::de::DeserializeOwned>(
-    json_file_path: &Path,
-    field_name: &str,
-) -> anyhow::Result<T> {
-    // 1. Open the file
-    let file = File::open(json_file_path)
-        .with_context(|| format!("Failed to open file: {:?}", json_file_path))?;
-    let reader = BufReader::new(file);
-
-    // 2. Parse the JSON file into a generic serde_json::Value
-    // We parse into `serde_json::Value` first because we need to look up a specific field.
-    // If we tried to deserialize directly into `T`, `T` would need to represent the whole JSON structure.
-    let json_data: serde_json::Value = serde_json::from_reader(reader)
-        .with_context(|| format!("Failed to parse JSON from file: {:?}", json_file_path))?;
-
-    // 3. Ensure the root of the JSON is an object (map)
-    let map = json_data.as_object().ok_or_else(|| {
-        anyhow::anyhow!("JSON root is not an object in file: {:?}", json_file_path)
-    })?;
-
-    // 4. Get the specific field's value
-    let field_value = map.get(field_name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Field '{}' not found in JSON file: {:?}",
-            field_name,
-            json_file_path
-        )
-    })?;
-
-    // 5. Deserialize the field's value into the target type T
-    // We need to clone `field_value` because `from_value` consumes its input.
-    serde_json::from_value(field_value.clone()).with_context(|| {
-        format!(
-            "Failed to deserialize field '{}' (value: {:?}) to the expected type from file: {:?}",
-            field_name, field_value, json_file_path
-        )
-    })
-}
-
-/// Pretty-print the part of JSON that has an error.
-pub fn log_json_err(filename: &str, json: &str, err: &serde_json::Error) {
-    const ERROR_PREFIX: &str = ">>     ";
-
-    // Only log errors that relate to the content of the JSON file
-    if !(err.is_syntax() || err.is_data()) {
-        return;
-    }
-    // These are 1 based for humans so subtract
-    let line = err.line().saturating_sub(1);
-    let column = err.column().saturating_sub(1);
-
-    let json_lines: Vec<&str> = json.lines().collect();
-    if json_lines.is_empty() {
-        tracing::error!("JSON parsing error in {filename}: File is empty.");
-        return;
-    }
-
-    // Two lines before
-    let start_index = (line - 2).max(0);
-    // The problem line and two lines after
-    let end_index = (line + 3).min(json_lines.len());
-
-    // Collect the context
-    let mut context_lines: Vec<String> = (start_index..end_index)
-        .map(|i| {
-            if i == line {
-                format!("{ERROR_PREFIX}{}", json_lines[i])
-            } else {
-                // Six places because tokenizer.json is very long
-                format!("{:06} {}", i + 1, json_lines[i])
-            }
-        })
-        .collect();
-
-    // Insert the column indicator
-    let col_indicator = "_".to_string().repeat(column + ERROR_PREFIX.len()) + "^";
-    let error_in_context_idx = line - start_index;
-    if error_in_context_idx < context_lines.len() {
-        context_lines.insert(error_in_context_idx + 1, col_indicator);
-    }
-
-    tracing::error!(
-        "JSON parsing error in {filename}: Line {}, column {}:\n{}",
-        err.line(),
-        err.column(),
-        context_lines.join("\n")
-    );
-}
 
 #[cfg(test)]
 mod file_json_field_tests {

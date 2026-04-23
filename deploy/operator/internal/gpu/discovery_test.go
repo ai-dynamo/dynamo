@@ -451,6 +451,43 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeMI200,
 		},
 
+		// --- Bare DCGM model names (no form factor suffix) ---
+		// DCGM often reports "NVIDIA H200" / "NVIDIA B200" with system="" because
+		// there is no SXM/HGX/DGX token in the string. GPUs that have no PCIe
+		// variant must still resolve to their SXM SKU.
+		{
+			name:     "NVIDIA H200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA H200",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+		{
+			name:     "NVIDIA B200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA B200",
+			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
+		},
+		{
+			name:     "NVIDIA GB200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA GB200",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+		},
+		{
+			name:     "H200 bare without vendor prefix",
+			input:    "H200",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+		// H100/A100 still default to PCIe when no form factor indicator is present,
+		// because those GPUs have a real PCIe variant.
+		{
+			name:     "H100 bare still defaults to PCIe (has PCIe variant)",
+			input:    "H100",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
+		{
+			name:     "A100 bare still defaults to PCIe (has PCIe variant)",
+			input:    "A100",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
+		},
+
 		// --- Normalization tests ---
 		{
 			name:     "lowercase + spaces",
