@@ -104,7 +104,7 @@ import (
 	"unsafe"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
 var logger = ctrl.Log.WithName("dynamo-kv-scorer")
@@ -132,7 +132,6 @@ func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
-	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
 	logger.Info("Dynamo KV Scorer config loaded",
 		"namespace", ffiNamespace,
 		"component", ffiComponent,
@@ -170,7 +169,6 @@ func initFFI() error {
 		defer C.free(unsafe.Pointer(ns))
 		defer C.free(unsafe.Pointer(cm))
 
-		// Create router handles
 		routerHandlesMutex.Lock()
 		defer routerHandlesMutex.Unlock()
 
@@ -204,8 +202,8 @@ func InitFFI() error {
 	return initFFI()
 }
 
-// podInfoJSON is the JSON-serializable representation of a backend.Pod (datalayer.PodInfo).
-type podInfoJSON struct {
+// endpointInfoJSON is the JSON-serializable representation of an endpoint's metadata.
+type endpointInfoJSON struct {
 	Name        string            `json:"name"`
 	Namespace   string            `json:"namespace"`
 	PodName     string            `json:"podName"`
@@ -215,7 +213,7 @@ type podInfoJSON struct {
 	Labels      map[string]string `json:"labels"`
 }
 
-// metricsJSON is the JSON-serializable representation of backendmetrics.MetricsState (datalayer.Metrics).
+// metricsJSON is the JSON-serializable representation of endpoint metrics.
 type metricsJSON struct {
 	ActiveModels            map[string]int `json:"activeModels"`
 	WaitingModels           map[string]int `json:"waitingModels"`
@@ -229,42 +227,42 @@ type metricsJSON struct {
 	UpdateTime              time.Time      `json:"updateTime"`
 }
 
-// podJSON is the JSON-serializable representation of a schedtypes.Pod passed across the FFI boundary.
-type podJSON struct {
-	Pod     *podInfoJSON `json:"pod"`
-	Metrics *metricsJSON `json:"metrics"`
+// endpointJSON is the JSON-serializable representation of a schedtypes.Endpoint passed across the FFI boundary.
+type endpointJSON struct {
+	Pod     *endpointInfoJSON `json:"pod"`
+	Metrics *metricsJSON      `json:"metrics"`
 }
 
-// SerializePodsToJSON converts a slice of schedtypes.Pod into a JSON string
+// SerializeEndpointsToJSON converts a slice of schedtypes.Endpoint into a JSON string
 // suitable for passing across the C FFI boundary to the Rust router.
-func SerializePodsToJSON(pods []schedtypes.Pod) (string, error) {
-	out := make([]podJSON, 0, len(pods))
-	for _, p := range pods {
-		entry := podJSON{}
+func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
+	out := make([]endpointJSON, 0, len(endpoints))
+	for _, ep := range endpoints {
+		entry := endpointJSON{}
 
-		if podInfo := p.GetPod(); podInfo != nil {
-			entry.Pod = &podInfoJSON{
-				Name:        podInfo.NamespacedName.Name,
-				Namespace:   podInfo.NamespacedName.Namespace,
-				PodName:     podInfo.PodName,
-				Address:     podInfo.Address,
-				Port:        podInfo.Port,
-				MetricsHost: podInfo.MetricsHost,
-				Labels:      podInfo.Labels,
+		if meta := ep.GetMetadata(); meta != nil {
+			entry.Pod = &endpointInfoJSON{
+				Name:      meta.NamespacedName.Name,
+				Namespace: meta.NamespacedName.Namespace,
+				PodName:   meta.PodName,
+				Address:   meta.Address,
+				Port:      meta.Port,
+				MetricsHost: meta.MetricsHost,
+				Labels:    meta.Labels,
 			}
 		}
 
-		if m := p.GetMetrics(); m != nil {
+		if m := ep.GetMetrics(); m != nil {
 			entry.Metrics = &metricsJSON{
 				ActiveModels:            m.ActiveModels,
 				WaitingModels:           m.WaitingModels,
 				MaxActiveModels:         m.MaxActiveModels,
-				RunningQueueSize:        m.RunningQueueSize,
+				RunningQueueSize:        m.RunningRequestsSize,
 				WaitingQueueSize:        m.WaitingQueueSize,
 				KVCacheUsagePercent:     m.KVCacheUsagePercent,
 				KvCacheMaxTokenCapacity: m.KvCacheMaxTokenCapacity,
 				CacheBlockSize:          m.CacheBlockSize,
-				CacheNumGPUBlocks:       m.CacheNumGPUBlocks,
+				CacheNumGPUBlocks:       m.CacheNumBlocks,
 				UpdateTime:              m.UpdateTime,
 			}
 		}
@@ -274,15 +272,14 @@ func SerializePodsToJSON(pods []schedtypes.Pod) (string, error) {
 
 	data, err := json.Marshal(out)
 	if err != nil {
-		return "", fmt.Errorf("failed to serialize pods: %w", err)
+		return "", fmt.Errorf("failed to serialize endpoints: %w", err)
 	}
 	return string(data), nil
 }
 
-func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
+func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error) {
 	requestBody := make(map[string]any)
 
-	// Preserve the original message structure for correct chat template application
 	if req == nil || req.Body == nil {
 		return nil, fmt.Errorf("missing request body")
 	}
@@ -304,17 +301,14 @@ func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 			return nil, fmt.Errorf("empty chat messages")
 		}
 		requestBody["messages"] = messages
-	} else if req.Body.Completions != nil && strings.TrimSpace(req.Body.Completions.Prompt) != "" {
-		// Legacy completions format - wrap as single user message
+	} else if req.Body.Completions != nil && !req.Body.Completions.Prompt.IsEmpty() {
 		requestBody["messages"] = []map[string]any{
-			{"role": "user", "content": req.Body.Completions.Prompt},
+			{"role": "user", "content": req.Body.Completions.Prompt.PlainText()},
 		}
 	} else {
 		return nil, fmt.Errorf("no messages or prompt provided")
 	}
 
-	// Model field is required by OpenAI spec but not used by the router's tokenizer
-	// (tokenizer is determined by the discovered model card)
 	if req != nil && strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
 	} else {
@@ -337,7 +331,6 @@ func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank
 		return fmt.Errorf("dynamo router handles not created")
 	}
 
-	// Convert token data from int64 to uint32
 	tokens := make([]uint32, len(tokenData))
 	for i, t := range tokenData {
 		tokens[i] = uint32(t)
@@ -421,6 +414,20 @@ type RoutingResult struct {
 	TokenData []int64
 }
 
+// extractTokenData copies token IDs from a C result into Go memory.
+func extractTokenData(result *C.CRoutingResult) []int64 {
+	count := int(result.token_count)
+	if count > 0 && result.token_ids != nil {
+		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
+		tokens := make([]int64, count)
+		for i := 0; i < count; i++ {
+			tokens[i] = int64(src[i])
+		}
+		return tokens
+	}
+	return nil
+}
+
 // CallRoutePrefillRequest routes a request to the best prefill worker.
 // It tokenizes the request and queries only the prefill router.
 func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResult, error) {
@@ -450,22 +457,12 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
 	}
 
-	// Copy token IDs into Go memory
-	count := int(result.token_count)
-	var tokens64 []int64
-	if count > 0 && result.token_ids != nil {
-		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
-		tokens64 = make([]int64, count)
-		for i := 0; i < count; i++ {
-			tokens64[i] = int64(src[i])
-		}
-	}
-
+	tokens := extractTokenData(&result)
 	workerID := uint64(result.prefill_worker_id)
 	dpRank := uint32(result.prefill_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens64}, nil
+	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
 }
 
 // CallRouteDecodeRequest routes a request to the best decode worker.
@@ -497,20 +494,10 @@ func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated
 		return nil, fmt.Errorf("route_decode_request failed with code %d", rc)
 	}
 
-	// Copy token IDs into Go memory
-	count := int(result.token_count)
-	var tokens64 []int64
-	if count > 0 && result.token_ids != nil {
-		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
-		tokens64 = make([]int64, count)
-		for i := 0; i < count; i++ {
-			tokens64[i] = int64(src[i])
-		}
-	}
-
+	tokens := extractTokenData(&result)
 	workerID := uint64(result.decode_worker_id)
 	dpRank := uint32(result.decode_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens64}, nil
+	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
 }

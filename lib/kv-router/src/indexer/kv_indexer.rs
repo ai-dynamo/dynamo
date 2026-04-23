@@ -49,7 +49,7 @@ fn apply_event_with_prune_tracking(
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
     let event_for_prune = prune_manager.is_some().then(|| event.clone());
-    let result = trie.apply_event(event);
+    let result = trie.apply_event_with_counters(event, Some(counters));
     let result_is_ok = result.is_ok();
     let tree_size = trie.current_size();
     tracing::trace!(
@@ -255,6 +255,7 @@ impl KvIndexer {
                             let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
                             let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash: None,
+                                start_position: None,
                                 blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
                                     tokens_hash: *local_hash,
                                     block_hash: ExternalSequenceBlockHash(*sequence_hash),

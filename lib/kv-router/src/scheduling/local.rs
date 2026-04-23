@@ -176,6 +176,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let track_prefill_tokens = router_config_override
@@ -196,6 +197,7 @@ where
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
+            shared_cache_hits,
             resp_tx: Some(resp_tx),
         };
 
@@ -429,6 +431,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -467,6 +470,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                None,
                 None,
                 None,
                 None,
@@ -511,6 +515,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -528,6 +533,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                         None,
@@ -572,6 +578,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -589,6 +596,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                         None,
@@ -647,6 +655,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -664,6 +673,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                         None,
@@ -721,6 +731,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -738,6 +749,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                         None,
@@ -790,6 +802,7 @@ mod tests {
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                None,
                 None,
                 None,
                 None,
@@ -894,6 +907,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -986,6 +1000,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                None,
                 None,
                 None,
                 None,

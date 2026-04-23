@@ -114,6 +114,11 @@ pub struct NvExtResponse {
     /// Routed expert capture payload (SGLang-specific)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_experts: Option<serde_json::Value>,
+
+    /// Opaque engine data passed through from the backend worker.
+    /// Dynamo does not inspect this; it is forwarded as-is to the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<serde_json::Value>,
 }
 
 /// Response nvext fields requested for a given request.
@@ -130,6 +135,7 @@ pub struct NvExtResponseFieldSelection {
     pub timing: bool,
     pub token_ids: bool,
     pub routed_experts: bool,
+    pub engine_data: bool,
 }
 
 impl NvExtResponseFieldSelection {
@@ -145,6 +151,7 @@ impl NvExtResponseFieldSelection {
                     "worker_id" => selection.worker_id = true,
                     "timing" => selection.timing = true,
                     "routed_experts" => selection.routed_experts = true,
+                    "engine_data" => selection.engine_data = true,
                     _ => {}
                 }
             }
@@ -176,11 +183,13 @@ impl NvExtResponseFieldSelection {
     /// - `routed_experts` requires the selection flag **and** a `"routed_experts"` key on
     ///   `disaggregated_params` (cloned as-is, no validation).
     /// - `timing` requires the selection flag, `finish_reason_present == true`, **and** a tracker.
+    /// - `engine_data` requires the selection flag **and** a non-`None` `engine_data_from_backend`.
     pub fn build_response_nvext(
         &self,
         tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
         disaggregated_params: Option<&serde_json::Value>,
         finish_reason_present: bool,
+        engine_data_from_backend: Option<serde_json::Value>,
     ) -> Option<NvExtResponse> {
         let worker_id = if self.worker_id {
             tracker.and_then(|t| t.get_worker_info())
@@ -210,10 +219,17 @@ impl NvExtResponseFieldSelection {
             None
         };
 
+        let engine_data = if self.engine_data {
+            engine_data_from_backend
+        } else {
+            None
+        };
+
         if worker_id.is_none()
             && token_ids.is_none()
             && routed_experts.is_none()
             && timing.is_none()
+            && engine_data.is_none()
         {
             return None;
         }
@@ -223,6 +239,7 @@ impl NvExtResponseFieldSelection {
             timing,
             token_ids,
             routed_experts,
+            engine_data,
         })
     }
 }
@@ -273,7 +290,7 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields include "worker_id", "timing", "routed_experts",
+    /// Supported fields include "worker_id", "timing", "routed_experts", "engine_data",
     /// which map to fields in NvExtResponse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
@@ -677,11 +694,11 @@ mod tests {
     fn test_build_response_nvext_all_false_returns_none() {
         let sel = sel_all_false();
         assert!(
-            sel.build_response_nvext(None, None, false).is_none(),
+            sel.build_response_nvext(None, None, false, None).is_none(),
             "no fields selected → None"
         );
         assert!(
-            sel.build_response_nvext(None, None, true).is_none(),
+            sel.build_response_nvext(None, None, true, None).is_none(),
             "finish_reason alone does not force emission"
         );
     }
@@ -696,7 +713,7 @@ mod tests {
 
         // finish_reason=false: worker_id still emitted (only timing is finish-gated).
         let out = sel
-            .build_response_nvext(Some(&tracker), None, false)
+            .build_response_nvext(Some(&tracker), None, false, None)
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
@@ -715,7 +732,7 @@ mod tests {
 
         // timing alone + finish_reason=false → nothing to emit, returns None.
         assert!(
-            sel.build_response_nvext(Some(&tracker), None, false)
+            sel.build_response_nvext(Some(&tracker), None, false, None)
                 .is_none(),
             "timing is gated on finish_reason_present"
         );
@@ -730,7 +747,7 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = sel
-            .build_response_nvext(Some(&tracker), None, true)
+            .build_response_nvext(Some(&tracker), None, true, None)
             .expect("timing should emit on finish");
 
         assert!(out.timing.is_some());
@@ -746,7 +763,7 @@ mod tests {
             ..Default::default()
         };
         // finish=true but no tracker → timing not populated → None.
-        assert!(sel.build_response_nvext(None, None, true).is_none());
+        assert!(sel.build_response_nvext(None, None, true, None).is_none());
     }
 
     #[test]
@@ -758,7 +775,7 @@ mod tests {
         let params = disagg_params_full();
 
         let out = sel
-            .build_response_nvext(None, Some(&params), false)
+            .build_response_nvext(None, Some(&params), false, None)
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -777,7 +794,7 @@ mod tests {
         let params = serde_json::json!({ "token_ids": "not-an-array" });
 
         assert!(
-            sel.build_response_nvext(None, Some(&params), false)
+            sel.build_response_nvext(None, Some(&params), false, None)
                 .is_none(),
             "malformed token_ids silently suppressed; nothing else selected → None"
         );
@@ -792,7 +809,7 @@ mod tests {
         let params = disagg_params_full();
 
         let out = sel
-            .build_response_nvext(None, Some(&params), false)
+            .build_response_nvext(None, Some(&params), false, None)
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -808,12 +825,13 @@ mod tests {
             timing: true,
             token_ids: true,
             routed_experts: true,
+            engine_data: false,
         };
         let tracker = tracker_with_prefill_worker();
         let params = disagg_params_full();
 
         let out = sel
-            .build_response_nvext(Some(&tracker), Some(&params), true)
+            .build_response_nvext(Some(&tracker), Some(&params), true, None)
             .expect("all fields selected and available → Some");
 
         assert!(out.worker_id.is_some());
@@ -843,6 +861,7 @@ mod tests {
                 timing: true,
                 token_ids: false, // only enabled via query_instance_id
                 routed_experts: true,
+                engine_data: false,
             }
         );
     }
