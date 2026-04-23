@@ -26,7 +26,9 @@ pytestmark = [
 
 
 class _MockEngine:
-    """Satisfies StageEngine Protocol — matches AsyncOmni.generate() signature."""
+    """Satisfies StageEngine Protocol — matches AsyncOmni interface."""
+
+    engine = None  # satisfies StageEngine.engine
 
     def __init__(self, output=None):
         self.received_prompt = None
@@ -43,6 +45,9 @@ class _MockEngine:
             yield self._output
 
         return _gen()
+
+    async def get_tokenizer(self):
+        return None
 
 
 class _ErrorEngine:
