@@ -87,7 +87,10 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 180
       cpu_only_test_markers: 'sglang and gpu_0'
-      single_gpu_test_markers: 'sglang and gpu_1'
+      # `not skip_in_nightly` excludes tests flagged via the skip_in_nightly
+      # pytest marker (see pyproject.toml) so they only run in pre_merge /
+      # post_merge. DYN-2784 is the first user (test_sglang_indexers_sync).
+      single_gpu_test_markers: 'sglang and gpu_1 and not skip_in_nightly'
       single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120

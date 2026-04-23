@@ -14,6 +14,7 @@ use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
+use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -60,9 +61,6 @@ const DEFAULT_GLOBAL_CONNECT_LIMIT: usize = 64;
 /// Default idle host TTL in seconds before cleanup
 const DEFAULT_HOST_IDLE_TTL_SECS: u64 = 300;
 
-/// Default maximum message size for TCP client (32 MB)
-const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
-
 /// Spin loop limit before falling back to async Notify in writer task
 const WRITER_SPIN_LIMIT: u32 = 64;
 
@@ -70,14 +68,6 @@ const WRITER_SPIN_LIMIT: u32 = 64;
 /// The buffer grows automatically beyond this if a batch exceeds it, then
 /// stays at the high-water mark for subsequent batches (amortised zero allocation).
 const WRITER_INITIAL_BUF_CAPACITY: usize = 256 * 1024;
-
-/// Get maximum message size from environment or use default
-fn get_max_message_size() -> usize {
-    std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
-}
 
 /// Check if latency tracing is enabled via environment
 fn latency_trace_enabled() -> bool {
@@ -593,7 +583,7 @@ impl TcpConnection {
     ) -> Result<()> {
         use crate::pipeline::network::codec::TcpResponseCodec;
 
-        let max_message_size = get_max_message_size();
+        let max_message_size = get_tcp_max_message_size();
         let codec = TcpResponseCodec::new(Some(max_message_size));
         let mut framed = FramedRead::new(read_half, codec);
 

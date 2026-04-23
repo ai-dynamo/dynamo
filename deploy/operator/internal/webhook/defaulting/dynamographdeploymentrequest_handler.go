@@ -35,7 +35,13 @@ const (
 
 	// defaultImage is the default profiler image used when spec.image is not set.
 	// Default image derivation is only supported for public release versions (1.0.0+).
-	defaultImage = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend"
+	//
+	// Starting with Dynamo 1.1.0, the profiler's runtime dependencies
+	// (kubernetes_asyncio, pmdarima, prophet, aiconfigurator, ...) ship only in the
+	// dedicated dynamo-planner image, so we default to that image here. Users who
+	// pin an earlier version may continue to override spec.image explicitly with
+	// the frontend image they were using before.
+	defaultImage = "nvcr.io/nvidia/ai-dynamo/dynamo-planner"
 )
 
 // DGDRDefaulter is a mutating webhook handler that fills in default values for
@@ -43,7 +49,7 @@ const (
 //
 // If spec.image is not set, it is derived as:
 //
-//	nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<operatorVersion>
+//	nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operatorVersion>
 //
 // Defaulting requires a known operator version and is only supported for
 // operator versions 1.0.0 and later.

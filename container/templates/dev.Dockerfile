@@ -187,39 +187,19 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
-# Copy UCX and NIXL libraries for dev stage compilation.
-# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
-# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
-# wheels, but dev stage needs it for maturin develop and cargo build from source.
-# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
-# - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
-ARG TARGETARCH
-RUN --mount=from=wheel_builder,target=/wheel_builder \
-    if [ "${FRAMEWORK}" = "sglang" ]; then \
-        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
-            mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
-            cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
-            cp -r /wheel_builder/usr/local/ucx /usr/local/; \
-            cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
-            cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
-            cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
-            echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
-        fi; \
-    fi
-
 {% if device == "xpu" %}
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
-{% else %}
-# NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
-# All frameworks reference NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64.
-# For vllm/trtllm/none: This resets the same values already set in runtime (no harm).
-# For sglang: This sets them for the first time (required).
+{% elif framework != "sglang" %}
+# Non-SGLang runtimes use the Dynamo-built NIXL install from wheel_builder.
+# Reset the same values already set in runtime (no harm).
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+{% endif %}
 
+{% if device != "xpu" %}
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
 # TRT-LLM: Dockerfile.trtllm lines 600-606
@@ -235,15 +215,18 @@ ENV CUDA_HOME=/usr/local/cuda \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
+{% if framework != "sglang" %}
 # Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
-ARG PYTHON_VERSION
 ENV LD_LIBRARY_PATH=\
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH}
+{% else %}
+# SGLang dev/local-dev inherit the upstream SGLang/NIXL runtime stack.
+{% endif %}
 
 # Copy shell profile script for framework-specific environment variables
 # This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
@@ -299,8 +282,9 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    cp -r --no-preserve=mode /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
+    cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
           /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
+    chmod -R g+w /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]

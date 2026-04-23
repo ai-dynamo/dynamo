@@ -80,8 +80,12 @@ spec:
   model: Qwen/Qwen3-0.6B
 
   # Container image for the profiling job — must match your installed platform version.
-  # This is the same dynamo-frontend image used by the deployed inference service.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${RELEASE_VERSION}"
+  #   Dynamo >= 1.1.0: use the dedicated planner/profiler image (dynamo-planner).
+  #     Planner/profiler runtime deps (kubernetes_asyncio, pmdarima, prophet,
+  #     aiconfigurator, ...) ship only in this image; the frontend and backend
+  #     runtime images do not.
+  #   Dynamo <  1.1.0: use the dynamo-frontend image you deploy with.
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:${RELEASE_VERSION}"
 ```
 
 Apply it (uses `envsubst` to substitute the `RELEASE_VERSION` shell variable into the YAML):
@@ -95,7 +99,7 @@ envsubst < qwen3-first-model.yaml | kubectl apply -f - -n ${NAMESPACE}
 | Field | Required | Default | Purpose |
 |---|---|---|---|
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
-| `image` | No | — | Container image for the profiling job (`dynamo-frontend`) |
+| `image` | No | — | Container image for the profiling job. For Dynamo ≥ 1.1.0 this must be the `dynamo-planner` image; for earlier versions it is the `dynamo-frontend` image. |
 | `backend` | No | `auto` | Inference engine (`auto`, `vllm`, `sglang`, `trtllm`) |
 | `searchStrategy` | No | `rapid` | Profiling depth — `rapid` (~30s, AIC simulation) or `thorough` (2–4h, real GPUs) |
 | `autoApply` | No | `true` | Automatically create and start the deployment after profiling |

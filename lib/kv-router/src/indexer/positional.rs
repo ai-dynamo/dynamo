@@ -21,11 +21,14 @@
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerTask,
+};
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
@@ -54,10 +57,10 @@ impl SeqEntry {
     }
 
     /// Insert a worker for a given seq_hash, upgrading to Multi if needed.
-    fn insert(&mut self, seq_hash: ExternalSequenceBlockHash, worker: WorkerWithDpRank) {
+    fn insert(&mut self, seq_hash: ExternalSequenceBlockHash, worker: WorkerWithDpRank) -> bool {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
-                workers.insert(worker);
+                workers.insert(worker)
             }
             Self::Single(existing_hash, existing_workers) => {
                 // Upgrade to Multi
@@ -65,10 +68,9 @@ impl SeqEntry {
                 map.insert(*existing_hash, std::mem::take(existing_workers));
                 map.entry(seq_hash).or_default().insert(worker);
                 *self = Self::Multi(map);
+                true
             }
-            Self::Multi(map) => {
-                map.entry(seq_hash).or_default().insert(worker);
-            }
+            Self::Multi(map) => map.entry(seq_hash).or_default().insert(worker),
         }
     }
 
@@ -152,7 +154,7 @@ impl SyncIndexer for PositionalIndexer {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
@@ -201,6 +203,7 @@ impl PositionalIndexer {
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
         event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
@@ -215,7 +218,7 @@ impl PositionalIndexer {
 
         match op {
             KvCacheEventData::Stored(store_data) => {
-                self.store_blocks_impl(worker_blocks, worker, store_data, id)?;
+                self.store_blocks_impl(worker_blocks, worker, store_data, id, counters)?;
 
                 Ok(())
             }
@@ -236,52 +239,79 @@ impl PositionalIndexer {
         worker: WorkerWithDpRank,
         store_data: KvCacheStoreData,
         event_id: u64,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
+        let KvCacheStoreData {
+            parent_hash,
+            start_position,
+            blocks,
+        } = store_data;
         let worker_map = worker_blocks.entry(worker).or_default();
-        // Determine starting position based on parent_hash
-        let start_pos = match store_data.parent_hash {
-            Some(parent_hash) => {
-                let Some(entry) = worker_map.get(&parent_hash) else {
-                    tracing::warn!(
-                        worker_id = worker.worker_id.to_string(),
-                        dp_rank = worker.dp_rank,
-                        event_id,
-                        parent_hash = ?parent_hash,
-                    );
-                    return Err(KvCacheEventError::ParentBlockNotFound);
-                };
+        let start_pos = match start_position {
+            Some(start_position) => start_position as usize,
+            None => match parent_hash {
+                Some(parent_hash) => {
+                    let Some(entry) = worker_map.get(&parent_hash) else {
+                        tracing::warn!(
+                            worker_id = worker.worker_id.to_string(),
+                            dp_rank = worker.dp_rank,
+                            event_id,
+                            parent_hash = ?parent_hash,
+                        );
+                        return Err(KvCacheEventError::ParentBlockNotFound);
+                    };
 
-                entry.0 + 1 // parent position + 1
-            }
-            None => 0, // Start from position 0
+                    entry.0 + 1 // parent position + 1
+                }
+                None => 0, // Start from position 0
+            },
         };
 
         let worker_blocks_entry = worker_blocks.entry(worker).or_default();
 
-        let num_stored_blocks = store_data.blocks.len();
+        let mut num_blocks_added = 0usize;
+        let mut duplicate_store = !blocks.is_empty();
 
-        for (i, block_data) in store_data.blocks.into_iter().enumerate() {
+        for (i, block_data) in blocks.into_iter().enumerate() {
             let position = start_pos + i;
             let local_hash = block_data.tokens_hash;
             let seq_hash = block_data.block_hash;
 
-            self.index
-                .entry((position, local_hash))
-                .and_modify(|entry| entry.insert(seq_hash, worker))
-                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+            match self.index.entry((position, local_hash)) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get_mut().insert(seq_hash, worker) {
+                        duplicate_store = false;
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(SeqEntry::new(seq_hash, worker));
+                    duplicate_store = false;
+                }
+            }
 
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
-            worker_blocks_entry.insert(seq_hash, (position, local_hash));
+            match worker_blocks_entry.insert(seq_hash, (position, local_hash)) {
+                Some(existing) if existing == (position, local_hash) => {}
+                Some(_) => duplicate_store = false,
+                None => {
+                    num_blocks_added += 1;
+                    duplicate_store = false;
+                }
+            }
         }
 
         match self.tree_sizes.get(&worker) {
             Some(size) => {
-                size.fetch_add(num_stored_blocks, Ordering::Relaxed);
+                size.fetch_add(num_blocks_added, Ordering::Relaxed);
             }
             None => {
                 self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_stored_blocks));
+                    .insert(worker, AtomicUsize::new(num_blocks_added));
             }
+        }
+
+        if duplicate_store && let Some(counters) = counters {
+            counters.inc_warning(EventWarningKind::DuplicateStore);
         }
 
         Ok(())
@@ -411,47 +441,22 @@ impl PositionalIndexer {
         let mut event_id = 0u64;
 
         for (worker, worker_map) in worker_blocks.iter() {
-            // Collect (position, local_hash, seq_hash) and sort by position
-            // so parents are emitted before children during replay.
+            // Collect (position, local_hash, seq_hash) and sort by position.
             let mut blocks: Vec<_> = worker_map
                 .iter()
                 .map(|(seq_hash, (pos, local_hash))| (*pos, *local_hash, *seq_hash))
                 .collect();
             blocks.sort_unstable_by_key(|(pos, _, _)| *pos);
 
-            // Track one valid seq_hash per position for parent_hash synthesis.
-            // Note: The synthesized parent_hash doesn't need to be the true logical
-            // parent — during replay it's only used to derive `start_pos = parent.position + 1`,
-            // so any seq_hash at the previous position is sufficient. The PositionalIndexer
-            // is position-based, not tree-topology-based.
-            let mut last_at_position: FxHashMap<usize, ExternalSequenceBlockHash> =
-                FxHashMap::default();
-
             for (pos, local_hash, seq_hash) in blocks {
-                let parent_hash = if pos == 0 {
-                    None
-                } else {
-                    match last_at_position.get(&(pos - 1)) {
-                        Some(&parent) => Some(parent),
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                position = pos,
-                                "Orphaned block at position with no parent; skipping in dump"
-                            );
-                            continue;
-                        }
-                    }
-                };
-
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
                     storage_tier: crate::protocols::StorageTier::Device,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
+                            parent_hash: None,
+                            start_position: Some(pos as u32),
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash: seq_hash,
                                 tokens_hash: local_hash,
@@ -462,7 +467,6 @@ impl PositionalIndexer {
                     },
                 });
                 event_id += 1;
-                last_at_position.insert(pos, seq_hash);
             }
         }
 

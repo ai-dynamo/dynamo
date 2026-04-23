@@ -245,9 +245,6 @@ type MPIConfiguration struct {
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
-	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
-	// +kubebuilder:default="/tmp/ready-for-checkpoint"
-	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
 	// Deprecated: Storage is retained for compatibility and ignored by the
 	// current snapshot flow. Snapshot storage is discovered from the
 	// snapshot-agent DaemonSet instead.

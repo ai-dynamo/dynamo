@@ -123,8 +123,10 @@ def _compute_mm_uuids(
     """
     Compute multi_modal_uuids from multi_modal_data.
 
-    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
-    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    Each image gets a blake3 hex digest as its UUID (computed by
+    compute_mm_uuids_from_images over a fixed-length header + pixel
+    preimage), ensuring consistent hashing across the MM Router, vLLM
+    handler, and Rust KV publisher.
     """
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
@@ -412,6 +414,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
+        # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
+        # bootstrap creates a fresh TCPStore per scale operation and stores it
+        # in engine_client._coord_store.  When two callers race through
+        # _setup_elastic_ep_reconfig_bootstrap concurrently the first caller's
+        # store gets garbage-collected before the new Ray actor has had a chance
+        # to connect, causing a 300 s TCPStore timeout on the worker node.
+        # One handler is created per worker process (worker_factory.py), so all
+        # concurrent HTTP callers share this lock and only one scale operation
+        # can mutate _coord_store at a time.
+        self._scale_ep_lock = asyncio.Lock()
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -544,52 +556,78 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
             }
+        if new_dp_size < 2:
+            return {
+                "status": "error",
+                "message": (
+                    "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled"
+                ),
+            }
 
         logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
-        try:
-            # TODO(upstream-vllm): remove this patch once vLLM fixes
-            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
-            # instead of ray.util.state.list_nodes().
-            #
-            # Patch ray.util.state.list_nodes to use the GCS API instead of the
-            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
-            # installs ray core only (not ray[default]), so the dashboard HTTP server
-            # starts in --minimal mode with the HTTP server disabled. vLLM's
-            # add_dp_placement_groups calls list_nodes() which requires that HTTP
-            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
-            # API server".
-            #
-            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
-            # needed) and returns the same information. Imported lazily so ray is not
-            # required at module load time (absent in non-elastic-EP deployments).
-            #
-            # Format mapping:
-            #   list_nodes() → objects with .node_ip and .node_id
-            #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
-            import ray
-            import ray.util.state as _ray_util_state
 
-            class _NodeInfo:
-                __slots__ = ("node_id", "node_ip")
+        # Early-reject if another scale is already in progress rather than
+        # queuing behind it: a queued caller would garbage-collect the first
+        # caller's TCPStore before its Ray actor connects, causing a 300 s
+        # timeout on the worker node.
+        # The locked() check followed immediately by async with is safe:
+        # asyncio.Lock.acquire() only suspends (yields to the event loop) when
+        # the lock is already held. When locked() returns False the lock is
+        # free, so acquire() completes synchronously — no other coroutine can
+        # run between the check and the acquisition.
+        if self._scale_ep_lock.locked():
+            msg = (
+                f"A scale_elastic_ep operation is already in progress; "
+                f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+            )
+            logger.warning(f"[ElasticEP] {msg}")
+            return {"status": "error", "message": msg}
 
-                def __init__(self, d: dict) -> None:
-                    self.node_ip: str = d["NodeManagerAddress"]
-                    self.node_id: str = d["NodeID"]
+        async with self._scale_ep_lock:
+            try:
+                # TODO(upstream-vllm): remove this patch once vLLM fixes
+                # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+                # instead of ray.util.state.list_nodes().
+                #
+                # Patch ray.util.state.list_nodes to use the GCS API instead of the
+                # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+                # installs ray core only (not ray[default]), so the dashboard HTTP server
+                # starts in --minimal mode with the HTTP server disabled. vLLM's
+                # add_dp_placement_groups calls list_nodes() which requires that HTTP
+                # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+                # API server".
+                #
+                # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+                # needed) and returns the same information. Imported lazily so ray is not
+                # required at module load time (absent in non-elastic-EP deployments).
+                #
+                # Format mapping:
+                #   list_nodes() → objects with .node_ip and .node_id
+                #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
+                import ray
+                import ray.util.state as _ray_util_state
 
-            _ray_util_state.list_nodes = lambda **kw: [
-                _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-            ]
+                class _NodeInfo:
+                    __slots__ = ("node_id", "node_ip")
 
-            await self.engine_client.scale_elastic_ep(new_dp_size)
-            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
-            return {
-                "status": "ok",
-                "message": f"Scaled to data_parallel_size={new_dp_size}",
-                "new_data_parallel_size": new_dp_size,
-            }
-        except Exception as e:
-            logger.error(f"[ElasticEP] Scaling failed: {e}")
-            return {"status": "error", "message": str(e)}
+                    def __init__(self, d: dict) -> None:
+                        self.node_ip: str = d["NodeManagerAddress"]
+                        self.node_id: str = d["NodeID"]
+
+                _ray_util_state.list_nodes = lambda **kw: [
+                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                ]
+
+                await self.engine_client.scale_elastic_ep(new_dp_size)
+                logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+                return {
+                    "status": "ok",
+                    "message": f"Scaled to data_parallel_size={new_dp_size}",
+                    "new_data_parallel_size": new_dp_size,
+                }
+            except Exception as e:
+                logger.error(f"[ElasticEP] Scaling failed: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
@@ -624,6 +662,34 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters. Supported keys:
+                - profile_prefix (str|None): Optional prefix for profile output files.
+        """
+        profile_prefix = body.get("profile_prefix")
+        try:
+            await self.engine_client.start_profile(profile_prefix=profile_prefix)
+            return {"status": "ok", "message": "Profiling started"}
+        except Exception as e:
+            logger.error(f"Failed to start profiling: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        try:
+            await self.engine_client.stop_profile()
+            return {"status": "ok", "message": "Profiling stopped"}
+        except Exception as e:
+            logger.error(f"Failed to stop profiling: {e}")
+            return {"status": "error", "message": str(e)}
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -1379,8 +1445,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "token_ids": [],
                     },
                 )
-        # Normal path: use token IDs
-        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        # Normal path: use token IDs.
+        # In EPD mode multi_modal_data carries pre-computed embeddings from the
+        # encode worker, not raw images — skip UUID production here; raw-image
+        # identity lives upstream at the Router / URL-keyed encoder cache.
+        if self.embedding_loader is None:
+            mm_uuids = _compute_mm_uuids(multi_modal_data)
+        else:
+            mm_uuids = None
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
@@ -1685,6 +1757,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = prefill_result.get("disaggregated_params", {}).get(
                 "embedding_params"
             )
+            # Normalize embedding_params to None if it is an empty dict
+            if not embedding_params:
+                embedding_params = None
         else:
             kv_params = None
             embedding_params = None
@@ -1723,6 +1798,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.error("Request %s: %s", request_id, msg)
                     yield {"status": "error", "message": msg}
                     return
+            else:
+                # Non-qwen model, assume the multi_modal_data has been consumed
+                # in prefill, so we can use the expanded prompt token ids
+                # without multimodal data
+                if embedding_params and "expanded_prompt_token_ids" in embedding_params:
+                    request["token_ids"] = embedding_params["expanded_prompt_token_ids"]
+                    has_mm_data = False
             # TODO(DIS-1661): video/audio re-downloaded on decode.
             # TODO(DIS-1664): mixed image+video in disagg decode is not
             # supported — synthetic image data would be overwritten.
@@ -1967,7 +2049,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context,
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -2049,10 +2130,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                # For prefill worker, only one res will be generated,
+                # so we can always build embedding params here without conditionals
+                embedding_params = self._build_embedding_params(
+                    multi_modal_data or {}, res.prompt_token_ids
+                )
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params, embedding_params
+                        res.kv_transfer_params,
+                        embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
@@ -2073,18 +2160,36 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 yield output
 
-    def _build_disaggregated_params(self, kv_transfer_params, embedding_params=None):
+    def _build_disaggregated_params(
+        self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None
+    ):
         disaggregated_params = {}
         if kv_transfer_params is not None:
             disaggregated_params["kv_transfer_params"] = kv_transfer_params
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
+        if expanded_prompt_token_ids is not None:
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 
     def _build_embedding_params(
-        self, multi_modal_data: dict[str, Any]
+        self, multi_modal_data: dict[str, Any], prompt_token_ids: list[int]
     ) -> Dict[str, Any] | None:
+        # [gluo NOTE] there could be different model architectures that
+        # need different embedding params, will add more logic if needed
         if not is_qwen_vl_model(self.config.model):
-            return None
-        return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+            # For non-qwen models, vLLM doesn't trigger mm preprocess so
+            # decode worker only needs expanded prompt to properly fetch KV blocks
+            # from prefill.
+            if multi_modal_data:
+                return {"expanded_prompt_token_ids": prompt_token_ids}
+        else:
+            # For qwen models, vLLM triggers mm preprocess so decode worker will
+            # perform token expansion unconditionally, so we need to pass
+            # original prompt and sufficient metadata to reconstruct mm embedding
+            # as request input.
+            return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
+        return None

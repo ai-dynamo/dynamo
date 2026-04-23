@@ -448,7 +448,7 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
-        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
+        trust_remote_code = self.config.trust_remote_code
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
