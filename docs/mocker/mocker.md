@@ -90,7 +90,7 @@ python -m dynamo.mocker \
 | `--num-workers` | 1 | Workers per process |
 | `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
-| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
+| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy: `fifo`/`fcfs` (default) or `lpm` (longest prefix match) |
 | `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens. Also becomes the effective block size when `--engine-type sglang` and `--block-size` is omitted |
 | `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
