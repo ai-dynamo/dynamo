@@ -211,10 +211,9 @@ async fn check_cancellation<E: LLMEngine>(
     model: &str,
     deadline: Duration,
 ) -> Result<(), ConformanceFailure> {
-    // Request enough tokens that the engine can't finish naturally before
-    // cancellation fires.
+    // Request enough tokens that an engine which ignores cancellation
+    // can't finish naturally before the deadline fires.
     const LONG_MAX_TOKENS: u32 = 10_000;
-    const CANCEL_AFTER: Duration = Duration::from_millis(50);
 
     let ctx = mock_context();
     let stream = engine
@@ -225,21 +224,10 @@ async fn check_cancellation<E: LLMEngine>(
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;
 
-    // Fire cancellation AFTER generate() has returned the stream, so slow
-    // engine setup can't race with the cancel timer. The spawned task is
-    // aborted on function exit so it can't outlive the check.
-    let ctx_for_cancel = ctx.clone();
-    let cancel_task = tokio::spawn(async move {
-        tokio::time::sleep(CANCEL_AFTER).await;
-        ctx_for_cancel.stop_generating();
-    });
-    struct AbortOnDrop(tokio::task::JoinHandle<()>);
-    impl Drop for AbortOnDrop {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-    let _cancel_guard = AbortOnDrop(cancel_task);
+    // Cancel as soon as the stream is live. The engine's body hasn't been
+    // polled yet, so its first `is_stopped()` check will observe the flag
+    // regardless of engine speed — no timer race.
+    ctx.stop_generating();
 
     let chunks = tokio::time::timeout(deadline, async {
         let mut s = stream;

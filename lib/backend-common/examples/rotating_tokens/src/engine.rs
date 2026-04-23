@@ -87,6 +87,10 @@ impl RotatingTokensEngine {
 #[async_trait]
 impl LLMEngine for RotatingTokensEngine {
     async fn start(&self) -> Result<EngineConfig, DynamoError> {
+        tracing::info!(
+            model = %self.model_name,
+            "rotating_tokens engine started"
+        );
         Ok(EngineConfig {
             model: self.model_name.clone(),
             served_model_name: Some(self.model_name.clone()),
@@ -112,6 +116,12 @@ impl LLMEngine for RotatingTokensEngine {
         let prompt_len = request.token_ids.len() as u32;
 
         Ok(Box::pin(async_stream::stream! {
+            // max_tokens == 0: nothing to generate, but still need a terminal.
+            if max_new == 0 {
+                yield LLMEngineOutput::length().with_usage(usage(prompt_len, 0));
+                return;
+            }
+
             for i in 0..max_new {
                 if ctx.is_stopped() {
                     yield LLMEngineOutput::cancelled()
@@ -119,6 +129,12 @@ impl LLMEngine for RotatingTokensEngine {
                     break;
                 }
                 tokio::time::sleep(delay).await;
+                // Re-check after the await: cancellation can fire during sleep.
+                if ctx.is_stopped() {
+                    yield LLMEngineOutput::cancelled()
+                        .with_usage(usage(prompt_len, i as u32));
+                    break;
+                }
                 let token_id = ((i as u32) + 1) % 32000;
 
                 if i == max_new - 1 {
@@ -223,6 +239,30 @@ mod tests {
         let u = chunks[2].completion_usage.as_ref().unwrap();
         assert_eq!(u.prompt_tokens, 3);
         assert_eq!(u.completion_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn generate_with_zero_max_tokens_emits_empty_length_terminal() {
+        // max_tokens=0 is valid input. The engine must still emit exactly one
+        // terminal chunk (otherwise the stream would end without a terminal).
+        let engine = build_engine(16);
+        let ctx = Context::new(());
+        let ctrl = ctx.context();
+        let stream = engine
+            .generate(request(Some(0)), ctrl)
+            .await
+            .expect("stream");
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(chunks.len(), 1, "zero max_tokens should yield one terminal");
+        assert!(chunks[0].token_ids.is_empty());
+        assert!(matches!(
+            chunks[0].finish_reason,
+            Some(FinishReason::Length)
+        ));
+        let u = chunks[0].completion_usage.as_ref().unwrap();
+        assert_eq!(u.prompt_tokens, 3);
+        assert_eq!(u.completion_tokens, 0);
     }
 
     #[tokio::test]

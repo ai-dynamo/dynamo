@@ -34,8 +34,9 @@ pub struct WorkerConfig {
     /// HF repo name or local model path. Empty means name-only registration
     /// (no tokenizer / chat-template on the card).
     pub model_name: String,
-    /// Public-facing model name. Falls back to `EngineConfig.model` when
-    /// unset.
+    /// Public-facing model name (operator CLI override). When unset, the
+    /// served name falls back to `EngineConfig.served_model_name`, then to
+    /// `EngineConfig.model`.
     pub served_model_name: Option<String>,
     /// Whether the engine consumes tokens (`Tokens`) or raw text (`Text`).
     pub model_input: ModelInput,
@@ -158,10 +159,8 @@ async fn serve(
         })?;
     tracing::debug!("model registered with discovery");
 
-    let served = config
-        .served_model_name
-        .clone()
-        .unwrap_or_else(|| engine_config.model.clone());
+    let served =
+        resolve_served_name(config, engine_config).unwrap_or_else(|| engine_config.model.clone());
     tracing::info!(
         "Serving {} on {}.{}.{}",
         served,
@@ -198,6 +197,19 @@ fn err(error_type: ErrorType, message: impl Into<String>) -> DynamoError {
         .error_type(error_type)
         .message(message)
         .build()
+}
+
+/// Resolve the public-facing served-model name.
+///
+/// Priority: `WorkerConfig.served_model_name` (operator CLI override) →
+/// `EngineConfig.served_model_name` (engine's preferred advertise-as name).
+/// Returns `None` if neither is set; callers fall back to
+/// `EngineConfig.model`.
+fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> Option<String> {
+    config
+        .served_model_name
+        .clone()
+        .or_else(|| engine_config.served_model_name.clone())
 }
 
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
@@ -237,9 +249,7 @@ async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
 ) -> Result<LocalModel, DynamoError> {
-    let served_name = config
-        .served_model_name
-        .clone()
+    let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
         .filter(|s| !s.is_empty());
 

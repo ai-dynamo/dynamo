@@ -92,15 +92,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut chunk_count: usize = 0;
             let mut cancelled = false;
             while let Some(chunk) = inner.next().await {
-                // Forward every chunk we receive — including a terminal
-                // cancel chunk the engine may have emitted in response to
-                // stop_generating(). We break AFTER the yield so downstream
-                // always sees the engine's final frame.
                 chunk_count += 1;
-                let should_break = ctx_for_stream.is_stopped();
-                yield Annotated::from_data(chunk);
-                if should_break {
+                // Record cancellation whenever the context reports it, but
+                // don't exit on that alone — a well-behaved engine will
+                // respond to `stop_generating()` by emitting its own
+                // terminal `Cancelled` chunk, and downstream must see it.
+                // We exit only on the engine's terminal chunk so the
+                // engine's final frame is always forwarded. Broken
+                // engines that never emit a terminal end the loop when
+                // their inner stream ends (the conformance kit catches
+                // the contract violation separately).
+                if ctx_for_stream.is_stopped() {
                     cancelled = true;
+                }
+                let is_terminal = chunk.finish_reason.is_some();
+                yield Annotated::from_data(chunk);
+                if is_terminal {
                     break;
                 }
             }
