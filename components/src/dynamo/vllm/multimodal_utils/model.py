@@ -173,6 +173,9 @@ def load_vision_model(model_id: str, enforce_eager: bool = False) -> torch.nn.Mo
         vllm_model = LLM(
             model=model_id,
             enforce_eager=enforce_eager,
+            # vLLM's free-memory precheck runs before kv_cache_memory_bytes applies;
+            # default 0.9 fails on <=24 GiB GPUs when another worker shares the device.
+            gpu_memory_utilization=0.2,
             kv_cache_memory_bytes=1024
             * 1024
             * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.

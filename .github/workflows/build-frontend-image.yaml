@@ -102,7 +102,7 @@ jobs:
       - name: Build EPP Image
         id: build-epp-image
         shell: bash
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           set -x
           EPP_REPOSITORY="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/dynamo-epp"

@@ -14,8 +14,13 @@ on:
         description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
         required: false
         type: string
+      nightly:
+        description: 'Publish as nightly (nightly-dated NGC tags; skips git tag, RC, and Helm push). Must be run from main.'
+        required: false
+        type: boolean
+        default: false
 
-# Note: workflow_dispatch can only be triggered from release/* branches
+# Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
 # This is enforced in the prepare-release job via branch validation
 
 permissions:
@@ -35,12 +40,14 @@ jobs:
     outputs:
       version: ${{ steps.extract.outputs.version }}
       commit_sha: ${{ steps.extract.outputs.commit_sha }}
+      nightly: ${{ steps.extract.outputs.nightly }}
     steps:
       - name: Extract version and validate inputs
         id: extract
         env:
           COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
           BRANCH_NAME: ${{ github.ref_name }}
+          NIGHTLY: ${{ github.event.inputs.nightly }}
         run: |
           set -euo pipefail
 
@@ -49,17 +56,27 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "Error: workflow_dispatch must be triggered from a release/* branch"
-            echo "Current branch: $BRANCH_NAME"
-            exit 1
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            if [[ "${BRANCH_NAME}" != "main" ]]; then
+              echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
+              exit 1
+            fi
+            VERSION="nightly"
+          else
+            if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              echo "Error: workflow_dispatch must be triggered from a release/* branch (or main with nightly=true)"
+              echo "Current branch: $BRANCH_NAME"
+              exit 1
+            fi
+            VERSION="${BRANCH_NAME#release/}"
           fi
-          VERSION="${BRANCH_NAME#release/}"
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+          echo "nightly=${NIGHTLY}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
           echo "Source commit SHA: ${COMMIT_SHA}"
+          echo "Nightly: ${NIGHTLY}"
 
   # ============================================================================
   # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
@@ -75,6 +92,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
@@ -93,6 +111,18 @@ jobs:
           INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
         run: |
           set -euo pipefail
+
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            DATE_UTC=$(date -u +%Y%m%d)
+            SHORT_SHA="${COMMIT_SHA:0:7}"
+            NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
+            echo "rc_tag=" >> $GITHUB_OUTPUT
+            echo "rc_number=" >> $GITHUB_OUTPUT
+            echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
+            echo "helm_chart_version=" >> $GITHUB_OUTPUT
+            echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
+            exit 0
+          fi
 
           if [ -n "${INPUT_RC_NUMBER}" ]; then
             if ! [[ "${INPUT_RC_NUMBER}" =~ ^[0-9]+$ ]]; then
@@ -133,6 +163,7 @@ jobs:
           echo "Helm chart version: ${HELM_CHART_VERSION}"
 
       - name: Create RC tag
+        if: env.NIGHTLY != 'true'
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
         run: |
@@ -290,6 +321,7 @@ jobs:
           fi
 
       - name: Package and push Helm charts to NGC
+        if: env.NIGHTLY != 'true'
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
@@ -340,12 +372,18 @@ jobs:
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
         run: |
-          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            echo "## Nightly Build Summary" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
+          if [[ "${NIGHTLY}" != "true" ]]; then
+            echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
           echo "| Source Commit SHA | ${COMMIT_SHA} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
@@ -378,7 +416,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
+          if [[ "${NIGHTLY}" != "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
+          fi
 

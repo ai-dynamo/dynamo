@@ -40,7 +40,6 @@ pytestmark = [
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
-    pytest.mark.skip(reason="Cancellation is temporarily disabled"),
 ]
 
 
@@ -364,6 +363,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
+@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models

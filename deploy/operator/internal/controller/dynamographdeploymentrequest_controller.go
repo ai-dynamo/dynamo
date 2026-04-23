@@ -1165,9 +1165,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	// Enrich hardware from GPU discovery before marshalling the spec.
-	// This fills in gpuSku, vramMb, numGpusPerNode if the user didn't set them.
+	// This fills in any missing hardware fields (gpuSku, vramMb, numGpusPerNode, totalGpus).
 	if err := r.enrichHardwareFromDiscovery(ctx, dgdr); err != nil {
-		logger.Info("GPU discovery not available, proceeding without enrichment", "reason", err.Error())
+		return err
 	}
 
 	// Use SyncResource to create/update the job
@@ -1459,7 +1459,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 
 	var gpuInfo *gpu.GPUInfo
 	logger.Info("Attempting GPU discovery for profiling job")
-	discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
+	discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
 	if err != nil {
 		reason := GetGPUDiscoveryFailureReason(err)
 		logger.Info("DCGM discovery failed, falling back to node-label discovery",

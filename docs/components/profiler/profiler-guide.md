@@ -155,9 +155,9 @@ The profiler enforces these rules at startup:
 | Condition | Behavior |
 |-----------|----------|
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
-| AIC unsupported + `enable_throughput_scaling: true` | Rejected. Throughput planner requires AIC support. |
-| AIC unsupported + `pre_deployment_sweeping_mode: rapid` | Falls back to `none` with a warning. |
-| `e2eLatency` provided without `ttft: null, itl: null` | Rejected by SLA validator. When using `e2eLatency`, explicitly null out `ttft` and `itl`. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Rejected. Throughput-based scaling requires pre-deployment sweeping. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Rejected. AIC does not support this model/hardware/backend combination; switch `pre_deployment_sweeping_mode` to `thorough`. |
+| `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
 | SLA unachievable | Warning logged, SLA updated to best achievable value. |
 | Load-match needs more GPUs than available | Warning logged. |
 
@@ -184,13 +184,7 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `components/src/dynamo/profiler/deploy/`:
-
-| Sample | Description |
-|--------|-------------|
-| `profile_sla_dgdr.yaml` | Standard online profiling with AIPerf |
-| `profile_sla_aic_dgdr.yaml` | Fast offline profiling with AI Configurator |
-| `profile_sla_moe_dgdr.yaml` | MoE model profiling (SGLang) |
+The recommended deployment method is through DGDRs. See [Profiler Examples](profiler-examples.md) for complete DGDR YAML examples covering rapid, thorough, MoE, custom SLA, and override use cases.
 
 #### Container Images
 
@@ -200,7 +194,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -217,7 +211,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
 ```
 
 **Step 2: Apply the DGDR**
@@ -308,7 +302,7 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **Duration**: 20-30 seconds
 - **Accuracy**: Estimated (may have errors for unusual configurations)
 - **GPU Requirements**: None
-- **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
+- **Backends**: All (vLLM, SGLang, TensorRT-LLM)
 
 AI Configurator is used by default with `searchStrategy: rapid`:
 
@@ -321,7 +315,7 @@ spec:
 > `aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
 
 **Currently supports:**
-- **Backends**: TensorRT-LLM (versions 0.20.0, 1.0.0rc3, 1.0.0rc6)
+- **Backends**: vLLM, SGLang, TensorRT-LLM
 - **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
@@ -374,7 +368,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
 
   searchStrategy: rapid  # or thorough
   autoApply: true

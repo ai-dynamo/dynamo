@@ -16,8 +16,9 @@ Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
 - QuantConfig: quantization algorithm and dynamic flags
 """
 
+import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo.common.utils.namespace import get_worker_namespace
 
@@ -64,6 +65,7 @@ class DiffusionConfig:
     max_height: int = 4096
     max_width: int = 4096
     default_num_frames: int = 81
+    default_num_images_per_prompt: int = 1
     default_fps: int = 24  # Used for both frame count calculation and video encoding
     default_seconds: int = 4  # Default video duration when only fps is specified
     default_num_inference_steps: int = 50
@@ -117,6 +119,22 @@ class DiffusionConfig:
     #               "scheduler", "image_encoder", "image_processor"
     skip_components: list[str] = field(default_factory=list)
 
+    @classmethod
+    def from_config(cls, config: Any, skip_components: list[str]) -> "DiffusionConfig":
+        """Build a DiffusionConfig from a worker Config, mapping matching field names automatically.
+
+        Special cases:
+          - model_path  ← config.model  (field name differs)
+          - skip_components ← pre-parsed list (Config holds a raw comma-separated string)
+          - max_height, max_width, default_fps, default_seconds use DiffusionConfig defaults
+            (they are not exposed as CLI args in Config)
+        """
+        field_names = {f.name for f in dataclasses.fields(cls)}
+        kwargs = {k: getattr(config, k) for k in field_names if hasattr(config, k)}
+        kwargs["model_path"] = config.model
+        kwargs["skip_components"] = skip_components
+        return cls(**kwargs)
+
     def __str__(self) -> str:
         return (
             f"DiffusionConfig("
@@ -129,6 +147,7 @@ class DiffusionConfig:
             f"default_height={self.default_height}, "
             f"default_width={self.default_width}, "
             f"default_num_frames={self.default_num_frames}, "
+            f"default_num_images_per_prompt={self.default_num_images_per_prompt}, "
             f"default_num_inference_steps={self.default_num_inference_steps}, "
             f"enable_teacache={self.enable_teacache}, "
             f"attn_backend={self.attn_backend}, "
