@@ -289,14 +289,37 @@ async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
     endpoint.serve_endpoint.return_value = standby_future
     runtime.endpoint.return_value = endpoint
 
+    # Record the order of events so the test asserts register_model runs
+    # before the lock-owner poll (MDC discoverable while primary still alive).
+    event_log: list[str] = []
+
     fake_lock = mock.AsyncMock()
-    fake_lock.owner.return_value = "engine-0"
+
+    async def fake_owner():
+        event_log.append("lock.owner")
+        return "engine-0"
+
+    fake_lock.owner.side_effect = fake_owner
+
+    # register_model is a PyO3 binding that rejects MagicMock endpoints at
+    # runtime; the standby now publishes its MDC pre-lock, so a mock is
+    # required even before get_llm_engine short-circuits via the side_effect.
+    register_model_mock = mock.AsyncMock()
+
+    async def record_register_model(*args, **kwargs):
+        event_log.append("register_model")
+
+    register_model_mock.side_effect = record_register_model
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
         mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
         mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
         mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.register_model",
+            register_model_mock,
+        ),
         mock.patch(
             "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
             return_value=fake_lock,
@@ -314,6 +337,9 @@ async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
             )
 
         assert exc_info.value.engine_args["gms_mode"] == "ro"
+        assert event_log.index("register_model") < event_log.index(
+            "lock.owner"
+        ), f"Standby must publish MDC before polling lock owner; got {event_log}"
 
 
 class MultimodalProcessorInstantiated(Exception):
