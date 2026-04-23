@@ -78,14 +78,12 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
 
         # Generate trace info if tracing is enabled
         trace_header = build_trace_headers(context) if self.enable_trace else None
-        trace_id = context.id() if trace_header else None
 
         async_gen = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
             stream=True,  # Always stream for Dynamo
             external_trace_header=trace_header,
-            rid=trace_id,
         )
 
         # Process stream output (token-based or text-based)
