@@ -2313,7 +2313,6 @@ name = "dynamo-bench"
 version = "1.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "clap 4.6.0",
  "dynamo-kv-router",
  "dynamo-mocker",
@@ -2326,8 +2325,10 @@ dependencies = [
  "reqwest 0.12.24",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]
