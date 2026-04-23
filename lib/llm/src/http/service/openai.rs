@@ -60,6 +60,9 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_runtime::error::{
+    BackendError as DynamoBackendError, DynamoError, ErrorType as DynamoErrorType,
+};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -126,6 +129,28 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
+}
+
+/// Return the matching `DynamoError` message so callers can surface it verbatim.
+fn find_invalid_argument_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    const INVALID_ARGUMENT_ERROR_TYPES: &[DynamoErrorType] = &[
+        DynamoErrorType::InvalidArgument,
+        DynamoErrorType::Backend(DynamoBackendError::InvalidArgument),
+    ];
+    const NON_INVALID_ARGUMENT_ERROR_TYPES: &[DynamoErrorType] = &[];
+
+    if !dynamo_runtime::error::match_error_chain(
+        err,
+        INVALID_ARGUMENT_ERROR_TYPES,
+        NON_INVALID_ARGUMENT_ERROR_TYPES,
+    ) {
+        return None;
+    }
+
+    std::iter::successors(Some(err), |e| e.source())
+        .filter_map(|e| e.downcast_ref::<DynamoError>())
+        .find(|dynamo_err| INVALID_ARGUMENT_ERROR_TYPES.contains(&dynamo_err.error_type()))
+        .map(|dynamo_err| dynamo_err.message().to_string())
 }
 
 impl ErrorMessage {
@@ -233,14 +258,14 @@ impl ErrorMessage {
             );
         }
 
-        // Check for DynamoError with InvalidArgument → HTTP 400
-        if let Some(dynamo_err) = err.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && dynamo_err.error_type() == dynamo_runtime::error::ErrorType::InvalidArgument
-        {
+        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
+        // This also matches Backend(InvalidArgument), which Python bindings produce when a
+        // worker (e.g. vLLM) raises ValueError/TypeError on invalid sampling params.
+        if let Some(message) = find_invalid_argument_message(err.as_ref()) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
+                    message,
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
                 }),
@@ -2685,6 +2710,76 @@ mod tests {
         assert_eq!(response.1.code, 499);
         assert_eq!(response.1.error_type, "Client Closed Request");
         assert!(response.1.message.contains("stopped or killed"));
+    }
+
+    #[test]
+    fn test_invalid_argument_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message("max_tokens must be greater than 0")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, 400);
+        assert_eq!(response.1.error_type, "Bad Request");
+        assert_eq!(response.1.message, "max_tokens must be greater than 0");
+    }
+
+    #[test]
+    fn test_backend_invalid_argument_error_response_from_anyhow() {
+        // vLLM-style: a worker raises ValueError on invalid sampling params, which
+        // Python bindings wrap as Backend(InvalidArgument). The frontend must surface
+        // this as HTTP 400, not 500.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("max_tokens must be greater than 0")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, 400);
+        assert_eq!(response.1.error_type, "Bad Request");
+        assert_eq!(response.1.message, "max_tokens must be greater than 0");
+    }
+
+    #[test]
+    fn test_backend_invalid_argument_nested_in_chain_from_anyhow() {
+        // The InvalidArgument may sit deeper in the error chain (wrapped by anyhow
+        // context or another DynamoError). Ensure the chain walk still catches it.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let inner = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("bad sampling param")
+            .build();
+        let outer = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .message("generate failed")
+            .cause(inner)
+            .build();
+        let err: anyhow::Error = outer.into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "bad sampling param");
+    }
+
+    #[test]
+    fn test_other_backend_error_still_returns_500_from_anyhow() {
+        // Backend variants other than InvalidArgument must keep their existing 500 behavior.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine gone")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

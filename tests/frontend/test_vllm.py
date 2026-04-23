@@ -455,3 +455,62 @@ def test_reasoning(request, start_services: ServicePorts, predownload_models) ->
     assert any(
         char.isdigit() for char in content
     ), "Expected response to contain numerical calculations"
+
+
+@pytest.mark.profiled_vram_gib(20.4)
+@pytest.mark.timeout(120)
+@pytest.mark.post_merge
+def test_max_tokens_zero_returns_400(
+    request, start_services: ServicePorts, predownload_models
+) -> None:
+    """Invalid sampling params must surface as HTTP 400, not 500.
+
+    For chat completions, frontend validation currently skips `max_tokens` (deprecated in
+    favor of `max_completion_tokens`), so the request reaches the vLLM worker, which
+    rejects `max_tokens=0` with a Python ValueError. The bindings tag that as
+    Backend(InvalidArgument); the OpenAI frontend must map it to HTTP 400.
+
+    The /v1/completions path also asserts 400 as a regression guard: that endpoint
+    enforces `max_tokens` at the frontend, and the fix must not regress it.
+    """
+    base_url = f"http://localhost:{start_services.frontend_port}"
+
+    chat_payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 0,
+    }
+    chat_response = _send_chat_request(chat_payload, base_url=base_url)
+    assert chat_response.status_code == 400, (
+        f"Expected HTTP 400 for chat completions with max_tokens=0, got "
+        f"{chat_response.status_code}: {chat_response.text}"
+    )
+    chat_body = chat_response.json()
+    assert chat_body.get("code") == 400, f"Unexpected chat body: {chat_body}"
+    assert chat_body.get("type") == "Bad Request", f"Unexpected chat body: {chat_body}"
+    assert (
+        isinstance(chat_body.get("message"), str) and chat_body["message"]
+    ), f"Chat 400 body must carry an error message: {chat_body}"
+
+    completions_payload = {
+        "model": TEST_MODEL,
+        "prompt": "hello",
+        "max_tokens": 0,
+    }
+    completions_response = requests.post(
+        f"{base_url}/v1/completions",
+        headers={"Content-Type": "application/json"},
+        json=completions_payload,
+        timeout=60,
+    )
+    assert completions_response.status_code == 400, (
+        f"Expected HTTP 400 for completions with max_tokens=0, got "
+        f"{completions_response.status_code}: {completions_response.text}"
+    )
+    completions_body = completions_response.json()
+    assert (
+        completions_body.get("code") == 400
+    ), f"Unexpected completions body: {completions_body}"
+    assert (
+        completions_body.get("type") == "Bad Request"
+    ), f"Unexpected completions body: {completions_body}"
