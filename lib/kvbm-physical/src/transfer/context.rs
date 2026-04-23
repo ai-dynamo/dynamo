@@ -12,7 +12,7 @@ use derive_builder::Builder;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::device::{DeviceBackend, DeviceContext, DeviceStream, DeviceEvent, DeviceMemPool, EngineHint};
+use crate::device::{DeviceBackend, DeviceContext, DeviceStream, DeviceEvent, DeviceMemPool};
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
 use velo::EventManager;
 
@@ -289,18 +289,18 @@ impl TransferContext {
 
         // Copy-engine pools: whole-block batch_copy → BCS on ZE, regular on CUDA
         let copy_h2d_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
-            .map(|_| device_ctx.create_stream(EngineHint::Copy).map(Arc::new))
+            .map(|_| device_ctx.create_stream().map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
         let copy_d2h_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
-            .map(|_| device_ctx.create_stream(EngineHint::Copy).map(Arc::new))
+            .map(|_| device_ctx.create_stream().map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
 
-        // Compute-engine pools: fc_lw vectorized_copy → CCS on ZE, regular on CUDA
+        // Compute-engine pools: vectorized_copy kernel streams
         let compute_h2d_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
-            .map(|_| device_ctx.create_stream(EngineHint::Compute).map(Arc::new))
+            .map(|_| device_ctx.create_stream().map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
         let compute_d2h_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
-            .map(|_| device_ctx.create_stream(EngineHint::Compute).map(Arc::new))
+            .map(|_| device_ctx.create_stream().map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
 
         // Create channels for background notification handlers

@@ -18,7 +18,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps, EngineHint};
+pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps};
 
 /// Device backend type selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -104,8 +104,8 @@ impl DeviceContext {
         self.device_id
     }
 
-    pub fn create_stream(&self, hint: EngineHint) -> Result<DeviceStream> {
-        let stream_ops = self.ops.create_stream(hint)?;
+    pub fn create_stream(&self) -> Result<DeviceStream> {
+        let stream_ops = self.ops.create_stream()?;
         Ok(DeviceStream {
             backend: self.backend,
             ops: stream_ops,
@@ -211,7 +211,7 @@ unsafe impl Sync for DeviceStream {}
 pub fn sync_memcpy_dtoh(device_id: u32, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
     let backend = DeviceBackend::detect_backend()?;
     let ctx = DeviceContext::new(backend, device_id)?;
-    let stream = ctx.create_stream(EngineHint::Copy)?;
+    let stream = ctx.create_stream()?;
     stream.memcpy_dtoh(src_device, dst_host)?;
     stream.synchronize()?;
     Ok(())
@@ -224,7 +224,7 @@ pub fn sync_memcpy_dtoh(device_id: u32, src_device: u64, dst_host: &mut [u8]) ->
 pub fn sync_memcpy_htod(device_id: u32, dst_device: u64, src_host: &[u8]) -> Result<()> {
     let backend = DeviceBackend::detect_backend()?;
     let ctx = DeviceContext::new(backend, device_id)?;
-    let stream = ctx.create_stream(EngineHint::Copy)?;
+    let stream = ctx.create_stream()?;
     stream.memcpy_htod(dst_device, src_host)?;
     stream.synchronize()?;
     Ok(())

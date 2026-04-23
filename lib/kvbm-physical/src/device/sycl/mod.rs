@@ -140,10 +140,9 @@ impl DeviceContextOps for SyclContext {
         self.device_id
     }
 
-    fn create_stream(&self, _hint: EngineHint) -> Result<Box<dyn DeviceStreamOps>> {
+    fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
         // Return a queue from the bounded pool (round-robin). All pool queues
         // share the same SYCL context as alloc_queue, so USM pointers are valid.
-        // EngineHint is ignored — SYCL runtime selects engine automatically.
         let pool = &self.cache.stream_pool;
         let idx = self.cache.next_stream.fetch_add(1, Ordering::Relaxed) % pool.len();
         Ok(Box::new(SyclStreamWrapper {
