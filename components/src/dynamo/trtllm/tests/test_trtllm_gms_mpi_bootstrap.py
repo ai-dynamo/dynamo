@@ -54,6 +54,10 @@ def stubbed_env(monkeypatch):
             self.n_workers = n_workers
             self.mpi_pool = None
 
+    def fake_worker_main(*args, **kwargs):
+        call_log.append(f"worker_main:{args}:{kwargs}")
+        return "worker-main-result"
+
     mpi4py_module = types.ModuleType("mpi4py")
     mpi4py_futures_module = types.ModuleType("mpi4py.futures")
     mpi4py_futures_module.MPIPoolExecutor = FakeMPIPoolExecutor
@@ -63,6 +67,9 @@ def stubbed_env(monkeypatch):
     trtllm_module = types.ModuleType("tensorrt_llm")
     trtllm_llmapi_module = types.ModuleType("tensorrt_llm.llmapi")
     trtllm_mpi_session_module = types.ModuleType("tensorrt_llm.llmapi.mpi_session")
+    trtllm_executor_module = types.ModuleType("tensorrt_llm.executor")
+    trtllm_executor_worker_module = types.ModuleType("tensorrt_llm.executor.worker")
+    trtllm_executor_proxy_module = types.ModuleType("tensorrt_llm.executor.proxy")
     trtllm_torch_module = types.ModuleType("tensorrt_llm._torch")
     trtllm_pyexecutor_module = types.ModuleType("tensorrt_llm._torch.pyexecutor")
     trtllm_pyexecutor_creator_module = types.ModuleType(
@@ -126,8 +133,14 @@ def stubbed_env(monkeypatch):
     )
     trtllm_pyexecutor_creator_module.create_py_executor = fake_create_py_executor
     trtllm_mpi_session_module.MpiPoolSession = FakeMpiPoolSession
+    trtllm_executor_worker_module.GenerationExecutorWorker = object
+    trtllm_executor_worker_module.worker_main = fake_worker_main
+    trtllm_executor_proxy_module.worker_main = fake_worker_main
     trtllm_module.llmapi = trtllm_llmapi_module
+    trtllm_module.executor = trtllm_executor_module
     trtllm_llmapi_module.mpi_session = trtllm_mpi_session_module
+    trtllm_executor_module.worker = trtllm_executor_worker_module
+    trtllm_executor_module.proxy = trtllm_executor_proxy_module
     trtllm_module._torch = trtllm_torch_module
     trtllm_torch_module.pyexecutor = trtllm_pyexecutor_module
     trtllm_pyexecutor_module.py_executor_creator = trtllm_pyexecutor_creator_module
@@ -139,6 +152,13 @@ def stubbed_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "tensorrt_llm.llmapi", trtllm_llmapi_module)
     monkeypatch.setitem(
         sys.modules, "tensorrt_llm.llmapi.mpi_session", trtllm_mpi_session_module
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt_llm.executor", trtllm_executor_module)
+    monkeypatch.setitem(
+        sys.modules, "tensorrt_llm.executor.worker", trtllm_executor_worker_module
+    )
+    monkeypatch.setitem(
+        sys.modules, "tensorrt_llm.executor.proxy", trtllm_executor_proxy_module
     )
     monkeypatch.setitem(sys.modules, "tensorrt_llm._torch", trtllm_torch_module)
     monkeypatch.setitem(
@@ -159,11 +179,24 @@ def stubbed_env(monkeypatch):
     bootstrap._extra_config_json = None
     bootstrap._executor_finalize_hook_installed = False
     bootstrap._shadow_activation_fd = None
+    bootstrap._comm_task_bootstrapped = False
+    for key in (
+        "DYN_GMS_TRTLLM_ENABLED",
+        "DYN_GMS_TRTLLM_EXTRA_CONFIG_JSON",
+        "CONTAINER_NAME",
+        "DYN_GMS_SHADOW_MODE",
+        "ENGINE_ID",
+        "FAILOVER_LOCK_PATH",
+        "GMS_SOCKET_DIR",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
     yield {
         "bootstrap": bootstrap,
         "FakeMpiPoolSession": FakeMpiPoolSession,
         "captured_kwargs": captured_kwargs,
+        "executor_proxy": trtllm_executor_proxy_module,
+        "executor_worker": trtllm_executor_worker_module,
         "py_executor_creator": trtllm_pyexecutor_creator_module,
         "call_log": call_log,
         "fake_comm": fake_comm,
@@ -173,17 +206,21 @@ def stubbed_env(monkeypatch):
 def test_install_patches_mpi_pool_session_start_method(stubbed_env):
     bootstrap = stubbed_env["bootstrap"]
     FakeMpiPoolSession = stubbed_env["FakeMpiPoolSession"]
+    executor_proxy = stubbed_env["executor_proxy"]
     original = (
         FakeMpiPoolSession._start_mpi_pool
         if hasattr(FakeMpiPoolSession, "_start_mpi_pool")
         else None
     )
+    original_worker_main = executor_proxy.worker_main
 
     bootstrap.install_mpi_worker_bootstrap()
 
     patched = FakeMpiPoolSession._start_mpi_pool
     assert patched is not original
     assert callable(patched)
+    assert executor_proxy.worker_main is bootstrap.bootstrapped_proxy_worker_main
+    assert executor_proxy.worker_main is not original_worker_main
 
 
 def test_install_is_idempotent(stubbed_env):
@@ -220,6 +257,7 @@ def test_start_mpi_pool_injects_initializer_and_extra_config(stubbed_env, monkey
     env_snapshot, extra_config_json = captured_kwargs["initargs"]
     assert env_snapshot == {
         "DYN_GMS_TRTLLM_ENABLED": "1",
+        "DYN_GMS_TRTLLM_EXTRA_CONFIG_JSON": '{"gms_read_only": true}',
         "DYN_GMS_SHADOW_MODE": "1",
         "ENGINE_ID": "1",
         "FAILOVER_LOCK_PATH": "/tmp/failover.lock",
@@ -229,6 +267,10 @@ def test_start_mpi_pool_injects_initializer_and_extra_config(stubbed_env, monkey
     assert captured_kwargs["env"]["TRTLLM_FOO"] == "bar"
     assert captured_kwargs["env"]["TLLM_BAZ"] == "qux"
     assert captured_kwargs["env"]["DYN_GMS_TRTLLM_ENABLED"] == "1"
+    assert (
+        captured_kwargs["env"]["DYN_GMS_TRTLLM_EXTRA_CONFIG_JSON"]
+        == '{"gms_read_only": true}'
+    )
     assert captured_kwargs["env"]["FAILOVER_LOCK_PATH"] == "/tmp/failover.lock"
 
 
@@ -275,6 +317,73 @@ def test_worker_init_hook_no_op_when_gms_disabled(stubbed_env, monkeypatch):
     bootstrap.worker_init_hook({"ENGINE_ID": "1"}, None)
 
     fake_setup_gms.assert_not_called()
+
+
+def test_worker_init_hook_infers_shadow_read_only_without_extra_config(
+    stubbed_env, monkeypatch
+):
+    bootstrap = stubbed_env["bootstrap"]
+
+    import gpu_memory_service.integrations.trtllm as trtllm_gms
+
+    fake_setup_gms = MagicMock()
+    monkeypatch.setattr(trtllm_gms, "setup_gms", fake_setup_gms)
+
+    env_snapshot = {
+        "DYN_GMS_TRTLLM_ENABLED": "1",
+        "DYN_GMS_SHADOW_MODE": "1",
+        "ENGINE_ID": "1",
+    }
+    bootstrap.worker_init_hook(env_snapshot, None)
+
+    fake_setup_gms.assert_called_once_with({"gms_read_only": True})
+
+
+def test_bootstrapped_proxy_worker_main_bootstraps_comm_workers(
+    stubbed_env, monkeypatch
+):
+    bootstrap = stubbed_env["bootstrap"]
+    executor_proxy = stubbed_env["executor_proxy"]
+    call_log = stubbed_env["call_log"]
+
+    bootstrap.install_mpi_worker_bootstrap()
+    bootstrap._comm_task_bootstrapped = False
+    monkeypatch.setenv("DYN_GMS_TRTLLM_ENABLED", "1")
+    monkeypatch.setenv("DYN_GMS_SHADOW_MODE", "1")
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/failover.lock")
+    monkeypatch.setenv(
+        "DYN_GMS_TRTLLM_EXTRA_CONFIG_JSON",
+        '{"gms_delay_commit_until_engine_init": true}',
+    )
+
+    init_calls = []
+
+    def fake_worker_init_hook(env_snapshot, extra_config_json):
+        init_calls.append((env_snapshot, extra_config_json))
+
+    monkeypatch.setattr(bootstrap, "worker_init_hook", fake_worker_init_hook)
+
+    result = executor_proxy.worker_main(
+        "engine", "queues", "INFO", ready_signal="READY"
+    )
+
+    assert result == "worker-main-result"
+    assert init_calls == [
+        (
+            {
+                "DYN_GMS_TRTLLM_ENABLED": "1",
+                "DYN_GMS_TRTLLM_EXTRA_CONFIG_JSON": '{"gms_delay_commit_until_engine_init": true}',
+                "DYN_GMS_SHADOW_MODE": "1",
+                "ENGINE_ID": "1",
+                "FAILOVER_LOCK_PATH": "/tmp/failover.lock",
+            },
+            '{"gms_delay_commit_until_engine_init": true}',
+        )
+    ]
+    assert call_log == [
+        "worker_main:('engine', 'queues', 'INFO'):{'ready_signal': 'READY'}"
+    ]
 
 
 def test_worker_init_hook_installs_child_finalize_before_start_worker(

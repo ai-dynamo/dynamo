@@ -10,11 +10,17 @@ so setup_gms() — which monkey-patches ModelLoader.load — only runs in the pa
 Every child rank then hits the unpatched load path and allocates its own full
 weight shard, duplicating weights between active and shadow engines.
 
-This module fixes that by monkey-patching MpiPoolSession._start_mpi_pool so the
-MPIPoolExecutor is constructed with an ``initializer=worker_init_hook`` that runs
-first in every child. The hook restores the GMS-relevant env vars from the
-parent's snapshot and calls setup_gms() so that the child's own ModelLoader.load
-is patched before TRT-LLM invokes it.
+This module fixes that in both TRT-LLM worker-launch paths:
+
+- ``MpiPoolSession`` / ``MPIPoolExecutor`` children get
+  ``initializer=worker_init_hook``.
+- ``MpiCommSession`` / ``MPICommExecutor`` workers run a top-level
+  ``worker_main`` wrapper that calls the same hook before delegating to
+  TRT-LLM's real executor entrypoint.
+
+In both cases the hook restores the GMS-relevant env vars from the parent's
+snapshot and calls setup_gms() so that the child's own ModelLoader.load is
+patched before TRT-LLM invokes it.
 """
 
 from __future__ import annotations
@@ -33,10 +39,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ENABLED_ENV = "DYN_GMS_TRTLLM_ENABLED"
+_EXTRA_CONFIG_ENV = "DYN_GMS_TRTLLM_EXTRA_CONFIG_JSON"
 # Env vars the children must inherit for the child-side setup_gms to behave
 # identically to the parent. Upstream MpiPoolSession only forwards TRTLLM_*/TLLM_*.
 _PROPAGATED_ENV_VARS: tuple[str, ...] = (
     _ENABLED_ENV,
+    _EXTRA_CONFIG_ENV,
     "CONTAINER_NAME",
     "DYN_GMS_SHADOW_MODE",
     "ENGINE_ID",
@@ -55,6 +63,18 @@ def set_extra_config(extra: "dict[str, Any] | None") -> None:
     """Stash the model_loader_extra_config so MPI children see the same lock mode."""
     global _extra_config_json
     _extra_config_json = json.dumps(extra) if extra else None
+    if _extra_config_json is None:
+        os.environ.pop(_EXTRA_CONFIG_ENV, None)
+    else:
+        os.environ[_EXTRA_CONFIG_ENV] = _extra_config_json
+
+
+def _current_bootstrap_context() -> tuple[dict[str, str], Optional[str]]:
+    env_snapshot = {
+        key: os.environ[key] for key in _PROPAGATED_ENV_VARS if key in os.environ
+    }
+    extra_config_json = _extra_config_json or env_snapshot.get(_EXTRA_CONFIG_ENV)
+    return env_snapshot, extra_config_json
 
 
 def _delay_commit_until_engine_init(extra: "dict[str, Any] | None") -> bool:
@@ -462,8 +482,11 @@ def worker_init_hook(env_snapshot: dict, extra_config_json: Optional[str]) -> No
         return
 
     from gpu_memory_service.integrations.trtllm import setup_gms
+    from gpu_memory_service.integrations.trtllm.utils import configure_gms_lock_mode
 
     extra = json.loads(extra_config_json) if extra_config_json else None
+    if os.environ.get("DYN_GMS_SHADOW_MODE") == "1":
+        extra = configure_gms_lock_mode(extra or {})
     set_extra_config(extra)
     setup_gms(extra)
     if _delay_commit_until_engine_init(extra) or _is_shadow_standby(extra):
@@ -489,6 +512,31 @@ def run_bootstrapped_mpi_task(
     return task(*args, **kwargs)
 
 
+def bootstrapped_proxy_worker_main(*args, **kwargs):
+    """Run TRT-LLM's worker_main through worker_init_hook on MPIComm paths.
+
+    External MPI worker nodes do not import Dynamo's llm_worker module before
+    accepting tasks through MPICommExecutor, so the parent-side
+    ``MpiCommSession.submit`` monkey-patch never reaches those processes. Patch
+    the pickled task itself instead: GenerationExecutorProxy submits
+    ``tensorrt_llm.executor.proxy.worker_main``, so replacing that symbol with a
+    top-level wrapper ensures remote MPI workers import this module and execute
+    ``worker_init_hook`` before TRT-LLM enters ``worker_main``.
+    """
+
+    env_snapshot, extra_config_json = _current_bootstrap_context()
+
+    from tensorrt_llm.executor.worker import worker_main as original_worker_main
+
+    return run_bootstrapped_mpi_task(
+        env_snapshot,
+        extra_config_json,
+        original_worker_main,
+        *args,
+        **kwargs,
+    )
+
+
 def install_mpi_worker_bootstrap() -> None:
     """Monkey-patch MpiPoolSession to run worker_init_hook in every child. Idempotent."""
     global _bootstrap_installed
@@ -496,6 +544,7 @@ def install_mpi_worker_bootstrap() -> None:
         return
 
     try:
+        import tensorrt_llm.executor.proxy as _executor_proxy
         import tensorrt_llm.llmapi.mpi_session as _mpi_session
     except ImportError as exc:
         raise RuntimeError(
@@ -530,6 +579,7 @@ def install_mpi_worker_bootstrap() -> None:
         )
 
     MpiPoolSession._start_mpi_pool = _patched_start_mpi_pool
+    _executor_proxy.worker_main = bootstrapped_proxy_worker_main
     if MpiCommSession is not None:
         original_submit = MpiCommSession.submit
 
@@ -553,5 +603,5 @@ def install_mpi_worker_bootstrap() -> None:
         MpiCommSession.submit = _patched_submit
     _bootstrap_installed = True
     logger.info(
-        "[GMS] Patched TensorRT-LLM MPI sessions to bootstrap GMS in MPI workers"
+        "[GMS] Patched TensorRT-LLM MPI sessions and proxy worker_main to bootstrap GMS in MPI workers"
     )
