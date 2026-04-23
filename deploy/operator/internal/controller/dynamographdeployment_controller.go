@@ -1606,9 +1606,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	}
 
 	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule).
-	// Always run SyncResource so that previously created DestinationRules
-	// are cleaned up when the service mesh is disabled.
-	{
+	// Only attempt DestinationRule reconciliation when the Istio CRDs are
+	// present on the cluster; otherwise the API call would fail on every
+	// reconcile for Istio-less clusters.
+	if r.RuntimeConfig.IstioAvailable {
 		meshEnabled := r.Config.ServiceMesh.IsEnabled()
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
@@ -1621,6 +1622,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		if meshEnabled {
 			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
 		}
+	} else if r.Config.ServiceMesh.IsEnabled() {
+		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
 	}
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
@@ -1676,6 +1679,14 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
+	if r.RuntimeConfig.IstioAvailable {
+		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return false },
+		}))
+	}
 	if r.RuntimeConfig.GroveEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set

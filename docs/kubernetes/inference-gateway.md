@@ -269,11 +269,18 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 
-**Service Mesh Integration**
+**Service Mesh Integration (Istio)**
 
-When running under a service mesh (e.g., Istio), the mesh sidecar proxy may conflict with the EPP's own TLS serving, causing connection failures (double-TLS). To avoid this, the mesh must be told how to connect to the EPP service.
+When running under a service mesh such as Istio, the mesh sidecar proxy may conflict with the EPP's own TLS serving, causing connection failures (double-TLS). To avoid this, the mesh must be told how to connect to the EPP service via an Istio `DestinationRule`.
 
-For **Istio**, this means creating a `DestinationRule` for the EPP service. The Dynamo operator can generate this automatically when the `serviceMesh` configuration is enabled in the platform Helm values:
+The Dynamo operator can generate this DestinationRule automatically. Enable it by setting the `dynamo.serviceMesh` parameters when installing or upgrading the Dynamo platform Helm chart:
+
+```bash
+helm install dynamo deploy/helm/charts/platform \
+  --set dynamo.serviceMesh.enabled=true
+```
+
+Or equivalently in a custom values file:
 
 ```yaml
 dynamo:
@@ -281,11 +288,23 @@ dynamo:
     enabled: true
     provider: "istio"
     istio:
-      tlsMode: "SIMPLE"          # EPP serves TLS with a self-signed cert
-      insecureSkipVerify: true    # skip verification of the self-signed cert
+      tlsMode: "SIMPLE"
+      insecureSkipVerify: true
 ```
 
-This produces a `DestinationRule` equivalent to:
+**Helm Parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `dynamo.serviceMesh.enabled` | bool | `false` | Enable automatic DestinationRule generation for EPP services. |
+| `dynamo.serviceMesh.provider` | string | `"istio"` | Service mesh provider. Only `"istio"` is supported. |
+| `dynamo.serviceMesh.istio.tlsMode` | string | `"SIMPLE"` | TLS mode for the DestinationRule. Supported values: `DISABLE`, `SIMPLE`, `MUTUAL`, `ISTIO_MUTUAL`. |
+| `dynamo.serviceMesh.istio.insecureSkipVerify` | bool | `true` | Skip TLS certificate verification. Set to `true` when EPP uses self-signed certificates (the default). |
+
+> [!NOTE]
+> The Istio CRDs (`networking.istio.io`) must be installed on the cluster before enabling this feature. The operator detects Istio availability at startup — if the CRDs are not present, DestinationRule reconciliation is skipped even when `serviceMesh.enabled` is `true`.
+
+When enabled, the operator produces a `DestinationRule` for each EPP service equivalent to:
 
 ```yaml
 apiVersion: networking.istio.io/v1beta1
@@ -300,7 +319,7 @@ spec:
       insecureSkipVerify: true
 ```
 
-If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
+If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
 
 ### 6. Verify Installation ###
 

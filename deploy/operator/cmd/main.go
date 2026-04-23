@@ -447,12 +447,16 @@ func main() {
 	setupLog.Info("Detecting DRA (Dynamic Resource Allocation) availability...")
 	runtimeConfig.DRAEnabled = commonController.DetectDRAAvailability(mainCtx, mgr)
 
+	setupLog.Info("Detecting Istio availability...")
+	runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
+
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
 		"volcano", volcanoDetected,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,
+		"istio", runtimeConfig.IstioAvailable,
 	)
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
