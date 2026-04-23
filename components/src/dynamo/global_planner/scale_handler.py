@@ -572,7 +572,10 @@ class ScaleRequestHandler:
                 # Read ALL known DGDs' current state once. Cross-DGD partner
                 # search needs to see every pool's current replicas and
                 # gpu_per_replica; cross-DGD budget math also consumes this.
-                all_pools = self._read_all_pools()
+                # Run the synchronous K8s GETs off-thread so the event loop
+                # (health checks, other endpoints) isn't blocked for the
+                # N round-trips it takes across managed DGDs.
+                all_pools = await asyncio.to_thread(self._read_all_pools)
                 dgd_pools = all_pools.get(connector_key, {})
 
                 # Always update the intent cache with this request's targets,
