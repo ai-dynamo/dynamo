@@ -91,6 +91,10 @@ class _DeferredAbort:
         self._request_id = request_id
         self._first_token_received = False
         self._first_token_event = asyncio.Event()
+        # Strong reference to the deferred-abort background task so it is not
+        # garbage collected mid-execution (asyncio.create_task only holds a
+        # weak reference via the event loop).
+        self._abort_task: Optional[asyncio.Task] = None
 
     def signal_first_token(self) -> None:
         """Called when the first engine output for the request is received."""
@@ -106,12 +110,12 @@ class _DeferredAbort:
                 f"Deferred abort: first token already received, "
                 f"aborting request {self._request_id} now"
             )
-        else:
+        elif self._abort_task is None:
             logger.debug(
                 f"Deferred abort: first token not received for request "
                 f"{self._request_id}, spawning background task"
             )
-            asyncio.create_task(self._wait_and_abort())
+            self._abort_task = asyncio.create_task(self._wait_and_abort())
 
     async def _wait_and_abort(self) -> None:
         """Background task: wait for first token, then abort."""
