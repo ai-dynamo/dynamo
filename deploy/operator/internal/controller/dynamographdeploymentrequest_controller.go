@@ -1451,7 +1451,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 
-	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
+	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil && hw.TotalGPUs != nil {
 		return nil
 	}
 
@@ -1459,18 +1459,24 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 
 	var gpuInfo *gpu.GPUInfo
 	logger.Info("Attempting GPU discovery for profiling job")
-	discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
-	if err != nil {
-		reason := GetGPUDiscoveryFailureReason(err)
-		logger.Info("DCGM discovery failed, falling back to node-label discovery",
-			"reason", reason, "error", err.Error())
-		if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
-			return err
+	var discoveredInfo *gpu.GPUInfo
+	var err error
+	if r.GPUDiscovery != nil {
+		discoveredInfo, err = r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
+		if err != nil {
+			reason := GetGPUDiscoveryFailureReason(err)
+			logger.Info("DCGM discovery failed, falling back to node-label discovery",
+				"reason", reason, "error", err.Error())
+			if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+				return fmt.Errorf("auto-discovery failed: %w", err)
+			}
 		}
+	}
+	if discoveredInfo == nil {
 		discoveredInfo, err = gpu.DiscoverGPUs(ctx, r.APIReader)
 		if err != nil {
 			logger.Info("Node-label discovery also failed", "error", err.Error())
-			return err
+			return fmt.Errorf("auto-discovery failed: %w", err)
 		}
 	}
 	gpuInfo = discoveredInfo
