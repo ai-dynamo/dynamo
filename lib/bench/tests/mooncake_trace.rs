@@ -136,7 +136,7 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> anyhow::Result<()> {
     let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
 

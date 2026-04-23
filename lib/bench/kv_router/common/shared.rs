@@ -83,7 +83,7 @@ where
     GetTimestamp: Fn(&T) -> u64 + Copy,
     WithTimestamp: Fn(&T, u64) -> T + Copy,
 {
-    let target_us = benchmark_duration_ms * 1000;
+    let target_us = u128::from(benchmark_duration_ms) * 1000;
 
     traces
         .iter()
@@ -97,7 +97,9 @@ where
             worker_trace
                 .iter()
                 .map(|entry| {
-                    with_timestamp(entry, timestamp_of(entry) * target_us / max_timestamp_us)
+                    let scaled_timestamp =
+                        u128::from(timestamp_of(entry)) * target_us / u128::from(max_timestamp_us);
+                    with_timestamp(entry, scaled_timestamp.min(u128::from(u64::MAX)) as u64)
                 })
                 .collect()
         })
@@ -112,16 +114,19 @@ pub fn compute_benchmark_run(
     mut latencies_ns: Vec<u64>,
 ) -> BenchmarkRun {
     let kept_up = total_duration <= Duration::from_millis(benchmark_duration_ms * 11 / 10);
-    let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
-    let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
-    let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
-    let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
+    let benchmark_duration_secs = (benchmark_duration_ms as f32 / 1000.0).max(1e-6);
+    let total_duration_secs = total_duration.as_secs_f32().max(1e-6);
+    let offered_ops_throughput = total_ops as f32 / benchmark_duration_secs;
+    let ops_throughput = total_ops as f32 / total_duration_secs;
+    let offered_block_throughput = total_blocks as f32 / benchmark_duration_secs;
+    let block_throughput = total_blocks as f32 / total_duration_secs;
 
     latencies_ns.sort_unstable();
     let latency_p99_us = if latencies_ns.is_empty() {
         0.0
     } else {
-        latencies_ns[latencies_ns.len() * 99 / 100] as f32 / 1000.0
+        let p99_idx = latencies_ns.len().saturating_sub(1) * 99 / 100;
+        latencies_ns[p99_idx] as f32 / 1000.0
     };
 
     BenchmarkRun {
@@ -205,9 +210,18 @@ pub async fn generate_replay_artifacts(
         artifacts.push(task.await??);
     }
 
-    for worker_events in artifacts.iter().map(|artifact| &artifact.kv_events) {
+    for (worker_idx, worker_events) in artifacts
+        .iter()
+        .enumerate()
+        .map(|(worker_idx, artifact)| (worker_idx, &artifact.kv_events))
+    {
         for i in 1..worker_events.len() {
-            assert!(worker_events[i].timestamp_us >= worker_events[i - 1].timestamp_us);
+            assert!(
+                worker_events[i].timestamp_us >= worker_events[i - 1].timestamp_us,
+                "worker {worker_idx} non-monotonic kv_events at idx {i}: prev={}, curr={}",
+                worker_events[i - 1].timestamp_us,
+                worker_events[i].timestamp_us
+            );
         }
     }
 

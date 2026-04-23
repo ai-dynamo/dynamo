@@ -18,7 +18,7 @@ const TRACE_SIMULATION_DURATION_MS: Option<u64> = None;
 const BENCHMARK_DURATION_MS: u64 = 4000;
 const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_sequences_trace_replays_without_warnings_or_leaks() -> anyhow::Result<()> {
     let warning_count = support::warning_counter(&["dynamo_kv_router::sequences", "dynamo_mocker"]);
     support::reset_warning_count(&warning_count);

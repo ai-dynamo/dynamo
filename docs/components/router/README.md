@@ -56,5 +56,6 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
 - **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
+- **[Router Testing](router-testing.md)**: Test layers from Rust unit tests to fixture-backed replay and full process E2E
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service for independent scaling
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details, algorithms, and event transport modes
