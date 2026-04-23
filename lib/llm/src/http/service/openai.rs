@@ -83,12 +83,20 @@ pub(super) fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
+/// OpenAI-compatible error envelope: `{ "error": { ... } }`.
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
-    message: String,
+    pub error: ErrorDetails,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct ErrorDetails {
+    pub message: String,
     #[serde(rename = "type")]
-    error_type: String,
-    code: u16,
+    pub error_type: String,
+    #[serde(default)]
+    pub param: Option<String>,
+    pub code: u16,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -125,7 +133,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
-    classify_error_for_metrics(response.0, &response.1.message)
+    classify_error_for_metrics(response.0, &response.1.error.message)
 }
 
 impl ErrorMessage {
@@ -136,9 +144,12 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
-                message: "Model not found".to_string(),
-                error_type,
-                code: code.as_u16(),
+                error: ErrorDetails {
+                    message: "Model not found".to_string(),
+                    error_type,
+                    param: None,
+                    code: code.as_u16(),
+                },
             }),
         )
     }
@@ -151,9 +162,12 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
-                message: "Model temporarily unavailable".to_string(),
-                error_type,
-                code: code.as_u16(),
+                error: ErrorDetails {
+                    message: "Model temporarily unavailable".to_string(),
+                    error_type,
+                    param: None,
+                    code: code.as_u16(),
+                },
             }),
         )
     }
@@ -174,9 +188,12 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
-                message: "Service is not ready".to_string(),
-                error_type,
-                code: code.as_u16(),
+                error: ErrorDetails {
+                    message: "Service is not ready".to_string(),
+                    error_type,
+                    param: None,
+                    code: code.as_u16(),
+                },
             }),
         )
     }
@@ -192,9 +209,12 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
-                message: msg.to_string(),
-                error_type,
-                code: code.as_u16(),
+                error: ErrorDetails {
+                    message: msg.to_string(),
+                    error_type,
+                    param: None,
+                    code: code.as_u16(),
+                },
             }),
         )
     }
@@ -209,9 +229,12 @@ impl ErrorMessage {
         (
             code,
             Json(ErrorMessage {
-                message: msg.to_string(),
-                error_type,
-                code: code.as_u16(),
+                error: ErrorDetails {
+                    message: msg.to_string(),
+                    error_type,
+                    param: None,
+                    code: code.as_u16(),
+                },
             }),
         )
     }
@@ -226,9 +249,12 @@ impl ErrorMessage {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: err.to_string(),
-                    error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
-                    code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    error: ErrorDetails {
+                        message: err.to_string(),
+                        error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
+                        param: None,
+                        code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    },
                 }),
             );
         }
@@ -240,9 +266,12 @@ impl ErrorMessage {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
-                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
-                    code: StatusCode::BAD_REQUEST.as_u16(),
+                    error: ErrorDetails {
+                        message: dynamo_err.message().to_string(),
+                        error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                        param: None,
+                        code: StatusCode::BAD_REQUEST.as_u16(),
+                    },
                 }),
             );
         }
@@ -254,9 +283,12 @@ impl ErrorMessage {
             return (
                 code,
                 Json(ErrorMessage {
-                    message: err.to_string(),
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
+                    error: ErrorDetails {
+                        message: err.to_string(),
+                        error_type: map_error_code_to_error_type(code),
+                        param: None,
+                        code: code.as_u16(),
+                    },
                 }),
             );
         }
@@ -277,9 +309,12 @@ impl ErrorMessage {
             Ok(code) => (
                 code,
                 Json(ErrorMessage {
-                    message: err.message,
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
+                    error: ErrorDetails {
+                        message: err.message,
+                        error_type: map_error_code_to_error_type(code),
+                        param: None,
+                        code: code.as_u16(),
+                    },
                 }),
             ),
             Err(_) => ErrorMessage::internal_server_error(&err.message),
@@ -290,11 +325,14 @@ impl ErrorMessage {
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
         ErrorMessage {
-            message: err.message,
-            error_type: map_error_code_to_error_type(
-                StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            ),
-            code: err.code,
+            error: ErrorDetails {
+                message: err.message,
+                error_type: map_error_code_to_error_type(
+                    StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                ),
+                param: None,
+                code: err.code,
+            },
         }
     }
 }
@@ -314,9 +352,12 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
-                message: error_message,
-                error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
-                code: StatusCode::BAD_REQUEST.as_u16(),
+                error: ErrorDetails {
+                    message: error_message,
+                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                    param: None,
+                    code: StatusCode::BAD_REQUEST.as_u16(),
+                },
             }),
         )
             .into_response()
@@ -1022,9 +1063,12 @@ pub(super) async fn check_for_backend_error(
             return Err((
                 status_code,
                 Json(ErrorMessage {
-                    message: error_msg,
-                    error_type: map_error_code_to_error_type(status_code),
-                    code: status_code.as_u16(),
+                    error: ErrorDetails {
+                        message: error_msg,
+                        error_type: map_error_code_to_error_type(status_code),
+                        param: None,
+                        code: status_code.as_u16(),
+                    },
                 }),
             ));
         }
@@ -2182,9 +2226,12 @@ async fn images_edits(
         return Err((
             code,
             Json(ErrorMessage {
-                message: "input_reference is required for /v1/images/edits".to_string(),
-                error_type: map_error_code_to_error_type(code),
-                code: code.as_u16(),
+                error: ErrorDetails {
+                    message: "input_reference is required for /v1/images/edits".to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    param: None,
+                    code: code.as_u16(),
+                },
             }),
         ));
     }
@@ -2609,7 +2656,7 @@ mod tests {
         let err = http_error_from_engine(400).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(response.1.message, "custom error message");
+        assert_eq!(response.1.error.message, "custom error message");
     }
 
     #[test]
@@ -2617,17 +2664,17 @@ mod tests {
         let err = http_error_from_engine(399).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, "custom error message");
+        assert_eq!(response.1.error.message, "custom error message");
 
         let err = http_error_from_engine(500).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, "custom error message");
+        assert_eq!(response.1.error.message, "custom error message");
 
         let err = http_error_from_engine(501).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.1.message, "custom error message");
+        assert_eq!(response.1.error.message, "custom error message");
     }
 
     #[test]
@@ -2636,7 +2683,7 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
-            response.1.message,
+            response.1.error.message,
             format!(
                 "{}: {}",
                 BACKUP_ERROR_MESSAGE,
@@ -2662,7 +2709,7 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            response.1.message,
+            response.1.error.message,
             "ResourceExhausted: All workers are busy, please retry later"
         );
     }
@@ -2682,9 +2729,9 @@ mod tests {
             499,
             "Cancelled errors should return HTTP 499"
         );
-        assert_eq!(response.1.code, 499);
-        assert_eq!(response.1.error_type, "Client Closed Request");
-        assert!(response.1.message.contains("stopped or killed"));
+        assert_eq!(response.1.error.code, 499);
+        assert_eq!(response.1.error.error_type, "Client Closed Request");
+        assert!(response.1.error.message.contains("stopped or killed"));
     }
 
     #[test]
@@ -2811,7 +2858,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!(
                     "{VALIDATION_PREFIX}The 'messages' field cannot be empty. At least one message is required."
                 )
@@ -2881,7 +2928,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
@@ -2904,7 +2951,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
@@ -2927,7 +2974,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
@@ -2950,7 +2997,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
@@ -2975,7 +3022,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
@@ -2998,7 +3045,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
             );
         }
@@ -3060,7 +3107,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Frequency penalty must be between -2 and 2, got -3")
             );
         }
@@ -3089,7 +3136,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Presence penalty must be between -2 and 2, got -3")
             );
         }
@@ -3118,7 +3165,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got -3")
             );
         }
@@ -3147,7 +3194,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got -3")
             );
         }
@@ -3178,7 +3225,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Repetition penalty must be between 0 and 2, got -3")
             );
         }
@@ -3207,7 +3254,7 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.1.message,
+                error_response.1.error.message,
                 format!("{VALIDATION_PREFIX}Top_logprobs must be between 0 and 20, got 25")
             );
         }
@@ -3239,7 +3286,7 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-            let msg = &error_response.1.message;
+            let msg = &error_response.1.error.message;
             assert!(msg.contains("Unsupported parameter"));
             // Verify all fields appear in the error message
             assert!(msg.contains("add_special_tokens"));
@@ -3272,7 +3319,7 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-            let msg = &error_response.1.message;
+            let msg = &error_response.1.error.message;
             assert!(msg.contains("Unsupported parameter"));
             // Verify both fields appear in error message
             assert!(msg.contains("add_special_tokens"));
@@ -3301,7 +3348,10 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.message, "Backend service unavailable");
+            assert_eq!(
+                error_response.1.error.message,
+                "Backend service unavailable"
+            );
         }
     }
 
@@ -3328,8 +3378,8 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.message, "prompt > max_seq_len");
-            assert_eq!(error_response.1.code, 500);
+            assert_eq!(error_response.1.error.message, "prompt > max_seq_len");
+            assert_eq!(error_response.1.error.code, 500);
         }
     }
 
@@ -3414,7 +3464,7 @@ mod tests {
         assert!(result.is_err());
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(error_response.1.message, "Connection timeout");
+            assert_eq!(error_response.1.error.message, "Connection timeout");
         }
     }
 
@@ -3510,6 +3560,21 @@ mod tests {
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn test_error_response_serializes_openai_error_envelope() {
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Validation: bad input".to_string(),
+        });
+        let body = serde_json::to_value(&response.1.0).unwrap();
+
+        assert_eq!(body["error"]["message"], "Validation: bad input");
+        assert_eq!(body["error"]["type"], "Bad Request");
+        assert!(body["error"]["param"].is_null());
+        assert_eq!(body["error"]["code"], 400);
+        assert!(body.get("message").is_none());
     }
 
     #[test]

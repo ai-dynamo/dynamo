@@ -974,7 +974,7 @@ def _test_router_overload_503(
                                     f"Request {req_id} got expected 503: {body}"
                                 )
                                 stop_event.set()
-                                error_msg = body.get("message", "")
+                                error_msg = body.get("error", {}).get("message", "")
                                 assert (
                                     "Service temporarily unavailable" in error_msg
                                     or "All workers are busy" in error_msg
