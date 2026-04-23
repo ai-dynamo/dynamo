@@ -18,19 +18,32 @@
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
 
-while getopts "c:o:a:n:u:" opt; do
+# BUILD_DRIVER selects how the wheel is built.
+#   auto   (default): pick 'buildx' if a local docker daemon is not reachable,
+#                      otherwise 'make'. This keeps the legacy local-dev
+#                      experience (`make -C docker wheel_build`) working while
+#                      letting the CI runner, which only has buildx against a
+#                      remote BuildKit, produce the same wheel.
+#   buildx : always use `docker buildx build` against the current builder.
+#   make   : always use the TensorRT-LLM docker/Makefile flow (requires a
+#            local docker daemon with containerd/docker CLI).
+BUILD_DRIVER="auto"
+
+while getopts "c:o:a:n:u:d:" opt; do
   case ${opt} in
     c) TRTLLM_COMMIT=$OPTARG ;;
     o) OUTPUT_DIR=$OPTARG ;;
     a) ARCH=$OPTARG ;;
     n) NIXL_COMMIT=$OPTARG ;;
     u) TRTLLM_GIT_URL=$OPTARG ;;
-    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch] [-n nixl_commit] [-u git_url]"
+    d) BUILD_DRIVER=$OPTARG ;;
+    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch] [-n nixl_commit] [-u git_url] [-d build_driver]"
        echo "  -c: TensorRT-LLM commit to build"
        echo "  -o: Output directory for wheel files"
        echo "  -a: Architecture (amd64 or arm64)"
        echo "  -n: NIXL commit"
        echo "  -u: TensorRT-LLM git URL"
+       echo "  -d: Build driver (auto|buildx|make, default auto)"
        exit 1 ;;
   esac
 done
@@ -115,23 +128,111 @@ if [ -z "${MAKEFLAGS:-}" ]; then
     export MAKEFLAGS="-j${JOBS}"
 fi
 
-if [ "$ARCH" = "amd64" ]; then
-    # Need to build in the Triton Devel Image for NIXL support.
-    make -C docker tritondevel_build
-    make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS="--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl --job_count ${JOBS}"
-else
-    # NIXL backend is not supported on arm64 for TensorRT-LLM.
-    # See here: https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
-    make -C docker wheel_build BUILD_WHEEL_OPTS="--job_count ${JOBS}"
+mkdir -p "$OUTPUT_DIR"
+
+# Auto-detect the build driver. The CI builder only has `docker buildx`
+# pointed at a remote BuildKit; it has no local docker daemon. In that case
+# the legacy `make -C docker wheel_build` flow (which uses `docker pull`,
+# `docker create`, and `docker cp` through a local socket) is unusable.
+if [ "${BUILD_DRIVER}" = "auto" ]; then
+    if docker info >/dev/null 2>&1; then
+        BUILD_DRIVER="make"
+    else
+        BUILD_DRIVER="buildx"
+    fi
 fi
+echo "Using BUILD_DRIVER=${BUILD_DRIVER}"
 
-# Copy the wheel to the host
-mkdir -p $OUTPUT_DIR
+if [ "${BUILD_DRIVER}" = "make" ]; then
+    if [ "$ARCH" = "amd64" ]; then
+        # Need to build in the Triton Devel Image for NIXL support.
+        make -C docker tritondevel_build
+        make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS="--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl --job_count ${JOBS}"
+    else
+        # NIXL backend is not supported on arm64 for TensorRT-LLM.
+        # See here: https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
+        make -C docker wheel_build BUILD_WHEEL_OPTS="--job_count ${JOBS}"
+    fi
 
-docker create --name trtllm_wheel_container docker.io/tensorrt_llm/wheel:latest
-docker cp trtllm_wheel_container:/src/tensorrt_llm/build $OUTPUT_DIR/
-cp $OUTPUT_DIR/build/*.whl $OUTPUT_DIR/
-docker rm trtllm_wheel_container || true
+    # Copy the wheel to the host
+    docker create --name trtllm_wheel_container docker.io/tensorrt_llm/wheel:latest
+    docker cp trtllm_wheel_container:/src/tensorrt_llm/build "$OUTPUT_DIR/"
+    cp "$OUTPUT_DIR/build"/*.whl "$OUTPUT_DIR/"
+    docker rm trtllm_wheel_container || true
+elif [ "${BUILD_DRIVER}" = "buildx" ]; then
+    # Add a tiny scratch-based export stage that contains only the wheel files
+    # so `docker buildx build --output type=local,dest=...` can extract them
+    # without shipping the entire devel image back to the runner. We modify
+    # the fork's docker/Dockerfile.multi in-place inside the throwaway /tmp
+    # clone (not the source repo).
+    DOCKERFILE="docker/Dockerfile.multi"
+    if ! grep -q '^FROM scratch AS wheel_export$' "${DOCKERFILE}"; then
+        cat >> "${DOCKERFILE}" <<'EOF'
+
+# Appended by dynamo container/build_trtllm_wheel.sh to make the built wheel
+# extractable via `docker buildx build --target wheel_export --output type=local,dest=<dir>`.
+FROM scratch AS wheel_export
+COPY --from=wheel /src/tensorrt_llm/build/ /
+EOF
+    fi
+
+    # Assemble BUILD_WHEEL_ARGS the way docker/Makefile's %_build rule does.
+    WHEEL_ARGS="--clean --benchmarks"
+    if [ "$ARCH" = "amd64" ]; then
+        # Triton-devel-based build picks up NIXL at /opt/nvidia/nvda_nixl.
+        WHEEL_ARGS+=" --extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl"
+        DEVEL_STAGE="tritondevel"
+        TARGETPLATFORM="linux/amd64"
+    else
+        # arm64 builds a subset of CUDA archs (see docker/Makefile CUDA_ARCHS).
+        WHEEL_ARGS+=" --cuda_architectures '90-real;100-real;120-real'"
+        DEVEL_STAGE="devel"
+        TARGETPLATFORM="linux/arm64"
+    fi
+    WHEEL_ARGS+=" --job_count ${JOBS}"
+
+    # Mirror Makefile defaults for BASE_IMAGE/BASE_TAG etc. by parsing the
+    # `ARG <NAME>=<default>` lines from Dockerfile.multi. Falls back to the
+    # ARG defaults already baked into the Dockerfile if anything is missing.
+    arg_default() { grep -m1 "^ARG $1=" "${DOCKERFILE}" | sed -E 's/^ARG [^=]+=//; s/^"(.*)"$/\1/'; }
+    BASE_IMAGE_VAL="$(arg_default BASE_IMAGE)"
+    BASE_TAG_VAL="$(arg_default BASE_TAG)"
+    TRITON_IMAGE_VAL="$(arg_default TRITON_IMAGE)"
+    TRITON_BASE_TAG_VAL="$(arg_default TRITON_BASE_TAG)"
+
+    echo "buildx wheel build: arch=${ARCH} devel_stage=${DEVEL_STAGE} platform=${TARGETPLATFORM}"
+    echo "  BASE_IMAGE=${BASE_IMAGE_VAL}:${BASE_TAG_VAL}"
+    echo "  TRITON_IMAGE=${TRITON_IMAGE_VAL}:${TRITON_BASE_TAG_VAL}"
+    echo "  BUILD_WHEEL_ARGS=${WHEEL_ARGS}"
+
+    WHEEL_STAGE_DIR="${OUTPUT_DIR}/_wheel_stage"
+    rm -rf "${WHEEL_STAGE_DIR}"
+    mkdir -p "${WHEEL_STAGE_DIR}"
+
+    docker buildx build \
+        --progress=plain \
+        --platform "${TARGETPLATFORM}" \
+        --file "${DOCKERFILE}" \
+        --target wheel_export \
+        --build-arg "BASE_IMAGE=${BASE_IMAGE_VAL}" \
+        --build-arg "BASE_TAG=${BASE_TAG_VAL}" \
+        --build-arg "TRITON_IMAGE=${TRITON_IMAGE_VAL}" \
+        --build-arg "TRITON_BASE_TAG=${TRITON_BASE_TAG_VAL}" \
+        --build-arg "DEVEL_IMAGE=${DEVEL_STAGE}" \
+        --build-arg "BUILD_WHEEL_ARGS=${WHEEL_ARGS}" \
+        --output "type=local,dest=${WHEEL_STAGE_DIR}" \
+        .
+
+    # Flatten extracted files into OUTPUT_DIR/ so consumers can glob for
+    # *.whl at the top level just like the legacy make flow.
+    mkdir -p "${OUTPUT_DIR}/build"
+    cp -a "${WHEEL_STAGE_DIR}"/. "${OUTPUT_DIR}/build/"
+    find "${OUTPUT_DIR}/build" -maxdepth 3 -name '*.whl' -exec cp -v {} "${OUTPUT_DIR}/" \;
+    rm -rf "${WHEEL_STAGE_DIR}"
+else
+    echo "Error: unknown BUILD_DRIVER='${BUILD_DRIVER}' (expected auto, buildx, or make)" >&2
+    exit 2
+fi
 
 # Restore the original version file
 mv ${VERSION_FILE}.bak $VERSION_FILE
