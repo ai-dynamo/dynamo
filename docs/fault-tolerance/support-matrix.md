@@ -1,9 +1,11 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-title: Fault Tolerance Support Matrix
-subtitle: Backend support for Dynamo's in-flight fault tolerance features
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Fault Tolerance Support Matrix
+
+Backend support for Dynamo's in-flight fault tolerance features.
 
 This document tracks the status of Dynamo's in-flight fault tolerance features across the supported inference backends. For request-level fault tolerance (migration, cancellation, graceful shutdown), see the [Fault Tolerance README](README.md).
 
@@ -17,30 +19,39 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 
 | Backend | [GPU Memory Service](#gpu-memory-service-gms) | [Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover) | [Dynamo Snapshot](#dynamo-snapshot-chrek) |
 | :--- | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ | 🚧 <sup>†</sup> |
-| **SGLang** | ✅ | 🚧 <sup>2</sup> | 🚧 <sup>†</sup> |
-| **TensorRT-LLM** | 🚧 <sup>1</sup> | 🚧 <sup>2</sup> | 🚧 <sup>†</sup> |
+| **vLLM** | ✅ | ✅ | 🚧 |
+| **SGLang** | ✅ | 🚧 [^bulwark-sglang-trtllm] | 🚧 |
+| **TensorRT-LLM** | 🚧 [^gms-trtllm] | 🚧 [^bulwark-sglang-trtllm] | 🚧 |
 
-### Notes
-
-1. **TensorRT-LLM × GMS:** single-node support works. Multi-node support and KV cache management through GMS are pending.
-2. **SGLang / TensorRT-LLM × Bulwark:** shadow-engine failover is in progress; parity with vLLM is the next milestone.
-
-<sup>†</sup> **Dynamo Snapshot column is a stub.** Current row statuses need review by the Dynamo Snapshot owners before this column is authoritative.
+[^gms-trtllm]: TensorRT-LLM supports GMS on single-node today; multi-node support and KV cache management through GMS are pending. See the [GMS detailed matrix](#per-backend-gms-status) below.
+[^bulwark-sglang-trtllm]: Shadow-engine failover for SGLang and TensorRT-LLM is in progress; parity with vLLM is the next milestone.
 
 ## Features
 
 ### GPU Memory Service (GMS)
 
-GMS is an out-of-process GPU memory manager that decouples ownership of GPU memory from the processes that use it. This enables:
+GMS is an out-of-process GPU memory manager that enables zero-copy sharing of GPU memory (weights, KV cache) across worker processes on the same GPU, with memory surviving client crashes. It is the foundation for Dynamo Bulwark and for upcoming hardware-fault-tolerance layouts. See [`lib/gpu_memory_service/README.md`](../../lib/gpu_memory_service/README.md) for architecture.
 
-- **Zero-copy sharing** of GPU memory across multiple processes on the same GPU.
-- **Data survival** across process crashes, since memory is owned by the GMS server and not the client worker.
-- **Fast model loading** via memory import instead of disk I/O for subsequent workers.
+In Kubernetes, GMS is wired in as a DRA-backed sidecar via the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. See [GPU Memory Service on Kubernetes](../kubernetes/gpu-memory-service.md) for the operator-level layout and usage.
 
-GMS provides PyTorch integration via `CUDAPluggableAllocator` along with pre-built backend integrations. It is the foundation for Dynamo Bulwark today and for upcoming hardware-fault-tolerance layouts.
+#### Per-backend GMS status
 
-See [`lib/gpu_memory_service/README.md`](../../lib/gpu_memory_service/README.md) for the full architecture.
+| Backend | Managed memory | Multi-node | Upstream integration | KV remap/reuse |
+| :--- | :--- | :---: | :--- | :--- |
+| **vLLM** | weights, KV | ✅ | ✅ upstream | backlog |
+| **SGLang** | weights, KV | ✅ | 🚧 patches needed [^sglang-upstream] | backlog |
+| **TensorRT-LLM** | weights [^trtllm-kv] | 🚧 | 🚧 patches needed [^trtllm-upstream] | backlog |
+
+**Column definitions:**
+
+- **Managed memory** — which GPU memory regions the engine allocates through GMS today. Weights are the baseline; KV cache is an additional scope.
+- **Multi-node** — whether GMS has been validated across nodes (DRA claims spanning multi-node topologies).
+- **Upstream integration** — whether the backend's GMS integration lives upstream in the framework or requires out-of-tree patches.
+- **KV remap/reuse** — whether KV cache handles are remapped across engines (e.g. shadow takeover preserving in-flight requests) rather than each engine being handed a fresh allocation.
+
+[^sglang-upstream]: SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
+[^trtllm-kv]: TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
+[^trtllm-upstream]: TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
@@ -54,8 +65,6 @@ Supported topologies:
 Configured via the `gpuMemoryService` and `failover` fields on the `DynamoGraphDeployment` CR.
 
 ### Dynamo Snapshot (ChReK)
-
-> **Stub.** Owner to expand with full description, supported configurations, and current limitations.
 
 Dynamo Snapshot (internal name: **ChReK**, *Checkpoint Restore in Kubernetes*) uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a worker's initialized state once (including GPU memory and CUDA contexts) and restore subsequent workers from that checkpoint, reducing cold starts from roughly a minute to roughly ten seconds for large LLMs.
 
