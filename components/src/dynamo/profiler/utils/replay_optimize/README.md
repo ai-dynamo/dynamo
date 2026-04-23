@@ -151,7 +151,7 @@ flowchart LR
     C --> A
 ```
 
-Each step calls [`evaluate._evaluate_states`](evaluate.py), which replays the candidate state through `run_synthetic_trace_replay` or `run_trace_replay` (see [Mocker Trace Replay](../../../../../docs/benchmarks/mocker-trace-replay.md) for the underlying harness) and ranks the resulting records with `scoring._pick_best_record`. The ranking key is `spec.objective` (throughput, mean_ttft, or mean_e2e_latency) subject to `spec.sla` bounds and `spec.hardware.totalGpus` as a feasibility gate.
+Each step calls [`evaluate._evaluate_states`](evaluate.py), which replays the candidate state through `run_synthetic_trace_replay` or `run_trace_replay` (see [Mocker Trace Replay](../../../../../../docs/benchmarks/mocker-trace-replay.md) for the underlying harness) and ranks the resulting records with `scoring._pick_best_record`. The ranking key is `spec.objective` (throughput, mean_ttft, or mean_e2e_latency) subject to `spec.sla` bounds and `spec.hardware.totalGpus` as a feasibility gate.
 
 The descent is budget-focused: each step prunes to near-budget-edge states so the sweep ends up at a TP/worker shape that actually consumes the available GPU budget, rather than at a throughput-per-GPU pareto point. Aggregated replay (`optimize_dense_agg_with_replay`) collapses dimensions 1 and 2 into `(tp, workers)` but is otherwise identical; see [`search.py`](search.py) for both entrypoints.
 
