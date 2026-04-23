@@ -29,6 +29,8 @@ cd lib/bindings/python
 .venv/bin/maturin develop --release
 ```
 
+The `--release` flag is strongly recommended. Replay simulation is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.
+
 Get a trace in Mooncake JSONL format (`{timestamp, input_length, output_length, hash_ids}` per line). The public FAST25 release has four traces you can use directly:
 
 ```bash
