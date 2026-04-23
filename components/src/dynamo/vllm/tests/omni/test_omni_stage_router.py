@@ -42,19 +42,22 @@ class _StageClient:
         return _gen()
 
 
-def _make_stage_cfg(stage_id: int):
-    return SimpleNamespace(
+def _make_stage_cfg(stage_id: int, **overrides):
+    defaults = dict(
         stage_id=stage_id,
         engine_args=SimpleNamespace(model_stage=f"stage{stage_id}"),
     )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
-def _make_router(stage_configs, stage_clients, formatter=None):
+def _make_router(stage_configs, stage_clients, formatter=None, detect_pd=True):
     router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
     router.config = SimpleNamespace(output_modalities=None)
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
     router._formatter = formatter or AsyncMock()
+    router._pd_pair = router._detect_pd_pair() if detect_pd else None
     return router
 
 
@@ -297,3 +300,105 @@ async def test_generate_forwards_raw_request_to_stage0():
     assert stage0_received["prompt"] == "a dog"
     assert stage0_received["size"] == "832x480"
     assert stage0_received["nvext"] == {"num_inference_steps": 30}
+
+
+# ── PD disaggregation ────────────────────────────────────
+
+
+class TestDetectPdPair:
+    def test_detects_prefill_decode_pair(self):
+        cfgs = [
+            _make_stage_cfg(0, is_prefill_only=True, is_decode_only=False),
+            _make_stage_cfg(1, is_prefill_only=False, is_decode_only=True),
+            _make_stage_cfg(2),
+        ]
+        router = _make_router(cfgs, {})
+        assert router._pd_pair == (0, 1)
+
+    def test_no_pd_pair_when_no_flags(self):
+        cfgs = [_make_stage_cfg(0), _make_stage_cfg(1)]
+        router = _make_router(cfgs, {})
+        assert router._pd_pair is None
+
+    def test_no_pd_pair_with_only_prefill(self):
+        cfgs = [_make_stage_cfg(0, is_prefill_only=True), _make_stage_cfg(1)]
+        router = _make_router(cfgs, {})
+        assert router._pd_pair is None
+
+    def test_no_pd_pair_with_only_decode(self):
+        cfgs = [_make_stage_cfg(0), _make_stage_cfg(1, is_decode_only=True)]
+        router = _make_router(cfgs, {})
+        assert router._pd_pair is None
+
+
+@pytest.mark.asyncio
+async def test_pd_decode_receives_original_request_and_kv_params():
+    """PD decode stage must receive the original request + kv_transfer_params from prefill."""
+    decode_received = {}
+
+    async def prefill_handler(request):
+        return {
+            "kv_transfer_params": {"remote_block_ids": [1, 2], "remote_host": "gpu0"},
+            "original_prompt": {"prompt": "hello"},
+            "finished": True,
+        }
+
+    async def decode_handler(request):
+        decode_received.update(request)
+        return {
+            "stage_connector_refs": {"1": {"name": "decode-ref"}},
+            "original_prompt": {"prompt": "hello"},
+            "finished": True,
+        }
+
+    async def talker_handler(request):
+        return {"shm_meta": {"name": "output"}, "finished": True}
+
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"finished": True}
+
+    cfgs = [
+        _make_stage_cfg(
+            0,
+            is_prefill_only=True,
+            is_decode_only=False,
+            engine_args=SimpleNamespace(model_stage="thinker"),
+        ),
+        _make_stage_cfg(
+            1,
+            is_prefill_only=False,
+            is_decode_only=True,
+            engine_args=SimpleNamespace(model_stage="thinker"),
+        ),
+        _make_stage_cfg(2, engine_args=SimpleNamespace(model_stage="talker")),
+    ]
+    router = _make_router(
+        cfgs,
+        {
+            "thinker_prefill": _StageClient(prefill_handler),
+            "thinker_decode": _StageClient(decode_handler),
+            "talker": _StageClient(talker_handler),
+        },
+        formatter=mock_formatter,
+    )
+
+    request = {"prompt": "hello", "messages": [{"role": "user", "content": "hello"}]}
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, "chat"),
+    ):
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-pd"):
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+            ):
+                _ = [c async for c in router.generate(request, None)]
+
+    # Decode must get original request fields + kv_transfer_params
+    assert decode_received["request_id"] == "req-pd"
+    assert decode_received["prompt"] == "hello"
+    assert decode_received["kv_transfer_params"] == {
+        "remote_block_ids": [1, 2],
+        "remote_host": "gpu0",
+    }
+    # Must not get stage_connector_refs (PD decode re-tokenizes, doesn't fetch from connector)
+    assert "stage_connector_refs" not in decode_received
