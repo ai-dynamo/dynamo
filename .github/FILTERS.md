@@ -52,18 +52,15 @@ Example: `lib/**/*.rs` matches all Rust files under `lib/`.
 
 ## Adding a New Filter Group
 
-If you create a new filter in `filters.yaml`, you must also update the workflows:
+If you create a new filter in `filters.yaml`, you must also update the shared
+changed-files action so the coverage check knows about it:
 
-1. Add the filter to `filters.yaml`
-2. Update **both** workflow files to include the new filter in the uncovered files check:
-   - `.github/workflows/container-validation-backends.yml`
-   - `.github/workflows/container-validation-dynamo.yml`
-
-In each workflow, find the `COVERED_FILES` line and add your new filter:
-
-```bash
-COVERED_FILES=$(echo "... ${{ steps.filter.outputs.YOURFILTER_all_modified_files }} ..." | ...)
-```
+1. Add the filter to `filters.yaml`.
+2. Edit `.github/actions/changed-files/action.yml`:
+   - Expose the new filter as an output (see the existing `core`, `planner`,
+     `vllm`, `sglang`, `trtllm`, etc. entries at the top of the file).
+   - Add its `*_all_modified_files` to the `COVERED_FILES` line in the
+     "Check for uncovered files" step.
 
 If you skip this step, CI will fail with "uncovered files" even though your filter exists.
 

@@ -850,6 +850,12 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 			if rule.pcieSKU != "" {
 				return rule.pcieSKU
 			}
+			// Token matched but no form factor indicator was present in the string
+			// (e.g. "NVIDIA H200" from DCGM has no SXM/HGX/DGX suffix). If the GPU
+			// has no PCIe variant it must be SXM-only (H200, B200, GB200).
+			if rule.sxmSKU != "" {
+				return rule.sxmSKU
+			}
 		}
 	}
 

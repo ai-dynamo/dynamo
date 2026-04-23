@@ -270,3 +270,337 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
         );
     }
 }
+
+/// Construct a minimal stream chunk carrying `content` as a text delta.
+fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        Role,
+    };
+    #[allow(deprecated)]
+    let choice = ChatChoiceStream {
+        index: 0,
+        delta: ChatCompletionStreamResponseDelta {
+            role: Some(Role::Assistant),
+            content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason: None,
+        stop_reason: None,
+        logprobs: None,
+    };
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![choice],
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+    }
+}
+
+/// Construct a terminal `finish_reason=Stop` chunk with no content.
+fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+    };
+    #[allow(deprecated)]
+    let choice = ChatChoiceStream {
+        index: 0,
+        delta: ChatCompletionStreamResponseDelta {
+            role: None,
+            content: None,
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason: Some(FinishReason::Stop),
+        stop_reason: None,
+        logprobs: None,
+    };
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![choice],
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+    }
+}
+
+/// Regression: MiniMax + tool_choice=required + SGLang guided decoding.
+///
+/// The reasoning parser (minimax_append_think) synthesizes a `<think>` opener
+/// on the first chunk, so without guardrails the constrained JSON tool-call
+/// payload would be classified entirely as `reasoning_content` because the
+/// constrained output never emits `</think>`. tool_choice=required/named
+/// must therefore bypass the reasoning parser, letting the jail extract the
+/// bare JSON array into structured tool_calls.
+#[tokio::test]
+async fn postprocessor_parsing_stream_minimax_required_bypasses_reasoning() {
+    let preprocessor = build_preprocessor(Some("minimax_append_think"), Some("minimax_m2"));
+
+    // Baseline request with tools, then force tool_choice=required.
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    let tools: Vec<dynamo_protocols::types::ChatCompletionTool> =
+        serde_json::from_value(serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"]
+                }
+            }
+        }]))
+        .unwrap();
+    request.inner.tools = Some(tools);
+    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+
+    // Simulate SGLang guided-decoding output: bare JSON array, no markers.
+    let bare_json = r#"[{"name": "get_weather", "parameters": {"location": "San Francisco"}}]"#;
+    let input_chunks = vec![mock_content_chunk(bare_json), mock_final_chunk()];
+
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    let mut merged_tool_calls: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+    let mut finish_reasons = Vec::new();
+
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    merged_tool_calls
+                        .entry(tc.index)
+                        .or_default()
+                        .merge_from(tc);
+                }
+            }
+            if let Some(fr) = choice.finish_reason {
+                finish_reasons.push(fr);
+            }
+        }
+    }
+
+    // The bare-JSON tool call must end up in tool_calls — not in reasoning_content.
+    assert!(
+        reasoning.is_empty(),
+        "reasoning_content must be empty when tool_choice=required forces bare JSON, got: {reasoning:?}"
+    );
+    assert!(
+        !content.contains("get_weather"),
+        "tool call JSON must not leak into content, got: {content:?}"
+    );
+
+    let tool_calls: Vec<MergedToolCall> = merged_tool_calls.values().cloned().collect();
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0].name.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&tool_calls[0].arguments).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "San Francisco"}));
+
+    // tool_choice=required: finish_reason must be rewritten to ToolCalls.
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Regression: MiniMax + tool_choice=named + SGLang guided decoding.
+/// Same constraint as the required variant, but OpenAI spec says named
+/// keeps finish_reason=Stop.
+#[tokio::test]
+async fn postprocessor_parsing_stream_minimax_named_bypasses_reasoning() {
+    let preprocessor = build_preprocessor(Some("minimax_append_think"), Some("minimax_m2"));
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    let tools: Vec<dynamo_protocols::types::ChatCompletionTool> =
+        serde_json::from_value(serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"]
+                }
+            }
+        }]))
+        .unwrap();
+    request.inner.tools = Some(tools);
+    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+        "get_weather".to_string().into(),
+    ));
+
+    let bare_json = r#"[{"name": "get_weather", "parameters": {"location": "Tokyo"}}]"#;
+    let input_chunks = vec![mock_content_chunk(bare_json), mock_final_chunk()];
+
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut merged_tool_calls: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+    let mut finish_reasons = Vec::new();
+
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    merged_tool_calls
+                        .entry(tc.index)
+                        .or_default()
+                        .merge_from(tc);
+                }
+            }
+            if let Some(fr) = choice.finish_reason {
+                finish_reasons.push(fr);
+            }
+        }
+    }
+
+    assert!(
+        reasoning.is_empty(),
+        "reasoning_content must be empty for tool_choice=named, got: {reasoning:?}"
+    );
+
+    let tool_calls: Vec<MergedToolCall> = merged_tool_calls.values().cloned().collect();
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].name.as_deref(), Some("get_weather"));
+
+    // OpenAI spec: emitting tool_calls always rewrites finish_reason to ToolCalls,
+    // regardless of whether tool_choice was auto, required, or named.
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "named tool_choice with emitted tool_calls should finish as ToolCalls, got: {finish_reasons:?}"
+    );
+}
+
+/// Regression: MiniMax + tool_choice=named + the SingleObject guided-decoding
+/// schema (bare parameters, no `{name, parameters}` wrapper). Exercises the
+/// `parse_tool_choice_json` fallback — if the reasoning parser weren't gated
+/// off, the `<think>` prefix it unconditionally prepends would make the bare
+/// JSON unparseable by that fallback, and the tool call would leak as content.
+#[tokio::test]
+async fn postprocessor_parsing_stream_minimax_named_bare_parameters() {
+    let preprocessor = build_preprocessor(Some("minimax_append_think"), Some("minimax_m2"));
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    let tools: Vec<dynamo_protocols::types::ChatCompletionTool> =
+        serde_json::from_value(serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"]
+                }
+            }
+        }]))
+        .unwrap();
+    request.inner.tools = Some(tools);
+    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+        "get_weather".to_string().into(),
+    ));
+
+    // SingleObject schema: just the parameters, no wrapper.
+    let bare_params = r#"{"location": "Paris", "unit": "celsius"}"#;
+    let input_chunks = vec![mock_content_chunk(bare_params), mock_final_chunk()];
+
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    let mut merged_tool_calls: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    merged_tool_calls
+                        .entry(tc.index)
+                        .or_default()
+                        .merge_from(tc);
+                }
+            }
+        }
+    }
+
+    assert!(
+        reasoning.is_empty(),
+        "reasoning_content must be empty (parser must be gated off), got: {reasoning:?}"
+    );
+    assert!(
+        !content.contains("<think>"),
+        "no <think> prefix should reach the client, got: {content:?}"
+    );
+
+    let tool_calls: Vec<MergedToolCall> = merged_tool_calls.values().cloned().collect();
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0].name.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&tool_calls[0].arguments).unwrap();
+    assert_eq!(
+        args,
+        serde_json::json!({"location": "Paris", "unit": "celsius"})
+    );
+}

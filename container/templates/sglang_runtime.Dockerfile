@@ -68,6 +68,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     fi
 {% endif %}
 
+# Install nvtx pinned in container/deps/requirements.common.txt so DYN_NVTX=1
+# profiling works in all targets (runtime, dev, local-dev) — see
+# components/src/dynamo/common/utils/nvtx_utils.py. --no-deps preserves the
+# upstream lmsysorg/sglang Python stack.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
@@ -87,7 +96,10 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-    ln -s /workspace /sgl-workspace/dynamo
+    ln -s /workspace /sgl-workspace/dynamo && \
+    NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
+    if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
+    else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA

@@ -57,6 +57,7 @@ dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-tokenizers = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -150,9 +151,6 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
-tiktoken-rs = { version = "0.9", default-features = false }
-rustc-hash = "1.1"
-fastokens = { workspace = true }
 
 # backend
 galil-seiferas = { version = "0.1" }
