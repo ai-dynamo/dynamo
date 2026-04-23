@@ -1,0 +1,97 @@
+<svg width="1000" height="850" viewBox="0 0 1000 850" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1000" height="850" fill="#F7F8FE"/>
+
+  <text x="500" y="50" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="bold" fill="#0A0F25">LLM inference runtimes</text>
+
+  <rect x="80" y="80" width="240" height="120" fill="none" stroke="#0D32B2" stroke-width="1"/>
+  <line x1="80" y1="150" x2="320" y2="150" stroke="#0D32B2" stroke-width="1"/>
+  <text x="200" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0A0F25">TRTLLM</text>
+  <text x="200" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">TRTLLM Connector</text>
+
+  <rect x="360" y="80" width="240" height="120" fill="none" stroke="#0D32B2" stroke-width="1"/>
+  <line x1="360" y1="150" x2="600" y2="150" stroke="#0D32B2" stroke-width="1"/>
+  <text x="480" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0A0F25">vLLM</text>
+  <text x="480" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">vLLM Connector</text>
+
+  <rect x="640" y="80" width="240" height="120" fill="none" stroke="#0D32B2" stroke-width="1" stroke-dasharray="8 4"/>
+  <line x1="640" y1="150" x2="880" y2="150" stroke="#0D32B2" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="760" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0A0F25">SGLang</text>
+  <text x="760" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">SGLang Connector</text>
+
+  <rect x="30" y="240" width="940" height="350" rx="10" fill="none" stroke="#0D32B2" stroke-width="1"/>
+  <text x="500" y="275" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#0A0F25">Dynamo KVBM</text>
+
+  <rect x="60" y="295" width="880" height="40" rx="20" fill="#FFFFFF" stroke="#0D32B2" stroke-width="1"/>
+  <text x="500" y="322" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#0A0F25">KVBM Connector Interface</text>
+
+  <rect x="60" y="360" width="430" height="90" rx="15" stroke="#0D32B2" stroke-width="1" fill="none"/>
+  <text x="275" y="385" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Layouts &amp; Blocks</text>
+  <rect x="75" y="400" width="180" height="35" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="165" y="423" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Layout Config/ Type</text>
+  <rect x="295" y="400" width="180" height="35" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="385" y="423" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Blocks/ Meta Data</text>
+
+  <rect x="530" y="360" width="410" height="130" rx="15" stroke="#0D32B2" stroke-width="1" fill="none"/>
+  <text x="735" y="385" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Core</text>
+  <rect x="550" y="390" width="370" height="30" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="735" y="410" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">KVBlockManager</text>
+  <rect x="555" y="430" width="170" height="25" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="640" y="448" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Scheduler</text>
+  <rect x="765" y="430" width="150" height="25" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="840" y="448" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">KVBM State</text>
+  <rect x="555" y="460" width="130" height="25" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="620" y="478" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Events</text>
+  <rect x="795" y="460" width="120" height="25" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="855" y="478" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Metrics</text>
+
+  <rect x="60" y="465" width="430" height="110" rx="15" stroke="#0D32B2" stroke-width="1" fill="none"/>
+  <text x="275" y="490" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Storage Pools</text>
+  <circle cx="125" cy="530" r="30" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="125" y="535" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Device</text>
+  <circle cx="225" cy="530" r="30" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="225" y="535" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Host</text>
+  <circle cx="325" cy="530" r="30" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="325" y="535" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Disk</text>
+  <circle cx="425" cy="530" r="30" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="425" y="525" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#0A0F25">NFS</text>
+  <text x="425" y="540" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#0A0F25">Disk</text>
+
+  <rect x="520" y="515" width="400" height="70" rx="15" stroke="#0D32B2" stroke-width="1" fill="none"/>
+  <text x="720" y="535" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Transfer Manager</text>
+  <rect x="530" y="545" width="85" height="30" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="572" y="565" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">D2H</text>
+  <rect x="625" y="545" width="85" height="30" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="667" y="565" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">H2D</text>
+  <rect x="720" y="545" width="95" height="30" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="767" y="565" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">H2Disk</text>
+  <rect x="825" y="545" width="85" height="30" rx="5" fill="#F7F8FE" stroke="#0D32B2" stroke-width="1"/>
+  <text x="867" y="565" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0A0F25">Disk2D</text>
+
+  <text x="500" y="630" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="bold" fill="#0A0F25">NIXL integration with backend</text>
+  <rect x="195" y="650" width="610" height="40" fill="none" stroke="#0D32B2" stroke-width="1"/>
+  <text x="500" y="675" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">NIXL (p2p, RDMA, storage plugins)</text>
+
+  <g transform="translate(160, 710)">
+    <rect x="0" y="0" width="110" height="80" fill="none" stroke="#0D32B2" stroke-width="1"/>
+    <text x="55" y="45" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Block</text>
+
+    <rect x="140" y="0" width="110" height="80" fill="none" stroke="#0D32B2" stroke-width="1"/>
+    <text x="195" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Local</text>
+    <text x="195" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">File</text>
+
+    <rect x="280" y="0" width="110" height="80" fill="none" stroke="#0D32B2" stroke-width="1"/>
+    <text x="335" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Remote</text>
+    <text x="335" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">File</text>
+
+    <rect x="420" y="0" width="120" height="80" fill="none" stroke="#0D32B2" stroke-width="1"/>
+    <text x="480" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Remote</text>
+    <text x="480" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Object</text>
+
+    <rect x="570" y="0" width="110" height="80" fill="none" stroke="#0D32B2" stroke-width="1"/>
+    <text x="625" y="45" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#0A0F25">Cloud</text>
+  </g>
+
+  <rect x="30" y="810" width="340" height="35" fill="#676C7E"/>
+  <line x1="45" y1="827" x2="95" y2="827" stroke="#FFFFFF" stroke-width="2" stroke-dasharray="8 4"/>
+  <text x="110" y="833" font-family="Arial, sans-serif" font-size="16" fill="#FFFFFF">Planned for Future Releases</text>
+</svg>
