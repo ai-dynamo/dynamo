@@ -88,6 +88,17 @@ _HTML = """\
     .mock-warn { display: none; font-size: 0.75rem; color: #f59e0b;
                  background: #1c1407; border: 1px solid #78350f;
                  border-radius: 4px; padding: 6px 10px; margin-bottom: 10px; }
+    .toggle-wrap { display: flex; align-items: center; gap: 6px;
+                   font-size: 0.78rem; color: #777; }
+    .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: #2e2e2e;
+                     border-radius: 20px; transition: .2s; }
+    .toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px;
+                              left: 3px; bottom: 3px; background: #666; border-radius: 50%;
+                              transition: .2s; }
+    .toggle input:checked + .toggle-slider { background: #2563eb; }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(16px); background: #fff; }
     .debug-panel { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
     .debug-label { font-size: 0.7rem; color: #4b5563; text-transform: uppercase;
                    letter-spacing: 0.06em; margin-bottom: 3px; }
@@ -166,6 +177,13 @@ _HTML = """\
       <button id="mp-gen" class="btn-primary">&#9654; Generate</button>
       <button id="mp-next" class="btn-stop" disabled>&#9654;&#9654; Next Clip</button>
       <div    id="mp-spinner" class="spinner"></div>
+      <div class="toggle-wrap">
+        <span>Stream</span>
+        <label class="toggle">
+          <input type="checkbox" id="mp-stream" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
       <span   id="mp-status" class="status">Idle</span>
     </div>
     <div class="display" id="mp-display">
@@ -266,6 +284,7 @@ _HTML = """\
     const mpImg     = document.getElementById('mp-img');
     const mpVideo   = document.getElementById('mp-video');
     const mpPh      = document.getElementById('mp-placeholder');
+    const mpStream  = document.getElementById('mp-stream');
     let   mpPrevUrl = null;
 
     async function playVideoResponse(json) {
@@ -308,6 +327,7 @@ _HTML = """\
       const seconds = document.getElementById('mp-seconds').value;
       if (size)    body.size    = size;
       if (seconds) body.seconds = parseInt(seconds);
+      if (mpStream.checked) body.stream = true;
 
       mpGen.disabled           = true;
       mpSpinner.style.display  = 'block';
@@ -508,8 +528,14 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_video(request: web.Request) -> web.Response:
-    """POST /api/video → Dynamo POST /v1/videos (non-streaming JSON)."""
+    """POST /api/video → Dynamo POST /v1/videos.
+
+    Non-streaming: waits for the full JSON response, returns first clip.
+    Streaming: launches a background task to consume the SSE response and
+    populate request.app["clips"]; returns as soon as the first clip arrives.
+    """
     body = await request.json()
+    streaming = bool(body.get("stream"))
 
     debug = request.app["debug"]
     debug["request"] = json.dumps(body, indent=2)
@@ -521,9 +547,79 @@ async def handle_video(request: web.Request) -> web.Response:
     timeout = ClientTimeout(total=300, connect=10)
 
     try:
-        # [gluo TODO] parse SSE
+        if streaming:
+            first_clip_ready = asyncio.Event()
+
+            async def consume_sse() -> None:
+                try:
+                    async with ClientSession(timeout=timeout) as session:
+                        async with session.post(
+                            f"{dynamo_url}/v1/videos", json=body
+                        ) as upstream:
+                            buf = ""
+                            async for chunk in upstream.content.iter_any():
+                                text = chunk.decode("utf-8", errors="replace")
+                                buf += text
+                                lines = buf.split("\n")
+                                buf = lines[-1]
+                                for line in lines[:-1]:
+                                    line = line.rstrip("\r")
+                                    if not line.startswith("data: "):
+                                        continue
+                                    data_str = line[6:].strip()
+                                    if data_str == "[DONE]":
+                                        continue
+                                    try:
+                                        event = json.loads(data_str)
+                                        if isinstance(event.get("data"), list):
+                                            for item in event["data"]:
+                                                request.app["clips"].append(item.copy())
+                                                if "b64_json" in item:
+                                                    item[
+                                                        "b64_json"
+                                                    ] = f"<video_data_{len(request.app['clips'])-1}>"
+                                                if "url" in item:
+                                                    item[
+                                                        "url"
+                                                    ] = f"<video_url_{len(request.app['clips'])-1}>"
+                                        elif "b64_json" in event or "url" in event:
+                                            request.app["clips"].append(event.copy())
+                                            if "b64_json" in event:
+                                                event[
+                                                    "b64_json"
+                                                ] = f"<video_data_{len(request.app['clips'])-1}>"
+                                            if "url" in event:
+                                                event[
+                                                    "url"
+                                                ] = f"<video_url_{len(request.app['clips'])-1}>"
+                                        debug["chunks"] += json.dumps(event, indent=2)
+                                    except Exception:
+                                        pass
+                                    if (
+                                        request.app["clips"]
+                                        and not first_clip_ready.is_set()
+                                    ):
+                                        first_clip_ready.set()
+                except Exception as exc:
+                    logger.error("SSE consume error: %s", exc)
+                finally:
+                    if not first_clip_ready.is_set():
+                        first_clip_ready.set()
+
+            asyncio.create_task(consume_sse())
+            await first_clip_ready.wait()
+
+            if not request.app["clips"]:
+                raise web.HTTPBadGateway(reason="SSE stream ended without a video clip")
+            return web.json_response(request.app["clips"][0])
+
         async with ClientSession(timeout=timeout) as session:
             async with session.post(f"{dynamo_url}/v1/videos", json=body) as upstream:
+                if upstream.status != 200:
+                    text = await upstream.text()
+                    raise web.HTTPBadGateway(
+                        reason=f"Dynamo error {upstream.status}: {text}"
+                    )
                 json_body = await upstream.json()
                 if isinstance(json_body.get("data"), list):
                     for item in json_body["data"]:
@@ -539,6 +635,8 @@ async def handle_video(request: web.Request) -> web.Response:
                 return web.json_response(
                     request.app["clips"][0], status=upstream.status
                 )
+    except web.HTTPException:
+        raise
     except Exception as exc:
         logger.error("Video proxy error: %s", exc)
         raise web.HTTPBadGateway(reason=str(exc))

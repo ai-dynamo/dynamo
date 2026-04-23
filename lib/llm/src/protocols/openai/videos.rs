@@ -47,6 +47,10 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
 
+    /// Whether to stream the video generation (default: false)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
