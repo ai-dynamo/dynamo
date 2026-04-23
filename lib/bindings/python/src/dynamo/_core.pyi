@@ -1558,7 +1558,7 @@ def run_mocker_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     trace_block_size: int = 512,
-    trace_format: Literal["mooncake", "agentic"] = "mooncake",
+    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
 ) -> Dict[str, Any]:

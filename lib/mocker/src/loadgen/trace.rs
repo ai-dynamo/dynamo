@@ -46,7 +46,7 @@ struct RawMooncakeRecord {
 }
 
 #[derive(Debug, Deserialize)]
-struct RawAgenticRecord {
+struct RawAppliedComputeAgenticRecord {
     num_turns: usize,
     input_prompt_length: usize,
     assistant_response_length: Vec<usize>,
@@ -272,7 +272,7 @@ impl Trace {
         })
     }
 
-    pub fn from_agentic(
+    pub fn from_applied_compute_agentic(
         path: &Path,
         trace_block_size: usize,
         shared_prefix_ratio: f64,
@@ -306,13 +306,14 @@ impl Trace {
                 continue;
             }
 
-            let raw: RawAgenticRecord = serde_json::from_str(&line).with_context(|| {
-                format!(
-                    "failed to parse line {} from {} as JSON",
-                    line_idx + 1,
-                    path.display()
-                )
-            })?;
+            let raw: RawAppliedComputeAgenticRecord =
+                serde_json::from_str(&line).with_context(|| {
+                    format!(
+                        "failed to parse line {} from {} as JSON",
+                        line_idx + 1,
+                        path.display()
+                    )
+                })?;
 
             for (name, values) in [
                 (
@@ -350,7 +351,7 @@ impl Trace {
             let shared_initial_blocks = ((current_input_length.div_ceil(trace_block_size) as f64)
                 * shared_prefix_ratio)
                 .round() as usize;
-            extend_agentic_hash_ids(
+            extend_applied_compute_agentic_hash_ids(
                 &mut hash_ids,
                 current_input_length,
                 trace_block_size,
@@ -387,7 +388,7 @@ impl Trace {
                             line_idx + 1
                         )
                     })?;
-                extend_agentic_hash_ids(
+                extend_applied_compute_agentic_hash_ids(
                     &mut hash_ids,
                     current_input_length,
                     trace_block_size,
@@ -406,7 +407,7 @@ impl Trace {
             });
 
             sessions.push(SessionTrace {
-                session_id: format!("agentic_session_{}", line_idx + 1),
+                session_id: format!("applied_compute_agentic_session_{}", line_idx + 1),
                 first_arrival_timestamp_ms: None,
                 turns,
             });
@@ -886,7 +887,7 @@ impl Trace {
     }
 }
 
-fn extend_agentic_hash_ids(
+fn extend_applied_compute_agentic_hash_ids(
     hash_ids: &mut Vec<u64>,
     input_length: usize,
     trace_block_size: usize,

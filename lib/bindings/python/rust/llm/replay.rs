@@ -569,11 +569,11 @@ pub fn run_mocker_trace_replay(
     let replay_mode = replay_mode.to_owned();
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
-        if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Agentic
+        if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
             && replay_concurrency.is_none()
         {
             anyhow::bail!(
-                "trace_format='agentic' requires replay_concurrency because source traces do not contain first-turn timestamps"
+                "trace_format='applied_compute_agentic' requires replay_concurrency because source traces do not contain first-turn timestamps"
             );
         }
 
@@ -1107,9 +1107,11 @@ fn parse_trace_file_format(
 ) -> PyResult<dynamo_mocker::loadgen::TraceFileFormat> {
     match trace_format {
         "mooncake" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Mooncake),
-        "agentic" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Agentic),
+        "applied_compute_agentic" => {
+            Ok(dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic)
+        }
         other => Err(PyException::new_err(format!(
-            "trace_format must be either 'mooncake' or 'agentic', got '{}'",
+            "trace_format must be either 'mooncake' or 'applied_compute_agentic', got '{}'",
             other
         ))),
     }

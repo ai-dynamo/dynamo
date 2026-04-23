@@ -129,7 +129,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--trace-format",
-        choices=("mooncake", "agentic"),
+        choices=("mooncake", "applied_compute_agentic"),
         default="mooncake",
         help="Trace-file format to use with --trace-file.",
     )
@@ -142,19 +142,19 @@ def main() -> None:
     parser.add_argument(
         "--trace-replay-concurrency",
         type=int,
-        help="Optional replay concurrency cap for trace workloads; required for --trace-format=agentic.",
+        help="Optional replay concurrency cap for trace workloads; required for --trace-format=applied_compute_agentic.",
     )
     parser.add_argument(
         "--trace-shared-prefix-ratio",
         type=float,
         default=0.0,
-        help="Fraction of initial prompt blocks shared across sessions for agentic trace replay.",
+        help="Fraction of initial prompt blocks shared across sessions for applied_compute_agentic trace replay.",
     )
     parser.add_argument(
         "--trace-num-prefix-groups",
         type=int,
         default=0,
-        help="Number of shared-prefix groups for agentic trace replay.",
+        help="Number of shared-prefix groups for applied_compute_agentic trace replay.",
     )
     parser.add_argument(
         "--max-parallel-evals",

@@ -29,7 +29,7 @@ fn load_trace_from_file(
 ) -> Result<Trace> {
     match trace_format {
         TraceFileFormat::Mooncake => Trace::from_mooncake(trace_path, trace_block_size),
-        TraceFileFormat::Agentic => Trace::from_agentic(
+        TraceFileFormat::AppliedComputeAgentic => Trace::from_applied_compute_agentic(
             trace_path,
             trace_block_size,
             trace_shared_prefix_ratio,
@@ -107,9 +107,9 @@ pub fn simulate_trace_file_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
-    if trace_format == TraceFileFormat::Agentic {
+    if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
-            "agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
+            "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
     }
     let trace = load_trace_from_file(
@@ -171,9 +171,9 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
-    if trace_format == TraceFileFormat::Agentic {
+    if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
-            "agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
+            "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
     }
     let trace = load_trace_from_file(
@@ -257,9 +257,9 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
-    if trace_format == TraceFileFormat::Agentic {
+    if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
-            "agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
+            "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
     }
     let trace = load_trace_from_file(

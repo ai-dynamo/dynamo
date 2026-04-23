@@ -125,7 +125,7 @@ def _trace_workload(trace_file: Path, speedup: float = 100.0) -> WorkloadSpec:
     return WorkloadSpec(traceFile=str(trace_file), arrivalSpeedupRatio=speedup)
 
 
-def _agentic_trace_workload(
+def _applied_compute_agentic_trace_workload(
     trace_file: Path,
     *,
     concurrency: int = 8,
@@ -134,7 +134,7 @@ def _agentic_trace_workload(
 ) -> WorkloadSpec:
     return WorkloadSpec(
         traceFile=str(trace_file),
-        traceFormat="agentic",
+        traceFormat="applied_compute_agentic",
         traceReplayConcurrency=concurrency,
         traceSharedPrefixRatio=shared_prefix_ratio,
         traceNumPrefixGroups=num_prefix_groups,
@@ -158,29 +158,36 @@ def _sla(**bounds: float) -> SLASpec:
     return SLASpec(**{translate.get(k, k): v for k, v in bounds.items()})
 
 
-def test_agentic_trace_workload_requires_trace_replay_concurrency(tmp_path) -> None:
+def test_applied_compute_agentic_trace_workload_requires_trace_replay_concurrency(
+    tmp_path,
+) -> None:
     trace_path = _write_trace(tmp_path)
     with pytest.raises(ValueError, match="traceReplayConcurrency"):
-        WorkloadSpec(traceFile=str(trace_path), traceFormat="agentic")
+        WorkloadSpec(
+            traceFile=str(trace_path),
+            traceFormat="applied_compute_agentic",
+        )
 
 
-def test_agentic_trace_workload_rejects_shared_prefix_ratio_without_groups(
+def test_applied_compute_agentic_trace_workload_rejects_shared_prefix_ratio_without_groups(
     tmp_path,
 ) -> None:
     trace_path = _write_trace(tmp_path)
     with pytest.raises(ValueError, match="traceNumPrefixGroups"):
         WorkloadSpec(
             traceFile=str(trace_path),
-            traceFormat="agentic",
+            traceFormat="applied_compute_agentic",
             traceReplayConcurrency=8,
             traceSharedPrefixRatio=0.5,
             traceNumPrefixGroups=0,
         )
 
 
-def test_run_replay_for_state_passes_agentic_trace_knobs(tmp_path, monkeypatch) -> None:
+def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
+    tmp_path, monkeypatch
+) -> None:
     trace_path = _write_trace(tmp_path)
-    workload = _agentic_trace_workload(trace_path, concurrency=9)
+    workload = _applied_compute_agentic_trace_workload(trace_path, concurrency=9)
     captured: dict[str, Any] = {}
 
     def fake_run_trace_replay(trace_file, **kwargs):
@@ -203,7 +210,7 @@ def test_run_replay_for_state_passes_agentic_trace_knobs(tmp_path, monkeypatch) 
 
     assert Path(captured["trace_file"]) == trace_path
     assert captured["kwargs"]["replay_concurrency"] == 9
-    assert captured["kwargs"]["trace_format"] == "agentic"
+    assert captured["kwargs"]["trace_format"] == "applied_compute_agentic"
     assert captured["kwargs"]["trace_shared_prefix_ratio"] == 0.5
     assert captured["kwargs"]["trace_num_prefix_groups"] == 1
 

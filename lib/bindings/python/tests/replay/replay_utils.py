@@ -152,8 +152,8 @@ def _write_multiturn_trace(tmp_path):
     return trace_path
 
 
-def _write_agentic_trace(tmp_path):
-    trace_path = tmp_path / "agentic_trace.jsonl"
+def _write_applied_compute_agentic_trace(tmp_path):
+    trace_path = tmp_path / "applied_compute_agentic_trace.jsonl"
     records = [
         {
             "num_turns": 2,

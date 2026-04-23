@@ -16,7 +16,7 @@ from .replay_utils import (
     _router_config,
     _sglang_args,
     _vllm_args,
-    _write_agentic_trace,
+    _write_applied_compute_agentic_trace,
     _write_multiturn_trace,
     _write_trace_and_args,
 )
@@ -127,10 +127,10 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
-def test_run_trace_replay_supports_agentic_format_with_concurrency(
+def test_run_trace_replay_supports_applied_compute_agentic_format_with_concurrency(
     tmp_path, replay_mode
 ):
-    trace_path = _write_agentic_trace(tmp_path)
+    trace_path = _write_applied_compute_agentic_trace(tmp_path)
 
     report = run_trace_replay(
         trace_path,
@@ -139,7 +139,7 @@ def test_run_trace_replay_supports_agentic_format_with_concurrency(
         replay_concurrency=2,
         replay_mode=replay_mode,
         router_mode="kv_router",
-        trace_format="agentic",
+        trace_format="applied_compute_agentic",
         trace_shared_prefix_ratio=0.5,
         trace_num_prefix_groups=1,
     )
@@ -150,8 +150,10 @@ def test_run_trace_replay_supports_agentic_format_with_concurrency(
     assert report["total_output_tokens"] == 10
 
 
-def test_run_trace_replay_rejects_agentic_format_without_concurrency(tmp_path):
-    trace_path = _write_agentic_trace(tmp_path)
+def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurrency(
+    tmp_path,
+):
+    trace_path = _write_applied_compute_agentic_trace(tmp_path)
 
     with pytest.raises(Exception, match="replay_concurrency"):
         run_trace_replay(
@@ -159,7 +161,7 @@ def test_run_trace_replay_rejects_agentic_format_without_concurrency(tmp_path):
             extra_engine_args=_vllm_args(),
             num_workers=2,
             replay_mode="offline",
-            trace_format="agentic",
+            trace_format="applied_compute_agentic",
         )
 
 

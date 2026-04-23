@@ -85,7 +85,7 @@ fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
 }
 
 #[test]
-fn test_from_agentic_expands_rows_into_num_turns_plus_final_request() {
+fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
     let file = write_trace(&[serde_json::json!({
         "num_turns": 2,
         "input_prompt_length": 100,
@@ -95,7 +95,7 @@ fn test_from_agentic_expands_rows_into_num_turns_plus_final_request() {
         "final_assistant_response_length": 50,
     })]);
 
-    let trace = Trace::from_agentic(file.path(), 64, 0.0, 0).unwrap();
+    let trace = Trace::from_applied_compute_agentic(file.path(), 64, 0.0, 0).unwrap();
     assert_eq!(trace.sessions.len(), 1);
     let session = &trace.sessions[0];
     assert_eq!(session.first_arrival_timestamp_ms, None);
@@ -112,7 +112,7 @@ fn test_from_agentic_expands_rows_into_num_turns_plus_final_request() {
 }
 
 #[test]
-fn test_from_agentic_prefix_extends_hashes_across_turns() {
+fn test_from_applied_compute_agentic_prefix_extends_hashes_across_turns() {
     let file = write_trace(&[serde_json::json!({
         "num_turns": 2,
         "input_prompt_length": 600,
@@ -122,7 +122,7 @@ fn test_from_agentic_prefix_extends_hashes_across_turns() {
         "final_assistant_response_length": 60,
     })]);
 
-    let trace = Trace::from_agentic(file.path(), 256, 0.0, 0).unwrap();
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.0, 0).unwrap();
     let turns = &trace.sessions[0].turns;
     assert_eq!(turns[0].hash_ids, vec![1, 2, 3]);
     assert_eq!(turns[1].hash_ids, vec![1, 2, 3]);
@@ -130,7 +130,7 @@ fn test_from_agentic_prefix_extends_hashes_across_turns() {
 }
 
 #[test]
-fn test_from_agentic_can_share_initial_prefix_blocks_across_sessions() {
+fn test_from_applied_compute_agentic_can_share_initial_prefix_blocks_across_sessions() {
     let file = write_trace(&[
         serde_json::json!({
             "num_turns": 1,
@@ -150,7 +150,7 @@ fn test_from_agentic_can_share_initial_prefix_blocks_across_sessions() {
         }),
     ]);
 
-    let trace = Trace::from_agentic(file.path(), 256, 0.5, 1).unwrap();
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.5, 1).unwrap();
     assert_eq!(
         trace.sessions[0].turns[0].hash_ids[0],
         trace.sessions[1].turns[0].hash_ids[0]

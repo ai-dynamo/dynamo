@@ -185,9 +185,9 @@ class WorkloadSpec(BaseModel):
                     "trace workload (traceFile set) must not also set synthetic "
                     f"fields: {mixed}"
                 )
-            if self.traceFormat not in {"mooncake", "agentic"}:
+            if self.traceFormat not in {"mooncake", "applied_compute_agentic"}:
                 raise ValueError(
-                    "traceFormat must be either 'mooncake' or 'agentic', got "
+                    "traceFormat must be either 'mooncake' or 'applied_compute_agentic', got "
                     f"{self.traceFormat!r}"
                 )
             if (
@@ -203,9 +203,12 @@ class WorkloadSpec(BaseModel):
                 raise ValueError(
                     "traceSharedPrefixRatio > 0 requires traceNumPrefixGroups >= 1"
                 )
-            if self.traceFormat == "agentic" and self.traceReplayConcurrency is None:
+            if (
+                self.traceFormat == "applied_compute_agentic"
+                and self.traceReplayConcurrency is None
+            ):
                 raise ValueError(
-                    "traceFormat='agentic' requires traceReplayConcurrency"
+                    "traceFormat='applied_compute_agentic' requires traceReplayConcurrency"
                 )
             return self
 

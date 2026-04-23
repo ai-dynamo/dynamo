@@ -420,7 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
         "--trace-format",
-        choices=("mooncake", "agentic"),
+        choices=("mooncake", "applied_compute_agentic"),
         default="mooncake",
         help="format of trace_file when replaying from a file",
     )
@@ -434,13 +434,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--trace-shared-prefix-ratio",
         type=float,
         default=0.0,
-        help="fraction of the initial prompt blocks to share across sessions for agentic trace replay",
+        help="fraction of the initial prompt blocks to share across sessions for applied_compute_agentic trace replay",
     )
     parser.add_argument(
         "--trace-num-prefix-groups",
         type=int,
         default=0,
-        help="number of cross-session shared-prefix groups for agentic trace replay",
+        help="number of cross-session shared-prefix groups for applied_compute_agentic trace replay",
     )
     parser.add_argument(
         "--report-json",
@@ -479,11 +479,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if (
         using_trace_file
-        and args.trace_format == "agentic"
+        and args.trace_format == "applied_compute_agentic"
         and args.replay_concurrency is None
     ):
         parser.error(
-            "--trace-format=agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
+            "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
 
     extra_engine_args = _load_engine_args(args.extra_engine_args)
