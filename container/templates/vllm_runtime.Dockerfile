@@ -16,6 +16,9 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 {% endif %}
 
 ARG PYTHON_VERSION
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
@@ -28,8 +31,8 @@ ENV PATH=/usr/local/bin/etcd:${PATH}
 
 # Upstream vLLM ships NIXL and its UCX runtime assets inside the Python
 # installation rather than under /opt/nvidia/nvda_nixl. Resolve the packaged
-# `.nixl_cu*` directory once at build time and expose it via a stable path so
-# the same runtime template works for both CUDA 12 and CUDA 13 images.
+# CUDA-matched `.nixl_cu*` directory once at build time and expose it via a
+# stable path so the same runtime template works for both CUDA 12 and CUDA 13.
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ENV NIXL_PREFIX=/opt/dynamo/nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}
@@ -65,8 +68,16 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 # stable paths. CUDA 12 and CUDA 13 package the runtime under different
 # site-packages directories, so resolve the actual location once at build time.
 RUN set -eu; \
+{% if device == "cuda" %}
+    NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name ".nixl_cu${CUDA_MAJOR}.mesonpy.libs" | sort | tail -n 1)"; \
+{% else %}
     NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' | sort | tail -n 1)"; \
-    test -n "${NIXL_SITE_DIR}"; \
+{% endif %}
+    if [ -z "${NIXL_SITE_DIR}" ]; then \
+        echo "Could not find CUDA-matched NIXL libs under ${SITE_PACKAGES}" >&2; \
+        find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' >&2; \
+        exit 1; \
+    fi; \
     ln -sfn "${NIXL_SITE_DIR}" "${NIXL_PREFIX}"; \
     CUDA_RUNTIME_SITE_LIB="$(find "${SITE_PACKAGES}/nvidia" -maxdepth 3 -type f -name 'libcudart.so.*' | sort | tail -n 1)"; \
     test -n "${CUDA_RUNTIME_SITE_LIB}"; \
