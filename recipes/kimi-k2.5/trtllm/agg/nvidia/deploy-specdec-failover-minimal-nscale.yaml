@@ -12,7 +12,6 @@
 # - CUDA graphs disabled
 # - TRT-LLM autotuner disabled
 # - no KV-shrink cheat knobs
-# - same-process executor enabled to avoid the old MPI bootstrap seam
 #
 # Before apply:
 # - replace both REPLACE_WITH_RUNTIME_IMAGE values with the same pushed runtime image
@@ -132,8 +131,6 @@ spec:
               value: "1"
             - name: TLLM_LOG_LEVEL
               value: INFO
-            - name: TLLM_WORKER_USE_SINGLE_PROCESS
-              value: "1"
             - name: MPI4PY_MPIABI
               value: openmpi
             - name: OMPI_MCA_coll_ucc_enable
