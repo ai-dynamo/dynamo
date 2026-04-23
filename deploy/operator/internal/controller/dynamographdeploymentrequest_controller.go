@@ -1047,21 +1047,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
-	// Check if user provided hardware info in the typed spec.
-	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
-		dgdr.Spec.Hardware.VRAMMB != nil ||
-		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
-
-	// If manual config is provided, validation passes.
-	if hasManualConfig {
+	// Skip discovery only when all required hardware fields are provided by the user.
+	hw := dgdr.Spec.Hardware
+	if hw != nil && hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
 		return nil
 	}
 
 	// DCGM exporter is a cluster-level Service — reachable from any namespace.
-	if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache); err == nil {
-		return nil
-	} else {
-		logger.Info("DCGM discovery unavailable", "error", err.Error())
+	if r.GPUDiscovery != nil {
+		if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache); err == nil {
+			return nil
+		} else {
+			logger.Info("DCGM discovery unavailable", "error", err.Error())
+		}
 	}
 
 	// Node-label fallback
