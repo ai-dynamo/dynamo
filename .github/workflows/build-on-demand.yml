@@ -105,25 +105,26 @@ jobs:
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
-      # The TRTLLM fork wheel build is CUDA-kernel-heavy and OOMs on the
-      # shared remote BuildKit pool at its default 26Gi/29Gi memory limit
-      # (observed in ai-dynamo/dynamo actions run 24855398208: BuildKit
-      # pod died with "rpc error: code = Unavailable desc = error reading
-      # from server: EOF" during CUDA compile). Force a dedicated K8s
-      # BuildKit pod for this pipeline and size it up so the wheel build
-      # has enough memory headroom to finish.
+      # Force a dedicated K8s BuildKit pod for this pipeline. We need a
+      # dedicated pod (not the shared remote pool) to:
+      #   1. Get a clean BuildKit cache scoped to this fork wheel build, so
+      #      the SM90-only cutlass compile can actually be reused via the
+      #      --cache-to/--cache-from registry cache wired up in
+      #      container/build_trtllm_wheel.sh.
+      #   2. Run the wheel build on the same node as dynamo's image build
+      #      so the local output directory handoff (--build-context
+      #      trtllm_wheel=/path) resolves against a buildx context that can
+      #      read that path.
       #
-      # Sizing note: the dynamo-builder-fallback node pool rejects 64Gi
-      # requests (run 24856663726 hit "waiting for 1 pods to be ready,
-      # timeout: 2 minutes" x3 at 64Gi request / 96Gi limit). Stay inside
-      # the pool's per-node budget with 16 CPU / 40Gi request / 48Gi
-      # limit, which still gives roughly 1.6x the memory of the default
-      # 29Gi remote pool.
+      # Sizing: the dynamo-builder-fallback node pool won't schedule pods
+      # at 64Gi or 40Gi (see runs 24856663726 and 24857358494, both hit
+      # "waiting for 1 pods to be ready, timeout: 2 minutes" x3). Stay
+      # inside the pool's default budget (12 CPU / 26Gi request / 29Gi
+      # limit). That is enough for the narrowed SM90-only wheel compile
+      # because container/build_trtllm_wheel.sh now defaults to
+      # TRTLLM_CUDA_ARCHS=90-real, which eliminates the multi-arch cutlass
+      # instantiation blowup that OOMed the pod in 24855398208.
       fresh_builder: true
-      builder_requests_cpu: '16'
-      builder_requests_memory: '40Gi'
-      builder_limits_memory: '48Gi'
-      builder_ephemeral_storage: '600Gi'
     secrets: inherit
 
   # ============================================================================
