@@ -2296,6 +2296,16 @@ const VIDEO_STREAM_BINARY_KIND_MP4: u8 = 0x01;
 const VIDEO_STREAM_BINARY_KIND_ERROR: u8 = 0x02;
 const VIDEO_STREAM_BINARY_KIND_DONE: u8 = 0x03;
 const VIDEO_STREAM_BINARY_PROTOCOL: &str = "dynamo-video-binary-v1";
+const VIDEO_STREAM_BINARY_CMAF_KIND_METADATA: u8 = 0x01;
+const VIDEO_STREAM_BINARY_CMAF_KIND_INIT: u8 = 0x02;
+const VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT: u8 = 0x03;
+const VIDEO_STREAM_BINARY_CMAF_KIND_ERROR: u8 = 0x04;
+const VIDEO_STREAM_BINARY_CMAF_KIND_DONE: u8 = 0x05;
+const VIDEO_STREAM_BINARY_CMAF_PROTOCOL: &str = "dynamo-video-binary-cmaf-v1";
+const VIDEO_STREAM_BINARY_CMAF_ANNOTATION: &str = "experimental_binary_cmaf";
+const VIDEO_STREAM_BINARY_CMAF_METADATA_TAG: &str = "cmaf:metadata";
+const VIDEO_STREAM_BINARY_CMAF_INIT_TAG: &str = "cmaf:init";
+const VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX: &str = "cmaf:segment:";
 const VIDEO_STREAM_HLS_CMAF_ANNOTATION: &str = "experimental_hls_cmaf";
 const VIDEO_STREAM_HLS_PLAYLIST_CONTENT_TYPE: &str = "application/vnd.apple.mpegurl";
 const VIDEO_STREAM_HLS_FRAGMENT_CONTENT_TYPE: &str = "video/mp4";
@@ -2312,6 +2322,17 @@ struct VideoHlsStreamLocator {
     created: i64,
     expires_at: i64,
     target_duration_seconds: u32,
+}
+
+fn add_video_binary_cmaf_annotation(request: &mut NvCreateVideoRequest) {
+    let nvext = request.nvext.get_or_insert_with(Default::default);
+    let annotations = nvext.annotations.get_or_insert_with(Vec::new);
+    if !annotations
+        .iter()
+        .any(|annotation| annotation == VIDEO_STREAM_BINARY_CMAF_ANNOTATION)
+    {
+        annotations.push(VIDEO_STREAM_BINARY_CMAF_ANNOTATION.to_string());
+    }
 }
 
 fn add_video_hls_cmaf_annotation(request: &mut NvCreateVideoRequest) {
@@ -2510,6 +2531,36 @@ fn normalize_video_stream_response(
     Ok(response)
 }
 
+fn normalize_video_binary_cmaf_response(
+    response: NvVideosResponse,
+) -> Result<NvVideosResponse, String> {
+    for item in &response.data {
+        let tag = item.url.as_deref().ok_or_else(|| {
+            "CMAF binary streaming requires tagged data[*].url values".to_string()
+        })?;
+
+        if !(tag == VIDEO_STREAM_BINARY_CMAF_METADATA_TAG
+            || tag == VIDEO_STREAM_BINARY_CMAF_INIT_TAG
+            || tag.starts_with(VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX))
+        {
+            return Err(format!(
+                "CMAF binary streaming requires data[*].url tags matching {} / {} / {}<n>, got {tag}",
+                VIDEO_STREAM_BINARY_CMAF_METADATA_TAG,
+                VIDEO_STREAM_BINARY_CMAF_INIT_TAG,
+                VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX
+            ));
+        }
+
+        if item.b64_json.is_none() {
+            return Err(
+                "CMAF binary streaming requires raw payload bytes in data[*].b64_json".to_string(),
+            );
+        }
+    }
+
+    Ok(response)
+}
+
 fn decode_video_stream_payloads(response: NvVideosResponse) -> Result<Vec<Vec<u8>>, String> {
     response
         .data
@@ -2522,6 +2573,45 @@ fn decode_video_stream_payloads(response: NvVideosResponse) -> Result<Vec<Vec<u8
             base64::prelude::BASE64_STANDARD
                 .decode(&b64)
                 .map_err(|e| format!("failed to decode video chunk base64: {e}"))
+        })
+        .collect()
+}
+
+fn decode_video_binary_cmaf_payloads(
+    response: NvVideosResponse,
+) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    response
+        .data
+        .into_iter()
+        .map(|item| {
+            let kind = match item.url.as_deref() {
+                Some(VIDEO_STREAM_BINARY_CMAF_METADATA_TAG) => {
+                    VIDEO_STREAM_BINARY_CMAF_KIND_METADATA
+                }
+                Some(VIDEO_STREAM_BINARY_CMAF_INIT_TAG) => VIDEO_STREAM_BINARY_CMAF_KIND_INIT,
+                Some(tag) if tag.starts_with(VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX) => {
+                    VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT
+                }
+                Some(tag) => {
+                    return Err(format!(
+                        "unrecognized CMAF binary payload tag in data[*].url: {tag}"
+                    ));
+                }
+                None => {
+                    return Err(
+                        "CMAF binary streaming requires tagged data[*].url values".to_string()
+                    );
+                }
+            };
+
+            let b64 = item.b64_json.ok_or_else(|| {
+                "CMAF binary streaming requires raw payload bytes in data[*].b64_json".to_string()
+            })?;
+
+            let payload = base64::prelude::BASE64_STANDARD
+                .decode(&b64)
+                .map_err(|e| format!("failed to decode CMAF payload base64: {e}"))?;
+            Ok((kind, payload))
         })
         .collect()
 }
@@ -2548,6 +2638,22 @@ fn encode_binary_video_error_frame(message: impl Into<String>) -> Bytes {
 
 fn encode_binary_video_done_frame() -> Bytes {
     encode_binary_video_frame(VIDEO_STREAM_BINARY_KIND_DONE, &[])
+}
+
+fn encode_binary_video_cmaf_error_frame(message: impl Into<String>) -> Bytes {
+    let payload = serde_json::json!({
+        "error": {
+            "message": message.into(),
+        }
+    });
+    encode_binary_video_frame(
+        VIDEO_STREAM_BINARY_CMAF_KIND_ERROR,
+        payload.to_string().as_bytes(),
+    )
+}
+
+fn encode_binary_video_cmaf_done_frame() -> Bytes {
+    encode_binary_video_frame(VIDEO_STREAM_BINARY_CMAF_KIND_DONE, &[])
 }
 
 /// Canonical SSE streaming handler for `/v1/videos/stream`.
@@ -2785,6 +2891,157 @@ async fn video_stream_binary(
         })
 }
 
+/// Experimental CMAF-over-binary streaming handler for
+/// `/v1/videos/stream/binary/cmaf`.
+///
+/// This keeps Dynamo's single-request streaming model but upgrades the media
+/// unit from standalone MP4 clips to a continuous CMAF stream:
+/// `[kind:1][len_be_u32:4][payload:len]`
+/// where `kind=0x01` is a metadata JSON blob, `0x02` is the init fragment,
+/// `0x03` is a media fragment, `0x04` is an error JSON payload, and `0x05`
+/// is an end-of-stream marker.
+async fn video_stream_binary_cmaf(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    force_streaming_video_response_format(&mut request);
+    add_video_binary_cmaf_annotation(&mut request);
+
+    let request_id = get_or_create_request_id(&headers);
+    let request = Context::with_id(request, request_id);
+    let model = request.model.clone();
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
+
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start CMAF binary video stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let ctx = stream.context();
+    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+        ctx.clone(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Videos.to_string(),
+            request_type: "stream_binary_cmaf".to_string(),
+        },
+    )
+    .await;
+    connection_handle.disarm();
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    stream_handle.arm();
+    let binary_stream = async_stream::stream! {
+        tokio::pin!(stream);
+        loop {
+            tokio::select! {
+                item = stream.next() => {
+                    match item {
+                        Some(annotated) => {
+                            let annotated = annotated.map_data(normalize_video_binary_cmaf_response);
+                            match annotated.into_result() {
+                                Ok(Some(response)) => {
+                                    match decode_video_binary_cmaf_payloads(response) {
+                                        Ok(payloads) => {
+                                            for (kind, payload) in payloads {
+                                                yield Ok::<Bytes, std::convert::Infallible>(
+                                                    encode_binary_video_frame(kind, &payload)
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            inflight.mark_error(ErrorType::Internal);
+                                            stream_handle.disarm();
+                                            yield Ok::<Bytes, std::convert::Infallible>(
+                                                encode_binary_video_cmaf_error_frame(e.to_string())
+                                            );
+                                            yield Ok::<Bytes, std::convert::Infallible>(
+                                                encode_binary_video_cmaf_done_frame()
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    inflight.mark_error(ErrorType::Internal);
+                                    stream_handle.disarm();
+                                    yield Ok::<Bytes, std::convert::Infallible>(
+                                        encode_binary_video_cmaf_error_frame(e.to_string())
+                                    );
+                                    yield Ok::<Bytes, std::convert::Infallible>(
+                                        encode_binary_video_cmaf_done_frame()
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        None => {
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            yield Ok::<Bytes, std::convert::Infallible>(
+                                encode_binary_video_cmaf_done_frame()
+                            );
+                            break;
+                        }
+                    }
+                }
+                _ = ctx.stopped() => {
+                    tracing::trace!("Context stopped; breaking CMAF binary video stream");
+                    inflight.mark_error(ErrorType::Cancelled);
+                    break;
+                }
+            }
+        }
+    };
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            "x-dynamo-video-binary-protocol",
+            VIDEO_STREAM_BINARY_CMAF_PROTOCOL,
+        )
+        .body(Body::from_stream(binary_stream))
+        .map(|r| r.into_response())
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to build CMAF binary video response: {e}"
+            ))
+        })
+}
+
 /// Experimental HLS/CMAF kickoff route for `/v1/videos/stream/hls`.
 ///
 /// The worker returns a single `NvVideosResponse` whose `id` is an opaque stream
@@ -2950,6 +3207,7 @@ async fn video_stream_hls_segment(
 /// - `POST /v1/videos`               — non-streaming, returns a single JSON response
 /// - `POST /v1/videos/stream`        — canonical SSE streaming with `NvVideosResponse` payloads
 /// - `POST /v1/videos/stream/binary` — experimental framed binary MP4 streaming
+/// - `POST /v1/videos/stream/binary/cmaf` — experimental single-POST CMAF/fMP4 streaming
 /// - `POST /v1/videos/stream/hls`    — HLS/CMAF kickoff, returns a playlist URL + stream id
 /// - `GET  /v1/videos/stream/hls/{stream_id}/playlist.m3u8`
 /// - `GET  /v1/videos/stream/hls/{stream_id}/init.mp4`
@@ -2961,6 +3219,7 @@ pub fn videos_router(
     let path = path.unwrap_or("/v1/videos".to_string());
     let stream_path = format!("{}/stream", path);
     let binary_stream_path = format!("{}/binary", stream_path);
+    let binary_cmaf_stream_path = format!("{}/cmaf", binary_stream_path);
     let hls_path = format!("{}/hls", stream_path);
     let hls_playlist_path = format!("{}/{{stream_id}}/playlist.m3u8", hls_path);
     let hls_init_path = format!("{}/{{stream_id}}/init.mp4", hls_path);
@@ -2969,6 +3228,7 @@ pub fn videos_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let stream_doc = RouteDoc::new(axum::http::Method::POST, &stream_path);
     let binary_stream_doc = RouteDoc::new(axum::http::Method::POST, &binary_stream_path);
+    let binary_cmaf_stream_doc = RouteDoc::new(axum::http::Method::POST, &binary_cmaf_stream_path);
     let hls_doc = RouteDoc::new(axum::http::Method::POST, &hls_path);
     let hls_playlist_doc = RouteDoc::new(axum::http::Method::GET, &hls_playlist_path);
     let hls_init_doc = RouteDoc::new(axum::http::Method::GET, &hls_init_path);
@@ -2989,6 +3249,7 @@ pub fn videos_router(
         .route(&path, post(videos))
         .route(&stream_path, post(video_stream))
         .route(&binary_stream_path, post(video_stream_binary))
+        .route(&binary_cmaf_stream_path, post(video_stream_binary_cmaf))
         .route(&hls_path, post(video_stream_hls))
         .route(&hls_playlist_path, get(video_stream_hls_playlist))
         .route(&hls_init_path, get(video_stream_hls_init_fragment))
@@ -3002,6 +3263,7 @@ pub fn videos_router(
             doc,
             stream_doc,
             binary_stream_doc,
+            binary_cmaf_stream_doc,
             hls_doc,
             hls_playlist_doc,
             hls_init_doc,
@@ -4144,6 +4406,34 @@ mod tests {
     }
 
     #[test]
+    fn test_add_video_binary_cmaf_annotation_sets_nvext_annotation_once() {
+        let mut request = NvCreateVideoRequest {
+            prompt: "hello".to_string(),
+            model: "video-model".to_string(),
+            input_reference: None,
+            seconds: None,
+            size: None,
+            user: None,
+            response_format: None,
+            nvext: None,
+        };
+
+        add_video_binary_cmaf_annotation(&mut request);
+        add_video_binary_cmaf_annotation(&mut request);
+
+        let annotations = request
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.annotations.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            annotations,
+            vec![VIDEO_STREAM_BINARY_CMAF_ANNOTATION.to_string()]
+        );
+    }
+
+    #[test]
     fn test_video_hls_stream_id_round_trip() {
         let locator = VideoHlsStreamLocator {
             session_id: "session-123".to_string(),
@@ -4294,6 +4584,104 @@ mod tests {
 
         let payloads = decode_video_stream_payloads(response).unwrap();
         assert_eq!(payloads, vec![b"mp4-bytes".to_vec()]);
+    }
+
+    #[test]
+    fn test_normalize_video_binary_cmaf_response_accepts_tagged_payloads() {
+        let response = NvVideosResponse {
+            id: "vid-1".to_string(),
+            object: "video".to_string(),
+            model: "video-model".to_string(),
+            status: "in_progress".to_string(),
+            progress: 33,
+            created: 0,
+            data: vec![
+                VideoData {
+                    url: Some(VIDEO_STREAM_BINARY_CMAF_METADATA_TAG.to_string()),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(br#"{"ok":true}"#)),
+                },
+                VideoData {
+                    url: Some(VIDEO_STREAM_BINARY_CMAF_INIT_TAG.to_string()),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"init")),
+                },
+                VideoData {
+                    url: Some(format!("{VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX}7")),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"segment")),
+                },
+            ],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let normalized = normalize_video_binary_cmaf_response(response).unwrap();
+        assert_eq!(normalized.data.len(), 3);
+    }
+
+    #[test]
+    fn test_normalize_video_binary_cmaf_response_rejects_untagged_payloads() {
+        let response = NvVideosResponse {
+            id: "vid-1".to_string(),
+            object: "video".to_string(),
+            model: "video-model".to_string(),
+            status: "in_progress".to_string(),
+            progress: 33,
+            created: 0,
+            data: vec![VideoData {
+                url: Some("video/mp4".to_string()),
+                b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"segment")),
+            }],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let err = normalize_video_binary_cmaf_response(response).unwrap_err();
+        assert!(err.contains("cmaf"));
+    }
+
+    #[test]
+    fn test_decode_video_binary_cmaf_payloads_decodes_kinded_frames() {
+        let response = NvVideosResponse {
+            id: "vid-1".to_string(),
+            object: "video".to_string(),
+            model: "video-model".to_string(),
+            status: "completed".to_string(),
+            progress: 100,
+            created: 0,
+            data: vec![
+                VideoData {
+                    url: Some(VIDEO_STREAM_BINARY_CMAF_METADATA_TAG.to_string()),
+                    b64_json: Some(
+                        base64::prelude::BASE64_STANDARD.encode(br#"{"mime":"video/mp4"}"#),
+                    ),
+                },
+                VideoData {
+                    url: Some(VIDEO_STREAM_BINARY_CMAF_INIT_TAG.to_string()),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"init-bytes")),
+                },
+                VideoData {
+                    url: Some(format!("{VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX}0")),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"segment-bytes")),
+                },
+            ],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let payloads = decode_video_binary_cmaf_payloads(response).unwrap();
+        assert_eq!(
+            payloads,
+            vec![
+                (
+                    VIDEO_STREAM_BINARY_CMAF_KIND_METADATA,
+                    br#"{"mime":"video/mp4"}"#.to_vec()
+                ),
+                (VIDEO_STREAM_BINARY_CMAF_KIND_INIT, b"init-bytes".to_vec()),
+                (
+                    VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT,
+                    b"segment-bytes".to_vec()
+                ),
+            ]
+        );
     }
 
     #[test]

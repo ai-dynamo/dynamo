@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dynamo CMAF Binary Streaming POC Client</title>
+  <style>
+    :root {
+      --bg: #0d1720;
+      --panel: rgba(16, 28, 40, 0.9);
+      --panel-2: rgba(25, 40, 56, 0.92);
+      --text: #eef4f7;
+      --muted: #a9bcc8;
+      --border: rgba(255, 255, 255, 0.12);
+      --accent: #7ad2b4;
+      --accent-2: #7bbcff;
+      --danger: #ff8a7b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(122, 210, 180, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(123, 188, 255, 0.16), transparent 24%),
+        linear-gradient(180deg, #091119 0%, var(--bg) 100%);
+      padding: 24px;
+      display: grid;
+      place-items: center;
+    }
+
+    .app {
+      width: min(1120px, 100%);
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 22px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 20px 72px rgba(0, 0, 0, 0.32);
+    }
+
+    .controls {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.65rem;
+      line-height: 1.1;
+    }
+
+    p,
+    .hint {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    input,
+    textarea,
+    button {
+      font: inherit;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+    }
+
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      cursor: pointer;
+      transition: transform 160ms ease, opacity 160ms ease;
+      font-weight: 700;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #08100d;
+    }
+
+    .ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .player {
+      display: grid;
+      gap: 14px;
+    }
+
+    video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 18px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      font-size: 0.86rem;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    pre {
+      margin: 0;
+      min-height: 240px;
+      max-height: 440px;
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(4, 8, 13, 0.72);
+      padding: 16px;
+      color: #d9e6ee;
+      font-size: 0.83rem;
+      line-height: 1.46;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 920px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="panel controls">
+      <h1>Dynamo CMAF Binary Stream POC</h1>
+      <p>POST one prompt, then play a continuous CMAF/fMP4 stream over the experimental single-request binary route using Media Source Extensions.</p>
+
+      <label>
+        Frontend Base URL
+        <input id="baseUrl" placeholder="http://localhost:8000" />
+      </label>
+
+      <label>
+        Model
+        <input id="model" value="synthetic-binary-cmaf-video-stream" />
+      </label>
+
+      <label>
+        Prompt
+        <textarea id="prompt">Replay the synthetic continuous CMAF stream.</textarea>
+      </label>
+
+      <div class="actions">
+        <button class="primary" id="start">Start CMAF Binary Stream</button>
+        <button class="ghost" id="stop">Stop</button>
+      </div>
+
+      <p class="hint">This client expects `POST /v1/videos/stream/binary/cmaf` and uses `MediaSource` with one init fragment plus streamed `.m4s` media fragments. If the page and Dynamo are served from different origins, the videos router must expose CORS headers for browser testing.</p>
+    </section>
+
+    <section class="panel player">
+      <video id="player" controls playsinline></video>
+      <div class="stats">
+        <div class="pill">Mode: <span id="mode">idle</span></div>
+        <div class="pill">Buffered queue: <span id="queued">0</span></div>
+        <div class="pill">Appended: <span id="appended">0</span></div>
+        <div class="pill">Audio: <span id="audio">unknown</span></div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </div>
+
+  <script>
+    const player = document.getElementById("player");
+    const modeEl = document.getElementById("mode");
+    const queuedEl = document.getElementById("queued");
+    const appendedEl = document.getElementById("appended");
+    const audioEl = document.getElementById("audio");
+    const logEl = document.getElementById("log");
+
+    const FRAME_KIND_METADATA = 0x01;
+    const FRAME_KIND_INIT = 0x02;
+    const FRAME_KIND_SEGMENT = 0x03;
+    const FRAME_KIND_ERROR = 0x04;
+    const FRAME_KIND_DONE = 0x05;
+    const EXPECTED_PROTOCOL = "dynamo-video-binary-cmaf-v1";
+
+    let currentAbortController = null;
+    let currentObjectUrl = null;
+    let mediaSource = null;
+    let sourceBuffer = null;
+    let appendQueue = [];
+    let appendedCount = 0;
+    let streamDone = false;
+    let playbackStarted = false;
+    let sourceOpen = false;
+    let activeMetadata = null;
+
+    function log(message, isError = false) {
+      const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logEl.textContent += `${line}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+      if (isError) {
+        logEl.classList.add("error");
+      }
+    }
+
+    function resetLogStyle() {
+      logEl.classList.remove("error");
+    }
+
+    function setMode(mode) {
+      modeEl.textContent = mode;
+    }
+
+    function updateStats() {
+      queuedEl.textContent = String(appendQueue.length);
+      appendedEl.textContent = String(appendedCount);
+      audioEl.textContent = activeMetadata ? (activeMetadata.has_audio ? "yes" : "no") : "unknown";
+    }
+
+    function inferDefaultBaseUrl() {
+      const queryBaseUrl = new URLSearchParams(window.location.search).get("baseUrl");
+      if (queryBaseUrl) {
+        return queryBaseUrl;
+      }
+
+      if (window.location.protocol === "file:") {
+        return "http://localhost:8000";
+      }
+
+      const inferred = new URL(window.location.href);
+      inferred.pathname = "";
+      inferred.search = "";
+      inferred.hash = "";
+
+      if (!inferred.port || inferred.port === "8080") {
+        inferred.port = "8000";
+      }
+
+      return inferred.origin;
+    }
+
+    function initializeBaseUrl() {
+      const baseUrlInput = document.getElementById("baseUrl");
+      if (!baseUrlInput.value.trim()) {
+        baseUrlInput.value = inferDefaultBaseUrl();
+      }
+    }
+
+    function resetMediaPipeline() {
+      appendQueue = [];
+      appendedCount = 0;
+      streamDone = false;
+      playbackStarted = false;
+      sourceOpen = false;
+      activeMetadata = null;
+
+      if (sourceBuffer) {
+        try {
+          if (sourceBuffer.updating) {
+            sourceBuffer.abort();
+          }
+        } catch (error) {
+          log(`Ignoring SourceBuffer reset error: ${error}`, true);
+        }
+      }
+
+      if (mediaSource && mediaSource.readyState === "open") {
+        try {
+          mediaSource.endOfStream();
+        } catch (error) {
+          log(`Ignoring MediaSource reset error: ${error}`, true);
+        }
+      }
+
+      sourceBuffer = null;
+      mediaSource = null;
+
+      if (currentObjectUrl) {
+        URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = null;
+      }
+
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+      updateStats();
+    }
+
+    function maybeFinalizeStream() {
+      if (!streamDone || !mediaSource || !sourceBuffer) {
+        return;
+      }
+      if (appendQueue.length > 0 || sourceBuffer.updating) {
+        return;
+      }
+      if (mediaSource.readyState === "open") {
+        mediaSource.endOfStream();
+        log("MediaSource endOfStream()");
+      }
+    }
+
+    function drainAppendQueue() {
+      if (!sourceOpen || !sourceBuffer || sourceBuffer.updating || appendQueue.length === 0) {
+        maybeFinalizeStream();
+        return;
+      }
+
+      const next = appendQueue.shift();
+      updateStats();
+
+      try {
+        sourceBuffer.appendBuffer(next.bytes);
+        log(`Appending ${next.label} (${next.bytes.byteLength} bytes)`);
+      } catch (error) {
+        log(`Failed to append ${next.label}: ${error}`, true);
+      }
+    }
+
+    function enqueueFragment(bytes, label) {
+      const payload = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      appendQueue.push({ bytes: payload, label });
+      updateStats();
+      drainAppendQueue();
+    }
+
+    function ensureMediaPipeline(metadata) {
+      if (mediaSource) {
+        return;
+      }
+
+      const mimeType = metadata.source_buffer_mime_type;
+      if (!(window.MediaSource && window.MediaSource.isTypeSupported(mimeType))) {
+        throw new Error(`MediaSource does not support ${mimeType}`);
+      }
+
+      mediaSource = new MediaSource();
+      currentObjectUrl = URL.createObjectURL(mediaSource);
+      player.src = currentObjectUrl;
+      player.load();
+      player.muted = false;
+
+      mediaSource.addEventListener("sourceopen", () => {
+        sourceOpen = true;
+        log(`MediaSource opened with ${mimeType}`);
+        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        sourceBuffer.mode = "segments";
+
+        sourceBuffer.addEventListener("updateend", () => {
+          appendedCount += 1;
+          updateStats();
+
+          if (!playbackStarted) {
+            playbackStarted = true;
+            player.play().catch((error) => {
+              log(`Playback start blocked: ${error.message}. Press play if the browser requires a fresh gesture.`, true);
+            });
+          }
+
+          drainAppendQueue();
+        });
+
+        sourceBuffer.addEventListener("error", () => {
+          log("SourceBuffer error while appending CMAF payloads", true);
+        });
+
+        drainAppendQueue();
+      }, { once: true });
+    }
+
+    async function stopStream() {
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+      }
+      resetMediaPipeline();
+      setMode("idle");
+      log("Stopped stream");
+    }
+
+    async function startStream() {
+      await stopStream();
+      resetLogStyle();
+      logEl.textContent = "";
+
+      if (!(window.MediaSource && window.MediaSource.isTypeSupported)) {
+        log("This browser does not support MediaSource playback", true);
+        setMode("unsupported");
+        return;
+      }
+
+      const baseUrl = document.getElementById("baseUrl").value.trim();
+      const pageOrigin = window.location.origin;
+      if (!baseUrl) {
+        log("Frontend Base URL is empty", true);
+        setMode("error");
+        return;
+      }
+
+      if (
+        window.location.protocol !== "file:" &&
+        !window.location.hostname.match(/^(localhost|127\.0\.0\.1)$/) &&
+        baseUrl.includes("localhost")
+      ) {
+        log(
+          `Frontend Base URL ${baseUrl} points at localhost, but this page is loaded from ${pageOrigin}. ` +
+          "In remote IDE or forwarded-port setups, browser localhost is usually not the same machine as the shell. Use the browser-reachable frontend URL instead.",
+          true
+        );
+      }
+
+      currentAbortController = new AbortController();
+      setMode("connecting");
+      updateStats();
+
+      const url = new URL("/v1/videos/stream/binary/cmaf", baseUrl).toString();
+      const body = {
+        model: document.getElementById("model").value.trim(),
+        prompt: document.getElementById("prompt").value.trim(),
+      };
+
+      log(`POST ${url}`);
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: currentAbortController.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        const errorBody = (await response.text()).trim();
+        throw new Error(
+          errorBody
+            ? `Binary CMAF request failed with ${response.status}: ${errorBody}`
+            : `Binary CMAF request failed with ${response.status}`
+        );
+      }
+
+      const protocol = response.headers.get("x-dynamo-video-binary-protocol") || "unknown";
+      log(`Connected to binary stream (${protocol})`);
+      if (protocol !== EXPECTED_PROTOCOL) {
+        throw new Error(`Unexpected binary protocol header: ${protocol}`);
+      }
+
+      setMode("streaming");
+      const reader = response.body.getReader();
+      const textDecoder = new TextDecoder();
+      let buffer = new Uint8Array(0);
+      let segmentIndex = 0;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          log("Binary stream closed");
+          break;
+        }
+
+        const next = new Uint8Array(buffer.length + value.length);
+        next.set(buffer);
+        next.set(value, buffer.length);
+        buffer = next;
+
+        while (buffer.length >= 5) {
+          const kind = buffer[0];
+          const length = new DataView(buffer.buffer, buffer.byteOffset + 1, 4).getUint32(0);
+          if (buffer.length < 5 + length) {
+            break;
+          }
+
+          const payload = buffer.slice(5, 5 + length);
+          buffer = buffer.slice(5 + length);
+
+          if (kind === FRAME_KIND_METADATA) {
+            activeMetadata = JSON.parse(textDecoder.decode(payload));
+            log(`Received metadata: ${JSON.stringify(activeMetadata, null, 2)}`);
+            ensureMediaPipeline(activeMetadata);
+            updateStats();
+          } else if (kind === FRAME_KIND_INIT) {
+            enqueueFragment(payload, "init fragment");
+          } else if (kind === FRAME_KIND_SEGMENT) {
+            enqueueFragment(payload, `media fragment ${segmentIndex}`);
+            segmentIndex += 1;
+          } else if (kind === FRAME_KIND_ERROR) {
+            log(`Binary error: ${textDecoder.decode(payload)}`, true);
+            setMode("error");
+          } else if (kind === FRAME_KIND_DONE) {
+            streamDone = true;
+            log("Received binary done frame");
+            maybeFinalizeStream();
+          } else {
+            log(`Unknown binary frame kind: ${kind}`, true);
+          }
+        }
+      }
+    }
+
+    player.addEventListener("error", () => {
+      const mediaError = player.error;
+      const detail = mediaError ? ` code=${mediaError.code}` : "";
+      log(`Video element error${detail}: the continuous CMAF stream could not be played`, true);
+      setMode("error");
+    });
+
+    document.getElementById("start").addEventListener("click", async () => {
+      try {
+        await startStream();
+      } catch (error) {
+        log(`Failed to start CMAF binary stream: ${error.message || error}`, true);
+        setMode("error");
+      }
+    });
+
+    document.getElementById("stop").addEventListener("click", () => {
+      void stopStream();
+    });
+
+    initializeBaseUrl();
+    updateStats();
+  </script>
+</body>
+</html>
