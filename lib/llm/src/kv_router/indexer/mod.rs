@@ -14,7 +14,7 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
-        LowerTierMatchDetails, MatchDetails,
+        LowerTierMatchDetails, MatchDetails, WireTieredMatchDetails,
     },
     protocols::{
         DpRank, LocalBlockHash, OverlapScores, RouterEvent, StorageTier, TokensWithHashes,
@@ -147,6 +147,37 @@ pub(crate) struct TieredMatchDetails {
     pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
 }
 
+impl From<&TieredMatchDetails> for WireTieredMatchDetails {
+    fn from(d: &TieredMatchDetails) -> Self {
+        Self {
+            device: d.device.overlap_scores.clone().into(),
+            lower_tier: d
+                .lower_tier
+                .iter()
+                .map(|(tier, details)| (*tier, details.into()))
+                .collect(),
+        }
+    }
+}
+
+impl From<WireTieredMatchDetails> for TieredMatchDetails {
+    fn from(w: WireTieredMatchDetails) -> Self {
+        // `last_matched_hashes` is only needed server-side to seed the tier walk,
+        // so we leave it empty on the inbound side.
+        Self {
+            device: MatchDetails {
+                overlap_scores: w.device.into(),
+                ..Default::default()
+            },
+            lower_tier: w
+                .lower_tier
+                .into_iter()
+                .map(|(tier, details)| (tier, details.into()))
+                .collect(),
+        }
+    }
+}
+
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub(crate) use subscriber::start_subscriber;
@@ -264,13 +295,13 @@ impl Indexer {
             Self::Concurrent { primary, .. } => {
                 Ok(primary.backend().find_match_details_impl(&sequence, false))
             }
+            // Device-only queries on the remote path go through the same tiered
+            // RPC; we just project out the device result. Keeps a single wire
+            // path on the client side.
             Self::Remote(remote) => remote
-                .find_matches(sequence)
+                .find_matches_by_tier(sequence)
                 .await
-                .map(|overlap_scores| MatchDetails {
-                    overlap_scores,
-                    ..Default::default()
-                })
+                .map(|tiered| tiered.device)
                 .map_err(|e| {
                     tracing::warn!(error = %e, "Remote indexer query failed");
                     KvRouterError::IndexerOffline
@@ -283,15 +314,21 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        let device = self.find_match_details(sequence.clone()).await?;
-        let lower_tier = match self {
+        match self {
             Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
-                query_lower_tiers(lower_tier, &sequence, &device)
+                let device = self.find_match_details(sequence.clone()).await?;
+                let lt = query_lower_tiers(lower_tier, &sequence, &device);
+                Ok(TieredMatchDetails {
+                    device,
+                    lower_tier: lt,
+                })
             }
-            Self::Remote(_) | Self::None => HashMap::new(),
-        };
-
-        Ok(TieredMatchDetails { device, lower_tier })
+            Self::Remote(remote) => remote.find_matches_by_tier(sequence).await.map_err(|e| {
+                tracing::warn!(error = %e, "Remote indexer tiered query failed");
+                KvRouterError::IndexerOffline
+            }),
+            Self::None => Ok(TieredMatchDetails::default()),
+        }
     }
 
     pub(crate) async fn record_hashed_routing_decision(

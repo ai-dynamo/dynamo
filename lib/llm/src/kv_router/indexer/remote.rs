@@ -11,7 +11,7 @@ use dynamo_kv_router::indexer::{
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::kv_router::metrics::RemoteIndexerMetrics;
 
-use super::Indexer;
+use super::{Indexer, TieredMatchDetails};
 
 pub struct RemoteIndexer {
     query_router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
@@ -85,10 +85,10 @@ impl RemoteIndexer {
         })
     }
 
-    pub(super) async fn find_matches(
+    pub(super) async fn find_matches_by_tier(
         &self,
         block_hashes: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores> {
+    ) -> Result<TieredMatchDetails> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_query_failures();
         })?;
@@ -106,7 +106,7 @@ impl RemoteIndexer {
             })?;
 
         match stream.next().await {
-            Some(IndexerQueryResponse::Scores(scores)) => Ok(scores.into()),
+            Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
             Some(IndexerQueryResponse::Error(msg)) => {
                 self.metrics.increment_query_failures();
                 Err(anyhow::anyhow!("Remote indexer error: {}", msg))
@@ -433,8 +433,8 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
         let indexer = self.bindings.read().get(&request.model_name).cloned();
 
         let response = match indexer {
-            Some(indexer) => match indexer.find_matches(request.block_hashes).await {
-                Ok(scores) => IndexerQueryResponse::Scores(scores.into()),
+            Some(indexer) => match indexer.find_matches_by_tier(request.block_hashes).await {
+                Ok(tiered) => IndexerQueryResponse::TieredScores((&tiered).into()),
                 Err(error) => IndexerQueryResponse::Error(error.to_string()),
             },
             None => IndexerQueryResponse::Error(format!(
@@ -505,6 +505,14 @@ fn service_key(component: &Component) -> ServiceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_router::indexer::LowerTierIndexers;
+    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, RouterEvent, StorageTier, WorkerWithDpRank,
+        compute_seq_hash_for_block,
+    };
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn query_engine_supports_multiple_model_bindings() {
@@ -522,7 +530,150 @@ mod tests {
 
         assert!(matches!(
             stream.next().await,
-            Some(IndexerQueryResponse::Scores(_))
+            Some(IndexerQueryResponse::TieredScores(_))
         ));
+    }
+
+    fn store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        prefix_hashes: &[u64],
+        local_hashes: &[u64],
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        let prefix_block_hashes: Vec<LocalBlockHash> =
+            prefix_hashes.iter().copied().map(LocalBlockHash).collect();
+        let parent_hash = compute_seq_hash_for_block(&prefix_block_hashes)
+            .last()
+            .copied()
+            .map(ExternalSequenceBlockHash);
+
+        let full_hashes: Vec<LocalBlockHash> = prefix_hashes
+            .iter()
+            .chain(local_hashes.iter())
+            .copied()
+            .map(LocalBlockHash)
+            .collect();
+        let full_sequence_hashes = compute_seq_hash_for_block(&full_hashes);
+        let new_sequence_hashes = &full_sequence_hashes[prefix_hashes.len()..];
+        let blocks = local_hashes
+            .iter()
+            .zip(new_sequence_hashes.iter())
+            .map(|(&local_hash, &sequence_hash)| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(sequence_hash),
+                tokens_hash: LocalBlockHash(local_hash),
+                mm_extra_info: None,
+            })
+            .collect();
+
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash,
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank,
+            },
+            storage_tier,
+        )
+    }
+
+    /// Verifies the served query engine returns a tiered payload with populated
+    /// lower-tier hits, and that the wire value round-trips through the client
+    /// conversion back to native `TieredMatchDetails`.
+    #[tokio::test]
+    async fn query_engine_returns_tiered_scores_with_lower_tier() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+        };
+
+        // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+
+        let Indexer::KvIndexer {
+            primary,
+            lower_tier,
+        } = &indexer
+        else {
+            unreachable!()
+        };
+        let _ = primary.flush().await;
+        for lt in lower_tier.all() {
+            let _ = lt.dump_events().await.unwrap();
+        }
+
+        let bindings = Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerQueryRequest {
+                model_name: "m".to_string(),
+                block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+            }))
+            .await
+            .unwrap();
+
+        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+            panic!("expected TieredScores response");
+        };
+
+        assert_eq!(
+            wire.device
+                .scores
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, s)| *s),
+            Some(2),
+            "device should report 2 overlap blocks"
+        );
+        let (_, host_hits) = wire
+            .lower_tier
+            .iter()
+            .find(|(tier, _)| *tier == StorageTier::HostPinned)
+            .expect("host-pinned tier should be present");
+        assert_eq!(
+            host_hits
+                .hits
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, h)| *h),
+            Some(1),
+            "host-pinned should report 1 hit beyond device"
+        );
+
+        // Round-trip through the client conversion mirrors what RemoteIndexer does.
+        let native: TieredMatchDetails = wire.into();
+        assert_eq!(
+            native.device.overlap_scores.scores.get(&worker).copied(),
+            Some(2)
+        );
+        assert_eq!(
+            native
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|d| d.hits.get(&worker).copied()),
+            Some(1)
+        );
     }
 }

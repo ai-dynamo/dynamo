@@ -135,7 +135,7 @@ pub struct IndexerQueryRequest {
 /// `OverlapScores` uses `FxHashMap<WorkerWithDpRank, _>` which can't be
 /// serialized as JSON (struct keys aren't valid JSON map keys), so we flatten
 /// to vecs of tuples for the wire protocol.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct WireOverlapScores {
     pub scores: Vec<(WorkerWithDpRank, u32)>,
     pub frequencies: Vec<usize>,
@@ -162,11 +162,51 @@ impl From<WireOverlapScores> for OverlapScores {
     }
 }
 
+/// Wire-friendly lower-tier match payload for JSON serialization.
+///
+/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` is server-side
+/// intermediate state (used only while walking the tier chain) and is not
+/// carried over the wire.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct WireLowerTierMatchDetails {
+    pub hits: Vec<(WorkerWithDpRank, usize)>,
+}
+
+impl From<&super::lower_tier::LowerTierMatchDetails> for WireLowerTierMatchDetails {
+    fn from(d: &super::lower_tier::LowerTierMatchDetails) -> Self {
+        Self {
+            hits: d.hits.iter().map(|(w, h)| (*w, *h)).collect(),
+        }
+    }
+}
+
+impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetails {
+    fn from(w: WireLowerTierMatchDetails) -> Self {
+        // `next_continuations` is server-side intermediate state; consumers of
+        // the tiered result never read it, so we reconstruct an empty map on
+        // the wire-inbound path.
+        Self {
+            hits: w.hits.into_iter().collect(),
+            next_continuations: Default::default(),
+        }
+    }
+}
+
+/// Wire-friendly tiered match payload: device overlap plus per-tier hits.
+///
+/// Lower tiers are a `Vec<(StorageTier, _)>` rather than a map so we never
+/// depend on `StorageTier` being a JSON-legal map key.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct WireTieredMatchDetails {
+    pub device: WireOverlapScores,
+    pub lower_tier: Vec<(StorageTier, WireLowerTierMatchDetails)>,
+}
+
 /// Response from a served KV indexer query.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IndexerQueryResponse {
-    /// Overlap scores per worker.
-    Scores(WireOverlapScores),
+    /// Tiered match details: device overlap plus per-tier hits.
+    TieredScores(WireTieredMatchDetails),
     /// An error occurred processing the query.
     Error(String),
 }
