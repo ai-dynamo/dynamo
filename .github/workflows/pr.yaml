@@ -404,8 +404,8 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: stg-tester-amd-v2 # TODO: CPU only DinD runner for dynamo repo
-      container_image_tag: ${{ github.sha }}-${{ needs.planner-build.outputs.target_tag_plain }}-test
+      amd_runner: stg-tester-amd-v2 
+      container_image_tag: ${{ github.sha }}-dynamo-planner-test
       cuda_version: ''
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
