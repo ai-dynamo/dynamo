@@ -19,9 +19,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import boto3
+import pytest
 import requests
 from botocore.client import Config
 from botocore.exceptions import ClientError
+from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
@@ -231,35 +233,32 @@ class MinioService:
                 raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
-        """Download LoRA from Hugging Face Hub, returns temp directory path."""
+        """Download LoRA from Hugging Face Hub, returns temp directory path.
+
+        Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
+        """
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            pytest.skip(
+                "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
+                "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
+            )
+
         self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
         self._logger.info(
             f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
         )
 
-        # Run with HF_HUB_OFFLINE unset so the download works even when
+        # Temporarily unset HF_HUB_OFFLINE so the download works even when
         # the predownload_models fixture has already enabled offline mode.
-        # This only affects the subprocess env; the parent process is unchanged.
-        env = os.environ.copy()
-        env.pop("HF_HUB_OFFLINE", None)
-
-        result = subprocess.run(
-            [
-                "huggingface-cli",
-                "download",
+        old_offline = os.environ.pop("HF_HUB_OFFLINE", None)
+        try:
+            snapshot_download(
                 self.config.lora_repo,
-                "--local-dir",
-                self._temp_download_dir,
-                "--local-dir-use-symlinks",
-                "False",
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to download LoRA: {result.stderr}")
+                local_dir=self._temp_download_dir,
+            )
+        finally:
+            if old_offline is not None:
+                os.environ["HF_HUB_OFFLINE"] = old_offline
 
         # Clean up cache directory
         cache_dir = os.path.join(self._temp_download_dir, ".cache")

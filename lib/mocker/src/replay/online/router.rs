@@ -111,6 +111,7 @@ pub(crate) struct KvReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
     scheduler: Arc<ReplayScheduler>,
+    scheduler_cancel: CancellationToken,
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
@@ -132,6 +133,7 @@ impl KvReplayRouter {
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config);
         let policy = replay_policy(&config, args);
+        let scheduler_cancel = CancellationToken::new();
         let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
             worker_config_rx,
@@ -142,7 +144,7 @@ impl KvReplayRouter {
             prefill_load_estimator,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
-            CancellationToken::new(),
+            scheduler_cancel.clone(),
             "replay",
             false,
         ));
@@ -159,6 +161,7 @@ impl KvReplayRouter {
             config,
             block_size: args.block_size as u32,
             scheduler,
+            scheduler_cancel,
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
             indexer,
@@ -210,6 +213,8 @@ impl KvReplayRouter {
                         .context("max_output_tokens does not fit into u32")?,
                 ),
                 None,
+                None,
+                None,
             )
             .await?;
         usize::try_from(response.best_worker.worker_id)
@@ -231,6 +236,7 @@ impl KvReplayRouter {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        self.scheduler_cancel.cancel();
         self.event_tx.lock().unwrap().take();
         let Some(event_task) = self.event_task.lock().unwrap().take() else {
             return Ok(());

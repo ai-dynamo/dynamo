@@ -26,6 +26,8 @@ type RuntimeConfig struct {
 	LWSEnabled bool
 	// KaiSchedulerEnabled is the resolved Kai-scheduler availability (config override merged with auto-detection)
 	KaiSchedulerEnabled bool
+	// DRAEnabled indicates whether Dynamic Resource Allocation (resource.k8s.io) is available
+	DRAEnabled bool
 	// ExcludedNamespaces for cluster-wide mode namespace filtering
 	ExcludedNamespaces ExcludedNamespacesInterface
 }

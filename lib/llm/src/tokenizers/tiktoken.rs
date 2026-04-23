@@ -11,7 +11,7 @@ use tiktoken_rs::CoreBPE;
 
 use super::{
     Encoding, Error, Result, TokenIdType,
-    traits::{Decoder, Encoder, Tokenizer},
+    traits::{DecodeResult, Decoder, Encoder, Tokenizer},
 };
 
 /// Number of reserved special-token slots to generate when filling gaps in the vocabulary.
@@ -89,7 +89,7 @@ impl Encoder for TikTokenTokenizer {
 }
 
 impl Decoder for TikTokenTokenizer {
-    fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String> {
+    fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<DecodeResult> {
         let ids: Vec<u32> = if skip_special_tokens {
             token_ids
                 .iter()
@@ -100,12 +100,22 @@ impl Decoder for TikTokenTokenizer {
             token_ids.to_vec()
         };
 
-        // Use lossy UTF-8 conversion so that partial multi-byte sequences become U+FFFD (�).
-        // This is critical for incremental detokenization: DecodeStream::step() relies on
-        // the replacement character to detect incomplete sequences and buffer tokens until
-        // a complete character arrives. CoreBPE::decode() would error on invalid UTF-8 instead.
+        // Try strict UTF-8 first: valid bytes get `Complete` with zero extra allocation
+        // (takes ownership of the Vec). This correctly handles vocabulary tokens whose
+        // raw bytes are EF BF BD (legitimate U+FFFD) -- they are valid UTF-8 and must
+        // not be confused with incomplete multi-byte sequences.
+        //
+        // On failure, fall back to lossy conversion so partial multi-byte sequences
+        // become U+FFFD, then classify via the trailing-FFFD heuristic. This path is
+        // only hit during incremental detokenization of byte-fallback tokens.
         let bytes: Vec<u8> = self.bpe._decode_native_and_split(ids).flatten().collect();
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(DecodeResult::Complete(text)),
+            Err(e) => {
+                let text = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                Ok(DecodeResult::from_decoded(text))
+            }
+        }
     }
 }
 
@@ -351,7 +361,7 @@ mod tests {
         assert!(!ids.is_empty());
 
         // Test decode roundtrip
-        let decoded = tokenizer.decode(ids, false).unwrap();
+        let decoded: String = tokenizer.decode(ids, false).unwrap().into();
         assert_eq!(decoded, "hello world");
     }
 
@@ -393,11 +403,11 @@ mod tests {
         ids.push(22); // [EOS]
 
         // Decode with skip_special_tokens=true should strip special tokens
-        let decoded_skip = tokenizer.decode(&ids, true).unwrap();
+        let decoded_skip: String = tokenizer.decode(&ids, true).unwrap().into();
         assert_eq!(decoded_skip, "hello");
 
         // Decode with skip_special_tokens=false should include them
-        let decoded_all = tokenizer.decode(&ids, false).unwrap();
+        let decoded_all: String = tokenizer.decode(&ids, false).unwrap().into();
         assert!(decoded_all.contains("hello"));
     }
 
@@ -416,7 +426,7 @@ mod tests {
         let ids = encoding.token_ids();
         assert!(!ids.is_empty());
 
-        let decoded = tokenizer.decode(ids, false).unwrap();
+        let decoded: String = tokenizer.decode(ids, false).unwrap().into();
         assert_eq!(decoded, "hello world");
     }
 
@@ -490,6 +500,15 @@ mod tests {
             content.push_str(&format!("{encoded} {rank}\n"));
         }
 
+        // Legitimate U+FFFD token: valid UTF-8 bytes EF BF BD (replacement character
+        // as an actual vocabulary entry, not an artifact of lossy conversion)
+        let fffd_token: Vec<(Vec<u8>, u32)> = vec![(vec![0xEF, 0xBF, 0xBD], 300)];
+
+        for (token, rank) in &fffd_token {
+            let encoded = engine.encode(token);
+            content.push_str(&format!("{encoded} {rank}\n"));
+        }
+
         let file_path = dir.join("tiktoken.model");
         let mut file = std::fs::File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
@@ -516,11 +535,11 @@ mod tests {
             result.is_ok(),
             "decode() should not error on incomplete UTF-8 bytes"
         );
-        let text = result.unwrap();
+        let decode_result = result.unwrap();
         assert!(
-            text.contains('\u{FFFD}'),
-            "incomplete UTF-8 byte should produce replacement character, got: {:?}",
-            text
+            decode_result.is_partial(),
+            "incomplete UTF-8 byte should produce DecodeResult::Partial, got: {:?}",
+            decode_result
         );
     }
 
@@ -532,11 +551,11 @@ mod tests {
 
         let result = tokenizer.decode(&[100, 101], false);
         assert!(result.is_ok());
-        let text = result.unwrap();
+        let decode_result = result.unwrap();
         assert!(
-            text.contains('\u{FFFD}'),
-            "incomplete 2-of-3 UTF-8 bytes should produce replacement character, got: {:?}",
-            text
+            decode_result.is_partial(),
+            "incomplete 2-of-3 UTF-8 bytes should produce DecodeResult::Partial, got: {:?}",
+            decode_result
         );
     }
 
@@ -550,7 +569,7 @@ mod tests {
 
         let result = tokenizer.decode(&[100, 101, 102], false);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "你");
+        assert_eq!(String::from(result.unwrap()), "你");
     }
 
     /// All 4 emoji bytes together form valid UTF-8, so this passes both before and after
@@ -562,7 +581,27 @@ mod tests {
 
         let result = tokenizer.decode(&[200, 201, 202, 203], false);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "😀");
+        assert_eq!(String::from(result.unwrap()), "😀");
+    }
+
+    /// Regression test: a vocabulary token whose raw bytes are EF BF BD (the valid
+    /// UTF-8 encoding of U+FFFD) must decode as `Complete`, not `Partial`. Before the
+    /// from_utf8 fast-path fix, from_utf8_lossy + the trailing-FFFD heuristic would
+    /// misclassify this as Partial, causing the incremental decoder to suppress it.
+    #[test]
+    fn test_decode_legitimate_replacement_char_token_is_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[300], false);
+        assert!(result.is_ok());
+        let decode_result = result.unwrap();
+        assert!(
+            decode_result.is_complete(),
+            "legitimate U+FFFD vocab token must be Complete, got: {:?}",
+            decode_result
+        );
+        assert_eq!(decode_result.as_str(), "\u{FFFD}");
     }
 
     /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
@@ -573,7 +612,7 @@ mod tests {
 
         let result = tokenizer.decode(&[200], false);
         assert!(result.is_ok());
-        assert!(result.unwrap().contains('\u{FFFD}'));
+        assert!(result.unwrap().is_partial());
     }
 
     /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
@@ -584,15 +623,16 @@ mod tests {
 
         let result = tokenizer.decode(&[5, 100], false);
         assert!(result.is_ok());
-        let text = result.unwrap();
+        let decode_result = result.unwrap();
+        assert!(
+            decode_result.is_partial(),
+            "trailing incomplete byte should produce DecodeResult::Partial"
+        );
+        let text: String = decode_result.into();
         assert!(
             text.starts_with("hello"),
             "should start with 'hello', got: {:?}",
             text
-        );
-        assert!(
-            text.contains('\u{FFFD}'),
-            "trailing incomplete byte should produce U+FFFD"
         );
     }
 
@@ -656,7 +696,10 @@ mod tests {
         assert_eq!(encodings.len(), 2);
 
         for (encoding, input) in encodings.iter().zip(inputs.iter()) {
-            let decoded = tokenizer.decode(encoding.token_ids(), false).unwrap();
+            let decoded: String = tokenizer
+                .decode(encoding.token_ids(), false)
+                .unwrap()
+                .into();
             assert_eq!(decoded, *input);
         }
     }

@@ -913,6 +913,7 @@ class DynamoFrontendProcess(ManagedProcess):
         frontend_port: Optional[int] = None,
         router_mode: str = "round-robin",
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         extra_args: Optional[list[str]] = None,
         extra_env: Optional[dict[str, str]] = None,
         # Default to false so pytest-xdist workers don't kill each other's frontends.
@@ -944,6 +945,8 @@ class DynamoFrontendProcess(ManagedProcess):
             command.extend(["--http-port", str(frontend_port)])
         # Migration limit is configured at the frontend level
         command.extend(["--migration-limit", str(migration_limit)])
+        if migration_max_seq_len is not None:
+            command.extend(["--migration-max-seq-len", str(migration_max_seq_len)])
         if extra_args:
             command.extend(extra_args)
 

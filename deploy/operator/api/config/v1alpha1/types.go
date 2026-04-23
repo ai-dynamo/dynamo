@@ -245,9 +245,6 @@ type MPIConfiguration struct {
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
-	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
-	// +kubebuilder:default="/tmp/ready-for-checkpoint"
-	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
 	// Deprecated: Storage is retained for compatibility and ignored by the
 	// current snapshot flow. Snapshot storage is discovered from the
 	// snapshot-agent DaemonSet instead.
@@ -309,6 +306,16 @@ const (
 	DiscoveryBackendKubernetes DiscoveryBackend = "kubernetes"
 	// DiscoveryBackendEtcd is the etcd discovery backend
 	DiscoveryBackendEtcd DiscoveryBackend = "etcd"
+)
+
+// KubeDiscoveryMode is the kube discovery identity granularity.
+type KubeDiscoveryMode string
+
+const (
+	// KubeDiscoveryModePod is the default: one identity per pod.
+	KubeDiscoveryModePod KubeDiscoveryMode = "pod"
+	// KubeDiscoveryModeContainer: each container registers independently with the discovery plane.
+	KubeDiscoveryModeContainer KubeDiscoveryMode = "container"
 )
 
 // GPUConfiguration holds GPU discovery settings.

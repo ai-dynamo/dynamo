@@ -39,6 +39,10 @@ type RestoreRequest struct {
 // Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
+//
+// Returns the placeholder container's host PID so callers can reach into the
+// container's mount namespace (e.g. to write sentinels under /snapshot-control)
+// without re-resolving via containerd.
 func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (int, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
@@ -90,11 +94,12 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 
 	log.Info("=== External restore completed ===",
 		"restored_pid", result.RestoredPID,
+		"placeholder_host_pid", snap.PlaceholderPID,
 		"validation_duration", time.Since(validationStart),
 		"total_duration", time.Since(restoreStart),
 	)
 
-	return result.RestoredPID, nil
+	return snap.PlaceholderPID, nil
 }
 
 func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
@@ -142,17 +147,18 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		targetGPUUUIDs, err := cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, containerName)
+		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
+			ctx,
+			req.Clientset,
+			req.PodName,
+			req.PodNamespace,
+			containerName,
+			snapshotruntime.HostProcPath,
+			placeholderPID,
+			log,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
-		}
-		if len(targetGPUUUIDs) == 0 {
-			log.Info("PodResources API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
-			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, placeholderPID)
-			if err != nil {
-				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed for restore target: %w", err)
-			}
-			log.Info("nvidia-smi fallback discovered target GPU UUIDs", "uuids", targetGPUUUIDs)
 		}
 		if len(targetGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)

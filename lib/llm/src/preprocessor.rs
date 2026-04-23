@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
-    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
-    TOKENIZE_SECONDS,
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
+    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
@@ -235,6 +235,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
 
@@ -267,7 +268,7 @@ impl OpenAIPreprocessor {
             .with_context(|| "Failed to gather multimodal data")?;
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["preprocess"])
+            .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
@@ -332,15 +333,20 @@ impl OpenAIPreprocessor {
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
                 allowed_worker_ids: None,
+                session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA.
+            // Ensure routing hints exist when we have LoRA,
+            // even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
                 ..Default::default()
             }));
         }
+
+        // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
     }
@@ -558,7 +564,13 @@ impl OpenAIPreprocessor {
                             // Completions will use raw_prompt, no template
                             let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
-                            // Check if backend_instance_id is present and token_data is provided
+                            // If nvext.token_data is present, use the pre-computed tokens
+                            // directly and skip tokenization.  This avoids redundant
+                            // tokenization when an external component (e.g. the GAIE EPP
+                            // KV-router) has already tokenized the prompt.
+                            // When backend_instance_id is set without token_data, warn
+                            // but fall back to tokenization (backward compat for non-GAIE
+                            // routers that set the header without providing tokens).
                             let has_backend_instance_id = request
                                 .nvext()
                                 .and_then(|ext| ext.backend_instance_id)
@@ -567,23 +579,22 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
-                                if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
-                                        tokens.len()
-                                    );
-                                    // need ownership for the builder, so clone.
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
-                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                    (encoding.token_ids().to_vec(), false)
-                                }
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
+                                token_data
+                            {
+                                tracing::info!(
+                                    token_count = tokens.len(),
+                                    first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+                                );
+                                (tokens.clone(), true)
+                            } else if has_backend_instance_id {
+                                tracing::warn!(
+                                    "backend_instance_id provided but no token_data; tokenizing prompt"
+                                );
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
                             } else {
-                                // No backend_instance_id provided, continue the normal flow.
                                 let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
@@ -678,6 +689,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &NvCreateEmbeddingRequest,
     ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
@@ -1457,6 +1469,8 @@ impl
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+
         // unpack the request
         let (mut request, context) = request.into_parts();
 
@@ -1513,6 +1527,9 @@ impl
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
         let annotations_stream = stream::iter(annotations);
+
+        // End preprocess stage before handing off to downstream (route/dispatch).
+        drop(_stage_guard);
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;

@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Combined benchmark for KvIndexer, KvIndexerSharded, and PositionalIndexer (nested).
+//! Combined benchmark for KvIndexer, PositionalIndexer (nested), and ConcurrentRadixTree.
 //!
 //! Provides two modes:
 //! - `microbench`: Per-operation latency benchmarks comparing indexer implementations
 //! - `stress`: Queue saturation stress test under load
 //!
-//! Supported indexer types: single, sharded, nested, all
+//! Supported indexer types: single, nested, concurrent, all
 //!
 //! Run with:
 //!   cargo bench --package dynamo-bench --bench kv_indexer_bench -- microbench --help
@@ -21,9 +21,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
     ConcurrentRadixTree,
-    indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
-    },
+    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer},
     nested_map::PositionalIndexer,
     protocols::{LocalBlockHash, RouterEvent},
 };
@@ -40,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(name = "kv_indexer_bench")]
-#[command(about = "Combined benchmark for KvIndexer, KvIndexerSharded, and PositionalIndexer")]
+#[command(about = "Combined benchmark for KvIndexer, PositionalIndexer, and ConcurrentRadixTree")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -63,8 +61,6 @@ enum Command {
 enum IndexerType {
     /// Non-sharded KvIndexer (single background thread)
     Single,
-    /// Sharded KvIndexer (multiple shards with separate trees)
-    Sharded,
     /// Nested PositionalIndexer (position-based HashMap with jump search)
     Nested,
     /// Concurrent radix tree (lock-per-node with DashMap lookup)
@@ -122,9 +118,9 @@ struct MicrobenchArgs {
     #[arg(long, value_enum, default_value = "all")]
     indexer_type: IndexerType,
 
-    /// Number of shards for sharded indexer
+    /// Number of event worker threads for nested/concurrent indexers
     #[arg(long, default_value = "4")]
-    num_shards: usize,
+    num_event_workers: usize,
 
     /// Jump size for nested/positional indexer
     #[arg(long, default_value = "32")]
@@ -164,9 +160,9 @@ struct StressArgs {
     #[arg(long, value_enum, default_value = "single")]
     indexer_type: IndexerType,
 
-    /// Number of shards for sharded indexer
+    /// Number of event worker threads for nested/concurrent indexers
     #[arg(long, default_value = "4")]
-    num_shards: usize,
+    num_event_workers: usize,
 
     /// Jump size for nested/positional indexer
     #[arg(long, default_value = "32")]
@@ -177,7 +173,7 @@ struct StressArgs {
 // Benchable Indexer Trait
 // ============================================================================
 
-/// Trait for abstracting over KvIndexer and KvIndexerSharded
+/// Trait for abstracting over benchmarked indexers
 #[async_trait::async_trait]
 trait BenchableIndexer: Send + Sync {
     async fn apply_event(&mut self, event: RouterEvent);
@@ -204,25 +200,6 @@ impl BenchableIndexer for KvIndexer {
 
     fn name(&self) -> &str {
         "KvIndexer (single)"
-    }
-}
-
-#[async_trait::async_trait]
-impl BenchableIndexer for KvIndexerSharded {
-    async fn apply_event(&mut self, event: RouterEvent) {
-        KvIndexerInterface::apply_event(self, event).await;
-    }
-
-    async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
-        KvIndexerInterface::find_matches(self, sequence).await?;
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        "KvIndexerSharded"
     }
 }
 
@@ -697,6 +674,16 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
         eprintln!("Error: size must be >= depth");
         std::process::exit(1);
     }
+    if matches!(
+        args.indexer_type,
+        IndexerType::Nested | IndexerType::Concurrent | IndexerType::All
+    ) && args.num_event_workers == 0
+    {
+        eprintln!(
+            "Error: num_event_workers must be > 0 when using Nested, Concurrent, or All indexer type"
+        );
+        std::process::exit(1);
+    }
 
     println!("KvIndexer Microbenchmark");
     println!("========================\n");
@@ -716,7 +703,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
         args.prefix_prompt_ratio * 100.0
     );
     println!("  Prefix prompt groups: {}", args.num_prefix_prompts);
-    println!("  Num shards (for sharded): {}", args.num_shards);
+    println!("  Event worker threads: {}", args.num_event_workers);
     println!("  Indexer type: {:?}", args.indexer_type);
     println!("  Benchmark type: {}", args.benchmark_type);
     println!(
@@ -751,26 +738,11 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Benchmark sharded indexer
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
-        let token = CancellationToken::new();
-        let mut indexer = KvIndexerSharded::new(
-            token.clone(),
-            args.num_shards,
-            args.common.block_size,
-            metrics.clone(),
-        );
-        let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
-        results.push(result);
-        token.cancel();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
     // Benchmark nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
         let mut indexer = ThreadPoolIndexer::new(
             PositionalIndexer::new(args.jump_size),
-            args.num_shards,
+            args.num_event_workers,
             args.common.block_size,
         );
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
@@ -786,7 +758,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
     ) {
         let mut indexer = ThreadPoolIndexer::new(
             ConcurrentRadixTree::new(),
-            args.num_shards,
+            args.num_event_workers,
             args.common.block_size,
         );
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
@@ -1226,10 +1198,12 @@ async fn run_stress_mode(args: StressArgs) {
     }
     if matches!(
         args.indexer_type,
-        IndexerType::Sharded | IndexerType::Nested | IndexerType::All
-    ) && args.num_shards == 0
+        IndexerType::Nested | IndexerType::Concurrent | IndexerType::All
+    ) && args.num_event_workers == 0
     {
-        eprintln!("Error: num_shards must be > 0 when using Sharded, Nested, or All indexer type");
+        eprintln!(
+            "Error: num_event_workers must be > 0 when using Nested, Concurrent, or All indexer type"
+        );
         std::process::exit(1);
     }
 
@@ -1254,11 +1228,13 @@ async fn run_stress_mode(args: StressArgs) {
     println!("  Duration: {}s", args.duration);
     println!("  In-flight timeout: {}s", args.in_flight_timeout);
     println!("  Indexer type: {:?}", args.indexer_type);
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
-        println!("  Num shards (sharded): {}", args.num_shards);
+    if matches!(
+        args.indexer_type,
+        IndexerType::Nested | IndexerType::Concurrent | IndexerType::All
+    ) {
+        println!("  Event worker threads: {}", args.num_event_workers);
     }
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
-        println!("  Num workers (nested): {}", args.num_shards);
         println!("  Jump size (nested): {}", args.jump_size);
     }
 
@@ -1322,58 +1298,11 @@ async fn run_stress_mode(args: StressArgs) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Test sharded indexer
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
-        let token = CancellationToken::new();
-        let indexer = KvIndexerSharded::new(
-            token.clone(),
-            args.num_shards,
-            args.common.block_size,
-            metrics.clone(),
-        );
-
-        println!(
-            "\n  Applying {} store events to KvIndexerSharded...",
-            sequences.len()
-        );
-        let construction_start = Instant::now();
-
-        for (event_id, seq) in sequences.iter().enumerate() {
-            let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&indexer, event).await;
-
-            if args.common.verbose && (event_id + 1) % 100 == 0 {
-                println!("    Applied {}/{} events...", event_id + 1, sequences.len());
-            }
-        }
-
-        let construction_time = construction_start.elapsed();
-        let construction_events = sequences.len() as u64;
-
-        println!("  Tree construction completed in {:?}", construction_time);
-        println!(
-            "  Throughput: {:.0} events/sec",
-            construction_events as f64 / construction_time.as_secs_f64()
-        );
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let mut results = run_stress_test(Arc::new(indexer), &sequences, &args).await;
-        results.construction_time = construction_time;
-        results.construction_events = construction_events;
-
-        print_stress_results(&args, &results);
-        all_results.push(results);
-
-        token.cancel();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
     // Test nested indexer
     if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
         let indexer = ThreadPoolIndexer::new(
             PositionalIndexer::new(args.jump_size),
-            args.num_shards,
+            args.num_event_workers,
             args.common.block_size,
         );
 
@@ -1425,7 +1354,7 @@ async fn run_stress_mode(args: StressArgs) {
     ) {
         let indexer = ThreadPoolIndexer::new(
             ConcurrentRadixTree::new(),
-            args.num_shards,
+            args.num_event_workers,
             args.common.block_size,
         );
 

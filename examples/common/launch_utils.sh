@@ -183,6 +183,34 @@ CURL_EOF
     echo "=========================================="
 }
 
+# wait_for_ready <url> [timeout_seconds]
+#
+# Polls an HTTP endpoint until it returns 200 or timeout is reached.
+# Useful for waiting for a worker to finish loading before starting the
+# next one (e.g. disaggregated same-GPU deployments where concurrent
+# model loading causes OOM).
+#
+# Args:
+#   url              HTTP URL to poll (e.g. http://localhost:8081/health)
+#   timeout_seconds  Max seconds to wait (default: 30)
+#
+# Returns 0 on success, 1 on timeout.
+wait_for_ready() {
+    local _url="$1"
+    local _timeout="${2:-30}"
+    local _start=$SECONDS
+    echo "Polling $_url (timeout: ${_timeout}s)..."
+    while (( SECONDS - _start < _timeout )); do
+        if curl -sf --max-time 2 "$_url" > /dev/null 2>&1; then
+            echo "Ready after $(( SECONDS - _start ))s"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: $_url not ready after ${_timeout}s" >&2
+    return 1
+}
+
 # print_curl_footer
 #
 # Prints a custom curl example wrapped in the standard framing (matching

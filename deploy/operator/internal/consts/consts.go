@@ -42,6 +42,7 @@ const (
 
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
+	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
@@ -138,9 +139,6 @@ const (
 	ResourceStateReady    = "ready"
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
-
-	// Environment variables injected into pods
-	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
 
 	// Pod identity (Downward API) ---
 	// After CRIU restore, env vars contain stale values from the checkpoint pod.

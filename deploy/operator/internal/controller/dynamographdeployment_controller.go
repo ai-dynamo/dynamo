@@ -35,6 +35,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -53,6 +54,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -85,11 +87,15 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
@@ -657,6 +663,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
+
+	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
+	if r.RuntimeConfig.DRAEnabled {
+		for serviceName, component := range dynamoDeployment.Spec.Services {
+			gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
+			claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+				return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
+			}
+		}
+	} else {
+		for _, component := range dynamoDeployment.Spec.Services {
+			if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+			}
+		}
+	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
 	if err != nil {
@@ -1356,18 +1383,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
 	}
 
-	identity := component.Checkpoint.Identity
-
-	checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
-		Model:                identity.Model,
-		BackendFramework:     identity.BackendFramework,
-		DynamoVersion:        identity.DynamoVersion,
-		TensorParallelSize:   identity.TensorParallelSize,
-		PipelineParallelSize: identity.PipelineParallelSize,
-		Dtype:                identity.Dtype,
-		MaxModelLen:          identity.MaxModelLen,
-		ExtraParameters:      identity.ExtraParameters,
-	}
+	checkpointIdentity := *component.Checkpoint.Identity.DeepCopy()
 
 	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
 	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
@@ -1375,7 +1391,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment,
 		component,
 		serviceName,
-		identity.BackendFramework,
+		checkpointIdentity.BackendFramework,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
@@ -1387,6 +1403,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment.Namespace,
 		checkpointIdentity,
 		podTemplate,
+		component.GPUMemoryService,
 	)
 }
 
@@ -1405,10 +1422,14 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, err
 	}
 
-	// Create a copy of the component spec without checkpoint config
-	// The checkpoint job is CREATING the checkpoint, not restoring from one
+	// Create a copy of the component spec stripped of features that buildCheckpointJob
+	// or the checkpoint controller handle independently. GenerateBasePodSpec would
+	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
+	// frontend sidecar) that conflict with the checkpoint path's own setup.
 	componentForJob := component.DeepCopy()
 	componentForJob.Checkpoint = nil
+	componentForJob.GPUMemoryService = nil
+	componentForJob.FrontendSidecar = nil
 
 	// Ensure DYN_NAMESPACE is set for checkpoint job using the same logic as regular pods
 	// This is required for service discovery and distributed coordination
@@ -1647,8 +1668,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 			// Watch PodClique resources - only on status changes
-			// Note: We don't need to watch PodCliqueScalingGroup because it's just a container
-			// for PodCliques. The actual status changes happen at the PodClique level.
 			Watches(
 				&grovev1alpha1.PodClique{},
 				handler.EnqueueRequestsFromMapFunc(r.mapPodCliqueToRequests),
@@ -1665,6 +1684,38 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						// Trigger if readyReplicas or replicas changed
 						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
 							oldPC.Spec.Replicas != newPC.Spec.Replicas
+					},
+					GenericFunc: func(ge event.GenericEvent) bool { return false },
+				}),
+			).
+			// Watch PodCliqueScalingGroup resources on status-replica changes.
+			// PCSG.Status.AvailableReplicas is independently recomputed by the PCSG
+			// controller and can land after the last PodClique event the DGD
+			// controller sees. Without this watch, the DGD aggregate
+			// (CheckPCSGReady reads pcsg.Status.AvailableReplicas) can stay stale
+			// indefinitely even though the underlying PCSG is already ready.
+			Watches(
+				&grovev1alpha1.PodCliqueScalingGroup{},
+				handler.EnqueueRequestsFromMapFunc(r.mapPodCliqueScalingGroupToRequests),
+				builder.WithPredicates(predicate.Funcs{
+					CreateFunc: func(ce event.CreateEvent) bool { return false },
+					DeleteFunc: func(de event.DeleteEvent) bool { return false },
+					UpdateFunc: func(ue event.UpdateEvent) bool {
+						oldPCSG, okOld := ue.ObjectOld.(*grovev1alpha1.PodCliqueScalingGroup)
+						newPCSG, okNew := ue.ObjectNew.(*grovev1alpha1.PodCliqueScalingGroup)
+						if !okOld || !okNew {
+							return false
+						}
+						// ObservedGeneration is tracked because CheckPCSGReady uses it as
+						// a readiness gate ("spec not yet processed" while
+						// ObservedGeneration < Generation). A PCSG spec edit that does
+						// not change Spec.Replicas (e.g. template/topology edits) would
+						// otherwise not wake the DGD when Grove catches up.
+						return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
+							oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
+							oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
+							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
+							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -1703,4 +1754,48 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueToRequests(ctx context.Con
 			Namespace: podClique.Namespace,
 		},
 	}}
+}
+
+// mapPodCliqueScalingGroupToRequests maps a PodCliqueScalingGroup to reconcile
+// requests for its owning DGD.
+//
+// The PCSG is owned by a PodCliqueSet (controller ownerRef), and Dynamo always
+// creates the PodCliqueSet with the same name as the DGD
+// (see graph.go: gangSet.Name = dynamoDeployment.Name), so the PodCliqueSet
+// owner reference name is the DGD name.
+func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	pcsg, ok := obj.(*grovev1alpha1.PodCliqueScalingGroup)
+	if !ok {
+		return nil
+	}
+
+	controllerRef := metav1.GetControllerOf(pcsg)
+	if controllerRef == nil ||
+		controllerRef.Kind != "PodCliqueSet" ||
+		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
+		log.FromContext(ctx).V(1).Info("PodCliqueScalingGroup missing PodCliqueSet controller ownerReference",
+			"podCliqueScalingGroup", pcsg.Name,
+			"namespace", pcsg.Namespace)
+		return nil
+	}
+
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      controllerRef.Name,
+			Namespace: pcsg.Namespace,
+		},
+	}}
+}
+
+// ptrInt64Equal returns true when two *int64 values are equivalent, treating
+// nil and a pointer to the same value as equal. Used to compare optional
+// status fields like ObservedGeneration without tripping on pointer identity.
+func ptrInt64Equal(a, b *int64) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
