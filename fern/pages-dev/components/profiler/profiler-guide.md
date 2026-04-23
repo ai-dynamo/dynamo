@@ -128,9 +128,12 @@ When the planner is enabled, the profiler generates engine interpolation data ne
 ```yaml
 features:
   planner:
+    optimization_target: sla              # required for throughput-based scaling and specific SLA targets
     pre_deployment_sweeping_mode: rapid   # rapid | thorough | none
     enable_throughput_scaling: true
 ```
+
+`optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft`/`itl` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft`/`itl` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
 - **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs)
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h)
@@ -138,7 +141,7 @@ features:
 
 The profiler saves two ConfigMaps into the generated DGD:
 - **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `profile_results_dir` pointing to the profiling data mount)
-- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON)
+- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `optimization_target: sla` is set alongside `enable_throughput_scaling: true` (or when mocker is enabled).
 
 See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.
 
@@ -155,6 +158,7 @@ The profiler enforces these rules at startup:
 | Condition | Behavior |
 |-----------|----------|
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
+| `enable_throughput_scaling: true` without `optimization_target: sla` | Silently coerced. `PlannerConfig` defaults `optimization_target` to `throughput`, which flips `enable_throughput_scaling` to `false` at validation time. Set `optimization_target: sla` explicitly to keep throughput-based scaling enabled. |
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Rejected. Throughput-based scaling requires pre-deployment sweeping. |
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Rejected. AIC does not support this model/hardware/backend combination; switch `pre_deployment_sweeping_mode` to `thorough`. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
