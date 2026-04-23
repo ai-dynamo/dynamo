@@ -534,6 +534,7 @@ impl PromptMembershipTrie {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn compute_overlap_depths(
         &self,
         query: Option<&[SequenceHash]>,

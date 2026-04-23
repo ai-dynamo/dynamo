@@ -17,6 +17,7 @@ use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RouterSchedulingPolicy,
     SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
+    scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -135,14 +136,35 @@ impl PendingRequest {
 
     fn scheduling_request(
         &self,
+        block_size: usize,
         decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
         prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     ) -> SchedulingRequest {
+        let effective_overlap_blocks = self
+            .overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as f64))
+            .collect();
+        let effective_cached_tokens = self
+            .overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as usize * block_size))
+            .collect();
         SchedulingRequest {
             maybe_request_id: Some(self.request_id()),
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
-            overlaps: self.overlaps.clone(),
+            tier_overlap_blocks: TierOverlapBlocks::default(),
+            effective_overlap_blocks,
+            effective_cached_tokens,
+            tree_sizes: self
+                .overlaps
+                .tree_sizes
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect(),
             decode_blocks,
             prefill_tokens,
             track_prefill_tokens: self.track_prefill_tokens,
@@ -216,7 +238,7 @@ impl OfflineReplayRouter {
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);
-        let policy = replay_policy(&config, args);
+        let policy = replay_policy(&config);
         let queue_threshold = config.router_queue_threshold;
 
         Ok(Self {
@@ -423,7 +445,11 @@ impl OfflineReplayRouter {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
         self.policy.enqueue_key(
             arrival_offset,
-            &request.scheduling_request(FxHashMap::default(), FxHashMap::default()),
+            &request.scheduling_request(
+                self.block_size as usize,
+                FxHashMap::default(),
+                FxHashMap::default(),
+            ),
         )
     }
 
@@ -495,11 +521,19 @@ impl OfflineReplayRouter {
             .potential_blocks_and_tokens_with_prefill_tracking(
                 request.token_seq.as_deref(),
                 request.isl_tokens,
-                request.overlaps.clone(),
+                request
+                    .overlaps
+                    .scores
+                    .iter()
+                    .map(|(worker, overlap)| {
+                        (*worker, *overlap as usize * self.block_size as usize)
+                    })
+                    .collect(),
                 request.track_prefill_tokens,
                 decay_now,
             );
-        let scheduling_request = request.scheduling_request(decode_blocks, prefill_tokens);
+        let scheduling_request =
+            request.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
             &scheduling_request,
@@ -510,13 +544,13 @@ impl OfflineReplayRouter {
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.overlap_blocks,
+            selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
-        let overlap_blocks = selection.overlap_blocks;
+        let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
 
         self.slots
             .add_request(
@@ -584,14 +618,14 @@ impl OfflineReplayRouter {
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;

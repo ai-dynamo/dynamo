@@ -8,7 +8,7 @@ use common::*;
 use clap::Parser;
 use common::NoopSequencePublisher;
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
@@ -379,12 +379,7 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens(
-                Some(&block_hashes),
-                isl,
-                OverlapScores::default(),
-                decay_now,
-            );
+            let _ = multi.potential_blocks_and_tokens(Some(&block_hashes), isl, HashMap::new());
             let _ = multi.add_request(
                 SequenceRequest {
                     request_id,

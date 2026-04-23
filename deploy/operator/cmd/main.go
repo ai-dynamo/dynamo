@@ -445,7 +445,23 @@ func main() {
 	}
 
 	setupLog.Info("Detecting DRA (Dynamic Resource Allocation) availability...")
-	runtimeConfig.DRAEnabled = commonController.DetectDRAAvailability(mainCtx, mgr)
+	draDetected := commonController.DetectDRAAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.DRA.Enabled == nil:
+		runtimeConfig.DRAEnabled = draDetected
+	case *operatorCfg.DRA.Enabled:
+		if !draDetected {
+			setupLog.Error(nil,
+				"DRA is explicitly enabled in config but the resource.k8s.io API group"+
+					" was not detected in the cluster (requires Kubernetes 1.32+)",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.DRAEnabled = true
+	default:
+		setupLog.Info("DRA is explicitly disabled via config override")
+		runtimeConfig.DRAEnabled = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
@@ -681,6 +697,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
+	if runtimeConfig.GroveEnabled {
+		if err = controller.NewFailoverCascadeReconciler(
+			mgr.GetClient(),
+			mgr.GetEventRecorderFor("gms-failover-cascade"),
+		).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+		}
+	}
+
 	setupLog.Info("Controllers registered successfully")
 	return nil
 }
@@ -716,7 +741,7 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}
