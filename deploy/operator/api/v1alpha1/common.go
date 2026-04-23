@@ -184,6 +184,28 @@ type GPUMemoryServiceSpec struct {
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 }
 
+// FailoverSpec configures active-passive failover for a worker component.
+// Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
+// annotation on the DGD.
+type FailoverSpec struct {
+	// Enabled activates failover mode. The main container is cloned into two
+	// engine containers (active + standby) sharing GPUs via DRA. The standby
+	// acquires the flock when the active engine fails.
+	Enabled bool `json:"enabled"`
+	// Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
+	// +kubebuilder:default=intraPod
+	// +kubebuilder:validation:Enum=intraPod;interPod
+	// +optional
+	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
+	// NumShadows is the number of shadow (standby) engine containers per rank.
+	// Reserved for future use — the operator currently creates exactly one shadow.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	NumShadows int32 `json:"numShadows,omitempty"`
+}
+
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.

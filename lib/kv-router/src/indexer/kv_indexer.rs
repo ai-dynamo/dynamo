@@ -11,8 +11,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    DumpRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    MatchRequest, RadixTree, RoutingDecisionRequest,
+    DumpRequest, EventKind, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
+    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, PruneManager};
 use crate::protocols::*;
@@ -41,21 +41,21 @@ fn stored_block_entries(event: &RouterEvent) -> Option<Vec<BlockEntry>> {
 fn apply_event_with_prune_tracking(
     trie: &mut RadixTree,
     event: RouterEvent,
-    metrics: &KvIndexerMetrics,
+    counters: &PreBoundEventCounters,
     prune_manager: &mut Option<PruneManager<BlockEntry>>,
     prune_tx: &mpsc::Sender<()>,
 ) {
-    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+    let kind = EventKind::of(&event.event.data);
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
     let event_for_prune = prune_manager.is_some().then(|| event.clone());
-    let result = trie.apply_event(event);
+    let result = trie.apply_event_with_counters(event, Some(counters));
     let result_is_ok = result.is_ok();
     let tree_size = trie.current_size();
     tracing::trace!(
-        "Applied KV event to global radix tree: event_type={event_type}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
+        "Applied KV event to global radix tree: event_type={kind}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
     );
-    metrics.increment_event_applied(event_type, result);
+    counters.inc(kind, result);
 
     let Some(pm) = prune_manager.as_mut() else {
         return;
@@ -132,6 +132,8 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        super::warn_on_unit_block_size("single", kv_block_size);
+
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
@@ -166,6 +168,7 @@ impl KvIndexer {
                     PruneManager::<BlockEntry>::new(50, config)
                 });
                 let mut event_id_counter = 0u64;
+                let counters = metrics.prebind();
 
                 loop {
                     // Create a future that sleeps until the next expiration time
@@ -222,7 +225,7 @@ impl KvIndexer {
                             apply_event_with_prune_tracking(
                                 &mut trie,
                                 event,
-                                &metrics,
+                                &counters,
                                 &mut prune_manager,
                                 &prune_tx,
                             );
@@ -234,7 +237,7 @@ impl KvIndexer {
                                 apply_event_with_prune_tracking(
                                     &mut trie,
                                     event,
-                                    &metrics,
+                                    &counters,
                                     &mut prune_manager,
                                     &prune_tx,
                                 );
@@ -252,6 +255,7 @@ impl KvIndexer {
                             let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
                             let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash: None,
+                                start_position: None,
                                 blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
                                     tokens_hash: *local_hash,
                                     block_hash: ExternalSequenceBlockHash(*sequence_hash),

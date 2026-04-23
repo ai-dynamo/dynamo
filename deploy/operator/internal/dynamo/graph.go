@@ -38,6 +38,8 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -1182,11 +1184,20 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	// Inject GMS sidecar with DRA shared GPU access when GPU memory service is enabled.
-	if IsGMSEnabled(component) {
-		claimTemplateName := GMSResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
-		if err := ApplyGPUMemoryService(&podSpec, component, claimTemplateName); err != nil {
-			return nil, fmt.Errorf("failed to apply GPU memory service: %w", err)
+	// GMS: replace nvidia.com/gpu with a shared DRA claim and add the server sidecar.
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
+		}
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+	}
+
+	// Clone main container into two engine containers (active + standby) for failover.
+	// Runs after GMS so the main container already has DRA claims and shared volume.
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}
 

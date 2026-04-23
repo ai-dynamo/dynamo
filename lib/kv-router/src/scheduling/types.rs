@@ -4,10 +4,13 @@
 use std::collections::{HashMap, HashSet};
 
 use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
-use crate::protocols::{DpRank, OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, OverlapScores, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
@@ -43,8 +46,8 @@ pub struct SchedulingRequest {
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub overlaps: OverlapScores,
-    pub decode_blocks: HashMap<WorkerWithDpRank, usize>,
-    pub prefill_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
+    pub prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     pub track_prefill_tokens: bool,
     pub router_config_override: Option<RouterConfigOverride>,
     pub update_states: bool,
@@ -58,6 +61,10 @@ pub struct SchedulingRequest {
     pub pinned_worker: Option<WorkerWithDpRank>,
     /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+    /// Shared cache hit information from an external shared KV cache pool.
+    /// When present, the selector adjusts prefill cost by weighting shared hits
+    /// beyond each worker's device prefix.
+    pub shared_cache_hits: Option<SharedCacheHits>,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 

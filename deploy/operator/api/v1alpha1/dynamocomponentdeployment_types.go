@@ -154,6 +154,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
+
+	// Failover configures active-passive GPU failover for this service.
+	// When enabled, the main container is cloned into two engine containers
+	// (active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 type MultinodeSpec struct {

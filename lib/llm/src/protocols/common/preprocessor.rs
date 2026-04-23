@@ -195,6 +195,12 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
+    /// Multimodal processor kwargs forwarded to the backend engine
+    /// (e.g. `{"use_audio_in_video": true}` for omni models).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_processor_kwargs: Option<serde_json::Value>,
+
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

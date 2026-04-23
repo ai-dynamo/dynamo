@@ -144,7 +144,7 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
-        self.enable_trace = config.server_args.enable_trace
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         # Set up metrics and KV publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
@@ -699,7 +699,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
-        self.enable_trace = config.server_args.enable_trace
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -1062,6 +1062,11 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
                 return {"json_schema": json.dumps(json_schema)}
+            structural_tag = guided_decoding.get("structural_tag")
+            if structural_tag is not None:
+                if hasattr(structural_tag, "model_dump"):
+                    structural_tag = structural_tag.model_dump()
+                return {"structural_tag": json.dumps(structural_tag)}
         return {}
 
     @staticmethod

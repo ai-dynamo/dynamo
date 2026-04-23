@@ -40,9 +40,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -190,9 +190,11 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if serviceName == "" {
 			serviceName = dynamoComponentDeployment.Name
 		}
-		claimTemplateName := dynamo.GMSResourceClaimTemplateName(dynamoComponentDeployment.GetParentGraphDeploymentName(), serviceName)
+		spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
+		gpuCount, deviceClassName := dra.ExtractGPUParams(spec.GPUMemoryService, spec.Resources)
+		claimTemplateName := dra.ResourceClaimTemplateName(dynamoComponentDeployment.GetParentGraphDeploymentName(), serviceName)
 		_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-			return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
+			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
 		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
@@ -972,17 +974,6 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			}
-		}
-	}
-
-	// Checkpoint-restore pods must avoid overlap with prior replicas.
-	// Enforce Recreate whenever the rendered template is a restore target so
-	// the old pod is terminated before the restore placeholder is started.
-	if podTemplateSpec != nil &&
-		podTemplateSpec.Labels != nil &&
-		podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue {
-		strategy = appsv1.DeploymentStrategy{
-			Type: appsv1.RecreateDeploymentStrategyType,
 		}
 	}
 

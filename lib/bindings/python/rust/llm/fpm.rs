@@ -23,7 +23,7 @@ use super::*;
 use crate::Endpoint;
 use crate::to_pyerr;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery};
+use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -310,6 +310,11 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
+    // Serialized ModelDeploymentCard per worker_id, captured on discovery
+    // Added events.  Exposed via get_model_cards() so connectors can
+    // construct WorkerInfo from the same MDC stream the liveness watch
+    // uses, without the subscriber having to interpret card fields itself.
+    worker_model_cards: Arc<DashMap<String, String>>,
 }
 
 #[pymethods]
@@ -332,6 +337,7 @@ impl FpmEventSubscriber {
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
+            worker_model_cards: Arc::new(DashMap::new()),
         })
     }
 
@@ -511,11 +517,13 @@ impl FpmEventSubscriber {
         // normal scale-down path.  Any ghost entries created by the race
         // condition (FPM arriving *after* the Removed event) are caught by the
         // known_workers filter in get_recent_stats().
+        let cards = self.worker_model_cards.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
             let stats = stats.clone();
             let known = known.clone();
+            let cards = cards.clone();
             async move {
                 let discovery = component.drt().discovery();
                 let query = DiscoveryQuery::ComponentModels {
@@ -545,12 +553,28 @@ impl FpmEventSubscriber {
                             match event {
                                 Some(Ok(DiscoveryEvent::Added(instance))) => {
                                     let wid = instance.instance_id().to_string();
+                                    // Capture the full card JSON so connectors can build WorkerInfo
+                                    // from runtime_config / display_name / kv_cache_block_size / etc.
+                                    // without the subscriber having to know which fields matter.
+                                    if let DiscoveryInstance::Model { ref card_json, .. } = instance {
+                                        match serde_json::to_string(card_json) {
+                                            Ok(s) => {
+                                                cards.insert(wid.clone(), s);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "FPM tracker: failed to serialize card_json for {wid}: {e}"
+                                                );
+                                            }
+                                        }
+                                    }
                                     known.insert(wid.clone());
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::Removed(id))) => {
                                     let removed_id = id.instance_id().to_string();
                                     known.remove(&removed_id);
+                                    cards.remove(&removed_id);
 
                                     // Eagerly prune latest_stats for the common case
                                     // (worker removed cleanly before any late FPMs arrive).
@@ -602,6 +626,32 @@ impl FpmEventSubscriber {
             .latest_stats
             .iter()
             .filter(|entry| self.known_workers.contains(&entry.key().0))
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        Ok(snapshot)
+    }
+
+    /// Snapshot of model deployment cards keyed by worker id.
+    ///
+    /// The snapshot is filtered against `known_workers` so entries for
+    /// already-removed workers are not returned.  Values are the raw
+    /// `ModelDeploymentCard` serialized as a JSON string; callers parse
+    /// whichever fields they need (e.g. `runtime_config`, `display_name`).
+    ///
+    /// Returns:
+    ///     dict mapping `worker_id: str` to `card_json: str`.
+    fn get_model_cards(&self) -> PyResult<HashMap<String, String>> {
+        if !self.tracking_started.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "start_tracking() has not been called",
+            ));
+        }
+
+        let snapshot = self
+            .worker_model_cards
+            .iter()
+            .filter(|entry| self.known_workers.contains(entry.key()))
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
 
