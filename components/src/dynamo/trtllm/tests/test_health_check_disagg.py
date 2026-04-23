@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode
@@ -31,3 +33,26 @@ def test_payload_shape(mode, expect_disagg):
         }
     else:
         assert "disaggregated_params" not in payload
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [DisaggregationMode.PREFILL, DisaggregationMode.DECODE],
+)
+def test_env_override_preserves_canary_keys_for_disagg(monkeypatch, mode):
+    """DYN_HEALTH_CHECK_PAYLOAD must not drop the canary marker / disagg params."""
+    monkeypatch.setenv(
+        "DYN_HEALTH_CHECK_PAYLOAD",
+        json.dumps(
+            {
+                "token_ids": [128000],
+                "stop_conditions": {"max_tokens": 1},
+                "sampling_options": {"temperature": 0.0},
+            }
+        ),
+    )
+    payload = TrtllmHealthCheckPayload(disaggregation_mode=mode).to_dict()
+    assert payload.get(HEALTH_CHECK_KEY) is True
+    assert payload.get("disaggregated_params") == {
+        "request_type": "context_and_generation"
+    }

@@ -159,13 +159,17 @@ def test_canary_detects_rank_pause(
     predownload_models,  # noqa: ANN001
 ) -> None:
     base = _CONFIGS_BY_BACKEND[scenario.backend][scenario.base_config_key]
-    config = dataclasses.replace(base, frontend_port=dynamo_dynamic_ports.frontend_port)
-    config.env.update(
-        {
-            "MODEL_PATH": config.model,
-            "SERVED_MODEL_NAME": config.model,
+    # Fresh env dict — dataclasses.replace shallow-copies, so reusing base.env
+    # would mutate the shared module-level config across parametrized runs.
+    config = dataclasses.replace(
+        base,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        env={
+            **base.env,
+            "MODEL_PATH": base.model,
+            "SERVED_MODEL_NAME": base.model,
             "DYN_HEALTH_CHECK_ENABLED": "true",
-        }
+        },
     )
 
     system_ports = [int(p) for p in dynamo_dynamic_ports.system_ports]

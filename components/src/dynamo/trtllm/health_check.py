@@ -67,10 +67,10 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
         tokenizer: Any = None,
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
     ) -> None:
+        self._disaggregation_mode = disaggregation_mode
         bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
 
         self.default_payload = {
-            HEALTH_CHECK_KEY: True,
             "token_ids": [bos_token_id],
             "stop_conditions": {
                 "max_tokens": 1,
@@ -90,11 +90,19 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
                 "seed": None,
             },
         }
-        if disaggregation_mode in (
+        super().__init__()
+
+    def to_dict(self) -> dict:
+        # Layer the canary markers on top of whatever the base class returns
+        # (which may be DYN_HEALTH_CHECK_PAYLOAD-overridden), so the canary
+        # contract survives user payload overrides.
+        payload = dict(super().to_dict())
+        payload[HEALTH_CHECK_KEY] = True
+        if self._disaggregation_mode in (
             DisaggregationMode.PREFILL,
             DisaggregationMode.DECODE,
         ):
-            self.default_payload["disaggregated_params"] = {
+            payload["disaggregated_params"] = {
                 "request_type": "context_and_generation"
             }
-        super().__init__()
+        return payload
