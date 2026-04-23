@@ -87,7 +87,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus, len(dgd.Spec.Services))
 
 	for serviceName, component := range dgd.Spec.Services {
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
 		if usesPCSG {

@@ -823,14 +823,19 @@ func TestShouldUseMpBackend(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that when inter-pod GMS
-// failover is enabled, the vLLM backend is the one responsible for injecting
-// both the --load-format=gms flag and the DYN_VLLM_GMS_SHADOW_MODE env var.
-// These are vLLM-runtime switches and must live in the backend adapter, not
-// in the backend-agnostic GMS helpers (see gmsEngineEnvVars).
+// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that when the inter-pod
+// GMS layout is enabled (gpuMemoryService.mode=interPod, with or without
+// failover), the vLLM backend is the one responsible for injecting both the
+// --load-format=gms flag and the DYN_VLLM_GMS_SHADOW_MODE env var. These are
+// vLLM-runtime switches and must live in the backend adapter, not in the
+// backend-agnostic GMS helpers (see gmsEngineEnvVars).
 func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 	backend := &VLLMBackend{}
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
 		Failover: &v1alpha1.FailoverSpec{
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeInterPod,

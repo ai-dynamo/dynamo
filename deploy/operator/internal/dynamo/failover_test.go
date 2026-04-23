@@ -137,7 +137,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 1)
+	augmentEngineForGMS(podSpec, 1, true)
 	c := podSpec.Containers[0]
 
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
@@ -168,11 +168,48 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	initMount := findVolumeMount(initC, gmsSharedMountPath)
 	require.NotNil(t, initMount, "init container should mount shared volume")
 	assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-1", initMount.SubPathExpr)
+
+	assert.Equal(t, corev1.RestartPolicyNever, podSpec.RestartPolicy,
+		"inter-pod failover engines must be RestartPolicyNever so the "+
+			"FailoverCascadeReconciler is the sole recovery path")
+}
+
+// TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever pins the
+// standalone inter-pod GMS behavior: the engine pod must NOT be forced to
+// RestartPolicy=Never. The cascade-group label is only applied when
+// isInterPodFailover is true (see graph.go:GenerateGrovePodCliqueSet), so
+// forcing Never in standalone mode would strand a crashed engine in Failed
+// state with nothing listening to force-delete the PCSG replica. Instead the
+// engine inherits the default (Always) and kubelet restarts it in place,
+// matching the paired GMS weight-server pod — the restarted engine reconnects
+// to the still-running GMS server over UDS during --load-format gms startup.
+func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "engine",
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					"nvidia.com/gpu": k8sresource.MustParse("4"),
+				},
+			},
+		}},
+	}
+
+	augmentEngineForGMS(podSpec, 0, false)
+
+	assert.Equal(t, corev1.RestartPolicy(""), podSpec.RestartPolicy,
+		"standalone inter-pod GMS engine must not have RestartPolicy overridden; "+
+			"kubelet restart is the correct recovery path")
+
+	assert.True(t, hasVolume(podSpec, gmsSharedVolumeName),
+		"standalone engine still needs the shared hostPath for UDS sockets")
+	assert.True(t, hasEnvVar(podSpec.Containers[0], gms.EnvSocketDir, gmsSharedMountPath),
+		"standalone engine still needs the socket-dir env var to reach the GMS server")
 }
 
 func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 	podSpec := &corev1.PodSpec{}
-	augmentEngineForGMS(podSpec, 0)
+	augmentEngineForGMS(podSpec, 0, true)
 	assert.Empty(t, podSpec.Containers)
 }
 

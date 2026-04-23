@@ -522,21 +522,26 @@ func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string
 }
 
 // applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
-// based on the backend framework, multinode deployment patterns, and GMS failover.
+// based on the backend framework, multinode deployment patterns, and the
+// inter-pod GMS layout.
 //
 // Rules:
 // - For TRTLLM multinode: leader clique starts after worker cliques
-// - For GMS: engine PCLQs start after their corresponding GMS PCLQ (per rank)
+// - For inter-pod GMS: engine PCLQs start after their corresponding GMS PCLQ
+//   (per rank). This applies both to the standalone inter-pod layout and to
+//   the inter-pod layout with failover; the ordering reflects that engines
+//   load weights from the weight-server pod regardless of whether shadows are
+//   present.
 // - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
 func applyCliqueStartupDependencies(
 	gangSet *grovev1alpha1.PodCliqueSet,
 	roles []ServiceRole,
 	backendFramework BackendFramework,
 	numberOfNodes int32,
-	isInterPodFailover bool,
+	isInterPodGMS bool,
 ) {
 	enabledMultinode := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
-	if !enabledMultinode && !isInterPodFailover {
+	if !enabledMultinode && !isInterPodGMS {
 		return
 	}
 
@@ -577,7 +582,7 @@ func applyCliqueStartupDependencies(
 		var startsAfter []string
 
 		// GMS dependencies: engine PCLQs start after their rank's GMS PCLQ
-		if isInterPodFailover && cliqueRole != RoleGMS {
+		if isInterPodGMS && cliqueRole != RoleGMS {
 			if gmsName, ok := gmsCliqueByRank[cliqueRank]; ok {
 				startsAfter = append(startsAfter, gmsName)
 			}
@@ -876,24 +881,33 @@ type ServiceRole struct {
 	Rank     int32 // node rank: 0 = leader/main, 1..N-1 = workers
 }
 
-// expandRolesForService turns a service's (numberOfNodes, failover.mode,
-// replicas) tuple into the concrete list of ServiceRole entries the rest of
-// the Grove rendering pipeline iterates over. It is the single place that
-// decides how many PodCliques a service produces and what each PCLQ looks
-// like (name, role, replicas, static rank). Callers that iterate "engine
-// roles" must still gate on IsInterPodFailoverEnabled() — this function
-// emits the GMS weight-server PCLQ as a regular ServiceRole, not as a
-// separate concept.
+// expandRolesForService turns a service's (numberOfNodes,
+// gpuMemoryService.mode, failover.mode, replicas) tuple into the concrete
+// list of ServiceRole entries the rest of the Grove rendering pipeline
+// iterates over. It is the single place that decides how many PodCliques a
+// service produces and what each PCLQ looks like (name, role, replicas,
+// static rank).
+//
+// The inter-pod GMS branch is selected by IsInterPodGMSEnabled() (layout)
+// rather than IsInterPodFailoverEnabled() (hot-spares): both the standalone
+// inter-pod layout (1 engine pod + 1 weight-server pod per rank) and the
+// inter-pod layout with failover (primary + N shadows + 1 weight-server pod
+// per rank) use the same PCLQ topology, differing only in the per-rank engine
+// clique's Replicas (derived from GetTotalEnginePods).
+//
+// Callers that iterate "engine roles" must still gate on
+// IsInterPodGMSEnabled() — this function emits the GMS weight-server PCLQ
+// as a regular ServiceRole, not as a separate concept.
 func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentSharedSpec) []ServiceRole {
-	isInterPodFailover := component.IsInterPodFailoverEnabled()
+	isInterPodGMS := component.IsInterPodGMSEnabled()
 	isMultinode := numberOfNodes > 1
 
 	switch {
-	case isMultinode && isInterPodFailover:
+	case isMultinode && isInterPodGMS:
 		return expandMultinodeGMSRoles(serviceName, numberOfNodes, component.GetTotalEnginePods())
 	case isMultinode:
 		return expandMultinodeRoles(serviceName, numberOfNodes)
-	case isInterPodFailover:
+	case isInterPodGMS:
 		return expandSingleNodeGMSRoles(serviceName, component.GetTotalEnginePods())
 	default:
 		return expandSingleNodeRoles(serviceName, serviceReplicas)
@@ -1287,13 +1301,14 @@ func GenerateBasePodSpec(
 	// Intra-pod GMS: replace nvidia.com/gpu with a shared DRA claim and add the server
 	// sidecar directly into this pod.
 	//
-	// Inter-pod GMS (failover mode=interPod) must be skipped here — that path wires
-	// DRA claims and the GMS server on a dedicated weight-server pod at the PCSG
-	// level (see generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying
-	// the claim and injecting a sidecar here would produce a double-wired engine
+	// Inter-pod GMS (gpuMemoryService.mode=interPod, with or without failover)
+	// must be skipped here — that layout wires DRA claims and the GMS server
+	// on a dedicated weight-server pod at the PCSG level (see
+	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
+	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
 	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled &&
-		!component.IsInterPodFailoverEnabled() {
+		!component.IsInterPodGMSEnabled() {
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
@@ -1485,6 +1500,7 @@ type cliqueParams struct {
 	checkpointInfo             *checkpoint.CheckpointInfo
 	isMultinode                bool
 	usesPCSG                   bool
+	isInterPodGMS              bool
 	isInterPodFailover         bool
 	discoveryBackend           configv1alpha1.DiscoveryBackend
 	discoveryContext           DiscoveryContext
@@ -1514,35 +1530,34 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		}
 	}
 
-	// minAvailable controls Grove gang-scheduling: the clique is only considered
-	// available when at least this many replicas are Ready. The three axes that
-	// determine the right value are (1) whether the clique's replicas are NCCL-
-	// connected and (2) whether inter-pod failover is in play.
+	// minAvailable controls Grove gang-scheduling: the clique is only
+	// considered available when at least this many replicas are Ready.
 	//
-	// Plain multinode (no failover): a worker clique collapses all non-leader
-	// ranks into a single clique with Replicas = numberOfNodes - 1. Those pods
-	// ARE NCCL peers; losing any one breaks the collective, so minAvailable
-	// must equal Replicas.
+	// The invariant we want is "minAvailable = Replicas unless the clique
+	// has redundant replicas". Concretely:
 	//
-	// Single-node non-failover: Replicas is typically 1 (or DP factor via the
-	// outer PCSG), and minAvailable = 1 is correct.
+	//   - Plain multinode (no inter-pod GMS failover): the worker clique
+	//     collapses non-leader ranks into a single clique with
+	//     Replicas = numberOfNodes - 1 and those pods are NCCL peers of each
+	//     other — losing any one breaks the collective, so all replicas
+	//     must be Ready. Standalone inter-pod GMS on multinode also lands
+	//     here but has Replicas = 1 per PCLQ (primary only, no shadows), so
+	//     the same rule evaluates to minAvailable = 1 without a special case.
 	//
-	// Single-node inter-pod failover: Replicas = primary + shadows. Shadows
-	// are redundant hot spares of the primary; any one Ready pod can serve
-	// traffic, so minAvailable = 1.
+	//   - Inter-pod GMS failover (single- or multinode): within each rank
+	//     Replicas = primary + shadows and shadows ARE redundant hot spares
+	//     — requiring every shadow to be Ready would defeat failover, so
+	//     the clique stays at minAvailable = 1.
 	//
-	// Multinode inter-pod failover: each per-rank engine clique has
-	// Replicas = primary + shadows AT THAT RANK. Those replicas are NOT NCCL
-	// peers of each other — the primary at rank R belongs to the primary's
-	// distributed group (primary at R, primary at R+1, …); each shadow at R
-	// belongs to an INDEPENDENT group spanning its own peers across ranks.
-	// So within a rank, only one Ready pod is required (the runtime
-	// coordinates which cohort actually serves). Setting minAvailable =
-	// Replicas here would require every shadow at every rank to be Ready
-	// before Grove considered the clique available, defeating failover.
+	//   - Single-node clique (no multinode, with or without intra-pod
+	//     failover or standalone inter-pod GMS): Replicas is at most 1 or a
+	//     small DP fanout under the outer PCSG where the replicas are
+	//     independent of each other; minAvailable = 1 is correct.
 	//
-	// Summary: gang-schedule only the one case where clique replicas are
-	// NCCL-connected — plain multinode without failover.
+	// The two-line rule below captures all of the above: take the baseline
+	// of 1, then lift it to Replicas only on plain multinode without
+	// inter-pod failover (the only layout that combines >1 replicas per
+	// clique with no redundancy between them).
 	minAvailable := int32(1)
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
@@ -1689,8 +1704,9 @@ func GenerateGrovePodCliqueSet(
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
+		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
-		usesPCSG := isMultinode || isInterPodFailover
+		usesPCSG := isMultinode || isInterPodGMS
 		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 
@@ -1708,6 +1724,7 @@ func GenerateGrovePodCliqueSet(
 				checkpointInfo:             checkpointInfo,
 				isMultinode:                isMultinode,
 				usesPCSG:                   usesPCSG,
+				isInterPodGMS:              isInterPodGMS,
 				isInterPodFailover:         isInterPodFailover,
 				discoveryBackend:           discoveryBackend,
 				discoveryContext:           discoveryContext,
@@ -1724,9 +1741,9 @@ func GenerateGrovePodCliqueSet(
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
 
-		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodFailover)
+		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodGMS)
 
-		if isInterPodFailover {
+		if isInterPodGMS {
 			resourceClaimTemplates = append(resourceClaimTemplates, gmsResourceClaimTemplateConfigs(serviceName, component.Resources, roles)...)
 		}
 
@@ -1738,7 +1755,7 @@ func GenerateGrovePodCliqueSet(
 				MinAvailable:       ptr.To(int32(1)),
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			}
-			if isInterPodFailover {
+			if isInterPodGMS {
 				pcsg.ResourceSharing = gmsResourceSharingEntries(serviceName, roles)
 			}
 			scalingGroups = append(scalingGroups, pcsg)
@@ -1767,7 +1784,7 @@ func generatePodSpecForRole(
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) (*corev1.PodSpec, error) {
-	isInterPodFailover := component.IsInterPodFailoverEnabled()
+	isInterPodGMS := component.IsInterPodGMSEnabled()
 
 	if r.Role == RoleGMS {
 		// GMS weight server: generate a base engine spec then transform it
@@ -1782,9 +1799,9 @@ func generatePodSpecForRole(
 		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(getGPUCount(component.Resources))), nil
 	}
 
-	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode GMS
+	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode inter-pod GMS
 	var deployer MultinodeDeployer
-	if isInterPodFailover && numberOfNodes > 1 {
+	if isInterPodGMS && numberOfNodes > 1 {
 		deployer = &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: r.Rank}
 	}
 
@@ -1797,8 +1814,8 @@ func generatePodSpecForRole(
 		return nil, err
 	}
 
-	if isInterPodFailover {
-		augmentEngineForGMS(podSpec, r.Rank)
+	if isInterPodGMS {
+		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled())
 	}
 
 	return podSpec, nil

@@ -4387,7 +4387,8 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 1,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4399,7 +4400,8 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 1,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 3},
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 3},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4407,11 +4409,24 @@ func TestExpandRolesForService(t *testing.T) {
 			},
 		},
 		{
+			name:          "single-node standalone inter-pod GMS (no failover)",
+			serviceName:   "svc",
+			numberOfNodes: 1,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc", Role: RoleMain, Replicas: 1, Rank: 0},
+			},
+		},
+		{
 			name:          "multinode GMS 2 nodes 1 shadow",
 			serviceName:   "svc",
 			numberOfNodes: 2,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4425,7 +4440,8 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 3,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 2},
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 2},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4434,6 +4450,20 @@ func TestExpandRolesForService(t *testing.T) {
 				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 3, Rank: 1},
 				{Name: "svc-gms-2", Role: RoleGMS, Replicas: 1, Rank: 2},
 				{Name: "svc-wkr-2", Role: RoleWorker, Replicas: 3, Rank: 2},
+			},
+		},
+		{
+			name:          "multinode standalone inter-pod GMS (no failover)",
+			serviceName:   "svc",
+			numberOfNodes: 2,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc-ldr", Role: RoleLeader, Replicas: 1, Rank: 0},
+				{Name: "svc-gms-1", Role: RoleGMS, Replicas: 1, Rank: 1},
+				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 1, Rank: 1},
 			},
 		},
 	}
@@ -7165,6 +7195,10 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 					Resources: &v1alpha1.Resources{
 						Limits: &v1alpha1.ResourceItem{GPU: "1"},
 					},
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+						Enabled: true,
+						Mode:    v1alpha1.GMSModeInterPod,
+					},
 					Failover: &v1alpha1.FailoverSpec{
 						Enabled:    true,
 						Mode:       v1alpha1.GMSModeInterPod,
@@ -7224,11 +7258,12 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 			BackendFramework: "vllm",
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"decode": {
-					ComponentType: commonconsts.ComponentTypeDecode,
-					Replicas:      ptr.To(int32(1)),
-					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: numberOfNodes},
-					Resources:     &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
-					Failover:      &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: numShadows},
+					ComponentType:    commonconsts.ComponentTypeDecode,
+					Replicas:         ptr.To(int32(1)),
+					Multinode:        &v1alpha1.MultinodeSpec{NodeCount: numberOfNodes},
+					Resources:        &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+					Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: numShadows},
 				},
 			},
 		},

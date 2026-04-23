@@ -698,11 +698,42 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
+							},
+							Resources: &nvidiacomv1alpha1.Resources{
+								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:         "valid standalone inter-pod GMS (no failover) single-node with GPU",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gms-standalone",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
 							Resources: &nvidiacomv1alpha1.Resources{
 								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
@@ -724,7 +755,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -736,10 +772,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "GMS failover requires at least 1 GPU",
+			// validateGPUMemoryService fires first when the inter-pod layout
+			// is declared without any GPU resources.
+			errMsg: "requires resources.limits.gpu",
 		},
 		{
-			name:         "GMS failover on frontend component rejected",
+			name:         "inter-pod GMS on frontend component rejected",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -751,10 +789,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"fe": {
 							ComponentType: "frontend",
-							Failover: &nvidiacomv1alpha1.FailoverSpec{
-								Enabled:    true,
-								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
-								NumShadows: 1,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
 							Resources: &nvidiacomv1alpha1.Resources{
 								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
@@ -765,7 +802,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "GMS failover is not supported for componentType",
+			errMsg:      "GPU memory service is only supported for worker components",
 		},
 		{
 			name:         "GMS failover requires Grove pathway - annotation disabled",
@@ -781,7 +818,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -809,7 +851,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -827,7 +874,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "requires the Grove pathway",
 		},
 		{
-			name:         "GMS failover rejected on non-vLLM backend",
+			name:         "inter-pod GMS rejected on non-vLLM backend",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -837,7 +884,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "sglang",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -852,10 +904,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "inter-pod GMS failover is currently supported only for vLLM",
+			errMsg:      "currently supported only for vLLM",
 		},
 		{
-			name:         "GMS failover rejected when backendFramework is unset",
+			name:         "inter-pod GMS rejected when backendFramework is unset",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -869,6 +921,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -883,7 +939,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "inter-pod GMS failover is currently supported only for vLLM",
+			errMsg:      "currently supported only for vLLM",
 		},
 		{
 			name: "GMS failover disabled is valid without GPU",
@@ -2162,7 +2218,13 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
+						},
 					},
 				},
 			},
@@ -2170,7 +2232,12 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -2184,12 +2251,44 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			errMsg:  "failover cannot be toggled after creation",
 		},
 		{
+			name: "toggling inter-pod GMS layout is immutable",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "inter-pod GMS layout cannot be toggled after creation",
+		},
+		{
 			name: "changing numShadows is immutable",
 			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
@@ -2203,7 +2302,12 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {
+					"worker": {
+						ComponentType: consts.ComponentTypeWorker,
+						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
 								Mode:       nvidiacomv1alpha1.GMSModeInterPod,

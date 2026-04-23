@@ -105,8 +105,11 @@ func applyGMSSharedResources(podSpec *corev1.PodSpec, c *corev1.Container, rank 
 // weight buffers (re-sharded on reconnection by the engine clients). So an
 // in-place kubelet restart is a fast, correct recovery path.
 //
-// This is DELIBERATELY asymmetric with augmentEngineForGMS, which forces
-// RestartPolicyNever for engine pods — see the comment there.
+// The paired engine pod mirrors this policy in the standalone inter-pod GMS
+// layout (a restarted engine re-imports IPC handles from the still-running
+// GMS server). In the inter-pod GMS failover layout, augmentEngineForGMS
+// overrides the engine's RestartPolicy to Never so the cohort can only be
+// recovered via FailoverCascadeReconciler; see the comment there.
 func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount int) *corev1.PodSpec {
 	podSpec := basePodSpec.DeepCopy()
 	if len(podSpec.Containers) == 0 {
@@ -158,24 +161,37 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 	}
 }
 
-// augmentEngineForGMS modifies an engine pod spec in-place to work with GMS failover:
-// injects env vars, shared volume, strips GPU limits, adds toleration, and
-// prepends an init container to fix hostPath directory permissions.
+// augmentEngineForGMS modifies an engine pod spec in-place to work with the
+// inter-pod GMS layout: injects env vars, shared volume, strips GPU limits,
+// adds toleration, and prepends an init container to fix hostPath directory
+// permissions.
 //
-// RestartPolicy is forced to Never — DO NOT change this. Engine pods hold
-// distributed state that cannot survive an in-place container restart:
-// active NCCL collectives, CUDA IPC handles to weight buffers shared with the
-// GMS server, torch.distributed TCPStore membership, and shadow/primary
-// coordination via DYN_VLLM_GMS_SHADOW_MODE. An in-place restart here leaves
-// the cohort in a half-torn-down state (partial NCCL group, stale IPC handles,
-// dangling UDS file descriptors on the shared hostPath) and blocks recovery.
-// The correct recovery path is for the pod to exit, FailoverCascadeReconciler
-// to force-delete the full engine group (see failover_cascade_controller.go),
-// and Grove to recreate the cohort from scratch.
+// RestartPolicy behavior is layout-dependent and is the one asymmetry between
+// standalone inter-pod GMS and inter-pod GMS failover:
 //
-// This is DELIBERATELY asymmetric with gmsWeightServerPodSpec, which leaves
-// RestartPolicy at the default (Always) — see the comment there.
-func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
+//   - Standalone inter-pod GMS (isInterPodFailover=false): RestartPolicy is
+//     left unset (inherits Always), matching the GMS weight-server pod. A
+//     crashed engine is restarted in place by kubelet; the GMS server keeps
+//     running and the new engine container reconnects to the existing UDS
+//     sockets and re-imports CUDA IPC handles during --load-format gms
+//     startup. There is no cohort state to protect because there is no
+//     cohort — just one engine paired with one GMS server per rank.
+//
+//   - Inter-pod GMS failover (isInterPodFailover=true): RestartPolicy is
+//     forced to Never. Engine pods in a failover cohort hold distributed
+//     state that cannot survive an in-place container restart — active NCCL
+//     collectives, torch.distributed TCPStore membership, and primary/shadow
+//     coordination via the failover lock file and DYN_VLLM_GMS_SHADOW_MODE.
+//     An in-place restart leaves the cohort in a half-torn-down state and
+//     blocks recovery. The correct recovery path is for the pod to exit,
+//     FailoverCascadeReconciler (see failover_cascade_controller.go) to
+//     force-delete the full engine group based on the
+//     KubeLabelDynamoFailoverEngineGroupMember label, and Grove to recreate
+//     the cohort from scratch. That label is applied in graph.go only when
+//     isInterPodFailover is true, so forcing Never in the standalone case
+//     would strand engine pods in Failed state with nothing listening to
+//     force-delete them.
+func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool) {
 	if len(podSpec.Containers) == 0 {
 		return
 	}
@@ -185,7 +201,9 @@ func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
 	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
 	applyGMSSharedResources(podSpec, c, rank)
-	podSpec.RestartPolicy = corev1.RestartPolicyNever
+	if isInterPodFailover {
+		podSpec.RestartPolicy = corev1.RestartPolicyNever
+	}
 }
 
 // gmsSharedVolume returns a hostPath volume and mount with a subPathExpr that

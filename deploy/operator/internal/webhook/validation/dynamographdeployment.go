@@ -184,22 +184,36 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 		}
 	}
 
-	// Validate GMS failover immutability
+	// Validate inter-pod GMS layout and failover immutability.
+	//
+	// Flipping the inter-pod GMS layout or toggling failover within an
+	// inter-pod layout both change the PodClique topology (weight-server PCLQ,
+	// per-rank engine PCLQs, shadow PCLQs, DRA ResourceClaimTemplates), which
+	// Grove cannot transform in place. Force the user to delete and recreate.
 	for serviceName, newService := range v.deployment.Spec.Services {
 		oldService, exists := old.Spec.Services[serviceName]
 		if !exists {
 			continue
 		}
-		oldInterPod := oldService.IsInterPodFailoverEnabled()
-		newInterPod := newService.IsInterPodFailoverEnabled()
-		if oldInterPod != newInterPod {
+		oldInterPodGMS := oldService.IsInterPodGMSEnabled()
+		newInterPodGMS := newService.IsInterPodGMSEnabled()
+		if oldInterPodGMS != newInterPodGMS {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].gpuMemoryService.mode: the inter-pod GMS layout cannot be toggled after creation; "+
+					"delete and recreate the DynamoGraphDeployment",
+				serviceName,
+			))
+		}
+		oldInterPodFailover := oldService.IsInterPodFailoverEnabled()
+		newInterPodFailover := newService.IsInterPodFailoverEnabled()
+		if oldInterPodFailover != newInterPodFailover {
 			errs = append(errs, fmt.Errorf(
 				"spec.services[%s].failover: inter-pod GMS failover cannot be toggled after creation; "+
 					"delete and recreate the DynamoGraphDeployment",
 				serviceName,
 			))
 		}
-		if oldInterPod && newInterPod && oldService.Failover.NumShadows != newService.Failover.NumShadows {
+		if oldInterPodFailover && newInterPodFailover && oldService.Failover.NumShadows != newService.Failover.NumShadows {
 			errs = append(errs, fmt.Errorf(
 				"spec.services[%s].failover.numShadows is immutable for inter-pod GMS failover; "+
 					"delete and recreate the DynamoGraphDeployment to change it",
@@ -311,35 +325,39 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
-	// Inter-pod GMS failover requires the Grove pathway
-	if service.IsInterPodFailoverEnabled() && !v.isGrovePathway() {
+	// The inter-pod GMS layout (with or without failover) requires the Grove
+	// pathway: the weight-server pod, per-rank PCLQs, and DRA ResourceClaim
+	// templates are all wired at the PodCliqueScalingGroup level, which only
+	// the Grove renderer produces.
+	if service.IsInterPodGMSEnabled() && !v.isGrovePathway() {
 		if !v.groveEnabled {
 			return nil, fmt.Errorf(
-				"spec.services[%s]: GMS failover with mode=%q requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
+				"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
 				serviceName, nvidiacomv1alpha1.GMSModeInterPod)
 		}
 		return nil, fmt.Errorf(
-			"spec.services[%s]: GMS failover with mode=%q requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+			"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway; remove or unset the %q annotation (currently %q)",
 			serviceName, nvidiacomv1alpha1.GMSModeInterPod,
 			consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 	}
 
-	// Inter-pod GMS failover is currently implemented only for vLLM (the engine
-	// relies on vLLM-specific runtime hooks like --load-format gms and
-	// DYN_VLLM_GMS_SHADOW_MODE). Fail fast at admission rather than producing a
-	// broken deployment when another or no backend is configured — an empty
-	// BackendFramework means the operator cannot confirm the engine speaks
-	// vLLM, which is a hard prerequisite for inter-pod GMS.
-	if service.IsInterPodFailoverEnabled() &&
+	// The inter-pod GMS layout is currently implemented only for vLLM (the
+	// engine relies on vLLM-specific runtime hooks like --load-format gms and
+	// DYN_VLLM_GMS_SHADOW_MODE that activate the GMS client path). Fail fast
+	// at admission rather than producing a broken deployment when another or
+	// no backend is configured — an empty BackendFramework means the operator
+	// cannot confirm the engine speaks vLLM, which is a hard prerequisite for
+	// inter-pod GMS (both standalone and with failover).
+	if service.IsInterPodGMSEnabled() &&
 		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
 		detected := v.deployment.Spec.BackendFramework
 		if detected == "" {
 			detected = "<unset>"
 		}
 		return nil, fmt.Errorf(
-			"spec.services[%s]: inter-pod GMS failover is currently supported only for vLLM (detected: %s); "+
+			"spec.services[%s]: the inter-pod GMS layout (gpuMemoryService.mode=%q) is currently supported only for vLLM (detected: %s); "+
 				"set spec.backendFramework=%q",
-			serviceName, detected, backendFrameworkVLLM)
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod, detected, backendFrameworkVLLM)
 	}
 
 	// Validate service name length constraints for Grove PodCliqueSet naming
@@ -382,7 +400,7 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 	lowerServiceName := strings.ToLower(serviceName)
 
 	isMultinode := service.GetNumberOfNodes() > 1
-	isInterPodFailover := service.IsInterPodFailoverEnabled()
+	isInterPodGMS := service.IsInterPodGMSEnabled()
 
 	// Determine the longest PodClique name that will be generated.
 	// Grove validates: len(PCS name) + len(PCSG name) + len(PCLQ name) <= 45
@@ -390,7 +408,7 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 	var pcsgName string
 
 	switch {
-	case isInterPodFailover:
+	case isInterPodGMS:
 		// GMS services always get a PCSG named after the service.
 		// Longest PCLQ name is "serviceName-gms-0" (len + 6) or "serviceName-wkr-N".
 		pcsgName = lowerServiceName
