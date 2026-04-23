@@ -153,13 +153,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="If set, publish events and metrics to Dynamo components.",
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--disable-request-abort",
-            env_var="DYN_TRTLLM_DISABLE_REQUEST_ABORT",
-            default=True,
-            help="Disable calling abort() on the TRT-LLM engine when a request is cancelled.",
-        )
         add_argument(
             g,
             flag_name="--load-format",
@@ -503,7 +496,6 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
-    disable_request_abort: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
