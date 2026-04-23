@@ -15,7 +15,6 @@ from gpu_memory_service.server.fsm import ServerState
 from tests.gpu_memory_service.common.runtime import (
     GMSProcessManager,
     SGLangWithGMSProcess,
-    TRTLLMWithGMSProcess,
     VLLMWithGMSProcess,
 )
 from tests.gpu_memory_service.flow_assertions import (
@@ -25,7 +24,6 @@ from tests.gpu_memory_service.flow_assertions import (
     quiesce_engine,
     wait_for_active_layout,
     wait_for_resumed_layout,
-    wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -275,106 +273,3 @@ def test_gms_shadow_engine_failover_sglang(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     _run_shadow_failover_test(request, SGLangWithGMSProcess)
-
-
-# ---------------------------------------------------------------------------
-# TRT-LLM standalone failover test (weights-only GMS, no KV cache GMS)
-# ---------------------------------------------------------------------------
-
-
-def _trtllm_quiesce(
-    weights_gms,
-    engine,
-    *,
-    label: str,
-    expected_hash: str | None = None,
-):
-    """Quiesce a weights-only TRT-LLM engine and return the weights state."""
-    wait_for_weights_state(
-        weights_gms,
-        ServerState.RO,
-        expected_hash=expected_hash,
-        timeout=60.0,
-    )
-    assert engine.quiesce()["status"] == "ok"
-    logger.info("%s completed", label)
-    ws = wait_for_weights_state(weights_gms, ServerState.COMMITTED)
-    return ws
-
-
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450")
-@pytest.mark.trtllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.timeout(600)
-def test_gms_shadow_engine_failover_trtllm(
-    request, runtime_services_dynamic_ports, predownload_models
-):
-    """Weights-only shadow failover for TRT-LLM (no KV cache GMS)."""
-    with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
-        frontend_port = manager.frontend_port
-        weights_gms = manager.weights_gms
-
-        # Shadow A publishes weights, then quiesces.
-        shadow_a = manager.start_engine("shadow-a")
-        assert_completion_ok(
-            frontend_port,
-            "Hello",
-            failure_message="Shadow A inference failed",
-            success_message="Shadow A inference OK",
-        )
-        ws_a = _trtllm_quiesce(weights_gms, shadow_a, label="Shadow A quiesce")
-        weights_hash = ws_a.memory_layout_hash
-
-        # Shadow B starts RO, then quiesces.
-        shadow_b = manager.start_engine("shadow-b", read_only_weights=True)
-        assert_completion_ok(
-            frontend_port,
-            "Hello",
-            failure_message="Shadow B inference failed",
-            success_message="Shadow B inference OK",
-        )
-        _trtllm_quiesce(
-            weights_gms,
-            shadow_b,
-            label="Shadow B quiesce",
-            expected_hash=weights_hash,
-        )
-        assert_weights_published_once(weights_gms.get_event_history().events)
-
-        # Primary starts RO.
-        primary = manager.start_engine("primary", read_only_weights=True)
-        assert_completion_ok(
-            frontend_port,
-            "Primary test",
-            failure_message="Primary inference failed",
-            success_message="Primary inference OK",
-        )
-        wait_for_weights_state(
-            weights_gms,
-            ServerState.RO,
-            expected_hash=weights_hash,
-            min_ro_sessions=1,
-        )
-
-        # Kill primary, resume shadow A immediately (no KV blocking).
-        _kill_process_group(primary)
-        resume_result = shadow_a.resume(timeout=180)
-        assert resume_result["status"] == "ok"
-
-        wait_for_weights_state(
-            weights_gms,
-            ServerState.RO,
-            expected_hash=weights_hash,
-            min_ro_sessions=1,
-        )
-        assert_weights_published_once(weights_gms.get_event_history().events)
-
-        assert_completion_ok(
-            frontend_port,
-            "Post failover",
-            failure_message="Shadow after failover failed",
-            success_message="Shadow after failover OK",
-            retry_timeout=30.0,
-        )

@@ -135,21 +135,6 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                 )
 
 
-def _register_memory_routes(runtime, handler) -> None:
-    runtime.register_engine_route(
-        "release_memory_occupation",
-        handler.release_memory_occupation,
-    )
-    runtime.register_engine_route(
-        "resume_memory_occupation",
-        handler.resume_memory_occupation,
-    )
-    logging.info(
-        "Registered engine routes: "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
-    )
-
-
 async def init_llm_worker(
     runtime: DistributedRuntime,
     config: Config,
@@ -678,8 +663,6 @@ async def init_llm_worker(
                     handler = RequestHandlerFactory().get_request_handler(
                         handler_config
                     )
-                    if config.load_format == "gms":
-                        _register_memory_routes(runtime, handler)
 
                     if config.disaggregation_mode != DisaggregationMode.ENCODE:
                         await register_model(
@@ -719,8 +702,6 @@ async def init_llm_worker(
                     consolidator_publisher.shutdown()
             else:
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.load_format == "gms":
-                    _register_memory_routes(runtime, handler)
                 if config.disaggregation_mode != DisaggregationMode.ENCODE:
                     await register_model(
                         model_input,
