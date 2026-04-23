@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.19.0"
+VLLM_VER="0.19.1"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 

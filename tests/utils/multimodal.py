@@ -179,6 +179,11 @@ def make_multimodal_configs(
         marks.extend(profile.marks)
 
         key = f"mm_{topology}_{profile.short_name}"
+        worker_env = {
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "DYN_MM_LOCAL_PATH": str(WORKSPACE_DIR),
+            **topo_cfg.env,
+        }
         configs[key] = config_cls(
             name=key,
             directory=topo_cfg.directory or directory,
@@ -188,6 +193,6 @@ def make_multimodal_configs(
             marks=marks,
             delayed_start=topo_cfg.delayed_start,
             request_payloads=profile.request_payloads,
-            env=topo_cfg.env,
+            env=worker_env,
         )
     return configs

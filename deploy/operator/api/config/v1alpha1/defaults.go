@@ -85,11 +85,6 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.GPU.DiscoveryEnabled = ptr.To(true)
 	}
 
-	// Checkpoint defaults
-	if obj.Checkpoint.ReadyForCheckpointFilePath == "" {
-		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
-	}
-
 	// Logging defaults
 	if obj.Logging.Level == "" {
 		obj.Logging.Level = "info"
