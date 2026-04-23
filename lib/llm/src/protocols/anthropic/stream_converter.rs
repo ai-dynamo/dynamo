@@ -62,7 +62,7 @@ struct ToolCallState {
 
 impl AnthropicStreamConverter {
     pub fn new(model: String, estimated_input_tokens: u32) -> Self {
-        Self::new_with_thinking(model, estimated_input_tokens, true)
+        Self::new_with_thinking(model, estimated_input_tokens, false)
     }
 
     pub fn new_with_thinking(
@@ -1041,6 +1041,25 @@ mod tests {
     }
 
     #[test]
+    fn test_reasoning_demoted_to_text_without_context() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let ev = conv.process_chunk_tagged(&reasoning_chunk("hidden reasoning"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"],
+            "no-context fallback must not emit Anthropic thinking blocks"
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Text { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn test_reasoning_demoted_to_text_when_thinking_disabled() {
         let mut conv = AnthropicStreamConverter::with_context(
             "test-model".into(),
@@ -1090,7 +1109,11 @@ mod tests {
     /// block is properly closed before the next one starts.
     #[test]
     fn test_thinking_text_then_tool_call() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            context_with_thinking(Some("enabled")),
+        );
 
         // 1. Reasoning tokens → thinking block starts
         let ev = conv.process_chunk_tagged(&reasoning_chunk("Let me think..."));
@@ -1157,7 +1180,11 @@ mod tests {
     /// Thinking-only response (no text/tool follows): thinking block closed in end events.
     #[test]
     fn test_thinking_only_closed_in_end_events() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            context_with_thinking(Some("enabled")),
+        );
         conv.process_chunk_tagged(&reasoning_chunk("Deep thought..."));
 
         let ev = conv.emit_end_events_tagged();
