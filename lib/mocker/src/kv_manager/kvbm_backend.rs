@@ -14,10 +14,10 @@
 //!   new `MutableBlock`, stage with PLH, and register. On capacity exhaustion
 //!   returns partial count so the scheduler can preempt the oldest running
 //!   request.
-//! - **Destroy**: drop all RAII handles for the block. Emits a `Removed` KV
-//!   event to match the mocker's existing router protocol.
-//! - **Deref**: pop one `ImmutableBlock` clone; when the vec empties, the block
-//!   transitions to kvbm-logical's inactive pool (RAII return).
+//! - **Deref**: release one request-owned handle. For `PartialBlock` this drops
+//!   the unique `MutableBlock` and returns it to the reset pool. For
+//!   `FullBlock` this pops one `ImmutableBlock` clone; when the vec empties,
+//!   the block transitions to kvbm-logical's inactive pool (RAII return).
 //! - **Promote**: PartialBlock (`MutableBlock`) → FullBlock (`ImmutableBlock`).
 //!   Collapses onto an existing registered handle if the PLH / SequenceHash is
 //!   already present; otherwise stages + registers a new block.
@@ -245,7 +245,7 @@ impl KvManager {
     /// be allocated (capacity exhausted); the scheduler uses this to trigger
     /// preemption.
     ///
-    /// For `Destroy` / `Deref` / `Promote`, returns 1 on success and panics on
+    /// For `Deref` / `Promote`, returns 1 on success and panics on
     /// invalid state (consistent with the old `vllm_backend` semantics).
     pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
@@ -256,10 +256,6 @@ impl KvManager {
                 token_ids.as_deref(),
                 parent.as_ref(),
             ),
-            MoveBlock::Destroy(hashes) => {
-                self.process_destroy(hashes);
-                1
-            }
             MoveBlock::Deref(hashes) => {
                 self.process_deref(hashes);
                 1
@@ -430,47 +426,13 @@ impl KvManager {
         allocated
     }
 
-    /// Process a `MoveBlock::Destroy` instruction.
-    ///
-    /// Contract difference vs. the legacy `vllm_backend`: in the old manual
-    /// backend `Destroy(FullBlock)` physically removed the block from the
-    /// cache surface. Here we only drop all active RAII handles for the
-    /// block; kvbm-logical keeps the `Registered` state alive and the block
-    /// transitions to the **inactive pool**, where it remains matchable via
-    /// `match_blocks(plh)` until an allocation forces its eviction. We still
-    /// emit a router `Removed` event for protocol parity, but callers should
-    /// be aware that a subsequent `Use` on the same PLH will reactivate the
-    /// same physical block from inactive (an `InactiveHit`) rather than
-    /// allocating fresh.
-    ///
-    /// In the current scheduler flow `Destroy(FullBlock)` is not exercised
-    /// (preemption goes through `Deref` + `reset_with_signal`), so this
-    /// divergence is effectively dormant — see `test_destroy_full_block`.
-    fn process_destroy(&mut self, blocks: &[UniqueBlock]) {
-        let mut destroyed = Vec::<SequenceHash>::new();
+    fn process_deref(&mut self, blocks: &[UniqueBlock]) {
         for block in blocks {
             match block {
                 UniqueBlock::PartialBlock(uuid) => {
                     self.active_partial
                         .remove(uuid)
-                        .expect("Destroy: partial block not in active pool");
-                }
-                UniqueBlock::FullBlock(seq_hash) => {
-                    self.active_full
-                        .remove(seq_hash)
-                        .expect("Destroy: full block not in active pool");
-                    destroyed.push(*seq_hash);
-                }
-            }
-        }
-        self.publish_kv_event(destroyed, &[], None, false, None);
-    }
-
-    fn process_deref(&mut self, blocks: &[UniqueBlock]) {
-        for block in blocks {
-            match block {
-                UniqueBlock::PartialBlock(_) => {
-                    panic!("Deref on PartialBlock is not valid");
+                        .expect("Deref: partial block not in active pool");
                 }
                 UniqueBlock::FullBlock(seq_hash) => {
                     let vec = self
@@ -685,8 +647,8 @@ mod tests {
         mgr.process(&MoveBlock::Deref(vec![UniqueBlock::FullBlock(seq_hash)]));
     }
 
-    fn destroy_full(mgr: &mut KvManager, seq_hash: u64) {
-        mgr.process(&MoveBlock::Destroy(vec![UniqueBlock::FullBlock(seq_hash)]));
+    fn deref_partial(mgr: &mut KvManager, uuid: Uuid) {
+        mgr.process(&MoveBlock::Deref(vec![UniqueBlock::PartialBlock(uuid)]));
     }
 
     #[test]
@@ -776,42 +738,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Deref on PartialBlock is not valid")]
-    fn test_deref_on_partial_panics() {
+    fn test_deref_partial_returns_to_reset() {
         let mut mgr = make_mgr(10, 16);
         let uuid = Uuid::new_v4();
         use_partial(&mut mgr, uuid);
-        mgr.process(&MoveBlock::Deref(vec![UniqueBlock::PartialBlock(uuid)]));
-    }
-
-    #[test]
-    fn test_destroy_full_block() {
-        let (mut mgr, sink) = make_mgr_capturing(10, 16);
-
-        use_full(&mut mgr, 1, plh(100));
-        assert_eq!(mgr.num_active_blocks(), 1);
-        assert_eq!(mgr.num_inactive_blocks(), 0);
-
-        destroy_full(&mut mgr, 1);
-
-        // Active handles released — but kvbm-logical keeps the Registered
-        // state alive and the block lands in the *inactive* pool, still
-        // matchable via `match_blocks(plh)`.
-        assert_eq!(mgr.num_active_blocks(), 0);
-        assert_eq!(
-            mgr.num_inactive_blocks(),
-            1,
-            "Destroy must leave the block in kvbm-logical's inactive pool"
-        );
-
-        // Router-visible protocol parity: we still emit a `Removed` event
-        // for the caller.
-        let events = sink.events.lock().unwrap();
-        let removed_count = events
-            .iter()
-            .filter(|e| matches!(e.data, KvCacheEventData::Removed(_)))
-            .count();
-        assert_eq!(removed_count, 1, "Destroy must emit one Removed event");
+        assert_eq!(mgr.active_partial.len(), 1);
+        deref_partial(&mut mgr, uuid);
+        assert!(mgr.active_partial.is_empty());
+        assert_eq!(mgr.num_active_block_refs(), 0);
     }
 
     #[test]
@@ -883,10 +817,6 @@ mod tests {
             let plhs: Vec<_> = ids.iter().map(|&id| plh(id)).collect();
             mgr.process(&MoveBlock::Use(blocks, vec![], plhs, None, None));
         }
-        fn destroy_blocks(mgr: &mut KvManager, ids: &[u64]) {
-            let blocks = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
-            mgr.process(&MoveBlock::Destroy(blocks));
-        }
         fn deref_blocks(mgr: &mut KvManager, ids: &[u64]) {
             let blocks = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             mgr.process(&MoveBlock::Deref(blocks));
@@ -916,11 +846,9 @@ mod tests {
         // kvbm-logical AND absent from `active_full`. Also checks total count
         // matches so we catch stray inactive entries too.
         //
-        // NOTE: under kvbm-logical, `Destroy` removes the block from
-        // `active_full` but the `ImmutableBlock` drop returns it to the
-        // inactive pool — so a destroyed block appears as inactive here until
-        // evicted. This differs from the old `HashCache` where `Destroy`
-        // removed the block entirely.
+        // NOTE: under kvbm-logical, once the last `ImmutableBlock` handle is
+        // dropped, the block returns to the inactive pool and remains matchable
+        // until eviction.
         fn assert_inactive_blocks(mgr: &KvManager, expected_ids: &[u64]) {
             assert_eq!(
                 mgr.num_inactive_blocks(),
@@ -954,16 +882,15 @@ mod tests {
             &[(0, 2), (1, 2), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)],
         );
 
-        // Destroy block 4; deref 0, 1, 2, 3. 2 and 3 drop to inactive via
-        // RAII; 4 is destroyed (removed from active_full + Removed emitted)
-        // but kvbm-logical still has it in the inactive pool.
-        destroy_blocks(&mut mgr, &[4]);
+        // Deref block 4; deref 0, 1, 2, 3. 2, 3, and 4 drop to inactive via
+        // RAII because their last active handle is released.
+        deref_blocks(&mut mgr, &[4]);
         deref_blocks(&mut mgr, &[0, 1, 2, 3]);
         assert_active(&mgr, &[(0, 1), (1, 1), (5, 1), (6, 1)]);
         assert_inactive_blocks(&mgr, &[2, 3, 4]);
 
-        // Destroy block 6; deref 0, 1, 5. Active drains; inactive = {0..=6}.
-        destroy_blocks(&mut mgr, &[6]);
+        // Deref block 6; deref 0, 1, 5. Active drains; inactive = {0..=6}.
+        deref_blocks(&mut mgr, &[6]);
         deref_blocks(&mut mgr, &[0, 1, 5]);
         assert_active(&mgr, &[]);
         assert_inactive_blocks(&mgr, &[0, 1, 2, 3, 4, 5, 6]);
