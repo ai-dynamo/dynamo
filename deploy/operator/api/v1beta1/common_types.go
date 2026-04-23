@@ -111,15 +111,15 @@ type RestartStrategy struct {
 	Order []string `json:"order,omitempty"`
 }
 
-// ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter.
-// When enabled, the DGDSA owns the `replicas` field and external autoscalers
-// (HPA/KEDA/Planner) can control scaling via the Scale subresource.
-type ScalingAdapter struct {
-	// Enabled indicates whether the ScalingAdapter should be enabled for this service.
-	// +optional
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-}
+// ScalingAdapter opts a service into using the DynamoGraphDeploymentScalingAdapter
+// (DGDSA). When `scalingAdapter` is set on a service (even as an empty object,
+// `scalingAdapter: {}`), the DGDSA is created and owns the `replicas` field so
+// that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale
+// subresource. Omitting the field opts the service out. The struct is empty in
+// v1beta1 (it carried only an `Enabled` bool in v1alpha1, which is redundant
+// with field presence) but is intentionally kept as a struct so that future
+// per-service DGDSA configuration knobs can be added without another API break.
+type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
 type EPPConfig struct {
@@ -156,21 +156,21 @@ const (
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
 	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
-	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// When set, a GMS sidecar is injected and GPU access is managed via DRA.
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
-	// Failover configures active-passive GPU failover for this service.
-	// When enabled, the main container is cloned into two engine containers
-	// (active + standby) sharing GPUs via DRA. Requires
-	// `experimental.gpuMemoryService.enabled`, and its `mode` must match
+	// Failover configures active-passive GPU failover for this service. When
+	// set, the main container is cloned into two engine containers (active +
+	// standby) sharing GPUs via DRA. Requires `experimental.gpuMemoryService`
+	// to also be set, and `failover.mode` must match
 	// `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
 	// Checkpoint configures container-image snapshotting and restore for this
-	// service. When enabled, the DGD controller can produce a DynamoCheckpoint
-	// CR from a running pod and later restore pods from that checkpoint for
+	// service. When set, the DGD controller can produce a DynamoCheckpoint CR
+	// from a running pod and later restore pods from that checkpoint for
 	// faster cold start. The user-facing shape of this field -- especially its
 	// interaction with the standalone DynamoCheckpoint resource and the
 	// identity-hash computation -- is still settling, which is why it lives
@@ -180,15 +180,18 @@ type ExperimentalSpec struct {
 }
 
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
-// via DRA (Dynamic Resource Allocation).
+// Setting `experimental.gpuMemoryService` (i.e. presence of this struct) opts the
+// service into GMS: the operator injects a GMS sidecar and replaces the main
+// container's GPU resources with a DRA ResourceClaim for shared GPU access.
+// Omitting the field disables GMS for the service. The v1alpha1 `enabled` flag
+// is dropped here to follow the standard Kubernetes pattern of "presence ==
+// opt-in"; conversion from v1alpha1 maps `enabled:false` (with or without a
+// populated payload) to an absent field, with the original payload preserved
+// via an origin annotation when present (see the v1alpha1 conversion code).
 //
 // Exposed under `DynamoComponentDeploymentSharedSpec.Experimental.GPUMemoryService`
 // in v1beta1 -- see ExperimentalSpec for the stability caveat.
 type GPUMemoryServiceSpec struct {
-	// Enabled activates the GMS sidecar. GPU resources on the main container
-	// are replaced with a DRA ResourceClaim for shared GPU access.
-	Enabled bool `json:"enabled"`
 	// Mode selects the GMS deployment topology.
 	// +kubebuilder:default=intraPod
 	// +kubebuilder:validation:Enum=intraPod;interPod
@@ -201,17 +204,23 @@ type GPUMemoryServiceSpec struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// Requires `experimental.gpuMemoryService.enabled` and the
-// `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+// Setting `experimental.failover` opts the service into failover mode: the main
+// container is cloned into two engine containers (active + standby) sharing
+// GPUs via DRA, and the standby acquires the flock when the active engine
+// fails. Omitting the field disables failover. Failover requires that
+// `experimental.gpuMemoryService` is also set, and `failover.mode` must match
+// `gpuMemoryService.mode` (enforced by the validation webhook). Also requires
+// the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+// The v1alpha1 `enabled` flag is dropped here to follow the standard Kubernetes
+// pattern of "presence == opt-in"; conversion from v1alpha1 maps
+// `enabled:false` (with or without a populated payload) to an absent field,
+// with the original payload preserved via an origin annotation when present.
 //
 // Exposed under `DynamoComponentDeploymentSharedSpec.Experimental.Failover`
 // in v1beta1 -- see ExperimentalSpec for the stability caveat.
 type FailoverSpec struct {
-	// Enabled activates failover mode. The main container is cloned into two
-	// engine containers (active + standby) sharing GPUs via DRA. The standby
-	// acquires the flock when the active engine fails.
-	Enabled bool `json:"enabled"`
-	// Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
+	// Mode selects the failover deployment topology. Must match
+	// `experimental.gpuMemoryService.mode`.
 	// +kubebuilder:default=intraPod
 	// +kubebuilder:validation:Enum=intraPod;interPod
 	// +optional
@@ -237,13 +246,14 @@ const (
 )
 
 // ServiceCheckpointConfig configures checkpointing for a DGD service.
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
+// Setting `experimental.checkpoint` opts the service into checkpointing.
+// Omitting the field disables it. The v1alpha1 `enabled` flag is dropped here
+// to follow the standard Kubernetes pattern of "presence == opt-in";
+// conversion from v1alpha1 maps `enabled:false` (with or without a populated
+// payload) to an absent field, with the original payload preserved via an
+// origin annotation when present.
+// +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When checkpoint is configured, either checkpointRef or both identity.model and identity.backendFramework must be specified"
 type ServiceCheckpointConfig struct {
-	// Enabled indicates whether checkpointing is enabled for this service.
-	// +optional
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-
 	// Mode defines how checkpoint creation is handled.
 	// Auto: DGD controller creates the DynamoCheckpoint CR automatically.
 	// Manual: user must create the DynamoCheckpoint CR.

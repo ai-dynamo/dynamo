@@ -95,8 +95,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
 	// Replicas is the desired number of Pods for this component.
-	// When ScalingAdapter.Enabled is true, this field is managed by the
-	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+	// When `scalingAdapter` is set on this service, this field is managed by
+	// the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
@@ -118,10 +118,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
-	// ScalingAdapter configures whether this service uses the
-	// DynamoGraphDeploymentScalingAdapter. When enabled, a DGDSA is created and
-	// owns the `replicas` field so external autoscalers (HPA/KEDA/Planner) can
-	// drive scaling via the Scale subresource.
+	// ScalingAdapter opts this service into using the
+	// DynamoGraphDeploymentScalingAdapter. When set (even as `scalingAdapter: {}`),
+	// a DGDSA is created and owns the `replicas` field so external autoscalers
+	// (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the
+	// field to opt out. The struct is currently empty -- v1alpha1's `Enabled`
+	// bool was redundant with field presence -- but is intentionally kept as a
+	// struct so that future per-service DGDSA configuration knobs can be added
+	// without another API break.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
