@@ -22,7 +22,8 @@ from tests.gpu_memory_service.flow_assertions import (
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
-pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
+# TODO: revert to nightly once pre-merge validates the GMS->kvbm cleanup fix.
+pytestmark = [pytest.mark.pre_merge, pytest.mark.fault_tolerance]
 
 # Event flow under test:
 # 1. Weights are published once as a committed layout.
