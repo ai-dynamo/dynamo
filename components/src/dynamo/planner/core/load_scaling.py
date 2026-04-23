@@ -135,31 +135,53 @@ class LoadScalingMixin:
             return None
 
         easy = self._config.optimization_target != "sla"
-        p_desired = (
-            (
+
+        # Sub-decisions may set self._diag_load_reason to an informative
+        # value (e.g. "insufficient_data") before returning None. The
+        # per-component aggregation below only emits {scale_up,
+        # scale_down, scale_down_capped_by_throughput, no_change}, which
+        # would silently overwrite them. Isolate each component's
+        # contribution so both can be restored in the no-scaling-needed
+        # branch; otherwise sequential sub-decision calls would clobber
+        # each other on the shared field.
+        p_reason: Optional[str] = None
+        p_desired: Optional[int] = None
+        if p_stats:
+            self._diag_load_reason = None
+            p_desired = (
                 self._prefill_easy_decision(p_stats, self._num_p_workers)
                 if easy
                 else self._prefill_load_decision(p_stats, self._num_p_workers)
             )
-            if p_stats
-            else None
-        )
-        d_desired = (
-            (
+            p_reason = self._diag_load_reason
+
+        d_reason: Optional[str] = None
+        d_desired: Optional[int] = None
+        if d_stats:
+            self._diag_load_reason = None
+            d_desired = (
                 self._decode_easy_decision(d_stats, self._num_d_workers)
                 if easy
                 else self._decode_load_decision(d_stats, self._num_d_workers)
             )
-            if d_stats
-            else None
-        )
+            d_reason = self._diag_load_reason
 
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
-            self._diag_load_reason = "no_change"
+            # Preserve the informative sub-decision reason (e.g.
+            # "insufficient_data" when context_length is missing) so the
+            # Enum gauge and HTML timeline reflect the real decision
+            # path instead of a blanket "no_change". Prefer prefill over
+            # decode when both sides stalled.
+            picked = None
+            for candidate in (p_reason, d_reason):
+                if candidate is not None and candidate != "no_change":
+                    picked = candidate
+                    break
+            self._diag_load_reason = picked or "no_change"
             return None
 
         original_p, original_d = final_p, final_d

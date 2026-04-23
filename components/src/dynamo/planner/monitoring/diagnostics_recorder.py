@@ -207,7 +207,7 @@ class DiagnosticsRecorder:
         ]
 
         fig = make_subplots(
-            rows=6,
+            rows=7,
             cols=2,
             subplot_titles=(
                 "Replica Counts",
@@ -222,6 +222,8 @@ class DiagnosticsRecorder:
                 "Sequence Lengths (Observed vs Predicted)",
                 "Load Scaling Decisions",
                 "Throughput Scaling Decisions",
+                "Cumulative GPU Hours",
+                "",
             ),
             vertical_spacing=0.055,
             horizontal_spacing=0.08,
@@ -552,6 +554,18 @@ class DiagnosticsRecorder:
             col=2,
         )
 
+        # -- Row 7: Cumulative GPU hours ---------------------------------
+        fig.add_trace(
+            go.Scatter(
+                x=labels,
+                y=_vals("gpu_hours"),
+                name="Cumulative GPU Hours",
+                mode="lines+markers",
+            ),
+            row=7,
+            col=1,
+        )
+
         # -- Layout -------------------------------------------------------
 
         num_scaling_events = sum(
@@ -574,7 +588,7 @@ class DiagnosticsRecorder:
         )
         fig.update_layout(
             title=dict(text=summary, font=dict(size=14), y=0.99, yanchor="top"),
-            height=2000,
+            height=2300,
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=-0.03),
             template="plotly_white",
