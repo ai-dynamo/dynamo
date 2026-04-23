@@ -140,9 +140,6 @@ const (
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
 
-	// Environment variables injected into pods
-	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
-
 	// Pod identity (Downward API) ---
 	// After CRIU restore, env vars contain stale values from the checkpoint pod.
 	// The Downward API files at /etc/podinfo always reflect the current pod.

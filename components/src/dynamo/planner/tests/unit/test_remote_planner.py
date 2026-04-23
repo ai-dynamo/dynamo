@@ -16,7 +16,8 @@ from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.connectors.remote_client import RemotePlannerClient
-from dynamo.planner.errors import EmptyTargetReplicasError
+from dynamo.planner.errors import DeploymentValidationError, EmptyTargetReplicasError
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 
 async def _async_responses(*items):
@@ -330,15 +331,80 @@ async def test_connector_unsupported_and_noop_operations(connector):
 
 
 def test_connector_model_name_and_predicted_load(connector_runtime):
-    """Test GlobalPlannerConnector model name and predicted load tracking"""
-    # With model name
+    """Test GlobalPlannerConnector model name and predicted load tracking.
+
+    The ``model_name=None`` branch forces KubernetesConnector init to raise
+    so the connector falls back to the "managed-remotely" placeholder
+    deterministically, independent of the caller's kube config.
+    """
+    # With model name — local connector is never consulted.
     c1 = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
     assert c1.get_model_name() == "test"
 
-    # Without model name
-    c2 = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name=None)
-    assert c2.get_model_name() == "managed-remotely"
+    # Without model name — force the local connector init to fail so we
+    # exercise the fallback deterministically.
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c2 = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name=None
+        )
+        assert c2.get_model_name() == "managed-remotely"
 
     # Predicted load
     c1.set_predicted_load(42.0, 256.0, 128.0)
     assert c1.last_predicted_load == {"num_requests": 42.0, "isl": 256.0, "osl": 128.0}
+
+
+def test_connector_get_worker_info_delegates_to_local_k8s(connector_runtime):
+    """get_worker_info should delegate to a pool-local KubernetesConnector
+    so that MDC-populated capabilities (context_length, max_kv_tokens, ...)
+    reach load-scaling under environment=global-planner.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    mdc_info = WorkerInfo(
+        k8s_name="VllmPrefillWorker",
+        component_name="prefill",
+        endpoint="generate",
+        context_length=32768,
+        total_kv_blocks=1000,
+        kv_cache_block_size=16,
+    )
+    fake_local = MagicMock()
+    fake_local.get_worker_info = MagicMock(return_value=mdc_info)
+    fake_local.get_model_name = MagicMock(return_value="Qwen/Qwen3-8B")
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    info = c.get_worker_info(SubComponentType.PREFILL, backend="vllm")
+    assert info.context_length == 32768
+    assert info.max_kv_tokens == 16000
+    fake_local.get_worker_info.assert_called_once_with(SubComponentType.PREFILL, "vllm")
+
+    # get_model_name should prefer the init-time value and not call the
+    # local connector when one was provided.
+    assert c.get_model_name() == "test"
+    fake_local.get_model_name.assert_not_called()
+
+
+def test_connector_get_worker_info_falls_back_on_local_init_failure(connector_runtime):
+    """If the pool-local KubernetesConnector can't be created (e.g. outside
+    a cluster), get_worker_info should fall back to hard-coded defaults
+    rather than raising. Forces the init failure explicitly so the test
+    doesn't depend on the caller's kube config.
+    """
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name="test"
+        )
+        info = c.get_worker_info(SubComponentType.PREFILL, backend="vllm")
+
+    # Defaults populate component identifiers but leave capability fields
+    # unset — callers use this to detect "no MDC" without crashing.
+    assert info.context_length is None
+    assert info.max_kv_tokens is None
+    assert info.component_name is not None
