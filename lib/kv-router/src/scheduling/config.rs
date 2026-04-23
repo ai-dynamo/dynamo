@@ -35,6 +35,14 @@ pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     }
 }
 
+const fn default_host_cache_hit_weight() -> f64 {
+    0.75
+}
+
+const fn default_disk_cache_hit_weight() -> f64 {
+    0.25
+}
+
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +178,14 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
 
+    #[serde(default = "default_host_cache_hit_weight")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub host_cache_hit_weight: f64,
+
+    #[serde(default = "default_disk_cache_hit_weight")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub disk_cache_hit_weight: f64,
+
     #[validate(range(min = 0.0))]
     pub router_temperature: f64,
 
@@ -269,6 +285,8 @@ impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
+            host_cache_hit_weight: default_host_cache_hit_weight(),
+            disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
             use_kv_events: true,
             durable_kv_events: false, // default to NATS Core (local indexer mode)
