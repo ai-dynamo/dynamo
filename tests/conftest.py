@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 import tempfile
-import warnings
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -406,9 +405,9 @@ def predownload_models(pytestconfig, _models_dir_env):
     if pytestconfig.getoption("--models-dir"):
         missing = _missing_from_hf_cache(list(models)) if models else []
         for m in missing:
-            warnings.warn(
-                f"Model '{m}' not found in --models-dir cache; downloading from network.",
-                stacklevel=2,
+            logging.warning(
+                "Model '%s' not found in --models-dir cache; downloading from network.",
+                m,
             )
         with FileLock(_download_lock_path):
             if missing:
@@ -453,9 +452,9 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
     if pytestconfig.getoption("--models-dir"):
         missing = _missing_from_hf_cache(list(models)) if models else []
         for m in missing:
-            warnings.warn(
-                f"Model '{m}' tokenizer not found in --models-dir cache; downloading from network.",
-                stacklevel=2,
+            logging.warning(
+                "Model '%s' tokenizer not found in --models-dir cache; downloading from network.",
+                m,
             )
         with FileLock(_download_lock_path):
             if missing:
