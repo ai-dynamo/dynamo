@@ -78,6 +78,9 @@ COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /usr/bin/tail /bin/tail
 COPY --from=planner_builder /usr/bin/env /bin/env
+COPY --from=planner_builder /bin/tar /bin/tar
+COPY --from=planner_builder /bin/cat /bin/cat
+COPY --from=planner_builder /bin/grep /bin/grep
 COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
 COPY --chown=1000:0 --from=planner_builder /home/dynamo /home/dynamo
 COPY --chown=1000:0 --from=planner_builder /opt/dynamo/venv /opt/dynamo/venv
