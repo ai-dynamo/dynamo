@@ -118,6 +118,19 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # DYNAMO RUNTIME PIPELINE
+  # ============================================================================
+  dynamo-pipeline:
+    name: dynamo-runtime
+    uses: ./.github/workflows/dynamo-pipeline.yml
+    with:
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      cpu_parallel_test_markers: '(pre_merge or post_merge) and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: '(pre_merge or post_merge) and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      gpu_test_markers: '(pre_merge or post_merge) and none and gpu_1'
+    secrets: inherit
+
+  # ============================================================================
   # DEV PIPELINES
   # ============================================================================
   vllm-dev-pipeline:
@@ -434,7 +447,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -455,7 +468,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
+    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:

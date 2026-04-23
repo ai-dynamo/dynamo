@@ -120,13 +120,30 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # DYNAMO RUNTIME PIPELINE
+  # ============================================================================
+  dynamo-pipeline:
+    name: dynamo-runtime
+    needs: [create-fresh-builder]
+    uses: ./.github/workflows/dynamo-pipeline.yml
+    with:
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      fresh_builder: true
+      no_cache: true
+      build_timeout_minutes: 90
+      cpu_parallel_test_markers: 'parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      gpu_test_markers: 'none and gpu_1'
+    secrets: inherit
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-pipeline, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -149,7 +166,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-pipeline ]
     permissions:
       contents: read
     steps:

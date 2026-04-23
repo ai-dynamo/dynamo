@@ -37,59 +37,49 @@ fn softmax_sample_with_sample(
     temperature: f64,
     sample: f64,
 ) -> (WorkerWithDpRank, f64) {
-    if logits.is_empty() {
-        panic!("Empty logits for softmax sampling");
-    }
+    assert!(!logits.is_empty(), "Empty logits for softmax sampling");
 
-    // Guard: at zero temperature, return a minimum-logit worker directly.
     if temperature == 0.0 {
-        let mut logit_iter = logits.iter();
-        let (first_key, first_logit) = logit_iter.next().unwrap();
-
-        let mut min_logit = first_logit;
-        let mut min_key = first_key;
-        for (key, logit) in logit_iter {
-            if logit < min_logit {
-                min_logit = logit;
-                min_key = key;
-            }
-        }
-
-        return (*min_key, *min_logit);
+        let (worker, logit) = logits
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .expect("logits non-empty");
+        return (*worker, *logit);
     }
 
-    let entries: Vec<_> = logits
+    let entries: Vec<(WorkerWithDpRank, f64)> = logits.iter().map(|(w, l)| (*w, *l)).collect();
+
+    let (min_val, max_val) = entries
         .iter()
-        .map(|(worker, logit)| (*worker, *logit))
-        .collect();
-    let values: Vec<_> = entries.iter().map(|(_, logit)| *logit).collect();
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, v)| {
+            (lo.min(*v), hi.max(*v))
+        });
 
-    let min_val = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_val = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-    let probabilities = if min_val == max_val {
+    let mut probs = if min_val == max_val {
         vec![1.0 / entries.len() as f64; entries.len()]
     } else {
-        // Fused normalize -> negate -> scale -> exp, then normalize probabilities
-        let range = max_val - min_val;
-        let scaled: Vec<f64> = values.iter().map(|&v| -(v / range) / temperature).collect();
-        let max_scaled = scaled.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let mut probs: Vec<f64> = scaled.iter().map(|&v| (v - max_scaled).exp()).collect();
-        let sum: f64 = probs.iter().sum();
-        probs.iter_mut().for_each(|p| *p /= sum);
-        probs
+        // Negate logits and rescale to [−1/temperature, 0] for numerical stability
+        // before softmax. Subtracting the max (which maps to min_val) keeps exp() inputs ≤ 0.
+        let scale = -1.0 / ((max_val - min_val) * temperature);
+        let max_scaled = min_val * scale;
+        entries
+            .iter()
+            .map(|(_, v)| (v * scale - max_scaled).exp())
+            .collect::<Vec<f64>>()
     };
 
+    let sum: f64 = probs.iter().sum();
+    probs.iter_mut().for_each(|p| *p /= sum);
+
     let mut cumsum = 0.0;
-    for (i, &prob) in probabilities.iter().enumerate() {
+    for (i, &prob) in probs.iter().enumerate() {
         cumsum += prob;
         if sample <= cumsum {
             return entries[i];
         }
     }
 
-    // Fallback to last key (shouldn't normally reach here)
-    entries[entries.len() - 1]
+    *entries.last().unwrap()
 }
 
 /// Default implementation matching the Python _cost_function.
@@ -97,12 +87,6 @@ fn softmax_sample_with_sample(
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
     pub worker_type: &'static str,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WorkerScore {
-    overlap_blocks: u32,
-    logit: f64,
 }
 
 impl DefaultWorkerSelector {
@@ -113,7 +97,7 @@ impl DefaultWorkerSelector {
         }
     }
 
-    fn worker_score(
+    fn worker_logit(
         &self,
         request: &SchedulingRequest,
         worker: WorkerWithDpRank,
@@ -121,9 +105,16 @@ impl DefaultWorkerSelector {
         overlap_weight: f64,
         shared_cache_multiplier: f64,
         formula_name: &'static str,
-    ) -> WorkerScore {
+    ) -> f64 {
         let isl = request.isl_tokens;
-        let overlap_blocks = request.overlaps.scores.get(&worker).copied().unwrap_or(0);
+        let effective_overlap_blocks = request
+            .effective_overlap_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(0.0);
+        // `shared_cache_hits::hits_beyond` expects an integer block count, so
+        // round the weighted overlap for this comparison only.
+        let device_overlap_blocks = effective_overlap_blocks.round().max(0.0) as u32;
         let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
         let prefill_token = request
             .prefill_tokens
@@ -134,7 +125,7 @@ impl DefaultWorkerSelector {
         // Adjust prefill tokens by shared cache hits beyond this worker's device prefix.
         let (adjusted_prefill_token, shared_beyond) =
             if let Some(ref shared_hits) = request.shared_cache_hits {
-                let beyond = shared_hits.hits_beyond(overlap_blocks);
+                let beyond = shared_hits.hits_beyond(device_overlap_blocks);
                 let reduction = shared_cache_multiplier * (beyond as f64) * (block_size as f64);
                 let adjusted = (prefill_token as f64 - reduction).max(0.0) as usize;
                 (adjusted, beyond)
@@ -153,7 +144,7 @@ impl DefaultWorkerSelector {
 
         if shared_beyond > 0 {
             tracing::debug!(
-                "{formula_name} for worker_id={} dp_rank={:?} with {overlap_blocks} device blocks, \
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective device blocks, \
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = {overlap_weight:.1} * adjusted_prefill_blocks + decode_blocks \
                  = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3} \
@@ -163,7 +154,7 @@ impl DefaultWorkerSelector {
             );
         } else {
             tracing::debug!(
-                "{formula_name} for worker_id={} dp_rank={:?} with {overlap_blocks} cached blocks: {logit:.3} \
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = {overlap_weight:.1} * prefill_blocks + decode_blocks \
                  = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
                 worker.worker_id,
@@ -171,10 +162,7 @@ impl DefaultWorkerSelector {
             );
         }
 
-        WorkerScore {
-            overlap_blocks,
-            logit,
-        }
+        logit
     }
 }
 
@@ -201,7 +189,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let isl = request.isl_tokens;
         let request_blocks = isl.div_ceil(block_size as usize);
-        let overlaps = &request.overlaps.scores;
 
         let overlap_weight = request
             .router_config_override
@@ -218,7 +205,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         if let Some(worker) = pinned_worker {
             pinned_worker_config(workers, worker)?;
 
-            let score = self.worker_score(
+            let logit = self.worker_logit(
                 request,
                 worker,
                 block_size,
@@ -226,11 +213,31 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 shared_cache_multiplier,
                 "Pinned formula",
             );
+            let effective_overlap_blocks = request
+                .effective_overlap_blocks
+                .get(&worker)
+                .copied()
+                .unwrap_or(0.0);
+            let cached_tokens = request
+                .effective_cached_tokens
+                .get(&worker)
+                .copied()
+                .unwrap_or(0);
+
+            tracing::info!(
+                "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
+                self.worker_type,
+                worker.worker_id,
+                worker.dp_rank,
+                logit,
+                effective_overlap_blocks,
+            );
 
             return Ok(WorkerSelectionResult {
                 worker,
                 required_blocks: request_blocks as u64,
-                overlap_blocks: score.overlap_blocks,
+                effective_overlap_blocks,
+                cached_tokens,
             });
         }
 
@@ -241,7 +248,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(self.kv_router_config.router_temperature);
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            self.worker_score(
+            self.worker_logit(
                 request,
                 worker,
                 block_size,
@@ -249,7 +256,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 shared_cache_multiplier,
                 "Formula",
             )
-            .logit
         };
 
         let worker_iter = workers
@@ -282,7 +288,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 );
                 let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = min_workers
                     .iter()
-                    .map(|w| (request.overlaps.tree_sizes.get(w).copied().unwrap_or(0), w))
+                    .map(|w| (request.tree_sizes.get(w).copied().unwrap_or(0), w))
                     .collect();
 
                 if tree_sizes.iter().all(|(s, _)| *s == tree_sizes[0].0) {
@@ -305,22 +311,58 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             softmax_sample(&worker_logits, temperature)
         };
 
+        let best_host_pinned_overlap_blocks = request
+            .tier_overlap_blocks
+            .host_pinned
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0);
+        let best_disk_overlap_blocks = request
+            .tier_overlap_blocks
+            .disk
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0);
+
         if self.worker_type == "decode" {
             tracing::info!(
-                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}",
+                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, host_pinned blocks: {}, disk blocks: {}",
                 self.worker_type,
                 best_worker.worker_id,
                 best_worker.dp_rank,
                 best_logit,
+                best_host_pinned_overlap_blocks,
+                best_disk_overlap_blocks,
             );
+            let effective_overlap_blocks = request
+                .effective_overlap_blocks
+                .get(&best_worker)
+                .copied()
+                .unwrap_or(0.0);
+            let cached_tokens = request
+                .effective_cached_tokens
+                .get(&best_worker)
+                .copied()
+                .unwrap_or(0);
+
             return Ok(WorkerSelectionResult {
                 worker: best_worker,
                 required_blocks: request_blocks as u64,
-                overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+                effective_overlap_blocks,
+                cached_tokens,
             });
         }
 
-        let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
+        let best_overlap = request
+            .effective_overlap_blocks
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0.0);
+        let best_cached_tokens = request
+            .effective_cached_tokens
+            .get(&best_worker)
+            .copied()
+            .unwrap_or(0);
 
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
@@ -328,20 +370,17 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .map(|blocks| format!(", total blocks: {}", blocks))
             .unwrap_or_default();
 
-        let tree_size = request
-            .overlaps
-            .tree_sizes
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
+        let tree_size = request.tree_sizes.get(&best_worker).copied().unwrap_or(0);
 
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
+            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}, tree size: {}{}",
             self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,
             best_logit,
             best_overlap,
+            best_host_pinned_overlap_blocks,
+            best_disk_overlap_blocks,
             tree_size,
             total_blocks_info
         );
@@ -349,7 +388,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         Ok(WorkerSelectionResult {
             worker: best_worker,
             required_blocks: request_blocks as u64,
-            overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
+            effective_overlap_blocks: best_overlap,
+            cached_tokens: best_cached_tokens,
         })
     }
 }
@@ -479,7 +519,6 @@ mod tests {
     /// Worker 1 has lower logit (less work), so it wins.
     #[test]
     fn test_shared_cache_hits_scoring() {
-        use crate::protocols::OverlapScores;
         use crate::test_utils::SimpleWorkerConfig;
 
         let block_size = 1u32;
@@ -487,8 +526,8 @@ mod tests {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
 
-        let mut overlaps = OverlapScores::new();
-        overlaps.scores.insert(worker0, 2);
+        let mut effective_overlap_blocks = HashMap::new();
+        effective_overlap_blocks.insert(worker0, 2.0);
         // worker1 has 0 overlap (not in map)
 
         #[allow(clippy::single_range_in_vec_init)]
@@ -511,7 +550,10 @@ mod tests {
             maybe_request_id: Some("test".into()),
             token_seq: None,
             isl_tokens: isl,
-            overlaps,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks,
+            effective_cached_tokens: HashMap::new(),
+            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -540,15 +582,14 @@ mod tests {
     /// Without shared cache hits, the scoring should be unchanged.
     #[test]
     fn test_no_shared_cache_unchanged() {
-        use crate::protocols::OverlapScores;
         use crate::test_utils::SimpleWorkerConfig;
 
         let block_size = 16u32;
         let isl = 64usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
 
-        let mut overlaps = OverlapScores::new();
-        overlaps.scores.insert(worker0, 2);
+        let mut effective_overlap_blocks = HashMap::new();
+        effective_overlap_blocks.insert(worker0, 2.0);
 
         let config = KvRouterConfig::default();
         let selector = DefaultWorkerSelector::new(Some(config), "test");
@@ -560,7 +601,10 @@ mod tests {
             maybe_request_id: Some("test".into()),
             token_seq: None,
             isl_tokens: isl,
-            overlaps,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks,
+            effective_cached_tokens: HashMap::new(),
+            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
