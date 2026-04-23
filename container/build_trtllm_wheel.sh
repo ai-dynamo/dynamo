@@ -40,9 +40,12 @@ if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="/tmp/trtllm_wheel"
 fi
 
-# Set default TensorRT-LLM git URL if not specified
+# Set default TensorRT-LLM git URL if not specified.
+# Default points at the galletas1712 fork because the Kimi K2.5 + Eagle3
+# shadow-failover proof pins the runtime image to a fork-only commit
+# (see container/context.yaml::trtllm.github_trtllm_commit).
 if [ -z "$TRTLLM_GIT_URL" ]; then
-    TRTLLM_GIT_URL="https://github.com/NVIDIA/TensorRT-LLM.git"
+    TRTLLM_GIT_URL="https://github.com/galletas1712/TensorRT-LLM.git"
 fi
 
 # Store directory where script is being launched from
