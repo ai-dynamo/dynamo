@@ -155,7 +155,7 @@ mod tests {
     }
 
     impl TestTensor {
-        fn new(shape: Vec<usize>) -> Arc<dyn TensorDescriptor> {
+        fn arc(shape: Vec<usize>) -> Arc<dyn TensorDescriptor> {
             // Row-major strides (unused by layout inference, but the trait requires them).
             let mut stride = vec![1usize; shape.len()];
             for i in (0..shape.len().saturating_sub(1)).rev() {
@@ -196,7 +196,7 @@ mod tests {
     }
 
     fn layers(shape: Vec<usize>, n: usize) -> Vec<Arc<dyn TensorDescriptor>> {
-        (0..n).map(|_| TestTensor::new(shape.clone())).collect()
+        (0..n).map(|_| TestTensor::arc(shape.clone())).collect()
     }
 
     /// Standard 4D cache with K/V split, block-first: [n_blocks, 2, page_size, inner_dim].
