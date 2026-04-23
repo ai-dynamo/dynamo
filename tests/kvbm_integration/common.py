@@ -621,9 +621,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
 
     def _diag_run(cmd):
         try:
-            return _diag_sp.run(
-                cmd, capture_output=True, text=True, timeout=10
-            ).stdout
+            return _diag_sp.run(cmd, capture_output=True, text=True, timeout=10).stdout
         except Exception as exc:
             return f"(failed: {exc})"
 
@@ -653,7 +651,11 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     print("--- fuser /dev/nvidia* ---")
     print(_diag_run(["fuser", "-v", "/dev/nvidia0", "/dev/nvidiactl"]))
     print("--- ps -ef | grep python/vllm ---")
-    print(_diag_run(["bash", "-c", "ps -ef | grep -iE 'python|vllm|engine' | grep -v grep"]))
+    print(
+        _diag_run(
+            ["bash", "-c", "ps -ef | grep -iE 'python|vllm|engine' | grep -v grep"]
+        )
+    )
     print("=== [kvbm-diag] end ===\n", flush=True)
 
     # Start server with ManagedProcess
