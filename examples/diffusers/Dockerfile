@@ -30,8 +30,8 @@ RUN git clone https://github.com/RandNMR73/flash-attention \
  && rm -rf ../flash-attention
 
 # Install Dynamo with /v1/videos support.
-RUN uv pip install 'git+https://github.com/ai-dynamo/dynamo@release/1.0.0#subdirectory=lib/bindings/python' \
- && uv pip install 'git+https://github.com/ai-dynamo/dynamo@release/1.0.0'
+RUN uv pip install 'git+https://github.com/ai-dynamo/dynamo@release/1.0.2#subdirectory=lib/bindings/python' \
+ && uv pip install 'git+https://github.com/ai-dynamo/dynamo@release/1.0.2'
 
 # Install FastVideo directly from the public upstream repository.
 # Checkout with --recurse-submodules to get the required submodules as well.

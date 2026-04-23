@@ -22,7 +22,7 @@ spec:
   identity:
     model: "meta-llama/Meta-Llama-3-8B-Instruct"
     backendFramework: "vllm"
-    dynamoVersion: "0.6.0"
+    dynamoVersion: "1.0.2"
     tensorParallelSize: 1
     pipelineParallelSize: 1
     dtype: "bfloat16"

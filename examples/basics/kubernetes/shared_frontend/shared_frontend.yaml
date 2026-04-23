@@ -23,7 +23,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -46,7 +46,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
@@ -73,7 +73,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh
@@ -92,7 +92,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh
@@ -111,7 +111,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh

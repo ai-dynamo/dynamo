@@ -223,7 +223,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           imagePullPolicy: IfNotPresent
 
     VLLMWorker:
@@ -243,7 +243,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           command:
@@ -459,7 +459,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           imagePullPolicy: IfNotPresent
 
     VLLMPrefillWorker:
@@ -486,7 +486,7 @@ spec:
           value: "0"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -534,7 +534,7 @@ spec:
           value: "0"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           securityContext:

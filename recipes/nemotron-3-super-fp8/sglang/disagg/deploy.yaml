@@ -34,7 +34,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
           command:
             - /bin/sh
             - -c
@@ -57,7 +57,7 @@ spec:
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
           workingDir: /workspace
           command:
             - python3
@@ -100,7 +100,7 @@ spec:
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
           workingDir: /workspace
           command:
             - python3
