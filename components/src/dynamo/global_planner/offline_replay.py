@@ -205,6 +205,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pool topology per DGD. agg=one 'decode' pool; disagg=prefill+decode.",
     )
     parser.add_argument(
+        "--split-disagg",
+        action="store_true",
+        help=(
+            "In disagg mode, send prefill and decode as SEPARATE ScaleRequests "
+            "to simulate split-mode local planners (one planner per pool). "
+            "This exercises the intra-DGD pair path: one pool's intent gets "
+            "cached, the other pool's request then pairs with it."
+        ),
+    )
+    parser.add_argument(
         "--min-total-gpus",
         type=int,
         default=-1,
@@ -315,6 +325,34 @@ async def _run(args: argparse.Namespace) -> int:
         sh_logger.addHandler(stream)
     sh_logger.setLevel(logging.INFO)
 
+    async def _fire(name: str, targets: list[TargetReplica]) -> str:
+        """Emit one ScaleRequest and return the classified outcome."""
+        conn = connectors[name]
+        if all(
+            conn._state[t.sub_component_type.value][0] == t.desired_replicas
+            for t in targets
+        ):
+            return "stable_skipped"
+        capture.last_decision = None
+        req = ScaleRequest(
+            caller_namespace=f"default-{name}",
+            graph_deployment_name=name,
+            k8s_namespace="default",
+            target_replicas=targets,
+        )
+        results = []
+        async for r in handler.scale_request(req.model_dump()):
+            results.append(r)
+        response = results[0] if results else {"status": "none", "message": ""}
+        if response["status"] == "error":
+            msg = response["message"].lower()
+            if "below floor" in msg:
+                return "denied_floor"
+            if "ceiling" in msg or "exceeds" in msg:
+                return "denied_ceiling"
+            return "denied_other"
+        return capture.last_decision or "standalone"
+
     outcomes: Counter[str] = Counter()
     per_tick_events: list[dict] = []
     initial_total = sum(c.total_gpus for c in connectors.values())
@@ -330,73 +368,54 @@ async def _run(args: argparse.Namespace) -> int:
             conn = connectors[name]
             if args.mode == "agg":
                 desired = _desired_replicas(per_dgd, args.capacity_per_replica, 1)
-                targets = [
+                target_groups = [[
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,
                         desired_replicas=desired,
                     )
-                ]
+                ]]
             else:
                 half = per_dgd // 2
-                targets = [
-                    TargetReplica(
-                        sub_component_type=SubComponentType.PREFILL,
-                        desired_replicas=_desired_replicas(
-                            half, args.capacity_per_replica, 1
-                        ),
+                prefill_target = TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    desired_replicas=_desired_replicas(
+                        half, args.capacity_per_replica, 1
                     ),
-                    TargetReplica(
-                        sub_component_type=SubComponentType.DECODE,
-                        desired_replicas=_desired_replicas(
-                            half, args.capacity_per_replica, 1
-                        ),
+                )
+                decode_target = TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    desired_replicas=_desired_replicas(
+                        half, args.capacity_per_replica, 1
                     ),
-                ]
-
-            # Skip no-op requests (desired == current for every pool).
-            if all(
-                conn._state[t.sub_component_type.value][0] == t.desired_replicas
-                for t in targets
-            ):
-                outcomes["stable_skipped"] += 1
-                continue
-
-            capture.last_decision = None
-            req = ScaleRequest(
-                caller_namespace=f"default-{name}",
-                graph_deployment_name=name,
-                k8s_namespace="default",
-                target_replicas=targets,
-            )
-            results = []
-            async for r in handler.scale_request(req.model_dump()):
-                results.append(r)
-            response = results[0] if results else {"status": "none", "message": ""}
-
-            if response["status"] == "error":
-                msg = response["message"].lower()
-                if "below floor" in msg:
-                    decision = "denied_floor"
-                elif "ceiling" in msg or "exceeds" in msg:
-                    decision = "denied_ceiling"
+                )
+                if args.split_disagg:
+                    # Simulate split-mode local planners: one ScaleRequest per
+                    # pool. Alternate ordering by tick so both arrival orders
+                    # are exercised.
+                    if tick_idx % 2 == 0:
+                        target_groups = [[prefill_target], [decode_target]]
+                    else:
+                        target_groups = [[decode_target], [prefill_target]]
                 else:
-                    decision = "denied_other"
-            else:
-                decision = capture.last_decision or "standalone"
+                    # Standard disagg: one ScaleRequest containing both pools.
+                    target_groups = [[prefill_target, decode_target]]
 
-            outcomes[decision] += 1
-            per_tick_events.append(
-                {
-                    "tick": tick,
-                    "dgd": name,
-                    "n_requests_in_tick": per_dgd,
-                    "desired": {
-                        t.sub_component_type.value: t.desired_replicas for t in targets
-                    },
-                    "decision": decision,
-                    "state_after": dict(conn.replicas),
-                }
-            )
+            for targets in target_groups:
+                decision = await _fire(name, targets)
+                outcomes[decision] += 1
+                per_tick_events.append(
+                    {
+                        "tick": tick,
+                        "dgd": name,
+                        "n_requests_in_tick": per_dgd,
+                        "desired": {
+                            t.sub_component_type.value: t.desired_replicas
+                            for t in targets
+                        },
+                        "decision": decision,
+                        "state_after": dict(conn.replicas),
+                    }
+                )
 
     # Summary
     final_total = sum(c.total_gpus for c in connectors.values())
