@@ -373,16 +373,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         image_urls, video_urls = self._extract_media_urls(raw_request)
 
         # Build MultiModalGroup objects for the downstream SglangMultimodalRequest.
-        multimodal_groups = (
-            [
-                MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
-                for url in image_urls
-            ]
-            + [
-                MultiModalGroup(multimodal_input=MultiModalInput(video_url=url))
-                for url in video_urls
-            ]
-        )
+        multimodal_groups = [
+            MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
+            for url in image_urls
+        ] + [
+            MultiModalGroup(multimodal_input=MultiModalInput(video_url=url))
+            for url in video_urls
+        ]
         preprocessed_request = PreprocessedRequest.model_validate(raw_request)
 
         # Build SglangMultimodalRequest from the pre-tokenized request
