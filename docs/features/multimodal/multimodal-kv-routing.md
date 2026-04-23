@@ -7,7 +7,7 @@ subtitle: Route multimodal requests to workers with the best KV cache overlap
 
 ## Overview
 
-Multimodal KV routing extends Dynamo's KV-aware router to account for image content when computing cache overlap scores. The frontend runs vLLM's HF image processor to compute a hash of each image (`mm_hash`) and includes this hash in per-block routing metadata. The KV router then selects the backend worker with the highest cache overlap, including overlap on image embedding blocks.
+Multimodal KV routing extends Dynamo's KV-aware router to account for image content when computing cache overlap scores. An image hash (`mm_hash`) is computed per request — by the frontend's vLLM processor for vLLM backends, or by a dedicated MM router worker for TRT-LLM backends — and included in per-block routing metadata. The KV router then selects the backend worker with the highest cache overlap, including overlap on image embedding blocks.
 
 Repeated requests containing the same image are routed to the worker that already has the corresponding KV cache blocks, maximizing prefix cache reuse.
 
@@ -74,6 +74,26 @@ Frontend (round-robin) → MM Router Worker → Backend Workers
 
 For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
 
+## Prerequisites
+
+### Upstream vLLM Patch (vLLM backends only)
+
+MM KV routing on vLLM depends on [vllm-project/vllm#39502](https://github.com/vllm-project/vllm/pull/39502), which exposes `InputProcessor.inject_into_mm_cache()` as a public API for injecting pre-processed `mm_kwargs` into the processor cache. Until that PR merges, apply the patch to your installed vLLM:
+
+```bash
+SITE_PACKAGES_ROOT="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"
+cd "$SITE_PACKAGES_ROOT"
+curl -sL https://github.com/vllm-project/vllm/pull/39502.diff | python3 -c '
+import sys
+chunks = sys.stdin.read().split("diff --git ")
+filtered = [c for c in chunks if c.startswith("a/vllm/")]
+print("".join("diff --git " + c for c in filtered), end="")
+' > /tmp/vllm_pr39502_vllm_only.diff
+patch --dry-run -p1 < /tmp/vllm_pr39502_vllm_only.diff
+patch -p1 < /tmp/vllm_pr39502_vllm_only.diff
+cd -
+```
+
 ## Launching
 
 ### vLLM
@@ -104,15 +124,11 @@ cd $DYNAMO_HOME/examples/backends/trtllm/mm_router_worker
 
 See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
 
-## Transfer Mode Details
+## Transfer Mode Details (vLLM only)
 
-The `DYNAMO_MM_TRANSFER` environment variable controls how the frontend sends pre-processed image data to the backend:
+On vLLM backends, the frontend runs the HF image processor and ships the pre-processed `mm_kwargs` to the selected backend worker so the backend can skip re-processing. The `DYNAMO_MM_TRANSFER` environment variable controls how that payload is transferred. (TRT-LLM does not use this path — its backend workers re-run their own preprocessing, so `DYNAMO_MM_TRANSFER` has no effect there.)
 
-- **`shm`** (default): Uses POSIX shared memory. The frontend writes pickled mm_kwargs to a `/dev/shm` segment (~2ms for a typical image). The backend reads it directly. If the backend can't access the segment (e.g., cross-node), it falls back to re-processing images from URLs.
-- **`nixl`**: Uses NIXL RDMA transfer. Works across nodes via InfiniBand. Higher latency on same-node (~50ms due to UCX TCP fallback) but required for cross-node deployments.
-- **`DYNAMO_DISABLE_NIXL_MM=1`**: Disables all transfer. The backend downloads and processes images itself. Useful for debugging or when transfer overhead exceeds re-processing cost.
-
-## Known Limitations
-
-- Accurate MM cache hit rate metrics require vLLM's `InputProcessor.inject_into_mm_cache()` API (upstream PR pending).
+- **`shm`** (default): POSIX shared memory via a `/dev/shm` segment. Intended for same-node deployments, where frontend and backend share the host filesystem. If the backend can't access the segment (e.g., running on a different node), it falls back to re-processing the image from the URL.
+- **`nixl`**: NIXL RDMA transfer. Required for cross-node deployments where `/dev/shm` is not shared between frontend and backend. Works across nodes over InfiniBand or TCP (whichever UCX selects).
+- **`DYNAMO_DISABLE_NIXL_MM=1`**: Disables pre-processed mm_kwargs transfer entirely. The backend downloads and processes images itself from the original URLs. Useful for debugging or when transfer overhead exceeds re-processing cost.
 
