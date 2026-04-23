@@ -8,13 +8,18 @@ import time
 
 import pytest
 import requests
-from openai import APIError, OpenAI
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
+
+openai = pytest.importorskip(
+    "openai", reason="openai package is required for fault tolerance migration tests"
+)
+APIError = openai.APIError
+OpenAI = openai.OpenAI
 
 logger = logging.getLogger(__name__)
 
