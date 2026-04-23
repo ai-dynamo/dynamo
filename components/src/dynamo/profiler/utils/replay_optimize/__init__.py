@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from . import aic, bench, engine_args, evaluate, scoring, search
+from . import aic, bench, engine_args, evaluate, scoring, search, specs
 from .aic import _enumerate_dense_tp_candidates, _load_aiconfigurator_modules
 from .bench import compare_agg_and_disagg_with_replay, compare_aic_and_replay_disagg
 from .engine_args import (
@@ -11,15 +11,7 @@ from .engine_args import (
     _build_candidate_engine_args,
     _build_router_config,
 )
-from .models import (
-    DenseAggReplayState,
-    DenseReplayOptimizationResult,
-    DenseReplayState,
-    ReplayConstraints,
-    ReplayObjective,
-    SyntheticReplayWorkload,
-    TraceReplayWorkload,
-)
+from .models import DenseAggReplayState, DenseReplayOptimizationResult, DenseReplayState
 from .scoring import _pick_best_record
 from .search import (
     _iter_agg_tp_states_with_max_workers,
@@ -28,6 +20,16 @@ from .search import (
     _iter_tp_states_with_equal_workers,
     optimize_dense_agg_with_replay,
     optimize_dense_disagg_with_replay,
+)
+from .specs import (
+    EngineSpec,
+    HardwareSpec,
+    ReplayObjective,
+    ReplayOptimizeSpec,
+    RouterMode,
+    RouterSpec,
+    SLASpec,
+    WorkloadSpec,
 )
 
 __all__ = [
@@ -46,10 +48,14 @@ __all__ = [
     "DenseAggReplayState",
     "DenseReplayOptimizationResult",
     "DenseReplayState",
-    "ReplayConstraints",
+    "EngineSpec",
+    "HardwareSpec",
     "ReplayObjective",
-    "SyntheticReplayWorkload",
-    "TraceReplayWorkload",
+    "ReplayOptimizeSpec",
+    "RouterMode",
+    "RouterSpec",
+    "SLASpec",
+    "WorkloadSpec",
     "aic",
     "bench",
     "engine_args",
@@ -58,4 +64,5 @@ __all__ = [
     "optimize_dense_disagg_with_replay",
     "scoring",
     "search",
+    "specs",
 ]
