@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-import platform
-
 import pytest
 
 from tests.utils.multimodal import (
@@ -20,29 +17,6 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
 }
-
-
-def _is_cuda12() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    # handles "12", "12.9", etc.
-    return v.startswith("12")
-
-
-def _is_aarch64() -> bool:
-    arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
-    return arch in ("aarch64", "arm64")
-
-
-def _xfail_cuda12_upstream_nixl_disagg():
-    return pytest.mark.xfail(
-        _is_cuda12() and not _is_aarch64(),
-        reason=(
-            "Upstream vllm/vllm-openai CUDA 12.9 image has an unstable "
-            "multi-GPU NIXL/UCX transfer path in CI; CUDA 13 covers the "
-            "upstream-vLLM NIXL path for this PR"
-        ),
-        strict=False,
-    )
 
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -78,8 +52,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
             ),
             "p_d": TopologyConfig(
-                # p_d still exercises NIXL/UCX even when packed into gpu_1 CI.
-                marks=[_xfail_cuda12_upstream_nixl_disagg(), pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 single_gpu=True,
             ),
@@ -165,12 +138,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="llava-1.5-7b",
         topologies={
             "e_pd": TopologyConfig(
-                marks=[_xfail_cuda12_upstream_nixl_disagg(), pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=340,
                 gpu_marker="gpu_4",
             ),
             "epd": TopologyConfig(
-                marks=[_xfail_cuda12_upstream_nixl_disagg(), pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 gpu_marker="gpu_4",
             ),
