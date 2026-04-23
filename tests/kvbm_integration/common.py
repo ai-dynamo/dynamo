@@ -612,6 +612,30 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     if cpu_blocks is not None:
         env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_blocks)
 
+    # DIAGNOSTIC (temp): snapshot GPU processes right before vLLM launch so we
+    # can see who's holding CUDA memory when the fixture fails with
+    # "Free memory on device cuda:0 ... less than desired GPU memory utilization".
+    import subprocess as _diag_sp
+
+    try:
+        _diag = _diag_sp.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        print("\n=== [kvbm-diag] nvidia-smi compute apps BEFORE vllm launch ===")
+        print(_diag.stdout or "(empty)")
+        if _diag.stderr:
+            print(f"(stderr) {_diag.stderr}")
+        print("=== [kvbm-diag] end ===\n", flush=True)
+    except Exception as _diag_exc:
+        print(f"[kvbm-diag] nvidia-smi failed: {_diag_exc}", flush=True)
+
     # Start server with ManagedProcess
     timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
     log_dir = f"{request.node.name}_vllm"
