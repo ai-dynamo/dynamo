@@ -366,7 +366,32 @@ kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines.
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. At the top level, a single-engine simulation drives the engine core (scheduler + forward-pass modeling); a multi-engine simulation composes multiple cores with KV transfer, KV routing, and planner behavior around them.
+
+```mermaid
+flowchart TD
+    subgraph SEC[Single Engine Core]
+        subgraph SCH[Scheduler Modeling]
+            F[Fwd Pass Modeling]
+        end
+    end
+
+    KV[KV Transfer + Offloading Simulation]
+    KR[KV Router Simulation]
+    P[Planner Simulation]
+
+    SES[Single Engine Simulation]
+    MES[Multi Engine Simulation]
+
+    SES --> SEC
+
+    MES --> SEC
+    MES --> KV
+    MES --> KR
+    MES --> P
+```
+
+The subsections below walk each block: the scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core; KV transfer, router, and planner simulation activate only in multi-engine mode. Offline replay internals live in [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md); the user-facing replay harness is documented in [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md).
 
 ### Scheduler
 
