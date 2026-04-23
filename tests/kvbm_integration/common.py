@@ -612,29 +612,49 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     if cpu_blocks is not None:
         env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_blocks)
 
-    # DIAGNOSTIC (temp): snapshot GPU processes right before vLLM launch so we
-    # can see who's holding CUDA memory when the fixture fails with
-    # "Free memory on device cuda:0 ... less than desired GPU memory utilization".
+    # DIAGNOSTIC (temp): capture driver-level memory state + any process with
+    # a GPU handle. --query-compute-apps reported empty even while 2.5 GiB was
+    # allocated, so we also print the plain nvidia-smi table (shows driver
+    # allocations without an active compute process) and fuser on /dev/nvidia0
+    # (shows every PID still holding a GPU file descriptor).
     import subprocess as _diag_sp
 
-    try:
-        _diag = _diag_sp.run(
+    def _diag_run(cmd):
+        try:
+            return _diag_sp.run(
+                cmd, capture_output=True, text=True, timeout=10
+            ).stdout
+        except Exception as exc:
+            return f"(failed: {exc})"
+
+    print("\n=== [kvbm-diag] GPU state BEFORE vllm launch ===", flush=True)
+    print("--- nvidia-smi ---")
+    print(_diag_run(["nvidia-smi"]))
+    print("--- nvidia-smi --query-compute-apps=pid,process_name,used_memory ---")
+    print(
+        _diag_run(
             [
                 "nvidia-smi",
                 "--query-compute-apps=pid,process_name,used_memory",
                 "--format=csv",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
+            ]
         )
-        print("\n=== [kvbm-diag] nvidia-smi compute apps BEFORE vllm launch ===")
-        print(_diag.stdout or "(empty)")
-        if _diag.stderr:
-            print(f"(stderr) {_diag.stderr}")
-        print("=== [kvbm-diag] end ===\n", flush=True)
-    except Exception as _diag_exc:
-        print(f"[kvbm-diag] nvidia-smi failed: {_diag_exc}", flush=True)
+    )
+    print("--- nvidia-smi --query-gpu=memory.used,memory.free,memory.total ---")
+    print(
+        _diag_run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.free,memory.total",
+                "--format=csv",
+            ]
+        )
+    )
+    print("--- fuser /dev/nvidia* ---")
+    print(_diag_run(["fuser", "-v", "/dev/nvidia0", "/dev/nvidiactl"]))
+    print("--- ps -ef | grep python/vllm ---")
+    print(_diag_run(["bash", "-c", "ps -ef | grep -iE 'python|vllm|engine' | grep -v grep"]))
+    print("=== [kvbm-diag] end ===\n", flush=True)
 
     # Start server with ManagedProcess
     timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
