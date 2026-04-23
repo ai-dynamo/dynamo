@@ -26,8 +26,9 @@ pub mod worker;
 pub use args::CommonArgs;
 pub use engine::{
     AsyncEngineContext, CompletionUsage, EngineConfig, FinishReason, LLMEngine, LLMEngineOutput,
-    OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, chunk, usage,
+    LLMEngineOutputExt, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, chunk,
+    usage,
 };
-pub use error::BackendError;
+pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;
 pub use worker::{Worker, WorkerConfig};

@@ -5,7 +5,10 @@
 //!
 //! Wraps the engine's returned stream and panics on contract violations:
 //! - a chunk yielded after a terminal chunk (one carrying `finish_reason`)
-//! - a terminal chunk missing `completion_usage`
+//!
+//! `completion_usage` on a terminal chunk is optional — the rest of the
+//! Dynamo pipeline (frontend, router) treats it as nice-to-have, matching
+//! `LLMEngineOutput::cancelled/stop/length/error` which set it to `None`.
 //!
 //! The wrapper is compiled out in release — `lib.rs` gates the module
 //! with `#[cfg(debug_assertions)]`, so zero cost in release builds.
@@ -27,11 +30,6 @@ pub(crate) fn wrap(
                  (a chunk with finish_reason set must be the last item)"
             );
             if chunk.finish_reason.is_some() {
-                assert!(
-                    chunk.completion_usage.is_some(),
-                    "LLMEngine contract violation: terminal chunk missing completion_usage \
-                     (chunks with finish_reason must also set completion_usage)"
-                );
                 terminal_seen = true;
             }
             yield chunk;
@@ -42,7 +40,7 @@ pub(crate) fn wrap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{FinishReason, chunk, usage};
+    use crate::engine::{FinishReason, chunk};
     use futures::stream;
 
     fn to_stream(chunks: Vec<LLMEngineOutput>) -> BoxStream<'static, LLMEngineOutput> {
@@ -54,32 +52,32 @@ mod tests {
         let wrapped = wrap(to_stream(vec![
             chunk::token(1),
             chunk::token(2),
-            chunk::terminal(vec![3], FinishReason::Length, usage(10, 3)),
+            LLMEngineOutput::length(),
         ]));
         let collected: Vec<_> = wrapped.collect().await;
         assert_eq!(collected.len(), 3);
     }
 
     #[tokio::test]
-    #[should_panic(expected = "chunk yielded after terminal chunk")]
-    async fn panics_on_chunk_after_terminal() {
+    async fn valid_terminal_without_usage_passes() {
+        // LLMEngineOutput::cancelled() sets completion_usage to None — must
+        // not trip the validator.
         let wrapped = wrap(to_stream(vec![
-            chunk::terminal(vec![1], FinishReason::Length, usage(5, 1)),
-            chunk::token(2),
+            chunk::token(1),
+            LLMEngineOutput::cancelled(),
         ]));
-        let _collected: Vec<_> = wrapped.collect().await;
+        let collected: Vec<_> = wrapped.collect().await;
+        assert_eq!(collected.len(), 2);
+        assert!(matches!(
+            collected[1].finish_reason,
+            Some(FinishReason::Cancelled)
+        ));
     }
 
     #[tokio::test]
-    #[should_panic(expected = "terminal chunk missing completion_usage")]
-    async fn panics_on_terminal_missing_usage() {
-        let bad = LLMEngineOutput {
-            token_ids: vec![1],
-            finish_reason: Some(FinishReason::Length),
-            completion_usage: None,
-            ..Default::default()
-        };
-        let wrapped = wrap(to_stream(vec![bad]));
+    #[should_panic(expected = "chunk yielded after terminal chunk")]
+    async fn panics_on_chunk_after_terminal() {
+        let wrapped = wrap(to_stream(vec![LLMEngineOutput::length(), chunk::token(2)]));
         let _collected: Vec<_> = wrapped.collect().await;
     }
 }

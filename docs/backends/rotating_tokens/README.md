@@ -74,7 +74,7 @@ reachable via `NATS_SERVER` / `ETCD_ENDPOINTS` env vars.
 2. Implement
    [`LLMEngine`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/src/engine.rs)
    plus an inherent
-   `from_args(argv) -> Result<(Self, WorkerConfig), BackendError>`.
+   `from_args(argv) -> Result<(Self, WorkerConfig), DynamoError>`.
 3. Mirror `rotating_tokens`'s three-line `main.rs`.
 4. Run the conformance kit in your tests:
 

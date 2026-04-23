@@ -20,7 +20,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::adapter::EngineAdapter;
 use crate::engine::{EngineConfig, LLMEngine};
-use crate::error::BackendError;
+use crate::error::{BackendError, DynamoError, ErrorType};
 
 /// Per-worker runtime configuration.
 #[derive(Clone, Debug)]
@@ -89,23 +89,31 @@ impl Worker {
     /// that hold external resources per request should ensure their
     /// `generate` stream body releases them via RAII so drop paths
     /// (including forced drops) are safe.
-    pub async fn run(self, runtime: Runtime) -> Result<(), BackendError> {
+    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
         let Self { engine, config } = self;
 
         let drt = DistributedRuntime::from_settings(runtime)
             .await
-            .map_err(|e| BackendError::CannotConnect(format!("distributed runtime: {e}")))?;
+            .map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("distributed runtime: {e}"),
+                )
+            })?;
 
         let component = drt
             .namespace(&config.namespace)
             .and_then(|ns| ns.component(&config.component))
-            .map_err(|e| BackendError::EngineInit(format!("component: {e}")))?;
+            .map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("component: {e}"),
+                )
+            })?;
         let endpoint = component.endpoint(&config.endpoint);
 
-        let engine_config = engine
-            .start()
-            .await
-            .map_err(|e| BackendError::EngineInit(e.to_string()))?;
+        // engine.start() returns a DynamoError directly — propagate as-is.
+        let engine_config = engine.start().await?;
 
         // Cleanup must run even when registration or serve fails, so wrap
         // post-start work in a helper whose result is propagated after cleanup.
@@ -126,14 +134,19 @@ async fn serve(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     endpoint: dynamo_runtime::component::Endpoint,
-) -> Result<(), BackendError> {
+) -> Result<(), DynamoError> {
     let model_type = parse_endpoint_types(&config.endpoint_types)?;
 
     let mut local_model = build_local_model(config, engine_config).await?;
     local_model
         .attach(&endpoint, model_type, config.model_input, None)
         .await
-        .map_err(|e| BackendError::EngineInit(format!("model attach: {e}")))?;
+        .map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("model attach: {e}"),
+            )
+        })?;
 
     let served = config
         .served_model_name
@@ -147,8 +160,13 @@ async fn serve(
         config.endpoint
     );
 
-    let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(engine.clone())))
-        .map_err(|e| BackendError::EngineInit(format!("ingress: {e}")))?;
+    let ingress =
+        Ingress::for_engine(Arc::new(EngineAdapter::new(engine.clone()))).map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("ingress: {e}"),
+            )
+        })?;
 
     endpoint
         .endpoint_builder()
@@ -156,10 +174,23 @@ async fn serve(
         .graceful_shutdown(true)
         .start()
         .await
-        .map_err(|e| BackendError::Engine(format!("serve: {e}")))
+        .map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("serve: {e}"),
+            )
+        })
 }
 
-fn parse_endpoint_types(s: &str) -> Result<ModelType, BackendError> {
+/// Convenience shorthand for `DynamoError::builder().error_type(..).message(..).build()`.
+fn err(error_type: ErrorType, message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(error_type)
+        .message(message)
+        .build()
+}
+
+fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     let mut out = ModelType::empty();
     let mut any = false;
     for raw in s.split(',') {
@@ -174,16 +205,20 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, BackendError> {
             "tensor" => ModelType::TensorBased,
             "prefill" => ModelType::Prefill,
             other => {
-                return Err(BackendError::invalid(format!(
-                    "unknown endpoint type '{other}'"
-                )));
+                return Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    format!("unknown endpoint type '{other}'"),
+                ));
             }
         };
         out |= flag;
         any = true;
     }
     if !any {
-        return Err(BackendError::invalid("endpoint_types cannot be empty"));
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "endpoint_types cannot be empty",
+        ));
     }
     Ok(out)
 }
@@ -191,7 +226,7 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, BackendError> {
 async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
-) -> Result<LocalModel, BackendError> {
+) -> Result<LocalModel, DynamoError> {
     let served_name = config
         .served_model_name
         .clone()
@@ -217,28 +252,40 @@ async fn build_local_model(
     // name-only mode (no tokenizer / chat template on the card).
     if !config.model_name.is_empty() {
         let source = config.model_name.clone();
-        let local_path = if std::fs::exists(&source)
-            .map_err(|e| BackendError::invalid(format!("model path: {e}")))?
-        {
+        let local_path = if std::fs::exists(&source).map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!("model path: {e}"),
+            )
+        })? {
             PathBuf::from(&source)
         } else {
-            LocalModel::fetch(&source, false)
-                .await
-                .map_err(|e| BackendError::EngineInit(format!("fetch '{source}': {e}")))?
+            LocalModel::fetch(&source, false).await.map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("fetch '{source}': {e}"),
+                )
+            })?
         };
         builder.model_path(local_path);
         builder.source_path(PathBuf::from(source));
     }
 
-    builder
-        .build()
-        .await
-        .map_err(|e| BackendError::EngineInit(format!("build local model: {e}")))
+    builder.build().await.map_err(|e| {
+        err(
+            ErrorType::Backend(BackendError::Unknown),
+            format!("build local model: {e}"),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn error_type_of(result: Result<ModelType, DynamoError>) -> ErrorType {
+        result.unwrap_err().error_type()
+    }
 
     #[test]
     fn parse_endpoint_types_happy_path() {
@@ -267,20 +314,23 @@ mod tests {
 
     #[test]
     fn parse_endpoint_types_rejects_empty() {
-        assert!(matches!(
-            parse_endpoint_types(""),
-            Err(BackendError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            parse_endpoint_types("   ,  "),
-            Err(BackendError::InvalidArgument(_))
-        ));
+        assert_eq!(
+            error_type_of(parse_endpoint_types("")),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(
+            error_type_of(parse_endpoint_types("   ,  ")),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
     }
 
     #[test]
     fn parse_endpoint_types_rejects_unknown() {
-        let err = parse_endpoint_types("chat,bogus").unwrap_err();
-        assert!(matches!(err, BackendError::InvalidArgument(_)));
-        assert!(err.to_string().contains("bogus"));
+        let e = parse_endpoint_types("chat,bogus").unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("bogus"));
     }
 }

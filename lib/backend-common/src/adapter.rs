@@ -99,8 +99,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{EngineConfig, FinishReason, chunk, usage};
-    use crate::error::BackendError;
+    use crate::engine::{EngineConfig, FinishReason, LLMEngineOutputExt, chunk, usage};
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::pipeline::Context;
     use futures::StreamExt;
@@ -113,7 +113,7 @@ mod tests {
         chunks: Vec<LLMEngineOutput>,
         per_chunk_delay_ms: u64,
         abort_calls: Arc<AtomicUsize>,
-        setup_err: Option<fn() -> BackendError>,
+        setup_err: Option<fn() -> DynamoError>,
     }
 
     impl MockEngine {
@@ -131,7 +131,7 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for MockEngine {
-        async fn start(&self) -> Result<EngineConfig, BackendError> {
+        async fn start(&self) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
         }
 
@@ -139,7 +139,7 @@ mod tests {
             &self,
             _request: PreprocessedRequest,
             context: Arc<dyn AsyncEngineContext>,
-        ) -> Result<BoxStream<'static, LLMEngineOutput>, BackendError> {
+        ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
             if let Some(make_err) = self.setup_err {
                 return Err(make_err());
             }
@@ -160,7 +160,7 @@ mod tests {
             self.abort_calls.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn cleanup(&self) -> Result<(), BackendError> {
+        async fn cleanup(&self) -> Result<(), DynamoError> {
             Ok(())
         }
     }
@@ -180,7 +180,9 @@ mod tests {
     async fn adapter_maps_chunks_to_outputs() {
         let (engine, _abort_ct) = MockEngine::new(vec![
             chunk::token(11),
-            chunk::terminal(vec![22], FinishReason::Length, usage(3, 2)),
+            LLMEngineOutput::length()
+                .with_tokens(vec![22])
+                .with_usage(usage(3, 2)),
         ]);
         let adapter = EngineAdapter::new(engine);
 
@@ -242,7 +244,12 @@ mod tests {
             chunks: vec![],
             per_chunk_delay_ms: 0,
             abort_calls: Arc::new(AtomicUsize::new(0)),
-            setup_err: Some(|| BackendError::engine("init failed")),
+            setup_err: Some(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message("init failed")
+                    .build()
+            }),
         });
         let adapter = EngineAdapter::new(engine);
 
@@ -258,26 +265,26 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for TerminalOnCancelEngine {
-        async fn start(&self) -> Result<EngineConfig, BackendError> {
+        async fn start(&self) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
         }
         async fn generate(
             &self,
             _request: PreprocessedRequest,
             ctx: Arc<dyn AsyncEngineContext>,
-        ) -> Result<BoxStream<'static, LLMEngineOutput>, BackendError> {
+        ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
             Ok(Box::pin(async_stream::stream! {
                 yield chunk::token(1);
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     if ctx.is_stopped() {
-                        yield chunk::cancelled(usage(3, 1));
+                        yield LLMEngineOutput::cancelled().with_usage(usage(3, 1));
                         break;
                     }
                 }
             }))
         }
-        async fn cleanup(&self) -> Result<(), BackendError> {
+        async fn cleanup(&self) -> Result<(), DynamoError> {
             Ok(())
         }
     }
@@ -311,14 +318,19 @@ mod tests {
             chunks: vec![],
             per_chunk_delay_ms: 0,
             abort_calls: Arc::new(AtomicUsize::new(0)),
-            setup_err: Some(|| BackendError::invalid("bad param")),
+            setup_err: Some(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::InvalidArgument)
+                    .message("bad param")
+                    .build()
+            }),
         });
         let adapter = EngineAdapter::new(engine);
 
         let input = Context::new(make_request(vec![1]));
         let err = adapter.generate(input).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("invalid argument"), "got: {msg}");
+        assert!(msg.contains("InvalidArgument"), "got: {msg}");
         assert!(msg.contains("bad param"), "got: {msg}");
     }
 }

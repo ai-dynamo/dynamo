@@ -13,8 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, EngineConfig, FinishReason, LLMEngine,
-    LLMEngineOutput, PreprocessedRequest, WorkerConfig, chunk, usage,
+    AsyncEngineContext, BackendError, CommonArgs, DynamoError, EngineConfig, ErrorType, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use futures::stream::BoxStream;
 
@@ -52,12 +52,17 @@ pub struct RotatingTokensEngine {
 }
 
 impl RotatingTokensEngine {
-    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), BackendError> {
+    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = match argv {
             Some(a) => Args::try_parse_from(a),
             None => Args::try_parse(),
         }
-        .map_err(|e| BackendError::invalid(e.to_string()))?;
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message(e.to_string())
+                .build()
+        })?;
 
         let engine = RotatingTokensEngine {
             model_name: args.model_name.clone(),
@@ -81,7 +86,7 @@ impl RotatingTokensEngine {
 
 #[async_trait]
 impl LLMEngine for RotatingTokensEngine {
-    async fn start(&self) -> Result<EngineConfig, BackendError> {
+    async fn start(&self) -> Result<EngineConfig, DynamoError> {
         Ok(EngineConfig {
             model: self.model_name.clone(),
             served_model_name: Some(self.model_name.clone()),
@@ -97,7 +102,7 @@ impl LLMEngine for RotatingTokensEngine {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, BackendError> {
+    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
         let max_new = request
             .stop_conditions
             .max_tokens
@@ -109,18 +114,17 @@ impl LLMEngine for RotatingTokensEngine {
         Ok(Box::pin(async_stream::stream! {
             for i in 0..max_new {
                 if ctx.is_stopped() {
-                    yield chunk::cancelled(usage(prompt_len, i as u32));
+                    yield LLMEngineOutput::cancelled()
+                        .with_usage(usage(prompt_len, i as u32));
                     break;
                 }
                 tokio::time::sleep(delay).await;
                 let token_id = ((i as u32) + 1) % 32000;
 
                 if i == max_new - 1 {
-                    yield chunk::terminal(
-                        vec![token_id],
-                        FinishReason::Length,
-                        usage(prompt_len, max_new as u32),
-                    );
+                    yield LLMEngineOutput::length()
+                        .with_tokens(vec![token_id])
+                        .with_usage(usage(prompt_len, max_new as u32));
                 } else {
                     yield chunk::token(token_id);
                 }
@@ -135,7 +139,7 @@ impl LLMEngine for RotatingTokensEngine {
         );
     }
 
-    async fn cleanup(&self) -> Result<(), BackendError> {
+    async fn cleanup(&self) -> Result<(), DynamoError> {
         tracing::info!("rotating_tokens engine: cleanup invoked");
         Ok(())
     }
@@ -144,7 +148,7 @@ impl LLMEngine for RotatingTokensEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_backend_common::{SamplingOptions, StopConditions};
+    use dynamo_backend_common::{FinishReason, SamplingOptions, StopConditions};
     use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
     use futures::StreamExt;
 

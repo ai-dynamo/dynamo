@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-use crate::error::BackendError;
+use crate::error::DynamoError;
 
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 pub use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
@@ -75,7 +75,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// `tracing::info!` checkpoints so operators see progress — this
     /// call is otherwise a silent window between process launch and
     /// endpoint serving.
-    async fn start(&self) -> Result<EngineConfig, BackendError>;
+    async fn start(&self) -> Result<EngineConfig, DynamoError>;
 
     /// Yield streaming response chunks for a single request.
     ///
@@ -83,19 +83,24 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// stream MUST poll `ctx.is_stopped()` between yields; on cancellation,
     /// emit a terminal chunk with `FinishReason::Cancelled`.
     ///
-    /// Contract: exactly one terminal chunk (carrying both `finish_reason`
-    /// and `completion_usage`) must be the last item yielded. In debug
-    /// builds, the framework wraps the stream in a validator that panics
-    /// on contract violations.
+    /// Contract: exactly one terminal chunk (one with `finish_reason` set)
+    /// must be the last item yielded, and no chunks may follow it.
+    /// `completion_usage` on the terminal is optional but recommended —
+    /// the frontend aggregates it when present. In debug builds, the
+    /// framework wraps the stream in a validator that panics on
+    /// contract violations.
     ///
     /// The returned stream is `'static`: clone or move any state from
-    /// `&self` or `request` into the stream body before constructing it
-    /// (the `chunk::*` helpers in this module work well for this).
+    /// `&self` or `request` into the stream body before constructing it.
+    /// Use [`chunk::token`] for non-terminal chunks and
+    /// [`LLMEngineOutput::cancelled`] / `::stop` / `::length` / `::error`
+    /// for terminal chunks (combine with [`LLMEngineOutputExt`] for
+    /// fluent field setting).
     async fn generate(
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, BackendError>;
+    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError>;
 
     /// Abort an in-flight request (optional, default no-op).
     ///
@@ -113,12 +118,13 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
     /// Release all engine resources. Called once on shutdown.
-    async fn cleanup(&self) -> Result<(), BackendError>;
+    async fn cleanup(&self) -> Result<(), DynamoError>;
 }
 
-/// Convenience constructors for [`LLMEngineOutput`]. Cuts per-chunk boilerplate.
+/// Non-terminal chunk constructor. Terminal chunks come from upstream
+/// [`LLMEngineOutput::cancelled`] / `::stop` / `::length` / `::error`.
 pub mod chunk {
-    use super::{CompletionUsage, FinishReason, LLMEngineOutput};
+    use super::LLMEngineOutput;
 
     /// Non-terminal chunk carrying a single token.
     pub fn token(id: u32) -> LLMEngineOutput {
@@ -127,34 +133,44 @@ pub mod chunk {
             ..Default::default()
         }
     }
+}
 
-    /// Terminal chunk. `token_ids` may be empty or carry the final tokens.
-    pub fn terminal(
-        token_ids: Vec<u32>,
-        finish_reason: FinishReason,
-        usage: CompletionUsage,
-    ) -> LLMEngineOutput {
-        LLMEngineOutput {
-            token_ids,
-            finish_reason: Some(finish_reason),
-            completion_usage: Some(usage),
-            ..Default::default()
-        }
+/// Fluent setters for [`LLMEngineOutput`] — combine with upstream
+/// constructors (`LLMEngineOutput::length()`, `::cancelled()`, etc.) to
+/// avoid the `let mut output = ...; output.field = ...;` pattern.
+///
+/// ```ignore
+/// use dynamo_backend_common::{LLMEngineOutput, LLMEngineOutputExt, usage};
+///
+/// yield LLMEngineOutput::length()
+///     .with_tokens(vec![final_id])
+///     .with_usage(usage(prompt_len, n));
+/// ```
+pub trait LLMEngineOutputExt: Sized {
+    /// Replace `token_ids`.
+    fn with_tokens(self, tokens: Vec<u32>) -> Self;
+    /// Attach usage stats.
+    fn with_usage(self, usage: CompletionUsage) -> Self;
+}
+
+impl LLMEngineOutputExt for LLMEngineOutput {
+    fn with_tokens(mut self, tokens: Vec<u32>) -> Self {
+        self.token_ids = tokens;
+        self
     }
-
-    /// Terminal chunk for a cancelled request. `token_ids` is empty.
-    pub fn cancelled(usage: CompletionUsage) -> LLMEngineOutput {
-        terminal(vec![], FinishReason::Cancelled, usage)
+    fn with_usage(mut self, usage: CompletionUsage) -> Self {
+        self.completion_usage = Some(usage);
+        self
     }
 }
 
 /// Build a [`CompletionUsage`] from prompt and completion counts.
+/// `total_tokens` saturates on overflow (realistic LLM contexts are far
+/// from `u32::MAX`).
 pub fn usage(prompt_tokens: u32, completion_tokens: u32) -> CompletionUsage {
     CompletionUsage {
         prompt_tokens,
         completion_tokens,
-        // saturating_add: no real LLM context approaches u32::MAX, but
-        // defensively avoid overflow panic in debug builds.
         total_tokens: prompt_tokens.saturating_add(completion_tokens),
         prompt_tokens_details: None,
         completion_tokens_details: None,
@@ -174,26 +190,24 @@ mod tests {
     }
 
     #[test]
-    fn chunk_terminal_sets_all_required_fields() {
-        let c = chunk::terminal(vec![1, 2], FinishReason::Length, usage(10, 2));
-        assert_eq!(c.token_ids, vec![1, 2]);
-        assert!(matches!(c.finish_reason, Some(FinishReason::Length)));
-        let u = c.completion_usage.unwrap();
-        assert_eq!(u.prompt_tokens, 10);
-        assert_eq!(u.completion_tokens, 2);
-        assert_eq!(u.total_tokens, 12);
-    }
-
-    #[test]
-    fn chunk_cancelled_has_empty_tokens_and_cancelled_reason() {
-        let c = chunk::cancelled(usage(5, 3));
-        assert!(c.token_ids.is_empty());
-        assert!(matches!(c.finish_reason, Some(FinishReason::Cancelled)));
+    fn ext_with_tokens_and_with_usage() {
+        let terminal = LLMEngineOutput::length()
+            .with_tokens(vec![1, 2, 3])
+            .with_usage(usage(10, 3));
+        assert_eq!(terminal.token_ids, vec![1, 2, 3]);
+        assert!(matches!(terminal.finish_reason, Some(FinishReason::Length)));
+        assert_eq!(terminal.completion_usage.unwrap().total_tokens, 13);
     }
 
     #[test]
     fn usage_sums_totals() {
         let u = usage(7, 11);
         assert_eq!(u.total_tokens, 18);
+    }
+
+    #[test]
+    fn usage_saturates_on_overflow() {
+        let u = usage(u32::MAX, 10);
+        assert_eq!(u.total_tokens, u32::MAX);
     }
 }

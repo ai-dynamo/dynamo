@@ -56,7 +56,6 @@ pub enum ConformanceFailure {
     EmptyModelInConfig,
     GenerateFailed(String),
     NoChunksYielded,
-    TerminalMissingUsage,
     ChunkAfterTerminal,
     NoTerminalChunk,
     ConcurrentGenerateFailed(String),
@@ -73,10 +72,6 @@ impl std::fmt::Display for ConformanceFailure {
             EmptyModelInConfig => write!(f, "EngineConfig.model is empty"),
             GenerateFailed(m) => write!(f, "generate() failed: {m}"),
             NoChunksYielded => write!(f, "generate() stream yielded no chunks"),
-            TerminalMissingUsage => write!(
-                f,
-                "terminal chunk has finish_reason but no completion_usage"
-            ),
             ChunkAfterTerminal => write!(f, "chunk yielded after terminal chunk"),
             NoTerminalChunk => write!(f, "stream ended without a terminal chunk"),
             ConcurrentGenerateFailed(m) => {
@@ -173,9 +168,6 @@ async fn check_single_generate<E: LLMEngine>(
         if c.finish_reason.is_some() {
             if terminal_idx.is_some() {
                 return Err(ChunkAfterTerminal);
-            }
-            if c.completion_usage.is_none() {
-                return Err(TerminalMissingUsage);
             }
             terminal_idx = Some(i);
         }
