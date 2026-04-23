@@ -526,13 +526,13 @@ func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string
 // inter-pod GMS layout.
 //
 // Rules:
-// - For TRTLLM multinode: leader clique starts after worker cliques
-// - For inter-pod GMS: engine PCLQs start after their corresponding GMS PCLQ
-//   (per rank). This applies both to the standalone inter-pod layout and to
-//   the inter-pod layout with failover; the ordering reflects that engines
-//   load weights from the weight-server pod regardless of whether shadows are
-//   present.
-// - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
+//   - For TRTLLM multinode: leader clique starts after worker cliques
+//   - For inter-pod GMS: engine PCLQs start after their corresponding GMS PCLQ
+//     (per rank). This applies both to the standalone inter-pod layout and to
+//     the inter-pod layout with failover; the ordering reflects that engines
+//     load weights from the weight-server pod regardless of whether shadows are
+//     present.
+//   - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
 func applyCliqueStartupDependencies(
 	gangSet *grovev1alpha1.PodCliqueSet,
 	roles []ServiceRole,
@@ -856,7 +856,7 @@ const (
 //   - single-node, inter-pod GMS: 1 engine PCLQ (replicated) + 1 RoleGMS
 //     weight-server PCLQ
 //   - multinode, inter-pod GMS: N engine PCLQs (one per rank, replicated)
-//     + 1 RoleGMS weight-server PCLQ
+//   - 1 RoleGMS weight-server PCLQ
 //
 // The fields carry the information buildCliqueForRole needs to produce a
 // concrete PodCliqueTemplateSpec:

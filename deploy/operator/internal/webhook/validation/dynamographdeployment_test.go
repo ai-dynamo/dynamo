@@ -698,9 +698,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -729,9 +729,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -755,9 +755,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -818,9 +818,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -851,9 +851,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -884,9 +884,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "sglang",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -2218,9 +2218,9 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -2232,9 +2232,9 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -2264,9 +2264,9 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -2283,9 +2283,9 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
@@ -2302,9 +2302,9 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {
-						ComponentType: consts.ComponentTypeWorker,
-						GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 								Enabled: true,
 								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 							},
