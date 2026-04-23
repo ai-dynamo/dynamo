@@ -24,11 +24,16 @@ pytestmark = [
 
 
 class _MockEngine:
+    engine = None
+
     def generate(self, prompt, request_id="", *, sampling_params_list=None):
         async def _gen():
             yield {}
 
         return _gen()
+
+    def get_tokenizer(self):
+        return None
 
 
 def test_stage_engine_protocol_satisfied():

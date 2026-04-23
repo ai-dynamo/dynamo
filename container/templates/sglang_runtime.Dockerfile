@@ -40,8 +40,10 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Runtime target installs the prebuilt Dynamo wheels. Dev/local-dev build from
-# source later in the shared dev stage after the workspace is bind-mounted.
+# Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
+# packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
+# pip from replacing that stack. Dev/local-dev build from source later in the
+# shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
