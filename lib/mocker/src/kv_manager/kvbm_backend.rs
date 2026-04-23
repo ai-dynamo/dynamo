@@ -14,10 +14,10 @@
 //!   new `MutableBlock`, stage with PLH, and register. On capacity exhaustion
 //!   returns partial count so the scheduler can preempt the oldest running
 //!   request.
-//! - **Destroy**: drop all RAII handles for the block. Emits a `Removed` KV
-//!   event to match the mocker's existing router protocol.
-//! - **Deref**: pop one `ImmutableBlock` clone; when the vec empties, the block
-//!   transitions to kvbm-logical's inactive pool (RAII return).
+//! - **Deref**: release one request-owned handle. For `PartialBlock` this drops
+//!   the unique `MutableBlock` and returns it to the reset pool. For
+//!   `FullBlock` this pops one `ImmutableBlock` clone; when the vec empties,
+//!   the block transitions to kvbm-logical's inactive pool (RAII return).
 //! - **Promote**: PartialBlock (`MutableBlock`) → FullBlock (`ImmutableBlock`).
 //!   Collapses onto an existing registered handle if the PLH / SequenceHash is
 //!   already present; otherwise stages + registers a new block.
@@ -245,7 +245,7 @@ impl KvManager {
     /// be allocated (capacity exhausted); the scheduler uses this to trigger
     /// preemption.
     ///
-    /// For `Destroy` / `Deref` / `Promote`, returns 1 on success and panics on
+    /// For `Deref` / `Promote`, returns 1 on success and panics on
     /// invalid state (consistent with the old `vllm_backend` semantics).
     pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
@@ -256,10 +256,6 @@ impl KvManager {
                 token_ids.as_deref(),
                 parent.as_ref(),
             ),
-            MoveBlock::Destroy(hashes) => {
-                self.process_destroy(hashes);
-                1
-            }
             MoveBlock::Deref(hashes) => {
                 self.process_deref(hashes);
                 1
@@ -430,47 +426,13 @@ impl KvManager {
         allocated
     }
 
-    /// Process a `MoveBlock::Destroy` instruction.
-    ///
-    /// Contract difference vs. the legacy `vllm_backend`: in the old manual
-    /// backend `Destroy(FullBlock)` physically removed the block from the
-    /// cache surface. Here we only drop all active RAII handles for the
-    /// block; kvbm-logical keeps the `Registered` state alive and the block
-    /// transitions to the **inactive pool**, where it remains matchable via
-    /// `match_blocks(plh)` until an allocation forces its eviction. We still
-    /// emit a router `Removed` event for protocol parity, but callers should
-    /// be aware that a subsequent `Use` on the same PLH will reactivate the
-    /// same physical block from inactive (an `InactiveHit`) rather than
-    /// allocating fresh.
-    ///
-    /// In the current scheduler flow `Destroy(FullBlock)` is not exercised
-    /// (preemption goes through `Deref` + `reset_with_signal`), so this
-    /// divergence is effectively dormant — see `test_destroy_full_block`.
-    fn process_destroy(&mut self, blocks: &[UniqueBlock]) {
-        let mut destroyed = Vec::<SequenceHash>::new();
+    fn process_deref(&mut self, blocks: &[UniqueBlock]) {
         for block in blocks {
             match block {
                 UniqueBlock::PartialBlock(uuid) => {
                     self.active_partial
                         .remove(uuid)
-                        .expect("Destroy: partial block not in active pool");
-                }
-                UniqueBlock::FullBlock(seq_hash) => {
-                    self.active_full
-                        .remove(seq_hash)
-                        .expect("Destroy: full block not in active pool");
-                    destroyed.push(*seq_hash);
-                }
-            }
-        }
-        self.publish_kv_event(destroyed, &[], None, false, None);
-    }
-
-    fn process_deref(&mut self, blocks: &[UniqueBlock]) {
-        for block in blocks {
-            match block {
-                UniqueBlock::PartialBlock(_) => {
-                    panic!("Deref on PartialBlock is not valid");
+                        .expect("Deref: partial block not in active pool");
                 }
                 UniqueBlock::FullBlock(seq_hash) => {
                     let vec = self
@@ -657,8 +619,41 @@ mod tests {
         )
     }
 
+    fn make_mgr_capturing_with_backend(
+        capacity: usize,
+        block_size: usize,
+        backend: MockerEvictionBackend,
+    ) -> (KvManager, Arc<CapturingSink>) {
+        let sink = Arc::new(CapturingSink::default());
+        let publishers = KvEventPublishers::new(Some(sink.clone() as _), None);
+        (
+            KvManager::new_with_eviction_backend(capacity, block_size, publishers, 0, backend),
+            sink,
+        )
+    }
+
     fn plh(v: u64) -> PositionalLineageHash {
         PositionalLineageHash::new(v, None, 0)
+    }
+
+    fn lineage_plh(id: u64) -> PositionalLineageHash {
+        match id {
+            0 => PositionalLineageHash::new(0, None, 0),
+            1 => PositionalLineageHash::new(1, Some(0), 1),
+            2 => PositionalLineageHash::new(2, Some(1), 2),
+            3 => PositionalLineageHash::new(3, Some(2), 3),
+            4 => PositionalLineageHash::new(4, Some(3), 4),
+            5 => PositionalLineageHash::new(5, Some(1), 2),
+            6 => PositionalLineageHash::new(6, Some(5), 3),
+            7 => PositionalLineageHash::new(7, Some(2), 3),
+            8 => PositionalLineageHash::new(8, Some(7), 4),
+            9 => PositionalLineageHash::new(9, Some(8), 5),
+            10 => PositionalLineageHash::new(10, None, 0),
+            11 => PositionalLineageHash::new(11, Some(10), 1),
+            12 => PositionalLineageHash::new(12, Some(11), 2),
+            13 => PositionalLineageHash::new(13, None, 0),
+            _ => plh(id),
+        }
     }
 
     fn use_full(mgr: &mut KvManager, seq_hash: u64, p: PositionalLineageHash) -> usize {
@@ -685,8 +680,8 @@ mod tests {
         mgr.process(&MoveBlock::Deref(vec![UniqueBlock::FullBlock(seq_hash)]));
     }
 
-    fn destroy_full(mgr: &mut KvManager, seq_hash: u64) {
-        mgr.process(&MoveBlock::Destroy(vec![UniqueBlock::FullBlock(seq_hash)]));
+    fn deref_partial(mgr: &mut KvManager, uuid: Uuid) {
+        mgr.process(&MoveBlock::Deref(vec![UniqueBlock::PartialBlock(uuid)]));
     }
 
     #[test]
@@ -776,42 +771,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Deref on PartialBlock is not valid")]
-    fn test_deref_on_partial_panics() {
+    fn test_deref_partial_returns_to_reset() {
         let mut mgr = make_mgr(10, 16);
         let uuid = Uuid::new_v4();
         use_partial(&mut mgr, uuid);
-        mgr.process(&MoveBlock::Deref(vec![UniqueBlock::PartialBlock(uuid)]));
-    }
-
-    #[test]
-    fn test_destroy_full_block() {
-        let (mut mgr, sink) = make_mgr_capturing(10, 16);
-
-        use_full(&mut mgr, 1, plh(100));
-        assert_eq!(mgr.num_active_blocks(), 1);
-        assert_eq!(mgr.num_inactive_blocks(), 0);
-
-        destroy_full(&mut mgr, 1);
-
-        // Active handles released — but kvbm-logical keeps the Registered
-        // state alive and the block lands in the *inactive* pool, still
-        // matchable via `match_blocks(plh)`.
-        assert_eq!(mgr.num_active_blocks(), 0);
-        assert_eq!(
-            mgr.num_inactive_blocks(),
-            1,
-            "Destroy must leave the block in kvbm-logical's inactive pool"
-        );
-
-        // Router-visible protocol parity: we still emit a `Removed` event
-        // for the caller.
-        let events = sink.events.lock().unwrap();
-        let removed_count = events
-            .iter()
-            .filter(|e| matches!(e.data, KvCacheEventData::Removed(_)))
-            .count();
-        assert_eq!(removed_count, 1, "Destroy must emit one Removed event");
+        assert_eq!(mgr.active_partial.len(), 1);
+        deref_partial(&mut mgr, uuid);
+        assert!(mgr.active_partial.is_empty());
+        assert_eq!(mgr.num_active_block_refs(), 0);
     }
 
     #[test]
@@ -876,16 +843,10 @@ mod tests {
 
     #[test]
     fn test_block_lifecycle_stringent() {
-        // Batch helpers local to this test. Each FullBlock gets a unique PLH
-        // derived from its id so the PLH->SequenceHash mapping stays 1:1.
-        fn use_blocks(mgr: &mut KvManager, ids: &[u64]) {
+        fn use_blocks(mgr: &mut KvManager, ids: &[u64]) -> usize {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
-            let plhs: Vec<_> = ids.iter().map(|&id| plh(id)).collect();
-            mgr.process(&MoveBlock::Use(blocks, vec![], plhs, None, None));
-        }
-        fn destroy_blocks(mgr: &mut KvManager, ids: &[u64]) {
-            let blocks = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
-            mgr.process(&MoveBlock::Destroy(blocks));
+            let plhs: Vec<_> = ids.iter().map(|&id| lineage_plh(id)).collect();
+            mgr.process(&MoveBlock::Use(blocks, vec![], plhs, None, None))
         }
         fn deref_blocks(mgr: &mut KvManager, ids: &[u64]) {
             let blocks = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
@@ -916,18 +877,16 @@ mod tests {
         // kvbm-logical AND absent from `active_full`. Also checks total count
         // matches so we catch stray inactive entries too.
         //
-        // NOTE: under kvbm-logical, `Destroy` removes the block from
-        // `active_full` but the `ImmutableBlock` drop returns it to the
-        // inactive pool — so a destroyed block appears as inactive here until
-        // evicted. This differs from the old `HashCache` where `Destroy`
-        // removed the block entirely.
+        // NOTE: under kvbm-logical, once the last `ImmutableBlock` handle is
+        // dropped, the block returns to the inactive pool and remains matchable
+        // until eviction.
         fn assert_inactive_blocks(mgr: &KvManager, expected_ids: &[u64]) {
             assert_eq!(
                 mgr.num_inactive_blocks(),
                 expected_ids.len(),
                 "inactive count mismatch; expected={expected_ids:?}"
             );
-            let plhs: Vec<_> = expected_ids.iter().map(|&id| plh(id)).collect();
+            let plhs: Vec<_> = expected_ids.iter().map(|&id| lineage_plh(id)).collect();
             let presence = mgr
                 .block_manager
                 .block_registry()
@@ -943,47 +902,123 @@ mod tests {
                 );
             }
         }
+        fn drain_events(sink: &Arc<CapturingSink>) -> Vec<KvCacheEvent> {
+            std::mem::take(&mut *sink.events.lock().unwrap())
+        }
+        fn assert_stored_event(
+            event: &KvCacheEvent,
+            expected_blocks: &[u64],
+            expected_parent: Option<u64>,
+        ) {
+            let KvCacheEventData::Stored(data) = &event.data else {
+                panic!("expected Stored event, got {:?}", event.data);
+            };
+            let actual_blocks: Vec<u64> =
+                data.blocks.iter().map(|block| block.block_hash.0).collect();
+            assert_eq!(actual_blocks, expected_blocks, "stored blocks mismatch");
+            assert_eq!(
+                data.parent_hash.map(|hash| hash.0),
+                expected_parent,
+                "stored parent_hash mismatch"
+            );
+        }
+        fn assert_removed_event(event: &KvCacheEvent, expected_blocks: &[u64]) {
+            let KvCacheEventData::Removed(data) = &event.data else {
+                panic!("expected Removed event, got {:?}", event.data);
+            };
+            let actual_blocks: Vec<u64> = data.block_hashes.iter().map(|hash| hash.0).collect();
+            assert_eq!(actual_blocks, expected_blocks, "removed blocks mismatch");
+        }
 
-        let mut mgr = make_mgr(10, 16);
+        let (mut mgr, sink) =
+            make_mgr_capturing_with_backend(10, 16, MockerEvictionBackend::Lineage);
 
         // Use blocks 0..=4, then 0, 1, 5, 6 — 0 and 1 bump refcount to 2.
-        use_blocks(&mut mgr, &[0, 1, 2, 3, 4]);
-        use_blocks(&mut mgr, &[0, 1, 5, 6]);
+        assert_eq!(use_blocks(&mut mgr, &[0, 1, 2, 3, 4]), 5);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 1, "expected one Stored event for [0..=4]");
+        assert_stored_event(&events[0], &[0, 1, 2, 3, 4], None);
+
+        assert_eq!(use_blocks(&mut mgr, &[0, 1, 5, 6]), 4);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 1, "expected one Stored event for [5, 6]");
+        assert_stored_event(&events[0], &[5, 6], Some(1));
         assert_active(
             &mgr,
             &[(0, 2), (1, 2), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)],
         );
 
-        // Destroy block 4; deref 0, 1, 2, 3. 2 and 3 drop to inactive via
-        // RAII; 4 is destroyed (removed from active_full + Removed emitted)
-        // but kvbm-logical still has it in the inactive pool.
-        destroy_blocks(&mut mgr, &[4]);
-        deref_blocks(&mut mgr, &[0, 1, 2, 3]);
+        // Leaf-to-root release order is what makes the resulting inactive set
+        // deterministic under the Lineage backend.
+        deref_blocks(&mut mgr, &[4, 3, 2, 1, 0]);
+        let events = drain_events(&sink);
+        assert!(events.is_empty(), "Deref should not emit KV events");
         assert_active(&mgr, &[(0, 1), (1, 1), (5, 1), (6, 1)]);
         assert_inactive_blocks(&mgr, &[2, 3, 4]);
 
-        // Destroy block 6; deref 0, 1, 5. Active drains; inactive = {0..=6}.
-        destroy_blocks(&mut mgr, &[6]);
-        deref_blocks(&mut mgr, &[0, 1, 5]);
+        // Release the second branch leaf-to-root too. Active drains; inactive = {0..=6}.
+        deref_blocks(&mut mgr, &[6, 5, 1, 0]);
+        let events = drain_events(&sink);
+        assert!(events.is_empty(), "Deref should not emit KV events");
         assert_active(&mgr, &[]);
         assert_inactive_blocks(&mgr, &[0, 1, 2, 3, 4, 5, 6]);
 
         // Re-use 0, 1, 2 (reactivates from inactive) + 7, 8, 9 (new, 3 free
         // slots). No eviction needed — inactive shrinks to {3, 4, 5, 6}.
-        use_blocks(&mut mgr, &[0, 1, 2, 7, 8, 9]);
+        assert_eq!(use_blocks(&mut mgr, &[0, 1, 2, 7, 8, 9]), 6);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 1, "expected one Stored event for [7, 8, 9]");
+        assert_stored_event(&events[0], &[7, 8, 9], Some(2));
         assert_active(&mgr, &[(0, 1), (1, 1), (2, 1), (7, 1), (8, 1), (9, 1)]);
         assert_inactive_blocks(&mgr, &[3, 4, 5, 6]);
 
-        // Allocate through capacity: 10, 11, 12 force eviction of 3 inactive
-        // entries. Exact survivor depends on eviction order (Lineage/LRU), so
-        // only assert count.
-        use_blocks(&mut mgr, &[10, 11, 12]);
-        assert_eq!(mgr.num_active_blocks(), 9);
-        assert_eq!(mgr.num_inactive_blocks(), 1);
+        // Capacity pressure now forces exact leaf-first evictions: 4, then 3,
+        // then 6. The sole inactive survivor is 5.
+        assert_eq!(use_blocks(&mut mgr, &[10, 11, 12]), 3);
+        let events = drain_events(&sink);
+        assert_eq!(
+            events.len(),
+            2,
+            "expected Stored + Removed for [10, 11, 12]"
+        );
+        assert_stored_event(&events[0], &[10, 11, 12], None);
+        assert_removed_event(&events[1], &[4, 3, 6]);
+        assert_active(
+            &mgr,
+            &[
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (7, 1),
+                (8, 1),
+                (9, 1),
+                (10, 1),
+                (11, 1),
+                (12, 1),
+            ],
+        );
+        assert_inactive_blocks(&mgr, &[5]);
 
-        // One more block keeps us at full capacity without panicking.
-        use_blocks(&mut mgr, &[13]);
-        assert_eq!(mgr.num_active_blocks(), 10);
+        assert_eq!(use_blocks(&mut mgr, &[13]), 1);
+        let events = drain_events(&sink);
+        assert_eq!(events.len(), 2, "expected Stored + Removed for [13]");
+        assert_stored_event(&events[0], &[13], None);
+        assert_removed_event(&events[1], &[5]);
+        assert_active(
+            &mgr,
+            &[
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (7, 1),
+                (8, 1),
+                (9, 1),
+                (10, 1),
+                (11, 1),
+                (12, 1),
+                (13, 1),
+            ],
+        );
         assert_eq!(mgr.num_inactive_blocks(), 0);
     }
 
