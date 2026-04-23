@@ -1249,6 +1249,18 @@ async fn chat_completions(
         None
     };
 
+    // RL: for TITO requests the caller (handler_chat_completions_tokens) injects a
+    // placeholder message so Dynamo can select a chat template, but then saves the
+    // real token IDs in nvext.token_data.  Capture them now — before the request is
+    // consumed by engine.generate() — so the post-processing step can use them
+    // directly as prompt_token_ids instead of re-tokenizing the placeholder.
+    let rl_tito_token_ids: Option<Vec<u32>> =
+        if dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL") && !streaming {
+            request.nvext.as_ref().and_then(|nv| nv.token_data.clone())
+        } else {
+            None
+        };
+
     // Apply template values first to resolve the model before creating metrics guards
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -1467,7 +1479,12 @@ async fn chat_completions(
         //   response.choices[i].token_ids  (from nvext.completion_token_ids)
         let response = if let Some(ref messages) = rl_saved_messages {
             let mut response = response;
-            response.prompt_token_ids = rl_tokenize_prompt(&state, &model, messages);
+            // For TITO requests, nvext.token_data IS the prompt — use those IDs
+            // directly.  Falling back to rl_tokenize_prompt would re-tokenize the
+            // placeholder message injected by handler_chat_completions_tokens and
+            // return the wrong IDs.
+            response.prompt_token_ids =
+                rl_tito_token_ids.or_else(|| rl_tokenize_prompt(&state, &model, messages));
             if let Ok(mut json_val) = serde_json::to_value(&response) {
                 rl_promote_token_ids_in_response(&mut json_val);
                 return Ok(Json(json_val).into_response());
