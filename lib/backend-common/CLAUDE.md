@@ -3,7 +3,7 @@
 Shared runtime glue for Rust LLM backends. Two-type abstraction:
 `Worker` (runtime lifecycle) and `LLMEngine` (trait for engine-specific
 logic). A reference implementation lives at
-`lib/backend-common/examples/rotating_tokens/`.
+`lib/backend-common/examples/mocker/`.
 
 Engines work directly with `PreprocessedRequest` and `LLMEngineOutput`
 — the same types the rest of the Rust pipeline uses. No separate
@@ -148,7 +148,7 @@ aggregates it when present. `usage(prompt, completion)` computes
        dynamo_backend_common::run(Arc::new(engine), config)
    }
    ```
-5. Use `engine.rs` from `lib/backend-common/examples/rotating_tokens/`
+5. Use `engine.rs` from `lib/backend-common/examples/mocker/`
    as a template.
 6. Run the conformance test kit (see Testing below) against your engine.
 

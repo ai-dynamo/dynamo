@@ -21,7 +21,7 @@ members = [
     "lib/parsers",
     "lib/bench",
     "lib/backend-common",
-    "lib/backend-common/examples/rotating_tokens",
+    "lib/backend-common/examples/mocker",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
 ]

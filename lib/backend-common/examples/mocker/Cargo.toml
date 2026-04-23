@@ -2,29 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-rotating-tokens"
+name = "dynamo-mocker-backend"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Reference Rust backend that emits rotating token IDs — a minimal LLMEngine implementation against dynamo-backend-common."
+description = "Dynamo Rust backend example wrapping the dynamo-mocker scheduler — a full-fidelity mocked LLM engine exposed through the LLMEngine trait."
 
 [[bin]]
-name = "dynamo-rotating-tokens"
+name = "dynamo-mocker-backend"
 path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-mocker = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+dashmap = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }

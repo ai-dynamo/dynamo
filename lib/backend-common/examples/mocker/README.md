@@ -3,10 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# rotating_tokens
+# mocker
 
-Reference implementation of Dynamo's Rust backend interface.
+Reference Rust backend — wraps the `dynamo-mocker` scheduler in the
+`LLMEngine` contract from `dynamo-backend-common`.
 
-See [`docs/backends/rotating_tokens/README.md`](../../../../docs/backends/rotating_tokens/README.md)
+See [`docs/backends/mocker_backend/README.md`](../../../../docs/backends/mocker_backend/README.md)
 for the user guide — docker-compose quick demo, build instructions,
 contract walkthrough, and pointers to the crate.

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Build and run the rotating_tokens Rust backend.
+# Build and run the mocker Rust backend — a full-fidelity mocked LLM
+# engine wrapped in the `LLMEngine` contract from `dynamo-backend-common`.
 #
 # Build context MUST be the dynamo workspace root so Cargo can resolve all
 # workspace crates — see docker-compose.yml in this directory, which sets
@@ -33,8 +34,8 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     mkdir -p /out \
-    && cargo build -p dynamo-rotating-tokens --release \
-    && cp /build/target/release/dynamo-rotating-tokens /out/
+    && cargo build -p dynamo-mocker-backend --release \
+    && cp /build/target/release/dynamo-mocker-backend /out/
 
 FROM debian:bookworm-slim
 
@@ -42,6 +43,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /out/dynamo-rotating-tokens /usr/local/bin/
+COPY --from=builder /out/dynamo-mocker-backend /usr/local/bin/
 
-ENTRYPOINT ["dynamo-rotating-tokens"]
+ENTRYPOINT ["dynamo-mocker-backend"]

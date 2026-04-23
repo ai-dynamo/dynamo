@@ -10,7 +10,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Shared runtime glue for Rust LLM backends."
-# examples/rotating_tokens is its own workspace member crate, not a cargo-auto-discovered example.
+# examples/mocker is its own workspace member crate, not a cargo-auto-discovered example.
 autoexamples = false
 
 [features]
