@@ -31,8 +31,8 @@ def test_apply_bare_cache_layout(tmp_path, monkeypatch):
     try:
         assert os.environ["HF_HUB_CACHE"] == str(tmp_path)
         assert "HF_HOME" not in os.environ
-        assert os.environ["HF_HUB_OFFLINE"] == "1"
-        assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+        assert "HF_HUB_OFFLINE" not in os.environ
+        assert "TRANSFORMERS_OFFLINE" not in os.environ
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
         for k in _TRANSFORMERS_CACHE_OVERRIDE_KEYS:
             assert k not in os.environ
@@ -52,8 +52,8 @@ def test_apply_hf_home_layout(tmp_path, monkeypatch):
     try:
         assert os.environ["HF_HOME"] == str(tmp_path)
         assert "HF_HUB_CACHE" not in os.environ
-        assert os.environ["HF_HUB_OFFLINE"] == "1"
-        assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+        assert "HF_HUB_OFFLINE" not in os.environ
+        assert "TRANSFORMERS_OFFLINE" not in os.environ
         assert os.environ["DYNAMO_MODELS_DIR"] == str(tmp_path)
         for k in _TRANSFORMERS_CACHE_OVERRIDE_KEYS:
             assert k not in os.environ

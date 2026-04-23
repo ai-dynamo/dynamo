@@ -133,8 +133,6 @@ _MODELS_DIR_ENV_KEYS = (
     "HF_HUB_CACHE",
     "HF_HOME",
     *_TRANSFORMERS_CACHE_OVERRIDE_KEYS,
-    "HF_HUB_OFFLINE",
-    "TRANSFORMERS_OFFLINE",
     "DYNAMO_MODELS_DIR",
 )
 
@@ -156,20 +154,32 @@ def _apply_models_dir_env(models_dir: str) -> dict:
         os.environ["HF_HUB_CACHE"] = models_dir
     for key in _TRANSFORMERS_CACHE_OVERRIDE_KEYS:
         os.environ.pop(key, None)
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["DYNAMO_MODELS_DIR"] = models_dir
-    _enable_offline_with_mistral_patch()  # activates sitecustomize for Mistral tokenizer workaround
     return orig
 
 
 def _restore_models_dir_env(orig: dict) -> None:
     """Undo _apply_models_dir_env. Call after fixture yield."""
-    # _disable pops HF_HUB_OFFLINE; the loop below then restores the original value
-    # (no-op if orig was None, set-back if orig had a pre-existing value). Safe.
-    _disable_offline_with_mistral_patch()  # pops HF_HUB_OFFLINE + cleans sitecustomize
     for k, v in orig.items():
         if v is None:
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+
+
+def _missing_from_hf_cache(model_ids: list) -> list:
+    """Return the subset of model_ids not present in the current HF hub cache.
+
+    Resolves the cache path from env vars the same way huggingface_hub does:
+    HF_HUB_CACHE if set, otherwise HF_HOME/hub (defaulting to ~/.cache/huggingface/hub).
+    """
+    hf_hub_cache = os.environ.get("HF_HUB_CACHE")
+    if not hf_hub_cache:
+        hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        hf_hub_cache = os.path.join(hf_home, "hub")
+    cache_path = Path(hf_hub_cache)
+    return [
+        m
+        for m in model_ids
+        if not (cache_path / ("models--" + m.replace("/", "--"))).exists()
+    ]

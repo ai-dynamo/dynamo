@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -16,6 +17,7 @@ from tests.hf_cache import (
     _apply_models_dir_env,
     _disable_offline_with_mistral_patch,
     _enable_offline_with_mistral_patch,
+    _missing_from_hf_cache,
     _restore_models_dir_env,
 )
 from tests.utils.constants import TEST_MODELS, DefaultPort
@@ -393,16 +395,33 @@ def predownload_models(pytestconfig, _models_dir_env):
     Uses a file lock so that under xdist, only one worker downloads at a time
     and the rest reuse the HuggingFace cache.
 
-    When --models-dir is passed, _models_dir_env has already set up HF env vars;
-    this fixture simply yields without downloading.
+    When --models-dir is passed, _models_dir_env has already set up the HF cache
+    path. Models already in the cache are used directly; any missing models are
+    downloaded from the network with a warning before offline mode is enabled.
 
     _models_dir_env is declared as a dependency to ensure HF env vars are
     configured before any download attempt, even though its yielded value is unused.
     """
-    if pytestconfig.getoption("--models-dir"):
-        yield
-        return
     models = getattr(pytestconfig, "models_to_download", None)
+    if pytestconfig.getoption("--models-dir"):
+        missing = _missing_from_hf_cache(list(models)) if models else []
+        for m in missing:
+            warnings.warn(
+                f"Model '{m}' not found in --models-dir cache; downloading from network.",
+                stacklevel=2,
+            )
+        with FileLock(_download_lock_path):
+            if missing:
+                logging.info(
+                    f"Downloading {len(missing)} models missing from --models-dir cache\nModels: {missing}"
+                )
+                download_models(model_list=missing)
+        _enable_offline_with_mistral_patch()
+        try:
+            yield
+        finally:
+            _disable_offline_with_mistral_patch()
+        return
     with FileLock(_download_lock_path):
         if models:
             logging.info(
@@ -423,16 +442,33 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
 
     Uses a file lock so that under xdist, only one worker downloads at a time.
 
-    When --models-dir is passed, _models_dir_env has already set up HF env vars;
-    this fixture simply yields without downloading.
+    When --models-dir is passed, _models_dir_env has already set up the HF cache
+    path. Tokenizers already in the cache are used directly; any missing models are
+    downloaded from the network with a warning before offline mode is enabled.
 
     _models_dir_env is declared as a dependency to ensure HF env vars are
     configured before any download attempt, even though its yielded value is unused.
     """
-    if pytestconfig.getoption("--models-dir"):
-        yield
-        return
     models = getattr(pytestconfig, "models_to_download", None)
+    if pytestconfig.getoption("--models-dir"):
+        missing = _missing_from_hf_cache(list(models)) if models else []
+        for m in missing:
+            warnings.warn(
+                f"Model '{m}' tokenizer not found in --models-dir cache; downloading from network.",
+                stacklevel=2,
+            )
+        with FileLock(_download_lock_path):
+            if missing:
+                logging.info(
+                    f"Downloading tokenizers for {len(missing)} models missing from --models-dir cache\nModels: {missing}"
+                )
+                download_models(model_list=missing, ignore_weights=True)
+        _enable_offline_with_mistral_patch()
+        try:
+            yield
+        finally:
+            _disable_offline_with_mistral_patch()
+        return
     with FileLock(_download_lock_path):
         if models:
             logging.info(
