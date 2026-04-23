@@ -164,6 +164,20 @@ def test_agentic_trace_workload_requires_trace_replay_concurrency(tmp_path) -> N
         WorkloadSpec(traceFile=str(trace_path), traceFormat="agentic")
 
 
+def test_agentic_trace_workload_rejects_shared_prefix_ratio_without_groups(
+    tmp_path,
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    with pytest.raises(ValueError, match="traceNumPrefixGroups"):
+        WorkloadSpec(
+            traceFile=str(trace_path),
+            traceFormat="agentic",
+            traceReplayConcurrency=8,
+            traceSharedPrefixRatio=0.5,
+            traceNumPrefixGroups=0,
+        )
+
+
 def test_run_replay_for_state_passes_agentic_trace_knobs(tmp_path, monkeypatch) -> None:
     trace_path = _write_trace(tmp_path)
     workload = _agentic_trace_workload(trace_path, concurrency=9)

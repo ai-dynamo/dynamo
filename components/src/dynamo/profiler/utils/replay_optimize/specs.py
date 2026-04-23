@@ -199,6 +199,10 @@ class WorkloadSpec(BaseModel):
                 raise ValueError("traceSharedPrefixRatio must be between 0.0 and 1.0")
             if self.traceNumPrefixGroups < 0:
                 raise ValueError("traceNumPrefixGroups must be non-negative")
+            if self.traceSharedPrefixRatio > 0.0 and self.traceNumPrefixGroups == 0:
+                raise ValueError(
+                    "traceSharedPrefixRatio > 0 requires traceNumPrefixGroups >= 1"
+                )
             if self.traceFormat == "agentic" and self.traceReplayConcurrency is None:
                 raise ValueError(
                     "traceFormat='agentic' requires traceReplayConcurrency"
