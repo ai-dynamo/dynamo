@@ -1,55 +1,26 @@
-# Full-Stack Optimizations for Agentic Harnesses with Dynamo
+# What It Took to Run Claude Code, Codex, and OpenClaw on Dynamo
 
-Claude Code, OpenClaw, and Codex all depend on details that live above raw token generation: model metadata and tool-call readiness. Get those details wrong and the failure mode is not just uglier JSON. It is broken cache reuse, idle tool loops, and clients that behave as if the model is slower or less reliable than it really is.
+Agent harnesses ask for more than text. Claude Code expects Anthropic-shaped model metadata, stable prompt caching, streamed content blocks, and reasoning/tool replay that survives the next turn. Codex expects the Responses API shape to survive Dynamo's internal conversion path. OpenClaw keeps conversations alive across background loops and channels, so parser mistakes show up as long-lived user-facing failures.
 
-Our [first post](./agentic-inference.md) focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. This post stays closer to the harness boundary. The question here is simpler and more practical: what had to change in Dynamo to make real agent harnesses like Claude Code, OpenClaw, and Codex feel correct, cache-efficient, and fast?
+Our [first post](./agentic-inference.md) focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. This post stays at the harness boundary: what broke when real clients ran against Dynamo, and what we changed when "OpenAI-compatible" or "Anthropic-compatible" was not specific enough.
 
-Claude Code is the main anchor throughout. It puts pressure on nearly every layer at once: a large reusable system prompt, Anthropic-flavored API expectations, interleaved reasoning and tool calls, and long-running sessions with complex event-based patterns such as those created by background commands and agent teams. OpenClaw broadens the story to long-lived and background loops while Codex gives us the `v1/responses` side of the same problem.
+The story starts with Claude Code and Codex, because they expose the protocol and cache problems quickly. Then OpenClaw exercises the same backend in a different mode: long-lived, multi-channel conversations where reasoning and tool parsers have to keep working after the terminal session is gone.
 
-## Tiny Setup
+All experiments in the Claude Code and Codex sections were run against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. Some of the strongest results below are correctness results with clear systems implications; others are quantitative.
 
-The following minimal example helps make the integration concrete.
-For Claude Code, we used a simple SSH tunnel to a frontend that exposes the Anthropic-compatible API:
+## Harness-Facing Dynamo Settings
 
-```bash
-autossh -M 0 -f -N \
-  -L 8000:localhost:8000 \
-  -o ServerAliveInterval=15 \
-  -o ServerAliveCountMax=3 \
-  -o StrictHostKeyChecking=no \
-  <gpu-node> && \
-ANTHROPIC_BASE_URL=http://localhost:8000 \
-ANTHROPIC_CUSTOM_MODEL_OPTION=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
-ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Dynamo NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" \
-claude --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
-```
-
-For OpenClaw, the Anthropic-compatible path is even thinner:
-
-```bash
-autossh -M 0 -f -N \
-  -L 8000:localhost:8000 \
-  -o ServerAliveInterval=15 \
-  -o ServerAliveCountMax=3 \
-  -o StrictHostKeyChecking=no \
-  <gpu-node> && \
-ANTHROPIC_BASE_URL=http://localhost:8000 \
-npx openclaw
-```
-
-All experiments in this post were run against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. Some of the strongest results below are correctness results with clear systems implications; others are quantitative.
-
-## The Dynamo Graph Deployment (DGD) Settings
-
-We started the frontend with the Anthropic API compatibility flags shown below:
+For these experiments, the frontend exposed the Anthropic-compatible API and enabled the switches that preserve prompt, reasoning, and tool state.
 
 ```bash
 python -m dynamo.frontend \
   --http-port 8000 \
   --enable-anthropic-api \
-  --strip-anthropic-preamble
+  --strip-anthropic-preamble \
+  --enable-streaming-tool-dispatch
 ```
-If the frontend and worker are missing these harness-facing switches, the deployment can benchmark well in terms of metrics and still feel wrong and clunky.
+
+If the frontend and worker are missing these switches, the deployment can benchmark well and still misbehave at the client boundary.
 
 On the frontend side, the key settings to watch for are:
 
@@ -61,8 +32,7 @@ On the worker side, the important settings in this deployment are:
 
 - `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` so tool calls and reasoning blocks are reconstructed in the model-specific format the harness actually needs. For instance, a common pattern is to drop all reasoning tokens from previous turns. Parsers need to handle this correctly, as well as the case of not dropping reasoning tokens for turns with interleaved tool calls, where the reasoning provides crucial context.
 
-
-## Prompt Stability Is Key for Cache Re-use
+## Prompt Stability Is Key for Cache Reuse
 
 Claude Code sends thousands of tokens of reusable prompt scaffolding, much of which is designed to be the same across different users and sessions. However, at the very front of each prompt is a session-specific billing header which causes cache misses when pointed at custom endpoints that do not strip it out:
 
@@ -75,7 +45,7 @@ These headers poison the KV cache and prevent it from being reused, even across 
 
 That is why Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
 
-The impact of this simple fix is significant. On a Dynamo B200 deployment with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill. That is about a `5x` reduction in TTFT for new users hitting the same deployment or for the same user opening a new session.
+The measured impact was large. On a Dynamo B200 deployment with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill. That is about a `5x` reduction in TTFT for new users hitting the same deployment or for the same user opening a new session.
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" style="max-width:720px;width:100%;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;border:1px solid #e5e7eb;border-radius:8px">
 <line x1="72" y1="324.0" x2="696" y2="324.0" stroke="#e5e7eb" stroke-width="1"/>
@@ -309,19 +279,29 @@ Claude Code compatibility is more than text generation behind an Anthropic endpo
 - useful `input_tokens` in `message_start`
 - acceptance of `cache_control`
 
-The fixes in this area were not glamorous, but they brought our custom deployment to a user-experience parity.
+Once the frontend is reachable, the client side is intentionally plain:
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8000 \
+ANTHROPIC_CUSTOM_MODEL_OPTION=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Dynamo NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" \
+claude --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+```
+
+The fixes in this area brought the custom deployment closer to the behavior Claude Code expects from its backend.
 One concrete example shows the flavor of these bugs better than a long checklist. Claude Code asks for the connected model directly. On the measured deployment, that lookup failed:
 
 ```text
 GET /v1/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 HTTP/1.1 404 Not Found
 ```
+
 Another example is `message_start` reporting `input_tokens: 0` even when the final response later contains the real count. This can make the token count in the harness temporarily drop to `0` every time a new turn starts.
 
 ## Responses and Codex Fidelity
 
 The Codex-facing version of the same problem lives on the `v1/responses` side. Passing compliance tests is not enough to provide parity in user experience.
-We found that a Responses API request could not survive an internal round-trip without losing the fields that made it a Responses request rather than a chat completions request. Preserving those fields turned out to be an architectural concern, not just a serializer concern. The boring implementation details live in Dynamo's `ResponseParams` path and the upstream type-alignment work in [PR #6089](https://github.com/ai-dynamo/dynamo/pull/6089).
+We found that a Responses API request could not survive an internal round-trip without losing the fields that made it a Responses request rather than a chat completions request. Preserving those fields turned out to be an architectural concern, not just a serializer concern. The relevant changes live in Dynamo's `ResponseParams` path and the upstream type-alignment work in [PR #6089](https://github.com/ai-dynamo/dynamo/pull/6089).
 
 ## OpenClaw: Integration Testing and Parser Discovery
 
@@ -329,8 +309,14 @@ Claude Code stress-tests the system prompt and single-session tool loop. OpenCla
 
 OpenClaw is a multi-channel AI chat client that connects to the same backend over Telegram, WhatsApp, and web chat simultaneously. Unlike Claude Code, which starts a fresh session per task and sends a large system prompt once, OpenClaw keeps conversations alive indefinitely. That makes it a good vehicle for testing whether the full parsing pipeline holds up under realistic multi-turn conditions with tools and thinking interleaved.
 
-We ran experiments against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A12B-NVFP4 on 4x B200 with TP=4, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, `--enable-streaming-tool-dispatch`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
+The client path is the same Anthropic-compatible surface:
 
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8000 \
+npx openclaw
+```
+
+We ran experiments against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A12B-NVFP4 on 4x B200 with TP=4, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, `--enable-streaming-tool-dispatch`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
 
 Nemotron-3-Super ships with a reasoning format that uses `<think>` tags and a tool call format that uses `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>` XML. The tool call parser that handles the XML format is called `qwen3_coder`, because Qwen models popularized that output shape.
 
@@ -381,14 +367,14 @@ The streaming path makes the parser interaction more visible. A streaming reques
 
 The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
 
-The hackability and inspectability of OpenClaw makes it easier to understand the inner workings of how different events and tokens are handled.
-
+Because OpenClaw makes the event stream easy to inspect, it helped turn a parser concern into a repeatable integration test. The question was no longer "did the model answer?" It was "did every thinking, text, and tool-use boundary arrive in the shape the harness needs?"
 
 ## What's Next
 
 Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
 
+In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, LLM, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, `dynamo-llm`, and `dynamo-tokens`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
+
 ## Closing the Loop
 
-These integration fixes are what make the architecture from the first post show up in actual user-facing behavior.
-Dynamo now ships several of these layers as standalone Rust crates, including `dynamo-protocols`, `dynamo-parsers`, `dynamo-llm`, and `dynamo-tokens`. If you want to build your own serving pipeline rather than deploy the full stack, you can use those pieces directly. They let you reuse the same protocol, parser, and tokenizer machinery without running a full Dynamo deployment.
+These integration fixes are what make the architecture from the first post show up in actual user-facing behavior. The frontend will keep carrying more of this harness context as explicit protocol state instead of forcing each client to infer it from token streams. That is the practical direction: make Claude Code, Codex, OpenClaw, and new agent harnesses work through well-defined APIs, then expose the pieces so teams can reuse them in their own stacks.
