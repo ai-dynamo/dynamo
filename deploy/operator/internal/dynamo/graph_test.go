@@ -7408,16 +7408,11 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				assert.True(t, found, "sidecar should have downward API env var %s", name)
 			}
 
-			// Verify the sidecar inherited the expected volume mounts from the worker.
-			for _, want := range tt.wantSidecarMounts {
-				found := false
-				for _, got := range sidecar.VolumeMounts {
-					if got.Name == want.Name && got.MountPath == want.MountPath {
-						found = true
-						break
-					}
-				}
-				assert.True(t, found, "sidecar should have volume mount %s at %s", want.Name, want.MountPath)
+			// Verify the sidecar's volume mounts match the expected set exactly.
+			// The frontend base container ships with no mounts, so sidecar.VolumeMounts
+			// should equal wantSidecarMounts element-for-element.
+			if tt.wantSidecarMounts != nil {
+				assert.ElementsMatch(t, tt.wantSidecarMounts, sidecar.VolumeMounts, "sidecar volume mounts")
 			}
 
 			// Verify the sidecar did NOT inherit mounts that belong only to the worker
@@ -7445,15 +7440,14 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				}
 			}
 
-			// Verify pod-level volumes aren't duplicated when propagating to the sidecar.
+			// Verify pod-level volume counts exactly match the expected set
+			// (catches duplicates as well as unexpected extra volumes).
 			if tt.wantUniqueVolumes != nil {
 				counts := make(map[string]int)
 				for _, v := range podSpec.Volumes {
 					counts[v.Name]++
 				}
-				for name, want := range tt.wantUniqueVolumes {
-					assert.Equal(t, want, counts[name], "pod volume %s count", name)
-				}
+				assert.Equal(t, tt.wantUniqueVolumes, counts, "pod volume counts")
 			}
 		})
 	}
