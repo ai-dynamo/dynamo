@@ -2510,8 +2510,12 @@ dependencies = [
  "derive_builder",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "futures",
  "indicatif 0.18.4",
+ "kvbm-common",
+ "kvbm-engine",
  "kvbm-logical",
+ "kvbm-physical",
  "ndarray 0.16.1",
  "ndarray-interp",
  "ndarray-npy",
@@ -2528,6 +2532,7 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
+ "velo",
 ]
 
 [[package]]

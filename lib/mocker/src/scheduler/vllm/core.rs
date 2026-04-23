@@ -92,6 +92,18 @@ impl SchedulerState {
         self.waiting.push_front(uuid);
     }
 
+    /// Remove `uuid` from the waiting queue (front-only) and from the
+    /// `waiting_members` set. Shared between `transition_to_running`
+    /// (which then promotes to running) and the offload admission
+    /// hook's parking path (which keeps the request in `Waiting`
+    /// status while parked on a swap-in).
+    fn remove_from_waiting(&mut self, uuid: Uuid) {
+        if self.waiting.front().copied() == Some(uuid) {
+            self.waiting.pop_front();
+        }
+        self.waiting_members.remove(&uuid);
+    }
+
     fn next_waiting_uuid(&mut self) -> Option<Uuid> {
         loop {
             let uuid = *self.waiting.front()?;
@@ -126,10 +138,7 @@ impl SchedulerState {
     }
 
     fn transition_to_running(&mut self, uuid: Uuid) {
-        if self.waiting.front().copied() == Some(uuid) {
-            self.waiting.pop_front();
-        }
-        self.waiting_members.remove(&uuid);
+        self.remove_from_waiting(uuid);
         if self.running_members.insert(uuid) {
             self.running.push_back(uuid);
         }
@@ -195,11 +204,39 @@ impl SchedulerState {
     }
 }
 
+/// A request parked on a pending G2→G1 swap-in. The scheduler holds
+/// one per deferred request and polls `handle.is_complete()` each pass
+/// via [`VllmCore::tick_and_promote_swap_ins`]; on completion the
+/// request becomes promotable.
+///
+/// `skip_blocks` is the number of full prefix blocks that were already
+/// cached in G1 at park time; the swap-in covers the next
+/// `handle.block_count()` blocks starting at that offset. We need this
+/// to register the right slice of the request's PLHs into G1 inactive
+/// after the transfer completes.
+#[cfg(feature = "kvbm-offload")]
+pub(crate) struct AwaitingSwapIn {
+    pub(crate) uuid: Uuid,
+    pub(crate) handle: crate::kvbm_offload::SwapInHandle,
+    pub(crate) skip_blocks: usize,
+}
+
 pub(crate) struct VllmCore {
     args: MockEngineArgs,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: KvManager,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+
+    /// Requests parked on pending G2→G1 swap-ins. Populated by the
+    /// admission path when a request's remaining prefix matches G2 only
+    /// (not active, not inactive in G1); drained at pass entry by
+    /// [`Self::tick_and_promote_swap_ins`] once the associated
+    /// [`SwapInHandle`](crate::kvbm_offload::SwapInHandle) reports
+    /// complete. Lives on core (not engine) so the engine stays
+    /// request-agnostic — engine hands out opaque handles, core owns the
+    /// uuid↔handle mapping.
+    #[cfg(feature = "kvbm-offload")]
+    pub(super) requests_awaiting_swap_in: Vec<AwaitingSwapIn>,
 }
 
 impl VllmCore {
@@ -242,7 +279,28 @@ impl VllmCore {
             args,
             state: SchedulerState::default(),
             kv_event_buffer,
+            #[cfg(feature = "kvbm-offload")]
+            requests_awaiting_swap_in: Vec::new(),
         }
+    }
+
+    /// Wire a live-mode (`ClockSource::Real`) offload engine onto this
+    /// core's `KvManager`. No-op when `args.kv_bytes_per_token` is
+    /// unset. Caller must be inside an ambient tokio runtime.
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) async fn init_offload_live(&mut self) -> anyhow::Result<()> {
+        crate::scheduler::init_kvbm_live(&self.args, &mut self.kv_manager).await?;
+        Ok(())
+    }
+
+    /// Wire an offline-mode (`ClockSource::Virtual`) offload engine
+    /// onto this core's `KvManager`. No-op when
+    /// `args.kv_bytes_per_token` is unset. Sync entry — owns the
+    /// internal tokio runtime via `attach_runtime`.
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn init_offload_offline(&mut self) -> anyhow::Result<()> {
+        crate::scheduler::init_kvbm_offline(&self.args, &mut self.kv_manager)?;
+        Ok(())
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
@@ -290,6 +348,117 @@ impl VllmCore {
         self.execute_pass_internal(None, now_ms, None)
     }
 
+    /// Drive the offload engine forward to `now_ms` and promote any
+    /// parked swap-ins whose transfers just completed.
+    #[cfg(feature = "kvbm-offload")]
+    fn tick_and_promote_swap_ins(&mut self, now_ms: f64) {
+        self.kv_manager.tick_offload_engine(now_ms);
+        let mut i = 0;
+        while i < self.requests_awaiting_swap_in.len() {
+            if self.requests_awaiting_swap_in[i].handle.is_complete() {
+                let aws = self.requests_awaiting_swap_in.swap_remove(i);
+                self.complete_swap_in(aws);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Register the onboard'd PLHs into G1 inactive (so the request's
+    /// next `process_use` sees `InactiveHit`) and re-queue the request
+    /// for admission. The swap-in covers
+    /// `[skip_blocks .. skip_blocks + count]` of the request's block
+    /// sequence — we skip the G1-cached prefix the request already had
+    /// and register only the uncached-remainder blocks that the engine
+    /// actually onboarded from G2. `aws` drops at the end →
+    /// `SwapInHandle` drops → pinned G2 blocks release to kvbm-engine's
+    /// inactive pool.
+    #[cfg(feature = "kvbm-offload")]
+    fn complete_swap_in(&mut self, aws: AwaitingSwapIn) {
+        let count = aws.handle.block_count();
+        let skip = aws.skip_blocks;
+        let entries: Vec<_> = {
+            let request = self
+                .state
+                .requests
+                .get(&aws.uuid)
+                .expect("swap-in completed for known request");
+            let unique = request.sequence.unique_blocks();
+            let plhs = request.sequence.positional_lineage_hashes();
+            let local_hashes = request.sequence.block_hashes();
+            unique
+                .iter()
+                .zip(plhs.iter())
+                .zip(local_hashes.iter())
+                .skip(skip)
+                .take(count)
+                .filter_map(|((block, plh), local)| match block {
+                    UniqueBlock::FullBlock(seq_hash) => Some((*seq_hash, *plh, *local)),
+                    UniqueBlock::PartialBlock(_) => None,
+                })
+                .collect()
+        };
+        self.kv_manager.register_swapped_in_blocks(&entries);
+        self.state.push_waiting(aws.uuid);
+    }
+
+    /// Admission-side hook: park a request on a G2 swap-in covering its
+    /// **uncached remainder prefix** (the run of full-block PLHs after
+    /// whatever G1 already has cached). Returns `true` when parked.
+    ///
+    /// The gate is deliberately wider than "cold only": a request whose
+    /// first N blocks hit G1 can still benefit from a G2 onboard of
+    /// blocks N, N+1, ... — that's exactly the "evicted-then-recalled"
+    /// pattern in workloads with prefix sharing (mooncake_trace etc.).
+    /// By passing only the uncached-suffix PLHs to the engine, we avoid
+    /// redundantly re-onboarding the G1-cached prefix.
+    #[cfg(feature = "kvbm-offload")]
+    fn try_park_for_swap_in(&mut self, uuid: Uuid, now_ms: f64) -> bool {
+        use crate::kv_manager::kvbm_backend::BatchSwapInOutcome;
+        if !self.kv_manager.has_offload_engine() {
+            return false;
+        }
+        let request = self
+            .state
+            .requests
+            .get(&uuid)
+            .expect("try_park_for_swap_in: uuid in waiting queue but missing from state");
+        if !matches!(request.status, RequestStatus::Waiting) {
+            return false;
+        }
+        let cost = self.kv_manager.get_prefill_cost(&request.sequence);
+        let block_size = request.sequence.block_size();
+        let skip_blocks = cost.cached_tokens / block_size;
+        let plhs = request.sequence.positional_lineage_hashes();
+        if skip_blocks >= plhs.len() {
+            return false;
+        }
+        let remaining_plhs = &plhs[skip_blocks..];
+        if remaining_plhs.is_empty() {
+            return false;
+        }
+        let BatchSwapInOutcome::Scheduled { handle } = self
+            .kv_manager
+            .try_batch_swap_in(remaining_plhs, Some(now_ms))
+        else {
+            return false;
+        };
+        self.state.remove_from_waiting(uuid);
+        self.requests_awaiting_swap_in.push(AwaitingSwapIn {
+            uuid,
+            handle,
+            skip_blocks,
+        });
+        true
+    }
+
+    /// Test-only: push a parked swap-in directly onto the queue.
+    /// Production code populates this via the admission path.
+    #[cfg(all(test, feature = "kvbm-offload"))]
+    pub(super) fn push_awaiting_swap_in_for_test(&mut self, aws: AwaitingSwapIn) {
+        self.requests_awaiting_swap_in.push(aws);
+    }
+
     pub(super) fn execute_pass_internal(
         &mut self,
         mut collector: Option<&mut TraceCollector>,
@@ -297,6 +466,8 @@ impl VllmCore {
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
         let requests_before = self.state.requests.len();
+        #[cfg(feature = "kvbm-offload")]
+        self.tick_and_promote_swap_ins(now_ms);
         self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
         let mut scheduled = FxHashMap::default();
@@ -345,6 +516,10 @@ impl VllmCore {
             let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
+            #[cfg(feature = "kvbm-offload")]
+            if self.try_park_for_swap_in(uuid, now_ms) {
+                continue;
+            }
             match self.schedule_request(
                 uuid,
                 true,

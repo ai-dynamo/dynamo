@@ -26,6 +26,7 @@ default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]

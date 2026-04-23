@@ -32,6 +32,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "kvbm-offload")]
+use std::sync::Mutex;
 
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -49,6 +51,23 @@ use crate::common::protocols::{
     G1, KvEventPublishers, MockerEvictionBackend, MoveBlock, PrefillCost,
 };
 use crate::common::sequence::ActiveSequence;
+#[cfg(feature = "kvbm-offload")]
+use crate::kvbm_offload::{MockOffloadEngine, SwapInHandle};
+
+/// Outcome of [`KvManager::try_batch_swap_in`]. The caller uses this to
+/// decide whether to park the request on a pending-swap-in queue or to
+/// fall through to normal G1 allocation.
+#[cfg(feature = "kvbm-offload")]
+pub enum BatchSwapInOutcome {
+    /// No G2 hits (or no offload engine attached). Caller must allocate
+    /// fresh G1 blocks.
+    NoHits,
+    /// Swap-in reservation accepted. Caller parks the request with this
+    /// handle and polls `SwapInHandle::is_complete()` on subsequent
+    /// scheduler passes. Matched G2 blocks are pinned via RAII inside
+    /// the handle for the duration of the transfer.
+    Scheduled { handle: SwapInHandle },
+}
 
 /// Classification for each block processed inside `Use`.
 ///
@@ -94,6 +113,20 @@ pub struct KvManager {
     /// map so we can emit router-compatible `Removed` events when kvbm-logical
     /// evicts inactive blocks as a side effect of `allocate_blocks_with_evictions`.
     registered_plhs: HashMap<PositionalLineageHash, SequenceHash>,
+
+    /// Handle to the G1↔G2 offload engine. `None` until
+    /// [`attach_new_offload_engine`](Self::attach_new_offload_engine) wires
+    /// one in after construction (the engine is built async and cannot be
+    /// created inside `new_*`).
+    ///
+    /// Slot-reuse safety: G1 eviction hands kvbm-engine
+    /// `SourceBlocks::External(block_id, plh)` — no strong ref is pinned
+    /// through the transfer, so the G1 slot is free for reclaim and
+    /// reassignment immediately. Slot reuse during in-flight offload is
+    /// allowed behaviour that matches real kvbm semantics; the pipeline
+    /// identifies blocks by `plh` for destination registration.
+    #[cfg(feature = "kvbm-offload")]
+    offload_engine: Option<Arc<Mutex<MockOffloadEngine>>>,
 }
 
 impl KvManager {
@@ -155,6 +188,158 @@ impl KvManager {
             active_partial: HashMap::new(),
             active_full: HashMap::new(),
             registered_plhs: HashMap::new(),
+            #[cfg(feature = "kvbm-offload")]
+            offload_engine: None,
+        }
+    }
+
+    /// Wrap `engine` in `Arc<Mutex<_>>`, install it onto this
+    /// `KvManager`, and return a clone of the Arc to the caller.
+    /// Called once after construction by the scheduler's init helper;
+    /// a second call replaces the previous engine (primarily for tests).
+    #[cfg(feature = "kvbm-offload")]
+    pub fn attach_new_offload_engine(
+        &mut self,
+        engine: MockOffloadEngine,
+    ) -> Arc<Mutex<MockOffloadEngine>> {
+        let shared = Arc::new(Mutex::new(engine));
+        self.offload_engine = Some(shared.clone());
+        shared
+    }
+
+    /// `true` once an offload engine has been attached.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn has_offload_engine(&self) -> bool {
+        self.offload_engine.is_some()
+    }
+
+    /// Advance the offload engine's PS accountants and fire any
+    /// completion sinks for drained transfers. Scheduler calls this at
+    /// the top of every pass so swap-in flags flip before the
+    /// promote-completed loop runs, and offload awaiters fire before
+    /// the next enqueue measures the active-set size. No-op when no
+    /// engine is attached.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn tick_offload_engine(&self, now_ms: f64) {
+        if let Some(engine_arc) = self.offload_engine.as_ref() {
+            let engine = engine_arc.lock().expect("offload engine mutex poisoned");
+            engine.tick(now_ms);
+        }
+    }
+
+    /// Earliest pending completion time across offload + onboard links,
+    /// or `None` when both are idle or no engine is attached. Scheduler
+    /// uses this to drive stall-advance in virtual-time replay.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn earliest_offload_deadline(&self) -> Option<f64> {
+        let engine_arc = self.offload_engine.as_ref()?;
+        let engine = engine_arc.lock().expect("offload engine mutex poisoned");
+        engine.earliest_pending_deadline()
+    }
+
+    /// Hand the just-deactivated G1 block to the offload engine as an
+    /// `ExternalBlock` (no strong ref — see `offload_engine` field docs).
+    /// No-op when no engine is attached or when `popped` is `None`.
+    #[cfg(feature = "kvbm-offload")]
+    fn enqueue_deref_to_g2(&self, popped: Option<ImmutableBlock<G1>>) {
+        let (Some(block), Some(engine_arc)) = (popped, self.offload_engine.as_ref()) else {
+            return;
+        };
+        let block_id = block.block_id();
+        let plh = block.sequence_hash();
+        drop(block);
+        engine_arc
+            .lock()
+            .expect("offload engine mutex poisoned")
+            .enqueue_g1_eviction(block_id, plh, None);
+    }
+
+    /// Register a batch of G2-swapped-in blocks into the G1 inactive
+    /// pool. Entries already cached in G1 (active or inactive) are
+    /// skipped; fresh registrations land in inactive, where the
+    /// request's later `process_use` reactivates them as `InactiveHit`.
+    /// Returns the number of fresh registrations performed.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn register_swapped_in_blocks(
+        &mut self,
+        entries: &[(SequenceHash, PositionalLineageHash, BlockHash)],
+    ) -> usize {
+        let mut stored_seq_hashes = Vec::with_capacity(entries.len());
+        let mut stored_local_hashes = Vec::with_capacity(entries.len());
+        let mut evicted_plhs = Vec::with_capacity(entries.len());
+        let mut registered = 0usize;
+
+        for (seq_hash, plh, local_hash) in entries {
+            if self.active_full.contains_key(seq_hash) {
+                continue;
+            }
+            let presence = self
+                .block_manager
+                .block_registry()
+                .check_presence::<G1>(&[*plh]);
+            if presence.first().is_some_and(|(_, p)| *p) {
+                continue;
+            }
+            let Some((mut alloc, evicted)) = self
+                .block_manager
+                .allocate_blocks_with_evictions(1)
+            else {
+                break;
+            };
+            evicted_plhs.extend(evicted);
+            let mutable = alloc.pop().unwrap();
+            let complete = mutable
+                .stage(*plh, self.block_size)
+                .expect("stage failed during swap-in registration");
+            // Drop ImmutableBlock → block lands in kvbm-logical's
+            // inactive pool, where `process_use`'s `match_blocks`
+            // later reactivates it.
+            drop(self.block_manager.register_block(complete));
+            self.registered_plhs.insert(*plh, *seq_hash);
+            stored_seq_hashes.push(*seq_hash);
+            stored_local_hashes.push(*local_hash);
+            registered += 1;
+        }
+
+        if !stored_seq_hashes.is_empty() {
+            self.publish_kv_event(
+                stored_seq_hashes,
+                &stored_local_hashes,
+                None,
+                true,
+                None,
+            );
+        }
+        self.publish_evictions(evicted_plhs);
+
+        registered
+    }
+
+    /// Try to satisfy a request's remaining prefix via a G2→G1 swap-in.
+    ///
+    /// Admission path stays linear: `active → inactive → (this) →
+    /// allocate fresh`. Returns [`BatchSwapInOutcome::NoHits`] when no
+    /// engine is attached or when G2 holds none of `remaining_plhs`.
+    ///
+    /// The G2 tier is keyed by `PositionalLineageHash` (kvbm-engine's
+    /// native identity), not the router-facing `u64` SequenceHash — the
+    /// caller already holds these on the admission path. Find and
+    /// reserve happen atomically inside the engine; the returned
+    /// [`SwapInHandle`] pins the matched G2 blocks via RAII so a
+    /// concurrent offload cannot race in and reassign them.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn try_batch_swap_in(
+        &mut self,
+        remaining_plhs: &[PositionalLineageHash],
+        now_ms: Option<f64>,
+    ) -> BatchSwapInOutcome {
+        let Some(engine_arc) = self.offload_engine.as_ref() else {
+            return BatchSwapInOutcome::NoHits;
+        };
+        let mut engine = engine_arc.lock().expect("offload engine mutex poisoned");
+        match engine.try_onboard_prefix(remaining_plhs, now_ms) {
+            Some(handle) => BatchSwapInOutcome::Scheduled { handle },
+            None => BatchSwapInOutcome::NoHits,
         }
     }
 
@@ -411,19 +596,26 @@ impl KvManager {
             stored_token_ids,
         );
 
-        // Translate any blocks kvbm-logical evicted from its inactive pool
-        // during the allocations above into router `Removed` events.
-        if !evicted_plhs.is_empty() {
-            let evicted: Vec<SequenceHash> = evicted_plhs
-                .into_iter()
-                .filter_map(|plh| self.registered_plhs.remove(&plh))
-                .collect();
-            if !evicted.is_empty() {
-                self.publish_kv_event(evicted, &[], None, false, None);
-            }
-        }
+        self.publish_evictions(evicted_plhs);
 
         allocated
+    }
+
+    /// Translate PLHs that kvbm-logical evicted from its inactive pool
+    /// (during an `allocate_blocks_with_evictions` call) into a router
+    /// `Removed` event. No-op when the input is empty or none of the
+    /// PLHs are in our shadow registry.
+    fn publish_evictions(&mut self, evicted_plhs: Vec<PositionalLineageHash>) {
+        if evicted_plhs.is_empty() {
+            return;
+        }
+        let evicted: Vec<SequenceHash> = evicted_plhs
+            .into_iter()
+            .filter_map(|plh| self.registered_plhs.remove(&plh))
+            .collect();
+        if !evicted.is_empty() {
+            self.publish_kv_event(evicted, &[], None, false, None);
+        }
     }
 
     fn process_deref(&mut self, blocks: &[UniqueBlock]) {
@@ -439,9 +631,16 @@ impl KvManager {
                         .active_full
                         .get_mut(seq_hash)
                         .expect("Deref: full block not in active pool");
-                    vec.pop();
+                    // On default build, `popped` drops here and the block
+                    // deactivates normally. With `kvbm-offload`, we consume
+                    // it below to hand `(block_id, plh)` to the offload
+                    // engine before dropping.
+                    #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_variables))]
+                    let popped = vec.pop();
                     if vec.is_empty() {
                         self.active_full.remove(seq_hash);
+                        #[cfg(feature = "kvbm-offload")]
+                        self.enqueue_deref_to_g2(popped);
                     }
                 }
             }
@@ -1331,4 +1530,37 @@ mod tests {
         );
         assert_eq!(stored_count, 1, "one Stored event for the fresh block 12");
     }
+
+    #[cfg(feature = "kvbm-offload")]
+    mod offload {
+        use super::*;
+        use crate::kvbm_offload::{ClockSource, KvbmOffloadConfig, MockOffloadEngine};
+
+        #[test]
+        fn fresh_manager_has_no_offload_engine() {
+            let mgr = make_mgr(8, 4);
+            assert!(!mgr.has_offload_engine());
+        }
+
+        #[tokio::test]
+        async fn attach_new_offload_engine_wires_in_after_construction() {
+            let mut mgr = make_mgr(16, 4);
+            assert!(!mgr.has_offload_engine());
+
+            let engine = MockOffloadEngine::new(KvbmOffloadConfig::default(), ClockSource::Real)
+                .await
+                .expect("engine build");
+            mgr.attach_new_offload_engine(engine);
+            assert!(mgr.has_offload_engine());
+        }
+
+        #[test]
+        fn try_batch_swap_in_returns_no_hits_without_engine() {
+            let mut mgr = make_mgr(8, 4);
+            let plhs = [plh(1), plh(2), plh(3)];
+            let outcome = mgr.try_batch_swap_in(&plhs, None);
+            assert!(matches!(outcome, BatchSwapInOutcome::NoHits));
+        }
+    }
+
 }
