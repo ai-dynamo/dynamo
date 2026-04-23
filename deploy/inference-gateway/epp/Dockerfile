@@ -53,8 +53,6 @@ ARG SCCACHE_REGION=""
 
 # etcd-client crate requires protoc to compile proto files
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
     protobuf-compiler \
     libclang-dev \
     && rm -rf /var/lib/apt/lists/*

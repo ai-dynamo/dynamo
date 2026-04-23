@@ -121,8 +121,10 @@ ifeq ($(USE_SCCACHE),true)
   SCCACHE_ARGS += --build-arg SCCACHE_BUCKET=$(SCCACHE_BUCKET)
   SCCACHE_ARGS += --build-arg SCCACHE_REGION=$(SCCACHE_REGION)
   ifneq ($(AWS_WEB_IDENTITY_TOKEN_FILE),)
-    SCCACHE_ARGS += --secret id=aws-web-identity-token,src=$(AWS_WEB_IDENTITY_TOKEN_FILE)
-    SCCACHE_ARGS += --secret id=aws-role-arn,env=AWS_ROLE_ARN
+    ifneq ($(AWS_ROLE_ARN),)
+      SCCACHE_ARGS += --secret id=aws-web-identity-token,src=$(AWS_WEB_IDENTITY_TOKEN_FILE)
+      SCCACHE_ARGS += --secret id=aws-role-arn,env=AWS_ROLE_ARN
+    endif
   endif
 endif
 
