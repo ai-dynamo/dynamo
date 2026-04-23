@@ -39,6 +39,7 @@ pub mod tokenizers;
 pub mod tokens;
 pub mod types;
 pub mod utils;
+pub mod worker_type;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

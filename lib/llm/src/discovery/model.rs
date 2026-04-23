@@ -157,6 +157,107 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
+    // -- Topology readiness (DGH-706, live-computed, no cache) --
+    //
+    // See `docs/proposals/health-disagg-readiness.md`. Readiness is a pure
+    // function of current WorkerSet state: iterate the WorkerSets in a
+    // namespace, OR their `worker_type` (where `worker_count() > 0`) into
+    // `present`, OR `worker_type | needs` into `required`, ready iff
+    // `required & present == required`.
+    //
+    // Per the compatibility contract, a WorkerSet whose card carries an empty
+    // `worker_type` is interpreted as `WorkerType::Aggregated` with no `needs`.
+    // This preserves current behaviour for old workers and for new workers
+    // running without disagg flags.
+
+    /// Distinct namespaces represented by this model's WorkerSets, sorted.
+    /// Public so the `/v1/models/{model}/readiness` handler can enumerate.
+    pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
+        let mut ns: Vec<String> = self
+            .worker_sets
+            .iter()
+            .map(|entry| entry.value().namespace().to_string())
+            .collect();
+        ns.sort();
+        ns.dedup();
+        ns
+    }
+
+    /// Return `(required, present)` bitflags for the given namespace, applying
+    /// the missing-field compatibility contract. Public so the readiness
+    /// handler can report the same numbers `is_namespace_ready` uses.
+    pub fn namespace_topology(
+        &self,
+        namespace: &str,
+    ) -> (
+        crate::worker_type::WorkerType,
+        crate::worker_type::WorkerType,
+    ) {
+        let mut required = crate::worker_type::WorkerType::empty();
+        let mut present = crate::worker_type::WorkerType::empty();
+        for entry in self.worker_sets.iter() {
+            let ws = entry.value();
+            if ws.namespace() != namespace {
+                continue;
+            }
+            let (wt, needs) = Self::ws_topology(ws);
+            required |= wt | needs;
+            if ws.worker_count() > 0 {
+                present |= wt;
+            }
+        }
+        (required, present)
+    }
+
+    /// Return `(worker_type, needs)` for this WorkerSet, applying the
+    /// missing-field compatibility contract.
+    fn ws_topology(
+        ws: &WorkerSet,
+    ) -> (
+        crate::worker_type::WorkerType,
+        crate::worker_type::WorkerType,
+    ) {
+        let card = ws.card();
+        let mut wt = card.worker_type;
+        let mut needs = card.needs;
+        if wt.is_empty() {
+            // Missing-field contract: treat as Aggregated with no needs.
+            wt = crate::worker_type::WorkerType::Aggregated;
+            needs = crate::worker_type::WorkerType::empty();
+        }
+        (wt, needs)
+    }
+
+    /// Whether the given namespace's topology is ready.
+    pub fn is_namespace_ready(&self, namespace: &str) -> bool {
+        let (required, present) = self.namespace_topology(namespace);
+        if required.is_empty() {
+            // No WorkerSets for this namespace → not ready.
+            return false;
+        }
+        required & present == required
+    }
+
+    /// Return the first namespace (in sorted order) whose topology is ready,
+    /// or None if no namespace is ready.
+    pub fn first_ready_namespace(&self) -> Option<String> {
+        self.distinct_namespaces_sorted()
+            .into_iter()
+            .find(|ns| self.is_namespace_ready(ns))
+    }
+
+    /// Whether at least one namespace has a ready topology.
+    pub fn has_ready_namespace(&self) -> bool {
+        self.first_ready_namespace().is_some()
+    }
+
+    /// Worker types required in the given namespace but not currently present.
+    /// Returns an empty bitflag if the namespace is ready or unknown.
+    pub fn missing_worker_types(&self, namespace: &str) -> crate::worker_type::WorkerType {
+        let (required, present) = self.namespace_topology(namespace);
+        required & !present
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
@@ -719,5 +820,203 @@ mod tests {
             !model.is_displayable(),
             "model must be hidden when only the dead prefill set remains"
         );
+    }
+
+    // -- Topology readiness (DGH-706 PR 1) --
+    //
+    // These tests exercise the live-compute readiness methods added by PR 1.
+    // They construct WorkerSets with specific `worker_type` / `needs` values
+    // on their cards and verify the bitflag math, including the
+    // `Aggregated = Prefill | Decode` alias and the missing-field compat
+    // contract.
+
+    use crate::worker_type::WorkerType;
+
+    /// Build a WorkerSet with an explicit worker_type / needs and a live
+    /// worker count (via a watch channel).
+    fn ws_with_topology(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: WorkerType,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = worker_type;
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        (Arc::new(ws), tx)
+    }
+
+    #[test]
+    fn readiness_empty_model_not_ready() {
+        let model = Model::new("llama".to_string());
+        assert!(!model.has_ready_namespace());
+        assert_eq!(model.first_ready_namespace(), None);
+        assert!(!model.is_namespace_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_pd_pair_ready() {
+        let model = Model::new("llama".to_string());
+        let (prefill, _tx_p) = ws_with_topology(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            WorkerType::Decode,
+            vec![1],
+        );
+        let (decode, _tx_d) = ws_with_topology(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            WorkerType::Prefill,
+            vec![2],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        assert!(model.is_namespace_ready("dynamo"));
+        assert_eq!(model.first_ready_namespace(), Some("dynamo".to_string()));
+        assert_eq!(model.missing_worker_types("dynamo"), WorkerType::empty());
+    }
+
+    #[test]
+    fn readiness_pd_missing_prefill_not_ready() {
+        let model = Model::new("llama".to_string());
+        let (decode, _tx) = ws_with_topology(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            WorkerType::Prefill,
+            vec![2],
+        );
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        assert!(!model.is_namespace_ready("dynamo"));
+        assert_eq!(model.missing_worker_types("dynamo"), WorkerType::Prefill);
+    }
+
+    #[test]
+    fn readiness_epd_aggregated_plus_encode_ready() {
+        // E-PD pattern: Aggregated worker with --route-to-encoder + Encode worker.
+        // The Aggregated = Prefill | Decode alias is load-bearing here: Encode's
+        // needs = Prefill | Decode is satisfied by the Aggregated worker alone.
+        let model = Model::new("llava".to_string());
+        let (agg, _tx_a) = ws_with_topology(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            WorkerType::Encode,
+            vec![1],
+        );
+        let (enc, _tx_e) = ws_with_topology(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            WorkerType::Prefill | WorkerType::Decode,
+            vec![2],
+        );
+        model.add_worker_set("dynamo:aggregated".to_string(), agg);
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(model.is_namespace_ready("dynamo"));
+        assert_eq!(model.missing_worker_types("dynamo"), WorkerType::empty());
+    }
+
+    #[test]
+    fn readiness_encode_alone_not_ready() {
+        // Pathological case the Aggregated alias specifically guards against:
+        // encode alone should NOT be ready.
+        let model = Model::new("llava".to_string());
+        let (enc, _tx) = ws_with_topology(
+            "dynamo",
+            "mdc-e",
+            WorkerType::Encode,
+            WorkerType::Prefill | WorkerType::Decode,
+            vec![1],
+        );
+        model.add_worker_set("dynamo:encode".to_string(), enc);
+
+        assert!(!model.is_namespace_ready("dynamo"));
+        assert_eq!(
+            model.missing_worker_types("dynamo"),
+            WorkerType::Prefill | WorkerType::Decode,
+        );
+    }
+
+    #[test]
+    fn readiness_cross_namespace_isolation() {
+        // Prefill in ns-old, Decode in ns-new: neither namespace is ready.
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_topology(
+            "ns-old",
+            "mdc-p",
+            WorkerType::Prefill,
+            WorkerType::Decode,
+            vec![1],
+        );
+        let (d, _td) = ws_with_topology(
+            "ns-new",
+            "mdc-d",
+            WorkerType::Decode,
+            WorkerType::Prefill,
+            vec![2],
+        );
+        model.add_worker_set("ns-old:prefill".to_string(), p);
+        model.add_worker_set("ns-new".to_string(), d);
+
+        assert!(!model.is_namespace_ready("ns-old"));
+        assert!(!model.is_namespace_ready("ns-new"));
+        assert!(!model.has_ready_namespace());
+    }
+
+    #[test]
+    fn readiness_scale_down_flips_to_not_ready() {
+        // Decode worker_count drops to 0 → namespace flips from ready to not-ready
+        // with no clearing hook (the point of live-compute).
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_topology(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            WorkerType::Decode,
+            vec![1],
+        );
+        let (d, tx_d) = ws_with_topology(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            WorkerType::Prefill,
+            vec![2],
+        );
+        model.add_worker_set("dynamo:prefill".to_string(), p);
+        model.add_worker_set("dynamo".to_string(), d);
+
+        assert!(model.is_namespace_ready("dynamo"));
+
+        // Drop decode workers — no hook, just an update to the watch channel.
+        tx_d.send(vec![]).unwrap();
+        assert!(!model.is_namespace_ready("dynamo"));
+        assert_eq!(model.missing_worker_types("dynamo"), WorkerType::Decode);
+
+        // Rejoin a decode worker — namespace flips back to ready.
+        tx_d.send(vec![2]).unwrap();
+        assert!(model.is_namespace_ready("dynamo"));
+    }
+
+    #[test]
+    fn readiness_missing_worker_type_field_treated_as_aggregated() {
+        // Compatibility contract: cards without a worker_type field (i.e. old
+        // workers, or new workers registered before PR 2 sets the fields) are
+        // interpreted as Aggregated with no needs and are trivially ready.
+        let model = Model::new("llama".to_string());
+        // Default card → worker_type is empty.
+        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-agg", vec![1]);
+        model.add_worker_set("dynamo".to_string(), _ws);
+
+        assert!(model.is_namespace_ready("dynamo"));
     }
 }
