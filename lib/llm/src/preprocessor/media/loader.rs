@@ -363,6 +363,8 @@ mod tests {
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
             allow_direct_port: true,
+            // mockito serves on 127.0.0.1 which is in the loopback blocklist.
+            allow_private_ips: true,
             ..Default::default()
         };
 
