@@ -13,9 +13,8 @@ it as a template for writing your own Rust backend, or as a stand-in
 engine for testing the runtime.
 
 Rust backends implement the `LLMEngine` trait from
-[`dynamo-backend-common`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common) —
-see the trait's doc comments in
-[`engine.rs`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/src/engine.rs)
+[`dynamo-backend-common`](../../../lib/backend-common/) — see the trait's
+doc comments in [`engine.rs`](../../../lib/backend-common/src/engine.rs)
 for the authoritative contract.
 
 ## Quick demo (docker compose)
@@ -72,7 +71,7 @@ reachable via `NATS_SERVER` / `ETCD_ENDPOINTS` env vars.
 
 1. New crate depending on `dynamo-backend-common`; place under `lib/`.
 2. Implement
-   [`LLMEngine`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/src/engine.rs)
+   [`LLMEngine`](../../../lib/backend-common/src/engine.rs)
    plus an inherent
    `from_args(argv) -> Result<(Self, WorkerConfig), DynamoError>`.
 3. Mirror `rotating_tokens`'s three-line `main.rs`.
@@ -109,6 +108,6 @@ lib/backend-common/examples/rotating_tokens/
 
 ## References
 
-- Crate: [`lib/backend-common/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common)
-- Example source: [`lib/backend-common/examples/rotating_tokens/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/rotating_tokens)
-- Conformance kit: [`lib/backend-common/src/testing.rs`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/src/testing.rs)
+- Crate: [`lib/backend-common/`](../../../lib/backend-common/)
+- Example source: [`lib/backend-common/examples/rotating_tokens/`](../../../lib/backend-common/examples/rotating_tokens/)
+- Conformance kit: [`lib/backend-common/src/testing.rs`](../../../lib/backend-common/src/testing.rs)
