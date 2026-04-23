@@ -114,9 +114,9 @@ def start_nats_and_etcd_default_ports():
     nats_port = 4222
     etcd_client_port = 2379
 
-    # No data directories needed - use defaults
+    # No data directory for NATS - nats-server defaults to /tmp/nats/jetstream
     nats_data_dir = None
-    etcd_data_dir = None
+    etcd_data_dir = None  # set below after reuse check
 
     # Check if ports are already in use (reuse them if so)
     # TODO: In the future, error out to ensure proper test isolation
@@ -140,9 +140,13 @@ def start_nats_and_etcd_default_ports():
     print(f"Using NATS on default port {nats_port}")
     print(f"Using ETCD on default client port {etcd_client_port}")
 
+    # Create a writable temp dir for etcd data; avoids "permission denied" when CWD is read-only
+    # (e.g. ARC runner uid 1001 cannot write to /workspace owned by uid 1000)
+    etcd_data_dir = tempfile.mkdtemp(prefix="etcd_data_")
+
     # Start services with default ports
     nats_server = subprocess.Popen(["nats-server", "-js", "--trace"])
-    etcd = subprocess.Popen(["etcd"])
+    etcd = subprocess.Popen(["etcd", "--data-dir", str(etcd_data_dir)])
 
     return nats_server, etcd, nats_port, etcd_client_port, nats_data_dir, etcd_data_dir
 
