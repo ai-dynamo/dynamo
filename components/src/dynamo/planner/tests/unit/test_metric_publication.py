@@ -34,11 +34,19 @@ pytestmark = [
 ]
 
 
-def _make_planner(prometheus_port: int = 9085) -> NativePlannerBase:
-    """Build a minimal NativePlannerBase with a mock Prometheus metrics object."""
+def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
+    """Build a minimal NativePlannerBase with a mock Prometheus metrics object.
+
+    ``start_http_server`` is patched so no real HTTP port is bound (tests
+    would otherwise fail in parallel or on shared hosts). ``prometheus_port``
+    is toggled post-init as an enabled/disabled gate for the methods under
+    test; the actual port value is never used for I/O.
+    """
     with patch(
         "dynamo.planner.core.base.PlannerPrometheusMetrics"
     ) as mock_metrics, patch(
+        "dynamo.planner.core.base.start_http_server"
+    ), patch(
         "dynamo.planner.connectors.kubernetes.KubernetesAPI"
     ), patch.dict(
         os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
@@ -55,7 +63,7 @@ def _make_planner(prometheus_port: int = 9085) -> NativePlannerBase:
             backend="vllm",
             no_operation=True,
             metric_pulling_prometheus_endpoint="http://localhost:9090",
-            metric_reporting_prometheus_port=prometheus_port,
+            metric_reporting_prometheus_port=0,
             load_predictor="constant",
             environment="kubernetes",
             namespace="test-namespace",
@@ -70,9 +78,8 @@ def _make_planner(prometheus_port: int = 9085) -> NativePlannerBase:
             load_min_observations=5,
         )
         planner = NativePlannerBase(None, config)
-    # ``prometheus_port`` is an instance attribute assigned in __init__ from
-    # the config field; set here to make the test independent of that wiring.
-    planner.prometheus_port = prometheus_port
+    # Gate the methods under test without binding a real port.
+    planner.prometheus_port = 1 if prometheus_enabled else 0
     return planner
 
 
@@ -141,12 +148,20 @@ class TestPublishInventoryAndGpuHours:
         # Two deltas of 5s each, 2 GPUs total -> 2 * (2 * 5 / 3600) = 20/3600
         assert planner._cumulative_gpu_hours == pytest.approx(20.0 / 3600.0)
 
-    def test_skipped_when_prometheus_disabled(self):
-        planner = _make_planner(prometheus_port=0)
+    def test_prometheus_disabled_still_accumulates_gpu_hours(self):
+        # Prometheus export off, but the HTML recorder / live dashboard
+        # still consumes _cumulative_gpu_hours, so accumulation must
+        # continue. Only the gauge publishes should be skipped.
+        planner = _make_planner(prometheus_enabled=False)
         pm = planner.prometheus_metrics
 
         planner._publish_inventory_and_gpu_hours(_tick_input(now_s=1000.0))
+        planner._publish_inventory_and_gpu_hours(
+            _tick_input(now_s=1180.0, num_p=2, num_d=3)
+        )
 
+        # dt = 180s, gpu_count = 2*2 + 3*4 = 16, gpu_hours = 16 * 180 / 3600 = 0.8
+        assert planner._cumulative_gpu_hours == pytest.approx(0.8)
         pm.num_prefill_replicas.set.assert_not_called()
         pm.num_decode_replicas.set.assert_not_called()
         pm.gpu_hours.set.assert_not_called()
@@ -240,7 +255,7 @@ class TestReportDiagnosticsEnumGating:
         pm.throughput_scaling_decision.state.assert_not_called()
 
     def test_skipped_when_prometheus_disabled(self):
-        planner = _make_planner(prometheus_port=0)
+        planner = _make_planner(prometheus_enabled=False)
         pm = planner.prometheus_metrics
 
         planner._report_diagnostics(

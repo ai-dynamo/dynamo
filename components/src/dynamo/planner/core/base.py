@@ -764,13 +764,14 @@ class NativePlannerBase:
         Sourced from tick_input.worker_counts (populated every tick via
         need_worker_states=True); independent of enable_throughput_scaling
         so non-SLA planners also report inventory and cost accounting.
+        ``_cumulative_gpu_hours`` is updated regardless of Prometheus
+        port so the HTML recorder / live dashboard stay accurate even
+        when Prometheus export is disabled.
         """
-        if self.prometheus_port == 0 or tick_input.worker_counts is None:
+        if tick_input.worker_counts is None:
             return
         num_p = tick_input.worker_counts.ready_num_prefill or 0
         num_d = tick_input.worker_counts.ready_num_decode or 0
-        self.prometheus_metrics.num_prefill_replicas.set(num_p)
-        self.prometheus_metrics.num_decode_replicas.set(num_d)
 
         now = tick_input.now_s
         if self._last_gpu_hours_update_ts is not None:
@@ -784,6 +785,11 @@ class NativePlannerBase:
                 / 3600.0
             )
         self._last_gpu_hours_update_ts = now
+
+        if self.prometheus_port == 0:
+            return
+        self.prometheus_metrics.num_prefill_replicas.set(num_p)
+        self.prometheus_metrics.num_decode_replicas.set(num_d)
         self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
 
     def _report_diagnostics(self, tick: ScheduledTick, diag: TickDiagnostics) -> None:
