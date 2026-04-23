@@ -425,8 +425,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
-# Builds ai-dynamo and gpu_memory_service wheels. Non-vLLM targets also build
-# ai-dynamo-runtime here; vLLM builds it later after NIXL is installed.
+# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
@@ -437,8 +436,7 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) and, for most frameworks, ai-dynamo-runtime.
-# vLLM builds ai-dynamo-runtime later in the NIXL-aware wheel_builder stage.
+# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -455,13 +453,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist{% if framework != "vllm" %} && \
+    uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
     else \
         maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
-    fi{% endif %} && \
+    fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 {% else %}
@@ -625,43 +623,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         fi; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo KVBM"
-{% endif %}
-
-{% if framework == "vllm" and target not in ("dev", "local-dev") %}
-# Build ai-dynamo-runtime after NIXL is installed so nixl_sys links against real
-# NIXL instead of producing a stub-mode _core extension.
-ARG ENABLE_MEDIA_FFMPEG
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/root/.cache/uv \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo/lib/bindings/python && \
-    RUNTIME_WHEEL_DIR="$(mktemp -d)" && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --auditwheel skip --out "${RUNTIME_WHEEL_DIR}"; \
-    else \
-        maturin build --release --features "kv-indexer,lightseek-mm" --auditwheel skip --out "${RUNTIME_WHEEL_DIR}"; \
-    fi && \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    auditwheel repair \
-        --exclude libnixl.so \
-        --exclude libnixl_build.so \
-        --exclude libnixl_common.so \
-        --exclude 'lib*.so*' \
-        --plat manylinux_2_28_${ARCH_ALT} \
-        --wheel-dir /opt/dynamo/dist \
-        "${RUNTIME_WHEEL_DIR}"/ai_dynamo_runtime*.whl && \
-    rm -rf "${RUNTIME_WHEEL_DIR}" && \
-    /tmp/use-sccache.sh show-stats "Dynamo Runtime (NIXL)"
 {% endif %}
 
 # Consolidate all wheels from the runtime wheel builder stage
