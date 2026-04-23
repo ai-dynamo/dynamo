@@ -6,55 +6,52 @@ title: Supported GPU SKUs
 
 # Supported GPU SKUs
 
-This page lists all GPU SKUs supported by DGDR (DynamoGraphDeploymentRequest) for profiling and deployment.
+This page lists all GPU SKUs accepted by DGDR (`DynamoGraphDeploymentRequest`) and explains which search strategies are available for each.
 
 ## GPU SKU Format
 
-GPU SKUs in DGDR use **lowercase hyphenated format**, not the node discovery labels. For example:
+GPU SKUs in DGDR use **lowercase underscore format**, not the node discovery labels. For example:
 
-- ✅ **Correct**: `h100_sxm`, `a100_pcie`, `l40`
+- ✅ **Correct**: `h100_sxm`, `a100_sxm`, `l40s`
 - ❌ **Incorrect**: `H100-SXM5-80GB`, `A100_80GB`
 
-## Supported GPU SKUs
+The `H100-SXM5-80GB` style is a Kubernetes node label produced by DCGM — it is **not** a valid `gpuSku` value.
 
-### NVIDIA Blackwell
-| SKU | Form Factor | Availability |
-|-----|-------------|--------------|
-| `gb200_sxm` | SXM | Data center |
-| `b200_sxm` | SXM | Data center |
+## Search Strategy Overview
 
-### NVIDIA Hopper
-| SKU | Form Factor | Availability |
-|-----|-------------|--------------|
-| `h200_sxm` | SXM | Data center |
-| `h100_sxm` | SXM | Data center |
-| `h100_pcie` | PCIe | Cloud / On-prem |
+DGDR supports two profiling search strategies:
 
-### NVIDIA Ampere
-| SKU | Form Factor | Availability |
-|-----|-------------|--------------|
-| `a100_sxm` | SXM | Data center |
-| `a100_pcie` | PCIe | Cloud / On-prem |
+- **`rapid`** (default): Uses the AI Configurator (AIC) simulator — runs in ~20–30 seconds, no real GPUs needed. Only available for AIC-supported SKUs.
+- **`thorough`**: Uses AIPerf real hardware profiling — takes 2–4 hours, requires real GPUs. Available for all accepted SKUs.
 
-### NVIDIA Ada
-| SKU | Form Factor | Availability |
-|-----|-------------|--------------|
-| `l40s` | PCIe | Cloud / On-prem |
-| `l40` | PCIe | Cloud / On-prem |
-| `l4` | PCIe | Cloud / On-prem |
+## AIC-Supported SKUs (rapid + thorough)
 
-### NVIDIA Older Generations
-| SKU | Form Factor | Availability |
-|-----|-------------|--------------|
-| `v100_sxm` | SXM | Legacy data center |
-| `v100_pcie` | PCIe | Legacy on-prem |
-| `t4` | PCIe | Cloud / On-prem |
+These SKUs are supported by the AI Configurator and work with the default `rapid` search strategy:
 
-### AMD EPYC Accelerators
-| SKU | Form Factor | Availability |
-|-----|-------------|--------------|
-| `mi200` | SXM | Data center |
-| `mi300` | SXM | Data center |
+| SKU | GPU | Form Factor |
+|-----|-----|-------------|
+| `gb200_sxm` | NVIDIA GB200 NVL72 | SXM |
+| `b200_sxm` | NVIDIA B200 | SXM |
+| `h200_sxm` | NVIDIA H200 | SXM |
+| `h100_sxm` | NVIDIA H100 | SXM |
+| `a100_sxm` | NVIDIA A100 | SXM |
+| `l40s` | NVIDIA L40S | PCIe |
+
+## Other Accepted SKUs (thorough only)
+
+These SKUs are accepted by the DGDR webhook but are **not** AIC-supported. They require `searchStrategy: thorough` and real GPUs:
+
+| SKU | GPU | Form Factor |
+|-----|-----|-------------|
+| `h100_pcie` | NVIDIA H100 | PCIe |
+| `a100_pcie` | NVIDIA A100 | PCIe |
+| `l40` | NVIDIA L40 | PCIe |
+| `l4` | NVIDIA L4 | PCIe |
+| `v100_sxm` | NVIDIA V100 | SXM |
+| `v100_pcie` | NVIDIA V100 | PCIe |
+| `t4` | NVIDIA T4 | PCIe |
+| `mi200` | AMD Instinct MI200 | SXM |
+| `mi300` | AMD Instinct MI300 | SXM |
 
 ## Usage in DGDR
 
@@ -71,11 +68,11 @@ spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
-  
+
   workload:
     isl: 3000
     osl: 150
-  
+
   sla:
     ttft: 200.0
     itl: 20.0
@@ -83,7 +80,7 @@ spec:
 
 ### Manual GPU Specification
 
-If GPU discovery is unavailable or you want to specify a particular GPU:
+If GPU discovery is unavailable or you want to target a specific GPU:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -94,24 +91,24 @@ spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
-  
+
   hardware:
-    gpuSku: h100_sxm        # ← Use lowercase, underscore format
+    gpuSku: h100_sxm        # <- Use lowercase underscore format
     numGpusPerNode: 8
     vramMb: 81920
-  
+
   workload:
     isl: 3000
     osl: 150
-  
+
   sla:
     ttft: 200.0
     itl: 20.0
 ```
 
-## Cloud Deployment with PCIe GPUs
+### Using Thorough Search for Non-AIC SKUs
 
-PCIe GPU variants (h100_pcie, a100_pcie, l40, l4, t4) are fully supported and recommended for cloud and colocation deployments:
+PCIe and older GPU variants require `searchStrategy: thorough`:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -122,28 +119,35 @@ spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
-  
+
+  searchStrategy: thorough   # Required for non-AIC SKUs
+
   hardware:
-    gpuSku: h100_pcie       # PCIe variant for cloud
+    gpuSku: h100_pcie
     numGpusPerNode: 4
     vramMb: 81920
-  
-  # ... rest of spec
+
+  workload:
+    isl: 3000
+    osl: 150
+
+  sla:
+    ttft: 200.0
+    itl: 20.0
 ```
 
 ## Troubleshooting
 
 ### "Unknown GPU SKU" Error
 
-If you receive a validation error with an unknown GPU SKU, verify:
+If you receive a webhook validation error, verify:
 
 1. **Format**: Use lowercase with underscores (e.g., `h100_sxm` not `H100-SXM5-80GB`)
-2. **Spelling**: Check against the table above
-3. **Availability**: Ensure the GPU is available in your cluster
+2. **Spelling**: Check against the tables above
 
 ### GPU Not Auto-Detected
 
-If auto-detection isn't working:
+If auto-detection is not working:
 
 1. Verify cluster nodes have GPU labels
 2. Check RBAC permissions: the operator needs node read access
