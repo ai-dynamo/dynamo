@@ -431,6 +431,33 @@ async def init_llm_worker(
             (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
         ]
 
+    # Build a config-derived ModelRuntimeConfig up front so the shadow standby
+    # can publish its MDC before blocking on the failover lock. All fields are
+    # static config values; total_kv_blocks is intentionally omitted (the
+    # post-lock path does not populate it either — `get_stats_async` requires
+    # active requests to return real numbers, so there is nothing the engine
+    # can contribute here that the config does not already provide).
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.max_num_seqs = arg_map["max_batch_size"]
+    runtime_config.max_num_batched_tokens = arg_map["max_num_tokens"]
+    runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.tool_call_parser = config.dyn_tool_call_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
+    runtime_config.enable_local_indexer = (
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
+    )
+    # Mirror TensorRTLLMEngine.get_attention_dp_size(): tensor_parallel_size
+    # when attention DP is enabled, else 1. This is a pure config read; the
+    # engine wrapper only checks the same two attributes.
+    runtime_config.data_parallel_size = (
+        arg_map["tensor_parallel_size"]
+        if arg_map.get("enable_attention_dp", False)
+        else 1
+    )
+
     failover_lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
     startup_lock = None
     standby_generate_proxy = None
@@ -455,6 +482,27 @@ async def init_llm_worker(
         if standby_serve_task.done():
             await standby_serve_task
 
+        # Publish the standby's MDC before waiting on the failover lock so
+        # `/v1/models` stays populated across primary eviction. The frontend's
+        # KV router prefers live engines that publish KV events, so the
+        # standby's MDC with a no-op proxy does not steal traffic from the
+        # primary — see _StandbyGenerateProxy.generate. Registering once here
+        # and keeping the same MDC after lock acquire avoids the
+        # unregister/re-register churn that would otherwise open a gap.
+        if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            await register_model(
+                model_input,
+                model_type,
+                endpoint,
+                config.model,
+                config.served_model_name,
+                context_length=config.max_seq_len,
+                kv_cache_block_size=config.kv_block_size,
+                runtime_config=runtime_config,
+                custom_template_path=config.custom_jinja_template,
+            )
+            logging.info("[Shadow] MDC published; standby is now discoverable")
+
         logging.info(
             "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
         )
@@ -475,55 +523,24 @@ async def init_llm_worker(
             if engine_holder is not None:
                 engine_holder.append(engine)
 
-            # should ideally call get_engine_runtime_config
-            # this is because we don't have a good way to
-            # get total_kv_blocks from the engine yet without calling get_stats_async
-            # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
-            # So for now, we just set the parsers from the config
-            # TODO: fix this once we have a better way to get total_kv_blocks
-            runtime_config = ModelRuntimeConfig()
-
-            # Set values from config that are available immediately
-            # Note: We populate max_num_seqs and max_num_batched_tokens from config
-            # to ensure Prometheus metrics are available even without engine stats
-
-            # Naming clarification:
-            # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
-            # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
-            # Both parameters control the same thing: how many requests can be processed simultaneously
-
-            # Need to get max_num_seqs and max_num_batched_tokens from engine_args
-            # because they can be overridden by --extra-engine-args or --override-engine-args
-            runtime_config.max_num_seqs = engine_args["max_batch_size"]
-            runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
-            runtime_config.reasoning_parser = config.dyn_reasoning_parser
-            runtime_config.tool_call_parser = config.dyn_tool_call_parser
-            runtime_config.exclude_tools_when_tool_choice_none = (
-                config.exclude_tools_when_tool_choice_none
-            )
-            # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-            runtime_config.enable_local_indexer = (
-                config.enable_local_indexer
-                and config.disaggregation_mode != DisaggregationMode.DECODE
-            )
-            # Set data_parallel_size for attention DP mode
-            # This enables the router's scheduler to correctly iterate over all dp_ranks
-            # Need to name ADP as `data_parallel_size` for parity with other frameworks
+            # runtime_config was built from static engine args above so the
+            # shadow standby can register its MDC before waiting on the failover
+            # lock. Cross-check `data_parallel_size` against the live engine in
+            # case extra-engine-args flipped `enable_attention_dp`.
             attention_dp_size = engine.get_attention_dp_size()
-            runtime_config.data_parallel_size = attention_dp_size
-
+            if runtime_config.data_parallel_size != attention_dp_size:
+                logging.warning(
+                    "runtime_config.data_parallel_size=%s mismatches engine=%s; "
+                    "applying engine value",
+                    runtime_config.data_parallel_size,
+                    attention_dp_size,
+                )
+                runtime_config.data_parallel_size = attention_dp_size
             logging.info(
-                f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}"
+                f"runtime config max_num_seqs={runtime_config.max_num_seqs} "
+                f"max_num_batched_tokens={runtime_config.max_num_batched_tokens} "
+                f"data_parallel_size={runtime_config.data_parallel_size}"
             )
-            logging.info(
-                f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
-            )
-            logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
-
-            # The get_engine_runtime_config function exists but is not called here due to:
-            # 1. get_stats_async requires active requests to work properly
-            # 2. We need runtime config during registration, before any requests are made
-            # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
 
             # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
             # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
@@ -664,7 +681,14 @@ async def init_llm_worker(
                         handler_config
                     )
 
-                    if config.disaggregation_mode != DisaggregationMode.ENCODE:
+                    # Standby already registered its MDC pre-lock so
+                    # `/v1/models` stays populated across failover; do not
+                    # re-register post-lock because that path would go through
+                    # the discovery conflict check and could fail.
+                    if (
+                        config.disaggregation_mode != DisaggregationMode.ENCODE
+                        and not shadow_standby
+                    ):
                         await register_model(
                             model_input,
                             model_type,
@@ -702,7 +726,10 @@ async def init_llm_worker(
                     consolidator_publisher.shutdown()
             else:
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.disaggregation_mode != DisaggregationMode.ENCODE:
+                if (
+                    config.disaggregation_mode != DisaggregationMode.ENCODE
+                    and not shadow_standby
+                ):
                     await register_model(
                         model_input,
                         model_type,
