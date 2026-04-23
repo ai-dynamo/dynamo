@@ -47,10 +47,27 @@ pub(super) enum PrefillResolveDecision {
 pub(super) fn build_decode_router_override(
     existing_override: Option<RouterConfigOverride>,
 ) -> RouterConfigOverride {
-    RouterConfigOverride {
-        overlap_score_weight: Some(0.0),
-        assume_kv_reuse: Some(false),
+    // Experimental gate: when DYN_ROUTER_DECODE_KV_AWARE is truthy, let decode routing
+    // inherit the frontend's overlap_score_weight and assume_kv_reuse so repeat-prefix
+    // traffic is steered toward the decode worker already holding those blocks. Requires
+    // SGLang's disaggregation-decode-enable-radix-cache on the worker side.
+    let decode_kv_aware = std::env::var("DYN_ROUTER_DECODE_KV_AWARE")
+        .ok()
+        .map(|v| !matches!(v.as_str(), "" | "0" | "false" | "FALSE"))
+        .unwrap_or(false);
+
+    let base = RouterConfigOverride {
         track_prefill_tokens: Some(false),
         ..existing_override.unwrap_or_default()
+    };
+
+    if decode_kv_aware {
+        base
+    } else {
+        RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            assume_kv_reuse: Some(false),
+            ..base
+        }
     }
 }
