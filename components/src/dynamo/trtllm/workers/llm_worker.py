@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import suppress
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -79,6 +80,28 @@ except ImportError:
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
+class _StandbyGenerateProxy:
+    def __init__(self, health_check_payload: dict | None = None):
+        self._delegate = None
+        self._health_check_payload = health_check_payload
+
+    def set_delegate(self, delegate) -> None:
+        self._delegate = delegate
+
+    async def generate(self, request: dict, context):
+        if self._delegate is None:
+            if (
+                self._health_check_payload is not None
+                and request == self._health_check_payload
+            ):
+                yield {"status": "ok"}
+                return
+            raise RuntimeError("Shadow standby is waiting for failover lock")
+
+        async for response in self._delegate(request, context):
+            yield response
+
+
 def build_kv_connector_config(config: Config):
     if config.connector:
         if config.connector[0] == "kvbm":
@@ -110,27 +133,6 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                     old_val,
                     new_val,
                 )
-
-
-def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
-    """Parse --model-loader-extra-config into a dict. Accepts a dict or a JSON string."""
-    if raw is None or raw == "":
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Invalid JSON in --model-loader-extra-config: {exc}"
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("--model-loader-extra-config must decode to a JSON object")
-        return parsed
-    raise ValueError(
-        "--model-loader-extra-config must be a JSON object string or a dict"
-    )
 
 
 def _register_memory_routes(runtime, handler) -> None:
@@ -208,39 +210,18 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
-    try:
-        model_loader_extra_config = _parse_model_loader_extra_config(
-            config.model_loader_extra_config
-        )
-    except ValueError as exc:
-        logging.error("%s", exc)
-        sys.exit(1)
-
-    if config.load_format == "gms":
-        try:
-            from gpu_memory_service.integrations.trtllm import setup_gms
-        except ImportError as exc:
-            raise RuntimeError(
-                "gpu-memory-service is required for --load-format gms. "
-                "Install or update the package."
-            ) from exc
-        setup_gms(model_loader_extra_config)
-        logging.info(
-            "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config
-        )
-
-    # Resolve load_format for engine args. GMS patches are active regardless;
-    # fall back to "auto" if TRT-LLM doesn't recognise "gms" as a LoadFormat.
-    engine_load_format = config.load_format
     if config.load_format == "gms":
         try:
             LoadFormat(config.load_format)
-        except (ValueError, KeyError):
-            logging.warning(
-                "TensorRT-LLM does not recognise load_format='gms'; "
-                "using 'auto' while GMS patches remain active."
-            )
-            engine_load_format = "auto"
+        except (ValueError, KeyError) as exc:
+            raise RuntimeError(
+                "TensorRT-LLM load_format='gms' requires a TRT-LLM build with "
+                "the GMS load-format support landed."
+            ) from exc
+
+    shadow_engine_id = os.environ.get("ENGINE_ID", "0")
+    shadow_standby = config.gms_shadow_mode and shadow_engine_id != "0"
+    primary_shadow_owner = config.gms_shadow_mode and shadow_engine_id == "0"
 
     arg_map = {
         "model": model_path,
@@ -264,7 +245,9 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
-    arg_map["load_format"] = engine_load_format
+    arg_map["load_format"] = config.load_format
+    if config.load_format == "gms" and shadow_standby:
+        arg_map["gms_mode"] = "ro"
 
     # Enable sleep_config when GMS manages weights — required for GMS
     # unmap/remap. Conditional because SleepConfig contains unpicklable
@@ -448,262 +431,323 @@ async def init_llm_worker(
         component_name=config.component,
     )
 
-    async with get_llm_engine(
-        engine_args,
-        config.disaggregation_mode,
-        component_gauges=component_gauges,
-    ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
-        # The callback uses this to poll active request count during shutdown.
-        if engine_holder is not None:
-            engine_holder.append(engine)
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
 
-        endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.{config.endpoint}"
+    if shutdown_endpoints is not None:
+        shutdown_endpoints[:] = [endpoint]
+
+    health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+    metrics_labels = None
+    if config.publish_events_and_metrics:
+        metrics_labels = [
+            (prometheus_names.labels.MODEL, model_name_for_metrics),
+            (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
+        ]
+
+    failover_lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+    startup_lock = None
+    standby_generate_proxy = None
+    standby_serve_task = None
+    if primary_shadow_owner:
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        startup_lock = FlockFailoverLock(failover_lock_path)
+        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+        logging.info("[Shadow] Primary acquired startup lock, starting engine init")
+
+    if shadow_standby:
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        standby_generate_proxy = _StandbyGenerateProxy(health_check_payload)
+        standby_serve_task = endpoint.serve_endpoint(
+            standby_generate_proxy.generate,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
         )
+        await asyncio.sleep(0)
+        if standby_serve_task.done():
+            await standby_serve_task
 
-        if shutdown_endpoints is not None:
-            shutdown_endpoints[:] = [endpoint]
-
-        # should ideally call get_engine_runtime_config
-        # this is because we don't have a good way to
-        # get total_kv_blocks from the engine yet without calling get_stats_async
-        # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
-        # So for now, we just set the parsers from the config
-        # TODO: fix this once we have a better way to get total_kv_blocks
-        runtime_config = ModelRuntimeConfig()
-
-        # Set values from config that are available immediately
-        # Note: We populate max_num_seqs and max_num_batched_tokens from config
-        # to ensure Prometheus metrics are available even without engine stats
-
-        # Naming clarification:
-        # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
-        # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
-        # Both parameters control the same thing: how many requests can be processed simultaneously
-
-        # Need to get max_num_seqs and max_num_batched_tokens from engine_args
-        # because they can be overridden by --extra-engine-args or --override-engine-args
-        runtime_config.max_num_seqs = engine_args["max_batch_size"]
-        runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
-        runtime_config.reasoning_parser = config.dyn_reasoning_parser
-        runtime_config.tool_call_parser = config.dyn_tool_call_parser
-        runtime_config.exclude_tools_when_tool_choice_none = (
-            config.exclude_tools_when_tool_choice_none
-        )
-        # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-        runtime_config.enable_local_indexer = (
-            config.enable_local_indexer
-            and config.disaggregation_mode != DisaggregationMode.DECODE
-        )
-        # Set data_parallel_size for attention DP mode
-        # This enables the router's scheduler to correctly iterate over all dp_ranks
-        # Need to name ADP as `data_parallel_size` for parity with other frameworks
-        attention_dp_size = engine.get_attention_dp_size()
-        runtime_config.data_parallel_size = attention_dp_size
-
-        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
-            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
         )
-        logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
+        startup_lock = FlockFailoverLock(failover_lock_path)
+        while await startup_lock.owner() != "engine-0":
+            await asyncio.sleep(0.1)
+        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+        logging.info("[Shadow] Lock acquired, starting engine init")
 
-        # The get_engine_runtime_config function exists but is not called here due to:
-        # 1. get_stats_async requires active requests to work properly
-        # 2. We need runtime config during registration, before any requests are made
-        # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
+    try:
+        async with get_llm_engine(
+            engine_args,
+            config.disaggregation_mode,
+            component_gauges=component_gauges,
+        ) as engine:
+            # Expose engine to the drain callback installed by main.py (#7319).
+            # The callback uses this to poll active request count during shutdown.
+            if engine_holder is not None:
+                engine_holder.append(engine)
 
-        # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
-        # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
-        metrics_collector = None
-        additional_metrics = None
-        if config.publish_events_and_metrics:
-            try:
-                model_name_for_metrics = config.served_model_name or config.model
-                metrics_collector = MetricsCollector(
-                    {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
-                )
-                logging.info("TensorRT-LLM MetricsCollector initialized")
+            # should ideally call get_engine_runtime_config
+            # this is because we don't have a good way to
+            # get total_kv_blocks from the engine yet without calling get_stats_async
+            # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
+            # So for now, we just set the parsers from the config
+            # TODO: fix this once we have a better way to get total_kv_blocks
+            runtime_config = ModelRuntimeConfig()
 
-                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
-                _metric_prefixes = ["trtllm_"]
+            # Set values from config that are available immediately
+            # Note: We populate max_num_seqs and max_num_batched_tokens from config
+            # to ensure Prometheus metrics are available even without engine stats
 
-                # Additional metrics (abort tracking, request types, KV transfer perf).
-                # Wrapped in try/except because AdditionalMetricsCollector depends on
-                # prometheus_names which may not be available in all packaging variants.
+            # Naming clarification:
+            # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
+            # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
+            # Both parameters control the same thing: how many requests can be processed simultaneously
+
+            # Need to get max_num_seqs and max_num_batched_tokens from engine_args
+            # because they can be overridden by --extra-engine-args or --override-engine-args
+            runtime_config.max_num_seqs = engine_args["max_batch_size"]
+            runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
+            runtime_config.reasoning_parser = config.dyn_reasoning_parser
+            runtime_config.tool_call_parser = config.dyn_tool_call_parser
+            runtime_config.exclude_tools_when_tool_choice_none = (
+                config.exclude_tools_when_tool_choice_none
+            )
+            # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+            runtime_config.enable_local_indexer = (
+                config.enable_local_indexer
+                and config.disaggregation_mode != DisaggregationMode.DECODE
+            )
+            # Set data_parallel_size for attention DP mode
+            # This enables the router's scheduler to correctly iterate over all dp_ranks
+            # Need to name ADP as `data_parallel_size` for parity with other frameworks
+            attention_dp_size = engine.get_attention_dp_size()
+            runtime_config.data_parallel_size = attention_dp_size
+
+            logging.info(
+                f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}"
+            )
+            logging.info(
+                f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+            )
+            logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
+
+            # The get_engine_runtime_config function exists but is not called here due to:
+            # 1. get_stats_async requires active requests to work properly
+            # 2. We need runtime config during registration, before any requests are made
+            # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
+
+            # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
+            # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
+            metrics_collector = None
+            additional_metrics = None
+            if config.publish_events_and_metrics:
                 try:
-                    from dynamo.trtllm.metrics import AdditionalMetricsCollector
-
-                    disagg_mode_str = (
-                        config.disaggregation_mode.value
-                        if hasattr(config.disaggregation_mode, "value")
-                        else str(config.disaggregation_mode)
+                    model_name_for_metrics = config.served_model_name or config.model
+                    metrics_collector = MetricsCollector(
+                        {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
                     )
-                    additional_metrics = AdditionalMetricsCollector(
-                        labels={
-                            "model_name": model_name_for_metrics,
-                            "disaggregation_mode": disagg_mode_str,
-                            "engine_type": "trtllm",
-                        },
+                    logging.info("TensorRT-LLM MetricsCollector initialized")
+
+                    # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
+                    _metric_prefixes = ["trtllm_"]
+
+                    # Additional metrics (abort tracking, request types, KV transfer perf).
+                    # Wrapped in try/except because AdditionalMetricsCollector depends on
+                    # prometheus_names which may not be available in all packaging variants.
+                    try:
+                        from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+                        disagg_mode_str = (
+                            config.disaggregation_mode.value
+                            if hasattr(config.disaggregation_mode, "value")
+                            else str(config.disaggregation_mode)
+                        )
+                        additional_metrics = AdditionalMetricsCollector(
+                            labels={
+                                "model_name": model_name_for_metrics,
+                                "disaggregation_mode": disagg_mode_str,
+                                "engine_type": "trtllm",
+                            },
+                        )
+                        logging.info(
+                            "Additional metrics initialized (disagg_mode=%s)",
+                            disagg_mode_str,
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            "Failed to initialize additional metrics: %s", e
+                        )
+
+                    # Single callback for all Python-side metrics (trtllm_ + additional)
+                    register_engine_metrics_callback(
+                        endpoint=endpoint,
+                        registry=REGISTRY,
+                        metric_prefix_filters=_metric_prefixes,
+                        namespace_name=config.namespace,
+                        component_name=config.component,
+                        endpoint_name="generate",
+                        model_name=model_name_for_metrics,
                     )
                     logging.info(
-                        "Additional metrics initialized (disagg_mode=%s)",
-                        disagg_mode_str,
+                        "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
                     )
                 except Exception as e:
-                    logging.warning("Failed to initialize additional metrics: %s", e)
+                    logging.warning(
+                        f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
+                    )
 
-                # Single callback for all Python-side metrics (trtllm_ + additional)
-                register_engine_metrics_callback(
-                    endpoint=endpoint,
-                    registry=REGISTRY,
-                    metric_prefix_filters=_metric_prefixes,
-                    namespace_name=config.namespace,
-                    component_name=config.component,
-                    endpoint_name="generate",
-                    model_name=model_name_for_metrics,
-                )
-                logging.info(
-                    "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
-                )
-            except Exception as e:
-                logging.warning(
-                    f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
-                )
+            # Register callback for Dynamo component metrics using dedicated registry
+            register_engine_metrics_callback(
+                endpoint=endpoint,
+                registry=DYNAMO_COMPONENT_REGISTRY,
+            )
+            logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
 
-        # Register callback for Dynamo component metrics using dedicated registry
-        register_engine_metrics_callback(
-            endpoint=endpoint,
-            registry=DYNAMO_COMPONENT_REGISTRY,
-        )
-        logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
-
-        # publisher will be set later if publishing is enabled.
-        handler_config = RequestHandlerConfig(
-            engine=engine,
-            default_sampling_params=default_sampling_params,
-            publisher=None,
-            disaggregation_mode=config.disaggregation_mode,
-            encode_client=encode_client,
-            multimodal_processor=multimodal_processor,
-            generate_endpoint=endpoint,
-            connector=connector,
-            runtime=runtime,  # Pass runtime for graceful shutdown
-            metrics_collector=metrics_collector,
-            kv_block_size=config.kv_block_size,
-            shutdown_event=shutdown_event,
-            encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-            disable_request_abort=config.disable_request_abort,
-            additional_metrics=additional_metrics,
-            max_seq_len=config.max_seq_len,
-            disagg_machine_id=int(endpoint.connection_id()) % 1021,
-        )
-
-        media_decoder = None
-        media_fetcher = None
-        if config.frontend_decoding:
-            if not MEDIA_DECODER_AVAILABLE:
-                raise RuntimeError(
-                    "--frontend-decoding requires MediaDecoder support. "
-                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-                )
-            assert MediaDecoder is not None and MediaFetcher is not None
-            media_decoder = MediaDecoder()
-            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-            media_fetcher = MediaFetcher()
-            media_fetcher.timeout_ms(30000)
-            media_fetcher.allow_direct_port(False)
-
-        # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
-        if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_model(
-                model_input,
-                model_type,
-                endpoint,
-                config.model,
-                config.served_model_name,
-                context_length=config.max_seq_len,
-                kv_cache_block_size=config.kv_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=config.custom_jinja_template,
-                media_decoder=media_decoder,
-                media_fetcher=media_fetcher,
+            # publisher will be set later if publishing is enabled.
+            handler_config = RequestHandlerConfig(
+                engine=engine,
+                default_sampling_params=default_sampling_params,
+                publisher=None,
+                disaggregation_mode=config.disaggregation_mode,
+                encode_client=encode_client,
+                multimodal_processor=multimodal_processor,
+                generate_endpoint=endpoint,
+                connector=connector,
+                runtime=runtime,  # Pass runtime for graceful shutdown
+                metrics_collector=metrics_collector,
+                kv_block_size=config.kv_block_size,
+                shutdown_event=shutdown_event,
+                encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+                disable_request_abort=config.disable_request_abort,
+                additional_metrics=additional_metrics,
+                max_seq_len=config.max_seq_len,
+                disagg_machine_id=int(endpoint.connection_id()) % 1021,
             )
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+            media_decoder = None
+            media_fetcher = None
+            if config.frontend_decoding:
+                if not MEDIA_DECODER_AVAILABLE:
+                    raise RuntimeError(
+                        "--frontend-decoding requires MediaDecoder support. "
+                        "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+                    )
+                assert MediaDecoder is not None and MediaFetcher is not None
+                media_decoder = MediaDecoder()
+                media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+                media_fetcher = MediaFetcher()
+                media_fetcher.timeout_ms(30000)
+                media_fetcher.allow_direct_port(False)
 
-        if config.publish_events_and_metrics:
-            # Initialize and pass in the publisher to the request handler to
-            # publish events and metrics.
-            # Use model as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model
-            metrics_labels = [
-                (
-                    prometheus_names.labels.MODEL,
-                    model_name_for_metrics,
-                ),  # OpenAI standard
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    model_name_for_metrics,
-                ),  # Native engine compatibility
-            ]
+            if config.publish_events_and_metrics:
+                # Initialize and pass in the publisher to the request handler to
+                # publish events and metrics.
+                # Use model as fallback if served_model_name is not provided
+                # Create worker-side publisher for consolidated events if consolidator is enabled
+                # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
+                consolidator_publisher = None
+                if consolidator_output_endpoint:
+                    # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
+                    consolidator_publisher = KvEventPublisher(
+                        endpoint=endpoint,
+                        kv_block_size=config.kv_block_size,
+                        zmq_endpoint=consolidator_output_connect_endpoint,
+                        zmq_topic="",
+                    )
+                    logging.info(
+                        f"Created worker-side publisher for consolidated events: "
+                        f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
+                    )
 
-            # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
-            consolidator_publisher = None
-            if consolidator_output_endpoint:
-                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_publisher = KvEventPublisher(
-                    endpoint=endpoint,
-                    kv_block_size=config.kv_block_size,
-                    zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",
-                )
-                logging.info(
-                    f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
-                )
+                async with get_publisher(
+                    endpoint,
+                    engine,
+                    int(endpoint.connection_id()),
+                    config.kv_block_size,
+                    metrics_labels,
+                    component_gauges=component_gauges,
+                    zmq_endpoint=trtllm_zmq_bind_endpoint,
+                    enable_local_indexer=config.enable_local_indexer,
+                    metrics_collector=metrics_collector,
+                ) as publisher:
+                    handler_config.publisher = publisher
+                    handler = RequestHandlerFactory().get_request_handler(
+                        handler_config
+                    )
+                    if config.load_format == "gms":
+                        _register_memory_routes(runtime, handler)
 
-            async with get_publisher(
-                endpoint,
-                engine,
-                int(endpoint.connection_id()),
-                config.kv_block_size,
-                metrics_labels,
-                component_gauges=component_gauges,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
-                enable_local_indexer=config.enable_local_indexer,
-                metrics_collector=metrics_collector,
-            ) as publisher:
-                handler_config.publisher = publisher
+                    if config.disaggregation_mode != DisaggregationMode.ENCODE:
+                        await register_model(
+                            model_input,
+                            model_type,
+                            endpoint,
+                            config.model,
+                            config.served_model_name,
+                            context_length=config.max_seq_len,
+                            kv_cache_block_size=config.kv_block_size,
+                            runtime_config=runtime_config,
+                            custom_template_path=config.custom_jinja_template,
+                            media_decoder=media_decoder,
+                            media_fetcher=media_fetcher,
+                        )
+
+                    encoder_cache = getattr(handler, "_encoder_cache", None)
+                    if encoder_cache is not None:
+                        register_embedding_cache_metrics(
+                            endpoint=endpoint,
+                            cache=encoder_cache,
+                            model_name=model_name_for_metrics,
+                            component_name=config.component,
+                        )
+                    if shadow_standby:
+                        standby_generate_proxy.set_delegate(handler.generate)
+                        await standby_serve_task
+                    else:
+                        await endpoint.serve_endpoint(
+                            handler.generate,
+                            metrics_labels=metrics_labels,
+                            health_check_payload=health_check_payload,
+                        )
+
+                # Shutdown consolidator publisher if it was created
+                if consolidator_publisher:
+                    consolidator_publisher.shutdown()
+            else:
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 if config.load_format == "gms":
                     _register_memory_routes(runtime, handler)
-
-                encoder_cache = getattr(handler, "_encoder_cache", None)
-                if encoder_cache is not None:
-                    register_embedding_cache_metrics(
-                        endpoint=endpoint,
-                        cache=encoder_cache,
-                        model_name=model_name_for_metrics,
-                        component_name=config.component,
+                if config.disaggregation_mode != DisaggregationMode.ENCODE:
+                    await register_model(
+                        model_input,
+                        model_type,
+                        endpoint,
+                        config.model,
+                        config.served_model_name,
+                        context_length=config.max_seq_len,
+                        kv_cache_block_size=config.kv_block_size,
+                        runtime_config=runtime_config,
+                        custom_template_path=config.custom_jinja_template,
+                        media_decoder=media_decoder,
+                        media_fetcher=media_fetcher,
                     )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
-
-            # Shutdown consolidator publisher if it was created
-            if consolidator_publisher:
-                consolidator_publisher.shutdown()
-        else:
-            handler = RequestHandlerFactory().get_request_handler(handler_config)
-            if config.load_format == "gms":
-                _register_memory_routes(runtime, handler)
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
-            )
+                if shadow_standby:
+                    standby_generate_proxy.set_delegate(handler.generate)
+                    await standby_serve_task
+                else:
+                    await endpoint.serve_endpoint(
+                        handler.generate, health_check_payload=health_check_payload
+                    )
+    except Exception:
+        if standby_serve_task is not None:
+            standby_serve_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await standby_serve_task
+        raise
+    finally:
+        if startup_lock is not None:
+            await startup_lock.release()

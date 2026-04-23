@@ -93,11 +93,32 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_RejectsUnsupportedBackend(t *testing.T) {
 	ps := failoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "only vllm and trtllm")
+}
+
+func TestBuildFailoverPod_AllowsTRTLLMSingleNodeWithoutExtraOverrides(t *testing.T) {
+	ps := failoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		env := envToMap(ps.Containers[i].Env)
+		assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"], "engine-%d ENGINE_ID", i)
+		assert.Equal(t, failoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
+
+		_, hasShadowMode := env["DYN_TRTLLM_GMS_SHADOW_MODE"]
+		assert.False(t, hasShadowMode, "engine-%d should keep TRT-LLM shadow mode in the container command/env", i)
+
+		_, hasMasterPort := env["MASTER_PORT"]
+		assert.False(t, hasMasterPort, "engine-%d should not inject MASTER_PORT for the minimal single-node path", i)
+
+		_, hasNNODES := env["NNODES"]
+		assert.False(t, hasNNODES, "engine-%d should not inject NNODES for single-node TRT-LLM failover", i)
+	}
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
