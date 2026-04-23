@@ -10,13 +10,16 @@ This module defines the default health check payload for sglang backends.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import sglang as sgl
 
 from dynamo.health_check import HealthCheckPayload
 
 logger = logging.getLogger(__name__)
+
+# Marker key set on health-check probe requests.
+HEALTH_CHECK_KEY = "_HEALTH_CHECK"
 
 
 def _get_bos_token_id_from_engine(engine: Optional[sgl.Engine]) -> int:
@@ -163,6 +166,14 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
         )
 
         super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        # Layer the canary marker on top of whatever the base class returns
+        # (which may be DYN_HEALTH_CHECK_PAYLOAD-overridden), so the canary
+        # contract survives user payload overrides.
+        payload = dict(super().to_dict())
+        payload[HEALTH_CHECK_KEY] = True
+        return payload
 
 
 class SglangPrefillHealthCheckPayload(SglangDisaggHealthCheckPayload):
