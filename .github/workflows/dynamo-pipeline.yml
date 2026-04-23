@@ -172,11 +172,12 @@ jobs:
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.
   parallel:
+    name: test
     needs: image
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
-      test_type: Pytest
+      test_type: parallel
       amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
@@ -190,11 +191,12 @@ jobs:
     secrets: inherit
 
   sequential:
+    name: test
     needs: image
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
-      test_type: Pytest
+      test_type: sequential
       amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
@@ -208,11 +210,12 @@ jobs:
     secrets: inherit
 
   gpu:
+    name: test
     needs: image
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
-      test_type: Pytest
+      test_type: gpu
       amd_runner: prod-tester-amd-gpu-v1
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
