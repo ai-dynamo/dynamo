@@ -120,7 +120,7 @@ navigation:
             path: ../pages-v1.0.2/features/multimodal/encoder-disaggregation.md
           - page: Multimodal KV Routing
             path: ../pages-v1.0.2/features/multimodal/multimodal-kv-routing.md
-      - section: Diffusion (Preview)
+      - section: Diffusion
         slug: diffusion
         path: ../pages-v1.0.2/features/diffusion/README.md
         contents:
@@ -177,9 +177,9 @@ navigation:
             path: ../pages-v1.0.2/fault-tolerance/testing.md
       - page: Benchmarking
         path: ../pages-v1.0.2/benchmarks/benchmarking.md
-      - section: Testing with Mocker
+      - section: Mocker
         contents:
-          - page: Mocker
+          - page: Testing with Mocker
             path: ../pages-v1.0.2/mocker/mocker.md
           - page: Mocker Offline Trace Replay
             path: ../pages-v1.0.2/benchmarks/mocker-trace-replay.md
@@ -218,8 +218,19 @@ navigation:
             path: ../pages-v1.0.2/backends/trtllm/trtllm-diffusion.md
           - page: Known Issues and Mitigations
             path: ../pages-v1.0.2/backends/trtllm/trtllm-known-issues.md
-      - page: vLLM
+      - section: vLLM
         path: ../pages-v1.0.2/backends/vllm/README.md
+        contents:
+          - page: Reference Guide
+            path: ../pages-v1.0.2/backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: ../pages-v1.0.2/backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: ../pages-v1.0.2/backends/vllm/vllm-kv-offloading.md
+          - page: Observability
+            path: ../pages-v1.0.2/backends/vllm/vllm-observability.md
+          - page: vLLM-Omni
+            path: ../pages-v1.0.2/backends/vllm/vllm-omni.md
   # ==================== Components ====================
   - section: Components
     contents:
@@ -363,18 +374,6 @@ navigation:
       - page: NVIDIA Request Extensions (nvext)
         path: ../pages-v1.0.2/components/frontend/nvext.md
       # -- Backend detail pages --
-      - section: vLLM Details
-        contents:
-          - page: Reference Guide
-            path: ../pages-v1.0.2/backends/vllm/vllm-reference-guide.md
-          - page: Examples
-            path: ../pages-v1.0.2/backends/vllm/vllm-examples.md
-          - page: KV Cache Offloading
-            path: ../pages-v1.0.2/backends/vllm/vllm-kv-offloading.md
-          - page: Observability
-            path: ../pages-v1.0.2/backends/vllm/vllm-observability.md
-          - page: vLLM-Omni
-            path: ../pages-v1.0.2/backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
           - page: Building a Custom Container
