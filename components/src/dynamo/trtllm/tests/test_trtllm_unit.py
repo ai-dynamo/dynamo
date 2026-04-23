@@ -136,6 +136,15 @@ def test_config_multiple_connectors_fails(monkeypatch):
         parse_args(["--connector", "none", "kvbm"])
 
 
+def test_parse_args_shadow_mode_requires_gms(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_GMS_SHADOW_MODE", raising=False)
+
+    with pytest.raises(
+        ValueError, match="--gms-shadow-mode requires --load-format gms"
+    ):
+        parse_args(["--gms-shadow-mode"])
+
+
 # ---- Tests for trtllm_utils.deep_update ----
 
 
@@ -264,6 +273,47 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             f"Expected max_batch_size=512 from YAML override, "
             f"got {engine_args['max_batch_size']}"
         )
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
+    monkeypatch.setenv("ENGINE_ID", "1")
+
+    config = parse_args(
+        ["--model", "fake-model", "--load-format", "gms", "--gms-shadow-mode"]
+    )
+
+    runtime = mock.MagicMock()
+    endpoint = mock.MagicMock()
+    standby_future = asyncio.Future()
+    endpoint.serve_endpoint.return_value = standby_future
+    runtime.endpoint.return_value = endpoint
+
+    fake_lock = mock.AsyncMock()
+    fake_lock.owner.return_value = "engine-0"
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
+            return_value=fake_lock,
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=runtime,
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        assert exc_info.value.engine_args["gms_mode"] == "ro"
 
 
 class MultimodalProcessorInstantiated(Exception):
