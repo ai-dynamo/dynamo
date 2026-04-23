@@ -313,6 +313,76 @@ def _copy_artifacts_from_pvc(
     mount = artifact_pvc_mount_path.rstrip("/")
     pvc_path = f"{mount}/perf/{job_name}"
 
+    def _stream_tar(src_pod: str) -> tuple[bool, str]:
+        """Stream a tar of ``pvc_path`` from ``src_pod`` into ``local_dir``.
+
+        Uses ``kubectl exec ... -- tar cf - -C <dir> .`` piped into local
+        ``tar xf -``. This is substantially more robust than ``kubectl cp``
+        against flaky API-server streaming, which routinely emits
+        ``read message: unexpected EOF`` on large transfers. Returns
+        (ok, last_stderr_tail).
+        """
+        last_err = ""
+        max_attempts = 8
+        for i in range(max_attempts):
+            # kubectl exec streams tar output; pipe to local tar.
+            kubectl_proc = subprocess.Popen(
+                [
+                    "kubectl",
+                    "-n",
+                    namespace,
+                    "exec",
+                    src_pod,
+                    "--",
+                    "tar",
+                    "cf",
+                    "-",
+                    "-C",
+                    pvc_path,
+                    ".",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            tar_proc = subprocess.Popen(
+                ["tar", "xf", "-", "-C", str(local_dir)],
+                stdin=kubectl_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if kubectl_proc.stdout is not None:
+                kubectl_proc.stdout.close()
+            tar_out, tar_err = tar_proc.communicate(timeout=300)
+            k_err = kubectl_proc.stderr.read() if kubectl_proc.stderr else b""
+            kubectl_rc = kubectl_proc.wait()
+            tar_rc = tar_proc.returncode
+
+            if kubectl_rc == 0 and tar_rc == 0:
+                return True, ""
+
+            last_err = (
+                f"kubectl rc={kubectl_rc} stderr={k_err.decode(errors='replace').strip()[-300:]}"
+                f" | tar rc={tar_rc} stderr={tar_err.decode(errors='replace').strip()[-300:]}"
+            )
+            if i < max_attempts - 1:
+                print(
+                    f"  tar-stream from {src_pod} attempt {i + 1}/"
+                    f"{max_attempts} failed: {last_err[-400:]}"
+                )
+                # Clean up any partial extraction before retrying so a
+                # failed tar doesn't leave corrupt output around.
+                for p in local_dir.glob("*"):
+                    if p.is_dir():
+                        import shutil
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        try:
+                            p.unlink()
+                        except OSError:
+                            pass
+                time.sleep(5)
+        return False, last_err
+
     try:
         # Create a helper pod to access the PVC. Volume name is fixed to
         # ``artifact-pvc`` so helper-pod YAML is independent of the actual
@@ -339,41 +409,58 @@ spec:
 """
         run_kubectl(["apply", "-f", "-"], namespace=namespace, input_data=helper_yaml)
 
-        # Wait for helper pod to be ready
-        for _ in range(30):
-            result = run_kubectl(
-                ["get", "pod", helper_name, "-o", "jsonpath={.status.phase}"],
-                namespace=namespace,
-                check=False,
-            )
-            if result.stdout.strip() == "Running":
-                break
-            time.sleep(2)
-
-        # List what's on the PVC
-        result = run_kubectl(
-            ["exec", helper_name, "--", "ls", "-la", pvc_path],
+        # Wait for helper pod Ready condition (container started, kubectl exec
+        # targets are available). Running phase alone is not enough -- we've
+        # seen ``kubectl cp`` fail right after phase=Running because the
+        # container's file descriptors weren't yet attachable.
+        run_kubectl(
+            [
+                "wait",
+                f"pod/{helper_name}",
+                "--for=condition=Ready",
+                "--timeout=120s",
+            ],
             namespace=namespace,
             check=False,
         )
-        if result.stdout:
+        # Give tar inside busybox a beat to settle.
+        time.sleep(2)
+
+        # Wait for the final aiperf write to become visible on the PVC.
+        # With RWX PVCs and cross-pod mounts the aiperf pod's final flush
+        # isn't always visible to a freshly-mounted helper immediately --
+        # poll for ``profile_export_aiperf.json`` before the copy instead
+        # of doing a single optimistic ``kubectl cp`` that fails if the
+        # file hasn't propagated yet.
+        target_file = "profile_export_aiperf.json"
+        pvc_ls_attempts = 15  # 15 × 2s = 30s upper bound
+        pvc_ls_out = ""
+        for attempt in range(pvc_ls_attempts):
+            result = run_kubectl(
+                ["exec", helper_name, "--", "ls", "-la", pvc_path],
+                namespace=namespace,
+                check=False,
+            )
+            pvc_ls_out = result.stdout or ""
+            if target_file in pvc_ls_out:
+                break
+            if attempt == 0:
+                print(
+                    f"  PVC missing {target_file} yet; waiting for "
+                    "post-aiperf filesystem sync..."
+                )
+            time.sleep(2)
+        if pvc_ls_out:
             print(f"  PVC artifacts ({pvc_path}):")
-            for line in result.stdout.strip().split("\n")[:6]:
+            for line in pvc_ls_out.strip().split("\n")[:8]:
                 print(f"    {line}")
 
-        # Copy artifacts locally
-        subprocess.run(
-            [
-                "kubectl",
-                "cp",
-                f"{namespace}/{helper_name}:{pvc_path}/",
-                str(local_dir) + "/",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=120,
-        )
+        # Copy artifacts from the helper pod via tar-stream (more reliable
+        # than ``kubectl cp`` on this cluster, which hits spurious tar-stream
+        # EOFs even on tiny transfers).
+        ok, err = _stream_tar(helper_name)
+        if not ok:
+            raise RuntimeError(f"tar-stream from helper failed: {err[-400:]}")
         files = list(local_dir.glob("*"))
         print(f"  Copied {len(files)} artifact files to local")
         for f in sorted(files)[:5]:
