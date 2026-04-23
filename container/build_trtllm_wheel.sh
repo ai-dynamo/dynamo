@@ -199,15 +199,17 @@ EOF
     # combination; the stock build target "all" (SM70/75/80/86/89/90/100/120)
     # expands to ~thousands of translation units and dominates wheel build
     # wall-clock. The Kimi K2.5 + Eagle3 shadow-failover proof that this
-    # fork wheel exists for targets H200 (SM90) only, so compiling only
-    # SM90 kernels cuts the CUDA compile count to the subset we actually
-    # ship without changing which runtime symbols end up in
-    # libtensorrt_llm.so (the VMM rollback fix in virtualMemory.cpp is
-    # independent of CUDA arch).
+    # fork wheel exists for currently targets nscale B200 (SM100), so
+    # compiling only SM100 kernels cuts the CUDA compile count to the
+    # subset we actually ship without changing which runtime symbols end
+    # up in libtensorrt_llm.so (the VMM rollback fix in virtualMemory.cpp
+    # is independent of CUDA arch).
     #
     # Callers that want broader arch coverage can override TRTLLM_CUDA_ARCHS
-    # in the environment, e.g. TRTLLM_CUDA_ARCHS='90-real;100-real'.
-    TRTLLM_CUDA_ARCHS="${TRTLLM_CUDA_ARCHS:-90-real}"
+    # in the environment, e.g.
+    #   TRTLLM_CUDA_ARCHS='90-real;100-real'   (H200 + B200)
+    #   TRTLLM_CUDA_ARCHS='native'             (use detected host arch)
+    TRTLLM_CUDA_ARCHS="${TRTLLM_CUDA_ARCHS:-100-real}"
 
     WHEEL_ARGS="--clean --benchmarks"
     WHEEL_ARGS+=" --cuda_architectures '${TRTLLM_CUDA_ARCHS}'"

@@ -92,6 +92,16 @@ on:
         required: false
         type: string
         default: ''
+      trtllm_artifact_url:
+        description: 'URL to a prebuilt TensorRT-LLM artifact tarball (amd64/x86). When set, the trtllm prebuild step downloads and extracts this tarball instead of compiling the fork from source.'
+        required: false
+        type: string
+        default: ''
+      trtllm_artifact_gh200_url:
+        description: 'URL to a prebuilt TensorRT-LLM artifact tarball for GH200 (arm64+Grace).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -153,6 +163,8 @@ jobs:
           builder_requests_memory: ${{ inputs.builder_requests_memory }}
           builder_limits_memory: ${{ inputs.builder_limits_memory }}
           builder_ephemeral_storage: ${{ inputs.builder_ephemeral_storage }}
+          trtllm_artifact_url: ${{ inputs.trtllm_artifact_url }}
+          trtllm_artifact_gh200_url: ${{ inputs.trtllm_artifact_gh200_url }}
       - name: Copy image to ACR
         if: inputs.copy_to_acr
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}

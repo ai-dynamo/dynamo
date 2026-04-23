@@ -108,7 +108,7 @@ trtllm:
   pip_wheel: tensorrt-llm==1.3.0rc11
   trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
 
-  github_trtllm_commit: 18d83f4f0dea49925e31127feee2bf8a0c8bd6ff
+  github_trtllm_commit: 8974e4470aafe7d73f7eee07d55769c81f3c396f
   torch_version: 2.11.0a0+eb65b36914.nv26.2
   torch_tensorrt_version: 2.11.0a0
   torchvision_version: 0.25.0a0+1e53952f.nv26.2.44259020
