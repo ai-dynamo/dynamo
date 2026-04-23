@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     DumpRequest, EventKind, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest,
+    MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters, RadixTree,
+    RoutingDecisionRequest,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, PruneManager};
 use crate::protocols::*;
@@ -95,6 +96,8 @@ pub struct KvIndexer {
     event_tx: mpsc::Sender<RouterEvent>,
     /// A sender for `MatchRequest`s.
     match_tx: mpsc::Sender<MatchRequest>,
+    /// A sender for `MatchDetailsRequest`s.
+    match_details_tx: mpsc::Sender<MatchDetailsRequest>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
     /// A sender for remove worker dp_rank requests.
@@ -136,6 +139,7 @@ impl KvIndexer {
 
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
+        let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
@@ -156,6 +160,7 @@ impl KvIndexer {
             runtime.block_on(async move {
                 let cancel = cancel_clone;
                 let mut match_rx = match_rx;
+                let mut match_details_rx = match_details_rx;
                 let mut event_rx = event_rx;
                 let mut remove_worker_rx = remove_worker_rx;
                 let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
@@ -320,6 +325,11 @@ impl KvIndexer {
                             let _ = req.resp.send(matches);
                         }
 
+                        Some(req) = match_details_rx.recv() => {
+                            let matches = trie.find_match_details(req.sequence, req.early_exit);
+                            let _ = req.resp.send(matches);
+                        }
+
                         _ = expiry_fut => {
                             // TTL-based expiry triggered
                             let Some(ref mut pm) = prune_manager else { continue };
@@ -351,6 +361,7 @@ impl KvIndexer {
             cancel: token,
             event_tx,
             match_tx,
+            match_details_tx,
             remove_worker_tx,
             remove_worker_dp_rank_tx,
             get_workers_tx,
@@ -380,6 +391,21 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `RouterEvent`s.
     pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
         self.event_tx.clone()
+    }
+
+    pub async fn find_match_details(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<MatchDetails, KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.match_details_tx
+            .send(MatchDetailsRequest::new(sequence, false, resp_tx))
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
     #[cfg(test)]

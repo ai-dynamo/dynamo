@@ -660,6 +660,7 @@ async def init_llm_worker(
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
+                    enable_local_indexer=config.enable_local_indexer,
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

@@ -103,6 +103,9 @@ jobs:
         id: build-epp-image
         shell: bash
         timeout-minutes: 30
+        env:
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
         run: |
           set -x
           EPP_REPOSITORY="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
@@ -121,6 +124,9 @@ jobs:
             IMAGE_REPO="${EPP_IMAGE_REPO}" \
             GIT_TAG="${EPP_IMAGE_TAG}" \
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
+            USE_SCCACHE=true \
+            SCCACHE_BUCKET="${SCCACHE_S3_BUCKET}" \
+            SCCACHE_REGION="${AWS_DEFAULT_REGION}" \
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
       - name: Generate Dockerfile
         shell: bash

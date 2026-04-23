@@ -1491,12 +1491,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 			"cloudprovider", gpuInfo.CloudProvider)
 	}
 
-	// Enrich only the fields that are still missing
-	if hw.GPUSKU == "" && gpuInfo != nil {
-		if gpuInfo.System != "" {
+	if hw.GPUSKU == "" {
+		inferred := gpu.InferHardwareSystem(gpuInfo.Model)
+		switch {
+		case gpuInfo.System != "":
 			hw.GPUSKU = gpuInfo.System
-		} else {
-			// Unknown GPU type: use raw model name; profiler will attempt naive config generation.
+		case inferred != "":
+			hw.GPUSKU = inferred
+		default:
 			hw.GPUSKU = nvidiacomv1beta1.GPUSKUType(gpuInfo.Model)
 		}
 	}

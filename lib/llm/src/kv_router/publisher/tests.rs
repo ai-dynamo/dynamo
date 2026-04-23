@@ -1314,15 +1314,15 @@ mod test_event_dedup_filter {
         let data = store_data(&[1, 2, 3]);
 
         // Store same hashes twice — refcount should be 2
-        filter.track_store(0, &data);
-        filter.track_store(0, &data);
+        filter.track_store(0, StorageTier::Device, &data);
+        filter.track_store(0, StorageTier::Device, &data);
 
         // First remove — refcounts 2→1, all filtered out
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_none());
 
         // Second remove — refcounts 1→0, all pass through
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 3);
     }
@@ -1332,15 +1332,15 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store same hash twice
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // First remove — refcount 2→1, filtered out
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_none());
 
         // Second remove — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 1);
     }
@@ -1350,17 +1350,17 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store hash 1
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Remove hash 1 — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
         // Store hash 1 again — refcount starts fresh at 1
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Remove again — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 
@@ -1369,20 +1369,20 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store on rank 0 and rank 1
-        filter.track_store(0, &store_data(&[1, 2]));
-        filter.track_store(0, &store_data(&[1, 2]));
-        filter.track_store(1, &store_data(&[1, 2]));
-        filter.track_store(1, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
 
         // Clear wipes all ranks (matches indexer semantics where Cleared
         // from any rank removes all blocks for the entire worker).
         filter.clear();
 
         // Both ranks pass through defensively after clear
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
-        let result = filter.filter_remove(1, remove_data(&[1]));
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 
@@ -1391,18 +1391,18 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Hash 1: stored twice (refcount 2)
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Hash 2: stored once (refcount 1)
-        filter.track_store(0, &store_data(&[2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[2]));
 
         // Hash 3: stored twice (refcount 2)
-        filter.track_store(0, &store_data(&[3]));
-        filter.track_store(0, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
 
         // Remove all three — only hash 2 (refcount 1→0) passes through
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         let result = result.unwrap();
         assert_eq!(result.block_hashes.len(), 1);
@@ -1414,20 +1414,20 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store hash 1 on rank 0 (twice) and rank 1 (once)
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(1, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1]));
 
         // Remove hash 1 on rank 1 — refcount 1→0, passes through
-        let result = filter.filter_remove(1, remove_data(&[1]));
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
         // Remove hash 1 on rank 0 — refcount 2→1, filtered out
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_none());
 
         // Remove hash 1 on rank 0 again — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 }
@@ -1722,6 +1722,13 @@ mod event_processor_tests {
 
     fn local_gpu_event(event: KvCacheEvent) -> PlacementEvent {
         PlacementEvent::local_gpu(1, event)
+    }
+
+    fn local_host_event(event: KvCacheEvent) -> PlacementEvent {
+        PlacementEvent::new(
+            Placement::local_worker(1, event.dp_rank, StorageTier::HostPinned),
+            event,
+        )
     }
 
     /// Test that pushing N removed events results in batched output
@@ -2285,6 +2292,106 @@ mod event_processor_tests {
             2,
             "Switching from Removed to Stored should cause immediate flush, resulting in 2 separate events"
         );
+    }
+
+    #[tokio::test]
+    async fn test_host_tier_events_are_published_and_preserved() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(100),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(42)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "Expected a single published host-tier event"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+
+        let KvCacheEventData::Removed(data) = &events[0].event.data else {
+            panic!("Expected Removed event");
+        };
+        assert_eq!(data.block_hashes, vec![ExternalSequenceBlockHash(42)]);
+    }
+
+    #[tokio::test]
+    async fn test_storage_tier_change_causes_flush() {
+        let timeout_ms = Some(100);
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(1)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(2)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "Changing storage tier should flush the current batch"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+        assert_eq!(events[1].storage_tier, StorageTier::Device);
     }
 
     /// Test that dp_rank change causes immediate flush
