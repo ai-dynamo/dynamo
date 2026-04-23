@@ -22,6 +22,7 @@ ARG CUDA_MAJOR
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG LMCACHE_REF
+ARG NIXL_REF
 ARG VLLM_OMNI_REF
 
 WORKDIR /workspace
@@ -64,6 +65,19 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
+{% if device == "cuda" %}
+# Upgrade the upstream vLLM runtime's NIXL wheels so nixl_sys stubs can find
+# libnixl_capi.so and the runtime-selected NIXL path uses the same package.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eu; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    NIXL_VERSION="${NIXL_REF#v}"; \
+    uv pip install --system --force-reinstall --no-deps \
+        "nixl==${NIXL_VERSION}" \
+        "nixl-cu12==${NIXL_VERSION}" \
+        "nixl-cu13==${NIXL_VERSION}"
+{% endif %}
 
 # Find upstream's CUDA-versioned NIXL and libcudart libs and expose them at
 # stable paths. CUDA 12 and CUDA 13 package the runtime under different
