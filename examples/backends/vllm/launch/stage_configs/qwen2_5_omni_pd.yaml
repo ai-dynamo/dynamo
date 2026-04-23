@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # PD disaggregated stage config for Qwen2.5-Omni-7B.
 # Splits the thinker into prefill (stage 0) and decode (stage 1).
 # KV cache transfers via NixlConnector.
