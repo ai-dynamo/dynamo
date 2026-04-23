@@ -83,7 +83,19 @@ runs:
         print(f"GPU Name: {name}")
         if not available:
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
-
+    - name: Verify GPU visibility
+      if: inputs.gpu_tests == 'true'
+      shell: bash
+      run: |
+        set +e
+        if [[ -d "${{ inputs.local_models_dir }}" ]]; then
+          echo "📁Listing models directory: ${{ inputs.local_models_dir }}"
+          echo "--------------------------------"
+          find "${{ inputs.local_models_dir }}" -maxdepth 2 -type d
+          echo "--------------------------------"
+        else
+          echo "❌ Models directory not found: ${{ inputs.local_models_dir }}"
+        fi
     - name: Run pytest
       shell: bash
       env:
