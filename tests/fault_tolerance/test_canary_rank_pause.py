@@ -36,7 +36,7 @@ STARTUP_READY_BUDGET_S = 120
 _RANK_PATTERNS: dict[str, tuple[str, ...]] = {
     "trtllm": ("mpi4py.futures.server", "TRTLLM:EngineCore", "tensorrt_llm"),
     "vllm": ("VLLM::EngineCore", "EngineCoreProc"),
-    "sglang": ("SGLANG:EngineCore", "sgl_scheduler"),
+    "sglang": ("sglang::scheduler",),
 }
 
 _CONFIGS_BY_BACKEND = {
