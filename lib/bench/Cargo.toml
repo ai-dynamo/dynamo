@@ -44,7 +44,7 @@ tokio = { workspace = true }
 dynamo-mocker = { workspace = true }
 
 [dev-dependencies]
-dynamo-kv-router = { workspace = true, features = ["bench", "shard-metrics"] }
+dynamo-kv-router = { workspace = true, features = ["bench", "metrics", "shard-metrics"] }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
@@ -52,4 +52,5 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tempfile = { workspace = true }
 uuid = { workspace = true }

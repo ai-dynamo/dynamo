@@ -11,7 +11,8 @@ use dynamo_tokens::SequenceHash;
 use tokio::time::{Duration, Instant};
 
 use crate::common::{
-    BenchmarkResults, NoopSequencePublisher, generate_replay_artifacts, make_progress_bar,
+    BenchmarkRun, NoopSequencePublisher, compute_benchmark_run, generate_replay_artifacts,
+    make_progress_bar, rescale_trace_timestamps,
 };
 
 /// A single timestamped entry in a worker's sequence trace.
@@ -38,11 +39,6 @@ pub struct SequenceTrace {
     pub timestamp_us: u64,
 }
 
-pub struct ActiveSequencesBenchmarkRun {
-    pub results: BenchmarkResults,
-    pub kept_up: bool,
-}
-
 /// Pre-computed metadata for a request, stored before submission so the
 /// output signal can look it up by UUID.
 struct RequestMetadata {
@@ -57,7 +53,7 @@ pub async fn generate_sequence_events(
     traces: &[Trace],
     num_gpu_blocks: usize,
     block_size: u32,
-    trace_simulation_duration_ms: u64,
+    trace_simulation_duration_ms: Option<u64>,
 ) -> anyhow::Result<Vec<Vec<SequenceTrace>>> {
     println!("Generating sequence events...");
     let artifacts = generate_replay_artifacts(
@@ -148,8 +144,16 @@ pub async fn run_benchmark(
     block_size: u32,
     benchmark_duration_ms: u64,
     inference_worker_duplication_factor: usize,
-) -> anyhow::Result<ActiveSequencesBenchmarkRun> {
-    let scaled = rescale_traces(traces, benchmark_duration_ms);
+) -> anyhow::Result<BenchmarkRun> {
+    let scaled = rescale_trace_timestamps(
+        traces,
+        benchmark_duration_ms,
+        |entry| entry.timestamp_us,
+        |entry, timestamp_us| SequenceTrace {
+            entry: entry.entry.clone(),
+            timestamp_us,
+        },
+    );
     let num_trace_workers = scaled.len();
 
     let total_workers = num_trace_workers * inference_worker_duplication_factor;
@@ -240,68 +244,25 @@ pub async fn run_benchmark(
     let total_duration = progress.elapsed();
     multi.assert_completely_drained(Instant::now());
 
-    let kept_up = total_duration <= Duration::from_millis(benchmark_duration_ms * 11 / 10);
-    let total_ops = all_latencies.len();
-
-    let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
-    let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
-    let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
-    let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
-
-    all_latencies.sort_unstable();
-    let latency_p99_us = if all_latencies.is_empty() {
-        0.0
-    } else {
-        all_latencies[all_latencies.len() * 99 / 100] as f32 / 1000.0
-    };
+    let run = compute_benchmark_run(
+        all_latencies.len(),
+        total_blocks,
+        benchmark_duration_ms,
+        total_duration,
+        all_latencies,
+    );
 
     println!(
         "Ops Throughput: offered={} ops/s achieved={} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
-        offered_ops_throughput, ops_throughput
+        run.results.offered_ops_throughput, run.results.ops_throughput
     );
     println!(
         "Block Throughput: offered={} block ops/s achieved={} block ops/s",
-        offered_block_throughput, block_throughput
+        run.results.offered_block_throughput, run.results.block_throughput
     );
-    println!("Latency p99: {}us", latency_p99_us);
+    println!("Latency p99: {}us", run.results.latency_p99_us);
 
-    Ok(ActiveSequencesBenchmarkRun {
-        results: BenchmarkResults {
-            offered_ops_throughput,
-            ops_throughput,
-            offered_block_throughput,
-            block_throughput,
-            latency_p99_us,
-        },
-        kept_up,
-    })
-}
-
-fn rescale_traces(
-    traces: &[Vec<SequenceTrace>],
-    benchmark_duration_ms: u64,
-) -> Vec<Vec<SequenceTrace>> {
-    traces
-        .iter()
-        .map(|worker_trace| {
-            if worker_trace.is_empty() {
-                return Vec::new();
-            }
-            let max_ts = worker_trace
-                .last()
-                .map(|e| e.timestamp_us)
-                .unwrap_or(1)
-                .max(1);
-            let target_us = benchmark_duration_ms * 1000;
-            worker_trace
-                .iter()
-                .map(|entry| SequenceTrace {
-                    entry: entry.entry.clone(),
-                    timestamp_us: entry.timestamp_us * target_us / max_ts,
-                })
-                .collect()
-        })
-        .collect()
+    Ok(run)
 }
 
 fn make_unique_trace(trace: &[SequenceTrace], worker_id: u64) -> Vec<SequenceTrace> {

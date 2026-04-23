@@ -21,8 +21,9 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 pub use shared::{
-    BenchmarkResults, NoopSequencePublisher, WorkerReplayArtifacts, default_mock_engine_args,
-    generate_replay_artifacts, make_progress_bar, process_mooncake_trace,
+    BenchmarkResults, BenchmarkRun, NoopSequencePublisher, WorkerReplayArtifacts,
+    compute_benchmark_run, default_mock_engine_args, generate_replay_artifacts, make_progress_bar,
+    process_mooncake_trace, rescale_trace_timestamps,
 };
 
 /// Shared CLI arguments for trace-based benchmarks.
@@ -31,7 +32,8 @@ pub struct CommonArgs {
     /// Path to a JSONL mooncake trace file.
     pub mooncake_trace_path: Option<String>,
 
-    /// Run built-in self-tests instead of the benchmark.
+    /// Deprecated compatibility flag. Use `cargo test --package dynamo-bench --test ...`
+    /// for the fixture-backed integration tests instead.
     #[clap(long)]
     pub test: bool,
 
@@ -43,9 +45,10 @@ pub struct CommonArgs {
     #[clap(long, default_value = "128")]
     pub block_size: u32,
 
-    /// Wall-clock duration (ms) over which the trace is replayed during event generation.
-    #[clap(long, default_value = "30000")]
-    pub trace_simulation_duration_ms: u64,
+    /// Optional wall-clock duration (ms) used to rescale the trace during event generation.
+    /// Omit to preserve the original Mooncake timestamps.
+    #[clap(long)]
+    pub trace_simulation_duration_ms: Option<u64>,
 
     /// Wall-clock duration (ms) over which the benchmark replays operations.
     #[clap(long, default_value = "60000")]
@@ -448,61 +451,4 @@ pub fn median(durations: &[Duration]) -> Duration {
     let mut sorted = durations.to_vec();
     sorted.sort();
     sorted[sorted.len() / 2]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn multiturn_trace() -> Trace {
-        Trace {
-            block_size: 2,
-            sessions: vec![dynamo_mocker::loadgen::SessionTrace {
-                session_id: "session-a".to_string(),
-                first_arrival_timestamp_ms: Some(0.0),
-                turns: vec![
-                    dynamo_mocker::loadgen::TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 2,
-                        hash_ids: vec![1, 2],
-                        delay_after_previous_ms: 0.0,
-                    },
-                    dynamo_mocker::loadgen::TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 2,
-                        hash_ids: vec![3, 4],
-                        delay_after_previous_ms: 5.0,
-                    },
-                ],
-            }],
-        }
-    }
-
-    #[tokio::test]
-    async fn test_replay_worker_trace_releases_follow_up_turn_after_completion_delay() {
-        let artifacts = replay_worker_trace(
-            multiturn_trace(),
-            default_mock_engine_args(1024, 2).unwrap(),
-            5,
-            make_progress_bar(Some(2)),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(artifacts.requests.len(), 2);
-        let first_uuid = artifacts.requests[0].uuid;
-        let first_completion_ms = artifacts
-            .output_signals
-            .iter()
-            .find(|signal| signal.signal.uuid == first_uuid && signal.signal.completed)
-            .unwrap()
-            .timestamp_us as f64
-            / 1000.0;
-        assert!(
-            artifacts.requests[1].scheduled_ready_at_ms + 0.1 >= first_completion_ms + 5.0,
-            "expected follow-up turn to wait for completion plus delay, got ready_at={} completion_at={}",
-            artifacts.requests[1].scheduled_ready_at_ms,
-            first_completion_ms
-        );
-    }
 }
