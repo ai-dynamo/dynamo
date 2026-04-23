@@ -25,8 +25,8 @@ Get the VPC ID associated with your EKS cluster:
 
 ```bash
 export VPC_ID=$(aws eks describe-cluster \
-  --name $CLUSTER_NAME \
-  --region $AWS_REGION \
+  --name "$CLUSTER_NAME" \
+  --region "$AWS_REGION" \
   --query "cluster.resourcesVpcConfig.vpcId" \
   --output text)
 ```
@@ -35,7 +35,8 @@ Get the CIDR range for the VPC (used for the security group rule):
 
 ```bash
 export VPC_CIDR=$(aws ec2 describe-vpcs \
-  --vpc-ids $VPC_ID \
+  --vpc-ids "$VPC_ID" \
+  --region "$AWS_REGION" \
   --query "Vpcs[0].CidrBlock" \
   --output text)
 ```
@@ -46,10 +47,10 @@ Create a security group that allows NFS traffic (port 2049) from within the VPC:
 
 ```bash
 export EFS_SG_ID=$(aws ec2 create-security-group \
-  --group-name dynamo-efs-sg \
+  --group-name "${CLUSTER_NAME}-efs-sg" \
   --description "Security group for EFS access from EKS" \
-  --vpc-id $VPC_ID \
-  --region $AWS_REGION \
+  --vpc-id "$VPC_ID" \
+  --region "$AWS_REGION" \
   --query "GroupId" \
   --output text)
 ```
@@ -58,11 +59,11 @@ Add an inbound rule to allow NFS traffic from the VPC CIDR:
 
 ```bash
 aws ec2 authorize-security-group-ingress \
-  --group-id $EFS_SG_ID \
+  --group-id "$EFS_SG_ID" \
   --protocol tcp \
   --port 2049 \
-  --cidr $VPC_CIDR \
-  --region $AWS_REGION
+  --cidr "$VPC_CIDR" \
+  --region "$AWS_REGION"
 ```
 
 ## Create the EFS File System
@@ -72,7 +73,7 @@ export EFS_FS_ID=$(aws efs create-file-system \
   --performance-mode generalPurpose \
   --throughput-mode elastic \
   --encrypted \
-  --region $AWS_REGION \
+  --region "$AWS_REGION" \
   --tags Key=Name,Value=dynamo-efs \
   --query "FileSystemId" \
   --output text)
@@ -82,8 +83,8 @@ Wait for the file system to become available:
 
 ```bash
 aws efs describe-file-systems \
-  --file-system-id $EFS_FS_ID \
-  --region $AWS_REGION \
+  --file-system-id "$EFS_FS_ID" \
+  --region "$AWS_REGION" \
   --query "FileSystems[0].LifeCycleState" \
   --output text
 ```
@@ -98,8 +99,8 @@ Get the subnet IDs used by your EKS cluster:
 
 ```bash
 export SUBNET_IDS=$(aws eks describe-cluster \
-  --name $CLUSTER_NAME \
-  --region $AWS_REGION \
+  --name "$CLUSTER_NAME" \
+  --region "$AWS_REGION" \
   --query "cluster.resourcesVpcConfig.subnetIds[]" \
   --output text)
 
@@ -112,10 +113,10 @@ Create a mount target in each subnet:
 for SUBNET_ID in $(echo "$SUBNET_IDS" | tr '\t' '\n'); do
   echo "Creating mount target in subnet: $SUBNET_ID"
   aws efs create-mount-target \
-    --file-system-id $EFS_FS_ID \
-    --subnet-id $SUBNET_ID \
-    --security-groups $EFS_SG_ID \
-    --region $AWS_REGION 2>/dev/null || echo "  Mount target already exists or subnet is in a duplicate AZ (this is OK)"
+    --file-system-id "$EFS_FS_ID" \
+    --subnet-id "$SUBNET_ID" \
+    --security-groups "$EFS_SG_ID" \
+    --region "$AWS_REGION" 2>/dev/null || echo "  Mount target already exists or subnet is in a duplicate AZ (this is OK)"
 done
 ```
 
@@ -125,8 +126,8 @@ Verify mount targets are available:
 
 ```bash
 aws efs describe-mount-targets \
-  --file-system-id $EFS_FS_ID \
-  --region $AWS_REGION \
+  --file-system-id "$EFS_FS_ID" \
+  --region "$AWS_REGION" \
   --query "MountTargets[*].{SubnetId:SubnetId,AZ:AvailabilityZoneName,State:LifeCycleState}" \
   --output table
 ```
