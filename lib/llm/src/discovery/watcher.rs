@@ -665,10 +665,6 @@ impl ModelWatcher {
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
 
-        if let Some(tx) = &self.model_update_tx {
-            tx.send(ModelUpdate::Added(card.clone())).await.ok();
-        }
-
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
         let ws_key = worker_set_key(&namespace, card.model_type);
@@ -1018,6 +1014,10 @@ impl ModelWatcher {
             self.manager
                 .add_worker_set(card.name(), &ws_key, worker_set);
 
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Added(card.clone())).await.ok();
+            }
+
             // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
             // because it coordinates between decode and prefill WorkerSets that share
             // the same deployment namespace but have different ws_keys ("ns" vs "ns:prefill").
@@ -1051,6 +1051,10 @@ impl ModelWatcher {
         // Add the completed WorkerSet to the Model
         self.manager
             .add_worker_set(card.name(), &ws_key, worker_set);
+
+        if let Some(tx) = &self.model_update_tx {
+            tx.send(ModelUpdate::Added(card.clone())).await.ok();
+        }
 
         Ok(())
     }

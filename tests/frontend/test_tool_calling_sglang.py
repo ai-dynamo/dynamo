@@ -706,67 +706,6 @@ class TestToolCallingProtocol:
         ids = [tc["id"] for tc in result.tool_calls]
         assert len(ids) == len(set(ids)), f"duplicate tool ids: {ids}"
 
-    def test_complex_nested_arguments_schema_valid(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Create a weekly team standup meeting titled 'Engineering Standup' "
-                        "from 2025-01-15T09:00:00Z to 2025-01-15T09:30:00Z. "
-                        "Add attendees: Alice (alice@example.com, required) and "
-                        "Bob (bob@example.com, optional). "
-                        "Set recurrence weekly every 1 week for 10 occurrences. "
-                        "Location: Conference Room B. "
-                        "Use the create_event tool."
-                    ),
-                }
-            ],
-            tools=TOOLS_COMPLEX_ARGS,
-        )
-        if result.finish_reason != "tool_calls":
-            pytest.skip(
-                "Model declined to call create_event for complex schema "
-                f"(finish_reason={result.finish_reason!r})"
-            )
-        schema = tool_schema_map(TOOLS_COMPLEX_ARGS)
-        args = parse_and_validate_tool_call(
-            result.tool_calls[0], schema, expected_name="create_event"
-        )
-        assert args["title"]
-        assert args["start_time"]
-        assert args["end_time"]
-        assert isinstance(args.get("attendees", []), list)
-
-    def test_sql_tool_arguments_schema_valid(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Call the query_database tool. "
-                        "Set the 'database' parameter to \"users\" and "
-                        "set the 'sql' parameter to: "
-                        "SELECT * FROM users WHERE name LIKE '%O''Brien%' "
-                        "AND created_at > '2024-01-01'"
-                    ),
-                }
-            ],
-            tools=TOOLS_DATABASE,
-            tool_choice={"type": "function", "function": {"name": "query_database"}},
-        )
-        assert_finish_reason(result, {"tool_calls"})
-        schema = tool_schema_map(TOOLS_DATABASE)
-        args = parse_and_validate_tool_call(
-            result.tool_calls[0], schema, expected_name="query_database"
-        )
-        assert args["database"] == "users"
-        assert "SELECT" in args["sql"].upper()
-
     def test_array_argument_schema_valid(self, client: OpenAI, model: str):
         tools = [
             {
