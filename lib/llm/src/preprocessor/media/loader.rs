@@ -122,6 +122,30 @@ impl Default for MediaFetcher {
 }
 
 impl MediaFetcher {
+    /// Build a `MediaFetcher` whose defaults respect the shared
+    /// `DYN_MM_ALLOW_INTERNAL` environment variable. Mirrors the Python
+    /// `UrlValidationPolicy.from_env()` behavior so both fetch paths
+    /// (frontend decode in Rust, backend decode in Python) honor the
+    /// same on-prem opt-in flag.
+    ///
+    /// `DYN_MM_ALLOW_INTERNAL=1` flips `allow_direct_ip`,
+    /// `allow_direct_port`, and `allow_private_ips` all to `true` at
+    /// once.
+    pub fn from_env() -> Self {
+        let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL")
+            .ok()
+            .as_deref()
+            == Some("1");
+        Self {
+            allow_direct_ip: allow_internal,
+            allow_direct_port: allow_internal,
+            allow_private_ips: allow_internal,
+            ..Self::default()
+        }
+    }
+}
+
+impl MediaFetcher {
     pub fn check_if_url_allowed(&self, url: &url::Url) -> Result<()> {
         if !matches!(url.scheme(), "http" | "https" | "data") {
             anyhow::bail!("Only HTTP(S) and data URLs are allowed");
@@ -246,7 +270,9 @@ pub struct MediaLoader {
 
 impl MediaLoader {
     pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
-        let media_fetcher = media_fetcher.unwrap_or_default();
+        // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
+        // honored even when the caller doesn't pass an explicit fetcher.
+        let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
 
         // Redirect policy: revalidate the policy-visible part of the URL
         // (scheme, IP literals, hostname blocklist, direct-IP / direct-port
@@ -598,6 +624,20 @@ mod tests_non_nixl {
         let url = url::Url::parse("https://Metadata.Google.Internal/x").unwrap();
         let result = fetcher.check_if_url_allowed(&url);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_env_default() {
+        // Saving/restoring env vars in tests is racy with parallel tests,
+        // so we only assert the "unset" case here (parallel-safe).
+        // SAFETY: single-threaded mutation acceptable for this restore.
+        unsafe {
+            std::env::remove_var("DYN_MM_ALLOW_INTERNAL");
+        }
+        let f = MediaFetcher::from_env();
+        assert!(!f.allow_private_ips);
+        assert!(!f.allow_direct_ip);
+        assert!(!f.allow_direct_port);
     }
 
     #[test]
