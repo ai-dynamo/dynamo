@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.0.2
           env:
             - name: DYN_DECODE_FALLBACK
               value: "true"
@@ -60,11 +60,11 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/backends/vllm
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
             command:
               - python3
             args:
