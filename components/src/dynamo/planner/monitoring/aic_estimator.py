@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""AIConfigurator performance estimator used by the planner (and the profiler).
+
+This thin wrapper around the ``aiconfigurator`` SDK lets callers estimate
+prefill / decode latency and KV-cache capacity for a given model + system +
+backend + parallelism config without spinning up a real engine. The planner
+uses it to bootstrap regression models from an AIC spec in rapid mode.
+"""
+
 import logging
 from typing import Any
 
@@ -16,7 +24,7 @@ logger.addHandler(console_handler)
 
 
 def _try_import_aiconfigurator():
-    # Lazy-import aiconfigurator because it's an optional dependency in profile_sla.py
+    # Lazy-import aiconfigurator because it's an optional dependency.
     import aiconfigurator.sdk.backends.factory
     import aiconfigurator.sdk.config
     import aiconfigurator.sdk.inference_session

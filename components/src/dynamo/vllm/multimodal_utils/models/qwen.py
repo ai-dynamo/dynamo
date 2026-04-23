@@ -45,16 +45,19 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
         merge_size: int = processor.merge_size
         factor = patch_size * merge_size
 
-        # Qwen2/2.5-VL use min_pixels/max_pixels directly.
-        # Qwen3-VL sets them to None and uses size.shortest_edge/longest_edge.
+        # Qwen2/2.5-VL expose min_pixels/max_pixels attributes (transformers v4);
+        # transformers v5 and Qwen3-VL drop those attributes and rely on
+        # size.shortest_edge / size.longest_edge instead.
+        proc_min_pixels = getattr(processor, "min_pixels", None)
+        proc_max_pixels = getattr(processor, "max_pixels", None)
         min_pixels: int = (
-            processor.min_pixels
-            if processor.min_pixels is not None
+            proc_min_pixels
+            if proc_min_pixels is not None
             else processor.size.get("shortest_edge", factor)
         )
         max_pixels: int = (
-            processor.max_pixels
-            if processor.max_pixels is not None
+            proc_max_pixels
+            if proc_max_pixels is not None
             else processor.size.get("longest_edge", factor * factor * 1280)
         )
         vision_hidden_dim: int = getattr(

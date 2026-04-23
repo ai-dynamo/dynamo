@@ -7,8 +7,8 @@ use common::*;
 
 use clap::Parser;
 use common::NoopSequencePublisher;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
+use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
@@ -379,21 +379,17 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens(
-                Some(&block_hashes),
-                isl,
-                OverlapScores::default(),
-                decay_now,
-            );
+            let _ = multi.potential_blocks_and_tokens(Some(&block_hashes), isl, HashMap::new());
             let _ = multi.add_request(
                 SequenceRequest {
                     request_id,
                     token_sequence: Some(block_hashes),
-                    isl,
-                    overlap: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: Some(output_length as u32),
-                    prefill_load_hint: None,
+                    prefill_load_hint: Some(PrefillLoadHint {
+                        initial_effective_prefill_tokens: isl,
+                        expected_prefill_duration: None,
+                    }),
                     worker,
                     lora_name: None,
                 },

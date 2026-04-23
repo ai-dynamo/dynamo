@@ -85,11 +85,6 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.GPU.DiscoveryEnabled = ptr.To(true)
 	}
 
-	// Checkpoint defaults
-	if obj.Checkpoint.ReadyForCheckpointFilePath == "" {
-		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
-	}
-
 	// ServiceMesh defaults
 	if ServiceMeshProvider(obj.ServiceMesh.Provider) == ServiceMeshProviderIstio && obj.ServiceMesh.Istio == nil {
 		obj.ServiceMesh.Istio = &IstioMeshConfiguration{}

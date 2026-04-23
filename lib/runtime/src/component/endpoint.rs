@@ -144,6 +144,21 @@ impl EndpointConfigBuilder {
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
+            if system_health.lock().health_check_enabled()
+                && endpoint
+                    .drt()
+                    .local_endpoint_registry()
+                    .get(&endpoint.name)
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "Endpoint '{}' has a health_check_payload and canary is enabled, \
+                     but no local engine is registered. Call .register_local_engine() \
+                     before .start() so the canary health check can function.",
+                    endpoint.name
+                );
+            }
+
             // Build transport based on request plane mode
             let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 

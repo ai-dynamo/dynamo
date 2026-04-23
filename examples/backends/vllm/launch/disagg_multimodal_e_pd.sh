@@ -86,7 +86,7 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
-    EXTRA_ARGS="--enforce-eager"
+    EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
@@ -112,7 +112,6 @@ python -m dynamo.vllm \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
-  --max-model-len "$PD_MAX_MODEL_LEN" \
   --gpu-memory-utilization "$DYN_PD_GPU_MEM" \
   $EXTRA_ARGS \
   "${EXTRA_PD_ARGS[@]}" &

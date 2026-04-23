@@ -910,7 +910,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"/bin/sh", "-c"},
-										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
+										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
@@ -1681,7 +1681,11 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 		}
 	}
 
-	t.Run("ready checkpoint forces Recreate strategy", func(t *testing.T) {
+	t.Run("ready checkpoint keeps RollingUpdate strategy", func(t *testing.T) {
+		// Restore-target pods do not need a special Recreate override. The
+		// default RollingUpdate strategy works for failure-replacement and
+		// scale-up; users who specifically want Recreate on tight-GPU nodes
+		// can still opt in via the nvidia.com/deployment-strategy annotation.
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1709,8 +1713,8 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 		if toDelete {
 			t.Fatalf("expected deployment to be retained")
 		}
-		if deploy.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-			t.Fatalf("expected Recreate strategy, got %s", deploy.Spec.Strategy.Type)
+		if deploy.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Fatalf("expected RollingUpdate strategy, got %s", deploy.Spec.Strategy.Type)
 		}
 	})
 

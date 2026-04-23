@@ -85,6 +85,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on amd64 post-merge. "
+                        "OPS-4445"
+                    ),
                     pytest.mark.post_merge,
                 ],
                 timeout_s=600,
@@ -107,5 +111,24 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
         gated=True,
+    ),
+    # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
+    # We may use less GPUs by squeezing the model onto 2 GPUs.
+    MultimodalModelProfile(
+        name="llava-hf/llava-1.5-7b-hf",
+        short_name="llava-1.5-7b",
+        topologies={
+            "e_pd": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=340,
+                gpu_marker="gpu_4",
+            ),
+            "epd": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=300,
+                gpu_marker="gpu_4",
+            ),
+        },
+        request_payloads=[make_image_payload(["green"])],
     ),
 ]
