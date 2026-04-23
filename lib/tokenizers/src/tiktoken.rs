@@ -172,7 +172,7 @@ fn detect_bpe_pattern(directory: &Path) -> Result<&'static str> {
         _ => Err(Error::msg(format!(
             "Unsupported tiktoken model_type '{model_type}'. \
              Currently supported: kimi, kimi_k2, kimi_k25, deepseek_v3. \
-             To add a new model type, extend detect_bpe_pattern() in tokenizers/tiktoken.rs \
+             To add a new model type, extend detect_bpe_pattern() in lib/tokenizers/src/tiktoken.rs \
              with the appropriate BPE regex pattern. \
              Alternatively, provide a tokenizer.json (HuggingFace format) instead."
         ))),
@@ -249,7 +249,7 @@ fn load_special_tokens(directory: &Path, num_base_tokens: usize) -> Result<FxHas
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokenizers::DecodeStream;
+    use crate::DecodeStream;
     use std::io::Write;
     use std::sync::Arc;
 
@@ -643,7 +643,7 @@ mod tests {
     fn test_decode_stream_incremental_multibyte_reassembly() {
         let dir = tempfile::tempdir().unwrap();
         let tokenizer = create_byte_token_tokenizer(dir.path());
-        let tokenizer_arc: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+        let tokenizer_arc: Arc<dyn crate::traits::Tokenizer> = Arc::new(tokenizer);
 
         let mut stream = DecodeStream::new(tokenizer_arc, &[5], false);
 
@@ -663,7 +663,7 @@ mod tests {
     fn test_decode_stream_incremental_emoji_reassembly() {
         let dir = tempfile::tempdir().unwrap();
         let tokenizer = create_byte_token_tokenizer(dir.path());
-        let tokenizer_arc: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
+        let tokenizer_arc: Arc<dyn crate::traits::Tokenizer> = Arc::new(tokenizer);
 
         let mut stream = DecodeStream::new(tokenizer_arc, &[5], false);
 

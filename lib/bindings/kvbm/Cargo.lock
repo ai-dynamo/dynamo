@@ -1554,9 +1554,9 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-protocols",
  "dynamo-runtime",
+ "dynamo-tokenizers",
  "dynamo-tokens",
  "either",
- "fastokens",
  "flate2",
  "futures",
  "futures-util",
@@ -1581,7 +1581,6 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmp-serde",
- "rustc-hash 1.1.0",
  "rustls",
  "serde",
  "serde_json",
@@ -1589,7 +1588,6 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror 2.0.18",
- "tiktoken-rs",
  "tmq",
  "tokenizers",
  "tokio",
@@ -1750,6 +1748,23 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-tokenizers"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fastokens",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "strum",
+ "tiktoken-rs",
+ "tokenizers",
+ "tracing",
 ]
 
 [[package]]

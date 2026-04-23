@@ -5,7 +5,6 @@
 
 av==15.0.0
 ftfy==6.3.1
-nvtx==0.2.14
 # Pin transformers and onnxruntime: vLLM only sets a lower bound on
 # transformers, so resolver drift can change versions between builds
 # and shift LLaVA/vision preprocessing, making multimodal outputs

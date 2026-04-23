@@ -131,9 +131,13 @@ jobs:
       fresh_builder: true
       no_cache: true
       build_timeout_minutes: 90
-      cpu_parallel_test_markers: 'parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      gpu_test_markers: 'none and gpu_1'
+      # TODO: widen beyond `pre_merge` — today it picks up tests
+      # (e.g. fault_tolerance/deploy/*) that fail in this container-only
+      # context. Matches the coverage of the old container-validation-dynamo
+      # workflow.
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
   # ============================================================================
