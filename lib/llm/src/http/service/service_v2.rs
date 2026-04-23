@@ -90,6 +90,17 @@ impl StateFlags {
         }
     }
 
+    pub fn any_enabled(&self) -> bool {
+        self.chat_endpoints_enabled.load(Ordering::Relaxed)
+            || self.cmpl_endpoints_enabled.load(Ordering::Relaxed)
+            || self.embeddings_endpoints_enabled.load(Ordering::Relaxed)
+            || self.images_endpoints_enabled.load(Ordering::Relaxed)
+            || self.videos_endpoints_enabled.load(Ordering::Relaxed)
+            || self.audios_endpoints_enabled.load(Ordering::Relaxed)
+            || self.responses_endpoints_enabled.load(Ordering::Relaxed)
+            || self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
+    }
+
     pub fn set(&self, endpoint_type: &EndpointType, enabled: bool) {
         match endpoint_type {
             EndpointType::Chat => self
@@ -164,6 +175,12 @@ impl State {
     /// Check if the service is shutting down
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
+    }
+
+    /// Check if the service is ready to serve requests:
+    /// not shutting down and at least one model endpoint is enabled.
+    pub fn is_ready(&self) -> bool {
+        !self.is_cancelled() && self.flags.any_enabled()
     }
 
     /// Get the cancellation token
@@ -418,6 +435,8 @@ static HTTP_SVC_MODELS_PATH_ENV: &str = "DYN_HTTP_SVC_MODELS_PATH";
 static HTTP_SVC_HEALTH_PATH_ENV: &str = "DYN_HTTP_SVC_HEALTH_PATH";
 /// Environment variable to set the live endpoint path (default: `/live`)
 static HTTP_SVC_LIVE_PATH_ENV: &str = "DYN_HTTP_SVC_LIVE_PATH";
+/// Environment variable to set the ready endpoint path (default: `/v1/health/ready`)
+static HTTP_SVC_READY_PATH_ENV: &str = "DYN_HTTP_SVC_READY_PATH";
 /// Environment variable to set the chat completions endpoint path (default: `/v1/chat/completions`)
 static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 /// Environment variable to set the completions endpoint path (default: `/v1/completions`)
@@ -534,6 +553,7 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
+            super::health::ready_check_router(state.clone(), var(HTTP_SVC_READY_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
         let mut system_router = axum::Router::new();
@@ -704,5 +724,82 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    #[test]
+    fn test_is_ready_true_when_endpoint_enabled() {
+        let state = make_test_state();
+        state.flags.set(&EndpointType::Chat, true);
+        assert!(state.is_ready());
+    }
+
+    #[test]
+    fn test_is_ready_false_when_cancelled() {
+        let state = make_test_state();
+        state.flags.set(&EndpointType::Chat, true);
+        assert!(state.is_ready());
+        state.cancel_token.cancel();
+        assert!(!state.is_ready());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_ready_endpoint_200_when_endpoint_enabled() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let service = HttpService::builder()
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+        let port = service.port;
+
+        let service_token = cancel_token.clone();
+        let state = service.state_clone();
+        let handle = tokio::spawn(async move {
+            service.run((*service_token).clone()).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://localhost:{}/v1/health/ready", port))
+            .send()
+            .await
+            .expect("Request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ready");
+
+        // Cancel and verify it transitions to shutting_down
+        state.cancel_token.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = client
+            .get(format!("http://localhost:{}/v1/health/ready", port))
+            .send()
+            .await
+            .expect("Request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "shutting_down");
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    fn make_test_state() -> State {
+        use dynamo_runtime::discovery::KVStoreDiscovery;
+        let cancel_token = CancellationToken::new();
+        let discovery_client = Arc::new(KVStoreDiscovery::new(
+            dynamo_runtime::storage::kv::Manager::memory(),
+            cancel_token.child_token(),
+        )) as Arc<dyn Discovery>;
+        State::new(
+            Arc::new(ModelManager::new()),
+            discovery_client,
+            cancel_token,
+        )
     }
 }

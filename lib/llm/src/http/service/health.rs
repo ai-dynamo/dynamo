@@ -37,6 +37,21 @@ pub fn live_check_router(
     (docs, router)
 }
 
+pub fn ready_check_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let ready_path = path.unwrap_or_else(|| "/v1/health/ready".to_string());
+
+    let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &ready_path)];
+
+    let router = Router::new()
+        .route(&ready_path, get(ready_handler))
+        .with_state(state);
+
+    (docs, router)
+}
+
 async fn live_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
@@ -58,6 +73,36 @@ async fn live_handler(
             "message": "Service is live"
         })),
     )
+}
+
+async fn ready_handler(
+    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
+) -> impl IntoResponse {
+    if state.is_ready() {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "message": "Service is ready to accept requests"
+            })),
+        )
+    } else if state.is_cancelled() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "shutting_down",
+                "message": "Service is shutting down"
+            })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "message": "Service is not yet ready to accept requests"
+            })),
+        )
+    }
 }
 
 async fn health_handler(

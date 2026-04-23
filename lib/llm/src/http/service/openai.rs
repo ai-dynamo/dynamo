@@ -168,7 +168,7 @@ impl ErrorMessage {
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
-    pub fn _service_unavailable() -> ErrorResponse {
+    pub fn service_unavailable() -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
         let error_type = map_error_code_to_error_type(code);
         (
@@ -1863,12 +1863,10 @@ pub fn validate_response_unsupported_fields(
     None
 }
 
-// todo - abstract this to the top level lib.rs to be reused
-// todo - move the service_observer to its own state/arc
-pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+    if !state.is_ready() {
+        return Err(ErrorMessage::service_unavailable());
+    }
     Ok(())
 }
 
@@ -3495,6 +3493,22 @@ mod tests {
             extract_error_type_from_response(&response),
             ErrorType::Overload
         );
+    }
+
+    #[test]
+    fn test_check_ready_err_when_no_endpoints() {
+        let service = service_v2::HttpService::builder()
+            .enable_chat_endpoints(false)
+            .enable_cmpl_endpoints(false)
+            .enable_embeddings_endpoints(false)
+            .enable_responses_endpoints(false)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let result = check_ready(&state);
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
