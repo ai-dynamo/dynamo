@@ -29,16 +29,19 @@ PYPROJECT_TARGETS = [
 
 # Sub-crate Cargo files with an EXPLICIT [package].version (not workspace-inherited).
 # kvbm-config uses `version.workspace = true`, so it's intentionally omitted.
+# lib/runtime/examples/Cargo.toml is also omitted: it's a nested workspace (own
+# [workspace.package]) used only for local example binaries, not shipped in any
+# wheel, and nothing outside that workspace pins its version.
 # Root Cargo.toml is handled separately by rewrite_root_cargo.
 SUBCRATE_CARGO_TARGETS = [
     "lib/bindings/python/Cargo.toml",
+    "lib/bindings/python/codegen/Cargo.toml",
     "lib/bindings/kvbm/Cargo.toml",
     "lib/kvbm-common/Cargo.toml",
     "lib/kvbm-engine/Cargo.toml",
     "lib/kvbm-kernels/Cargo.toml",
     "lib/kvbm-logical/Cargo.toml",
     "lib/kvbm-physical/Cargo.toml",
-    "lib/runtime/examples/Cargo.toml",
 ]
 
 # Line-anchored: matches `version = "X.Y.Z"` lines. Skips `version.workspace = true`
@@ -63,15 +66,30 @@ def semver(suffix: str, base: str) -> str:
     return base + suffix
 
 
+def _pep440_tail(suffix: str) -> str:
+    # The trailing text that pep440() appends; used to detect "already stamped".
+    return suffix
+
+
+def _semver_tail(suffix: str) -> str:
+    # The trailing text that semver() appends; used to detect "already stamped".
+    return "-" + suffix[1:] if suffix.startswith(".") else suffix
+
+
 def rewrite_pyproject(path: Path, suffix: str, is_root: bool) -> None:
     text = path.read_text()
+
+    current = VERSION_LINE_RE.search(text)
+    if current is None:
+        raise RuntimeError(f"no [project].version in {path}")
+    if current.group(2).endswith(_pep440_tail(suffix)):
+        return  # already stamped -- idempotent no-op
 
     def _bump(m: re.Match) -> str:
         return f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}"
 
     text, n = VERSION_LINE_RE.subn(_bump, text, count=1)
-    if n != 1:
-        raise RuntimeError(f"no [project].version in {path}")
+    assert n == 1  # guaranteed by the search above
 
     if is_root:
         text = PY_RUNTIME_PIN_RE.sub(
@@ -83,10 +101,15 @@ def rewrite_pyproject(path: Path, suffix: str, is_root: bool) -> None:
 
 def rewrite_subcrate_cargo(path: Path, suffix: str) -> None:
     text = path.read_text()
-    text = VERSION_LINE_RE.sub(
-        lambda m: f"{m.group(1)}{semver(suffix, m.group(2))}{m.group(3)}",
-        text,
-    )
+    tail = _semver_tail(suffix)
+
+    def _bump(m: re.Match) -> str:
+        base = m.group(2)
+        if base.endswith(tail):
+            return m.group(0)  # already stamped
+        return f"{m.group(1)}{semver(suffix, base)}{m.group(3)}"
+
+    text = VERSION_LINE_RE.sub(_bump, text)
     path.write_text(text)
 
 
@@ -100,9 +123,8 @@ def rewrite_root_cargo(root: Path, suffix: str) -> None:
     (1) and (2) always use the SAME literal string. Anchor on it, then rewrite
     only `version = "<that exact string>"` occurrences. This bumps (1) and (2)
     in one pass while leaving (3) untouched (they hold other values like "1",
-    "0.45.0", "=0.19.3", etc.). Idempotent: re-running with the same suffix is
-    a no-op because `base` becomes the already-suffixed value, which never
-    matches external deps.
+    "0.45.0", "=0.19.3", etc.). An explicit "already stamped" guard makes this
+    idempotent -- re-running with the same suffix is a no-op.
     """
     path = root / "Cargo.toml"
     text = path.read_text()
@@ -114,6 +136,8 @@ def rewrite_root_cargo(root: Path, suffix: str) -> None:
     if not m:
         raise RuntimeError("no [workspace.package].version in root Cargo.toml")
     base = m.group(1)
+    if base.endswith(_semver_tail(suffix)):
+        return  # already stamped -- idempotent no-op
     new = semver(suffix, base)
 
     text = re.sub(
