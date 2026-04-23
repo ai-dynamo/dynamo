@@ -6,6 +6,7 @@ title: Feature Matrix
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
+<!-- bump-version:version-stamp -->
 *Updated for Dynamo v1.0.1*
 
 **Legend:**

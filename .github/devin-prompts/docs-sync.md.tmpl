@@ -1,0 +1,51 @@
+# Devin Task: Sync Dynamo reference docs for v${VERSION}
+
+Rendered by `.github/workflows/_version-bump-shared.yml` via `envsubst`.
+Only `${...}` placeholders are interpolated; everything else is verbatim.
+
+## Inputs
+
+- Repo: `ai-dynamo/dynamo`
+- Branch / PR: `${BRANCH}` — head of ${PR_URL} (already open)
+- Version: `v${VERSION}` released ${RELEASE_DATE}
+- Backends: SGLang `${SGLANG}` · TensorRT-LLM `${TRTLLM}` · vLLM `${VLLM}` · NIXL `${NIXL}`
+
+## Global rules
+
+- **Anchored edits only.** Touch only the lines/rows directly below each `<!-- bump-version:* -->` anchor. Never modify a historical row, never move or remove an anchor.
+- **Idempotent.** For each anchor, if the post-edit content already matches the spec below, skip it and log `::notice::<file> already at v${VERSION}`.
+- **Push, don't reopen.** Commit with `-s` (DCO), push to `${BRANCH}`; no `--force`, no amend, no new PR.
+
+## Edits
+
+### `docs/reference/release-artifacts.md`
+
+`<!-- bump-version:current-release -->`
+- Replace the heading below with: `## Current Release: Dynamo v${VERSION}`
+- In the bullet list, set `**GitHub Release:**` to `[v${VERSION}](https://github.com/ai-dynamo/dynamo/releases/tag/v${VERSION})` and `**Docs:**` to `[v${VERSION}](https://docs.dynamo.nvidia.com/dynamo)`.
+
+`<!-- bump-version:github-releases-table -->`
+- Insert as the first body row (after the header separator):
+  `` | `v${VERSION}` | ${RELEASE_DATE} | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v${VERSION}) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | | ``
+
+### `docs/reference/support-matrix.md`
+
+`<!-- bump-version:at-a-glance -->`
+- Replace the line below with:
+  `**Latest stable release:** [v${VERSION}](https://github.com/ai-dynamo/dynamo/releases/tag/v${VERSION}) -- SGLang \`${SGLANG}\` | TensorRT-LLM \`${TRTLLM}\` | vLLM \`${VLLM}\` | NIXL \`${NIXL}\``
+
+`<!-- bump-version:backend-dependencies-table -->`
+- Insert immediately after the `**main (ToT)**` row:
+  `` | **v${VERSION}** | \`${SGLANG}\` | \`${TRTLLM}\` | \`${VLLM}\` | \`${NIXL}\` | ``
+- In the row that was previously topmost (now directly below the new one), strip any `*(in progress)*` italic marker from its first cell.
+
+### `docs/reference/feature-matrix.md`
+
+`<!-- bump-version:version-stamp -->`
+- Replace the line below with: `*Updated for Dynamo v${VERSION}*`
+
+## Validate, commit, report
+
+1. Run `python3 .github/scripts/bump_version.py --check`. If it exits non-zero, `git reset --hard HEAD` and skip to step 3 with status `aborted`.
+2. One commit per changed file: `git commit -s -m "docs(release): sync <basename> for v${VERSION}"`, then `git push origin ${BRANCH}`.
+3. Post one comment on ${PR_URL} summarizing per-file outcome (`edited` / `already-current` / `aborted`), the `--check` result, and pushed SHAs. If aborted, include the failing tool's tail output (~50 lines) in a fenced block.

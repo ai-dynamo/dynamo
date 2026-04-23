@@ -9,6 +9,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
+<!-- bump-version:at-a-glance -->
 **Latest stable release:** [v1.0.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
 
 **Experimental releases:**
@@ -30,6 +31,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 The following table shows the backend framework versions included with each Dynamo release:
 
+<!-- bump-version:backend-dependencies-table -->
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |

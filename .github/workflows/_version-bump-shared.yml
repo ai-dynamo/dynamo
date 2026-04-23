@@ -225,51 +225,65 @@ jobs:
 
       # Dispatch a Devin session to push the three reference-doc updates
       # (release-artifacts.md, support-matrix.md, feature-matrix.md) to the
-      # same PR branch, pre-merge and pre-tag. Fire-and-forget: Devin's
-      # commits arrive as normal pushes and re-trigger CI. If DEVIN_API_KEY
-      # isn't configured the step no-ops and the release manager can amend
-      # the docs by hand.
+      # same PR branch, pre-merge and pre-tag. If DEVIN_API_KEY isn't
+      # configured, a manual-docs checklist comment is posted on the PR instead.
       - name: Dispatch Devin docs sync
-        if: steps.open_pr.conclusion == 'success'
+        if: success() && steps.open_pr.outputs.url != ''
         env:
-          DEVIN_API_KEY: ${{ secrets.devin_api_key }}
-          BRANCH:        ${{ inputs.pr_branch }}
-          PR_URL:        ${{ steps.open_pr.outputs.url }}
-          VERSION:       ${{ inputs.version }}
-          VLLM:          ${{ inputs.vllm_version }}
-          SGLANG:        ${{ inputs.sglang_version }}
-          TRTLLM:        ${{ inputs.trtllm_version }}
-          NIXL:          ${{ inputs.nixl_version }}
-          RELEASE_DATE:  ${{ inputs.release_date }}
+          GH_TOKEN:       ${{ secrets.github_token }}
+          DEVIN_API_KEY:  ${{ secrets.devin_api_key }}
+          BRANCH:         ${{ inputs.pr_branch }}
+          PR_URL:         ${{ steps.open_pr.outputs.url }}
+          VERSION:        ${{ inputs.version }}
+          VLLM:           ${{ inputs.vllm_version }}
+          SGLANG:         ${{ inputs.sglang_version }}
+          TRTLLM:         ${{ inputs.trtllm_version }}
+          NIXL:           ${{ inputs.nixl_version }}
+          RELEASE_DATE:   ${{ inputs.release_date }}
         run: |
           set -euo pipefail
+
+          # Prompt-injection guard: validate every value before it reaches the template.
+          VER_RE='^[0-9]+\.[0-9]+\.[0-9]+([\.-](post|rc|dev)[0-9]+)*$'
+          DATE_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+          for var in VERSION VLLM SGLANG TRTLLM NIXL; do
+            v=${!var}
+            [[ -z "$v" || "$v" =~ $VER_RE ]] \
+              || { echo "::error::$var invalid: '$v'"; exit 1; }
+          done
+          [[ -z "$RELEASE_DATE" || "$RELEASE_DATE" =~ $DATE_RE ]] \
+            || { echo "::error::RELEASE_DATE invalid: '$RELEASE_DATE'"; exit 1; }
+
+          # Fallback when the API key isn't wired up: leave the work for a human.
           if [ -z "${DEVIN_API_KEY:-}" ]; then
-            echo "::warning::DEVIN_API_KEY not configured; skipping reference-doc sync. Release manager must amend the docs manually before merge."
+            echo "::warning::DEVIN_API_KEY not configured; posting manual-docs checklist on PR."
+            envsubst '$BRANCH' <<'CHECKLIST' | gh pr comment "$PR_URL" --body-file -
+          ## Manual Reference-Doc Update Required
+
+          `DEVIN_API_KEY` is not configured — the automated docs-sync step was skipped.
+          A release manager must update these files on the `${BRANCH}` branch before merge:
+
+          - [ ] `docs/reference/release-artifacts.md` — add release row, bump Current Release header
+          - [ ] `docs/reference/support-matrix.md` — add backend-version row, refresh At a Glance
+          - [ ] `docs/reference/feature-matrix.md` — bump the "Updated for Dynamo vX.Y.Z" stamp
+          - [ ] Run `python3 .github/scripts/bump_version.py --check` to verify
+          CHECKLIST
             exit 0
           fi
 
-          # Build the prompt in a file to keep the curl payload readable and
-          # safe from shell quoting gotchas.
-          PROMPT_FILE="$(mktemp)"
-          cat >"$PROMPT_FILE" <<PROMPT
-          Push reference-doc updates to ai-dynamo/dynamo branch ${BRANCH} (PR ${PR_URL}) for v${VERSION}. Update three files:
+          # Render template -> JSON-encode prompt + idempotency key in one pipeline.
+          export VERSION BRANCH PR_URL VLLM SGLANG TRTLLM NIXL RELEASE_DATE
+          BODY=$(envsubst < .github/devin-prompts/docs-sync.md.tmpl \
+            | jq -Rs --arg key "docs-sync-${BRANCH}-${VERSION}-${GITHUB_RUN_ATTEMPT}" \
+                  '{prompt: ., idempotent_key: $key}')
 
-          1. docs/reference/release-artifacts.md -- add a new row to the GitHub Releases table matching the existing row format; link to https://github.com/ai-dynamo/dynamo/releases/tag/v${VERSION}; release date ${RELEASE_DATE}. Bump the "Current Release" header and the GitHub + Docs links at the top of the file to v${VERSION} (canonical docs host is docs.dynamo.nvidia.com/dynamo).
-
-          2. docs/reference/support-matrix.md -- add a backend-version row for v${VERSION} (SGLang ${SGLANG}, TRT-LLM ${TRTLLM}, vLLM ${VLLM}, NIXL ${NIXL}) right after the main (ToT) row. Demote any "(in progress)" marker on the prior version's row. Refresh the "Latest stable release" at-a-glance line to v${VERSION} with the same backend triple.
-
-          3. docs/reference/feature-matrix.md -- bump the "*Updated for Dynamo vX.Y.Z*" stamp to v${VERSION}. Do NOT rewrite historical version mentions in prose.
-
-          Commit with DCO sign-off (-s) and push to ${BRANCH}. Do NOT open a new PR -- the bump PR is already open at ${PR_URL}. If any of the files already contain a row for v${VERSION}, no-op on that file.
-          PROMPT
-
-          # jq builds a valid JSON body with the prompt string properly escaped.
-          BODY="$(jq -Rs --arg key "docs-sync-${BRANCH}-${VERSION}" \
-            '{prompt: ., idempotent_key: $key}' <"$PROMPT_FILE")"
-
-          curl -fsS -X POST https://api.devin.ai/v1/sessions \
-            -H "Authorization: Bearer ${DEVIN_API_KEY}" \
+          # --fail-with-body: non-zero exit on 4xx/5xx, body still captured.
+          RESPONSE=$(curl --fail-with-body -sS \
+            -X POST https://api.devin.ai/v1/sessions \
+            -H "Authorization: Bearer $DEVIN_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "$BODY"
+            -d "$BODY") \
+            || { echo "::error::Devin API call failed"; echo "$RESPONSE"; exit 1; }
 
-          rm -f "$PROMPT_FILE"
+          SESSION_URL=$(jq -r '.url // .session_url // .id // "unknown"' <<<"$RESPONSE")
+          echo "::notice::Devin docs-sync session dispatched: $SESSION_URL"

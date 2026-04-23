@@ -10,6 +10,7 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 
 Release history in this document begins at v0.6.0.
 
+<!-- bump-version:current-release -->
 ## Current Release: Dynamo v1.0.1
 
 - **GitHub Release:** [v1.0.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1)
@@ -181,6 +182,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 ### GitHub Releases
 
+<!-- bump-version:github-releases-table -->
 | Version | Release Date | GitHub | Docs | Notes |
 |---------|--------------|--------|------|-------|
 | `v1.1.0-dev.3` | Apr 18, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3) | — | Experimental (partial: trtllm container + ai-dynamo wheels only) |
