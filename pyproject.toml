@@ -58,6 +58,7 @@ vllm = [
     "blake3>=1.0.0,<2.0.0",
     "soundfile>=0.13.1",
     "librosa>=0.10.0",
+    "ray==2.55.0",
 ]
 
 sglang = [
