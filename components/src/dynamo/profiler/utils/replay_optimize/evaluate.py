@@ -58,10 +58,6 @@ def _run_replay_for_state(
             arrival_speedup_ratio=workload.arrivalSpeedupRatio,
         )
 
-    if workload.concurrency is None or workload.requestCount is None:
-        raise ValueError(
-            "synthetic WorkloadSpec requires both concurrency and requestCount"
-        )
     return run_synthetic_trace_replay(
         workload.isl,
         workload.osl,
@@ -100,10 +96,6 @@ def _run_agg_replay_for_state(
             arrival_speedup_ratio=workload.arrivalSpeedupRatio,
         )
 
-    if workload.concurrency is None or workload.requestCount is None:
-        raise ValueError(
-            "synthetic WorkloadSpec requires both concurrency and requestCount"
-        )
     return run_synthetic_trace_replay(
         workload.isl,
         workload.osl,

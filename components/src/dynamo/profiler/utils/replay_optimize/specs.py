@@ -38,7 +38,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.profiler.utils.dgdr_v1beta1_types import BackendType, GPUSKUType
 
-from .constants import AIC_BACKEND_VERSIONS, DEFAULT_OVERLAP_SCORE_WEIGHTS
+from .constants import (
+    AIC_BACKEND_VERSIONS,
+    DEFAULT_MAX_PARALLEL_EVALS,
+    DEFAULT_OVERLAP_SCORE_WEIGHTS,
+)
 
 RouterMode = Literal["kv_router", "round_robin", "both"]
 
@@ -67,12 +71,16 @@ class EngineSpec(BaseModel):
     Carries engine args for both agg and disagg paths; the relevant
     `optimize_dense_*` entry asserts the right fields are populated
     (guardrail #8).
+
+    `backend` has no default — pre-Phase-2 `optimize_dense_*` required it; keep
+    the explicit contract so a forgotten backend fails at spec construction
+    instead of silently falling through to a vLLM run.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     model: str
-    backend: BackendType = BackendType.Vllm
+    backend: BackendType
     baseEngineArgs: MockEngineArgs | None = None
     basePrefillEngineArgs: MockEngineArgs | None = None
     baseDecodeEngineArgs: MockEngineArgs | None = None
@@ -94,11 +102,22 @@ class EngineSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """GPU budget + SKU. Subset clone of DGDR.HardwareSpec."""
 
+    model_config = ConfigDict(extra="forbid")
+
     # Guardrail #7: keep the union so exotic AIC systems outside the current
     # GPUSKUType enumeration still work. Pydantic coerces matching strings to
     # the enum; non-matching strings stay as str and reach AIC untouched.
     gpuSku: GPUSKUType | str
     totalGpus: int = Field(gt=0)
+
+
+_SYNTHETIC_ONLY_FIELDS: tuple[str, ...] = (
+    "isl",
+    "osl",
+    "concurrency",
+    "requestRate",
+    "requestCount",
+)
 
 
 class WorkloadSpec(BaseModel):
@@ -109,10 +128,15 @@ class WorkloadSpec(BaseModel):
       turn controls, arrival interval)
     - trace-source fields (`traceFile`, `arrivalSpeedupRatio`)
 
-    `traceFile` acts as a discriminator: when set, the workload is trace-based
-    and synthetic-only fields are ignored by the replay runner; when unset,
-    `isl` and `osl` are required.
+    `traceFile` acts as a discriminator:
+    - when set, the workload is trace-based and the synthetic-only fields
+      (`isl`, `osl`, `concurrency`, `requestRate`, `requestCount`) must not
+      be populated — the validator rejects mixed mode to avoid silent data loss
+    - when unset, the synthetic fields `isl`, `osl`, `concurrency`, and
+      `requestCount` are all required
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     # DGDR base fields
     isl: int | None = None
@@ -134,10 +158,29 @@ class WorkloadSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "WorkloadSpec":
-        if self.traceFile is None and (self.isl is None or self.osl is None):
+        if self.traceFile is not None:
+            mixed = [
+                name
+                for name in _SYNTHETIC_ONLY_FIELDS
+                if getattr(self, name) is not None
+            ]
+            if mixed:
+                raise ValueError(
+                    "trace workload (traceFile set) must not also set synthetic "
+                    f"fields: {mixed}"
+                )
+            return self
+
+        missing = [
+            name
+            for name in ("isl", "osl", "concurrency", "requestCount")
+            if getattr(self, name) is None
+        ]
+        if missing:
             raise ValueError(
-                "workload needs either (isl, osl) for synthetic replay or "
-                "traceFile for trace replay"
+                "synthetic workload requires "
+                + ", ".join(missing)
+                + "; or set traceFile for trace replay"
             )
         return self
 
@@ -171,6 +214,8 @@ class SLASpec(BaseModel):
     `itl` is the DGDR-native name for what the Rust runner reports as
     `mean_tpot_ms` (inter-token latency == time-per-output-token).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     ttft: float | None = None
     itl: float | None = None
@@ -235,7 +280,7 @@ class RouterSpec(BaseModel):
     score weights plus a mode selector.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     mode: RouterMode = "kv_router"
     # None → fallback to DEFAULT_OVERLAP_SCORE_WEIGHTS (guardrail #3). Empty
@@ -264,10 +309,12 @@ class RouterSpec(BaseModel):
 class ReplayOptimizeSpec(BaseModel):
     """Top-level spec; analog to DGDR.DynamoGraphDeploymentRequestSpec."""
 
+    model_config = ConfigDict(extra="forbid")
+
     engine: EngineSpec
     hardware: HardwareSpec
     workload: WorkloadSpec
     sla: SLASpec = Field(default_factory=SLASpec)
     router: RouterSpec = Field(default_factory=RouterSpec)
     objective: ReplayObjective = ReplayObjective.THROUGHPUT
-    maxParallelEvals: int = Field(default=1, gt=0)
+    maxParallelEvals: int = Field(default=DEFAULT_MAX_PARALLEL_EVALS, gt=0)
