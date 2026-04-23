@@ -31,26 +31,22 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 ### GPU Memory Service (GMS)
 
 - Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Dynamo Bulwark. [Architecture →](../../lib/gpu_memory_service/README.md)
-- In Kubernetes, exposed as a DRA-backed sidecar via the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage →](../kubernetes/gpu-memory-service.md)
+- In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage →](../kubernetes/gpu-memory-service.md)
 
-#### Per-backend GMS status
+#### Status
 
-| Backend | Managed memory | Multi-node | Upstream integration | KV remap/reuse |
-| :--- | :--- | :---: | :--- | :--- |
-| **vLLM** | weights, KV | ✅ | ✅ upstream | backlog |
-| **SGLang** | weights, KV | ✅ | 🚧 patches needed [^sglang-upstream] | backlog |
-| **TensorRT-LLM** | weights [^trtllm-kv] | 🚧 | 🚧 patches needed [^trtllm-upstream] | backlog |
+| Backend | Managed memory | Multi-node | Upstream integration¹ |
+| :--- | :--- | :---: | :--- |
+| **vLLM** | weights, KV | ✅ | ✅ upstream |
+| **SGLang** | weights, KV | ✅ | 🚧 patches needed² |
+| **TensorRT-LLM** | weights³ | 🚧 | 🚧 patches needed⁴ |
 
-**Column definitions:**
+**Notes:**
 
-- **Managed memory** — which GPU memory regions the engine allocates through GMS today. Weights are the baseline; KV cache is an additional scope.
-- **Multi-node** — whether GMS has been validated across nodes (DRA claims spanning multi-node topologies).
-- **Upstream integration** — whether the backend's GMS integration lives upstream in the framework or requires out-of-tree patches.
-- **KV remap/reuse** — whether KV cache handles are remapped across engines (e.g. shadow takeover preserving in-flight requests) rather than each engine being handed a fresh allocation.
-
-[^sglang-upstream]: SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
-[^trtllm-kv]: TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
-[^trtllm-upstream]: TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
+1. **Upstream integration**: whether the backend's GMS integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream.
+2. SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
+3. TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
+4. TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
