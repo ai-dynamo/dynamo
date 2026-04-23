@@ -75,12 +75,19 @@ def create_runtime(
 
     loop = asyncio.get_running_loop()
 
-    # Only set DYN_EVENT_PLANE when explicit; unconditional writes defeat the
-    # Rust-side auto-detect and force NATS even with --discovery-backend file.
-    if event_plane:
-        os.environ["DYN_EVENT_PLANE"] = event_plane
-
-    runtime = DistributedRuntime(loop, discovery_backend, request_plane)
+    # Scope DYN_EVENT_PLANE to this call so an explicit event_plane doesn't leak
+    # process-wide and silently override later create_runtime(event_plane=None)
+    # calls that rely on the Rust-side auto-detect.
+    previous_event_plane = os.environ.get("DYN_EVENT_PLANE")
+    try:
+        if event_plane:
+            os.environ["DYN_EVENT_PLANE"] = event_plane
+        runtime = DistributedRuntime(loop, discovery_backend, request_plane)
+    finally:
+        if previous_event_plane is None:
+            os.environ.pop("DYN_EVENT_PLANE", None)
+        else:
+            os.environ["DYN_EVENT_PLANE"] = previous_event_plane
 
     return runtime, loop
 
