@@ -30,9 +30,8 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 
 ### GPU Memory Service (GMS)
 
-GMS is an out-of-process GPU memory manager that enables zero-copy sharing of GPU memory (weights, KV cache) across worker processes on the same GPU, with memory surviving client crashes. It is the foundation for Dynamo Bulwark and for upcoming hardware-fault-tolerance layouts. See [`lib/gpu_memory_service/README.md`](../../lib/gpu_memory_service/README.md) for architecture.
-
-In Kubernetes, GMS is wired in as a DRA-backed sidecar via the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. See [GPU Memory Service on Kubernetes](../kubernetes/gpu-memory-service.md) for the operator-level layout and usage.
+- Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Dynamo Bulwark. [Architecture →](../../lib/gpu_memory_service/README.md)
+- In Kubernetes, exposed as a DRA-backed sidecar via the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage →](../kubernetes/gpu-memory-service.md)
 
 #### Per-backend GMS status
 
