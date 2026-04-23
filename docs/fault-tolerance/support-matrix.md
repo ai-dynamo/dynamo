@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Backend support for Dynamo's in-flight fault tolerance features.
 
-This document tracks the status of Dynamo's in-flight fault tolerance features across the supported inference backends. For request-level fault tolerance (migration, cancellation, graceful shutdown), see the [Fault Tolerance README](README.md).
+This document tracks the status of Dynamo's in-flight fault tolerance features across the supported inference backends.
 
 **Legend:**
 
@@ -30,23 +30,23 @@ This document tracks the status of Dynamo's in-flight fault tolerance features a
 
 ### GPU Memory Service (GMS)
 
-- Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Dynamo Bulwark. [Architecture →](../../lib/gpu_memory_service/README.md)
-- In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage →](../kubernetes/gpu-memory-service.md)
+- Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Dynamo Bulwark. [Architecture](../../lib/gpu_memory_service/README.md)
+- In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage](../kubernetes/gpu-memory-service.md)
 
 #### Status
 
-| Backend | Managed memory | Multi-node | Upstream integration¹ |
+| Backend | Managed memory | Multi-node | Upstream integration<a href="#gms-note-1"><sup>1</sup></a> |
 | :--- | :--- | :---: | :--- |
 | **vLLM** | weights, KV | ✅ | ✅ upstream |
-| **SGLang** | weights, KV | ✅ | 🚧 patches needed² |
-| **TensorRT-LLM** | weights³ | 🚧 | 🚧 patches needed⁴ |
+| **SGLang** | weights, KV | ✅ | 🚧 patches needed<a href="#gms-note-2"><sup>2</sup></a> |
+| **TensorRT-LLM** | weights<a href="#gms-note-3"><sup>3</sup></a> | 🚧 | 🚧 patches needed<a href="#gms-note-4"><sup>4</sup></a> |
 
 **Notes:**
 
-1. **Upstream integration**: whether the backend's GMS integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream.
-2. SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
-3. TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
-4. TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
+1. <a id="gms-note-1"></a>**Upstream integration**: whether the backend's GMS integration lives in the upstream framework or still carries out-of-tree patches that need to land upstream.
+2. <a id="gms-note-2"></a>SGLang currently requires monkey-patching for GMS; upstreaming is in progress.
+3. <a id="gms-note-3"></a>TensorRT-LLM manages weights through GMS today; KV cache management through GMS is pending.
+4. <a id="gms-note-4"></a>TensorRT-LLM integration requires out-of-tree patches, targeted for upstream once the shadow-engine flow is validated end-to-end.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
