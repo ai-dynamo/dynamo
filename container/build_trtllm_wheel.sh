@@ -119,10 +119,26 @@ grep "__version__" "$VERSION_FILE"
 
 # Maximize parallelism for the wheel build. TRTLLM's wheel build_wheel.py
 # reads JOBS from the environment, and cmake/make rules accept MAKEFLAGS.
-# The CI builders have plenty of CPU, so push -j high when the caller has
-# not already set one.
+#
+# nproc inside the runner pod reports the host CPU count, which is NOT the
+# cgroup CPU limit the remote BuildKit pod actually has. Pushing `-j` up to
+# the host count over-subscribes the pod's memory cgroup and OOM-kills the
+# BuildKit worker mid-compile (observed in run 24855398208 with -j 12 and a
+# 29Gi limit). Clamp JOBS to something that comfortably fits the BuildKit
+# pod configured for the caller unless the caller has overridden it.
+#
+# With ~2-3 GiB peak per CUDA compile and a 96Gi limit the K8s fallback
+# pool configured by .github/workflows/build-on-demand.yml trtllm-pipeline,
+# -j 24 fits with headroom and cuts the compile wall-clock in half versus
+# -j 12. Callers that want a different parallelism should set JOBS in the
+# environment before invoking this script.
 if [ -z "${JOBS:-}" ]; then
-    export JOBS="$(nproc 2>/dev/null || echo 16)"
+    HOST_CPUS="$(nproc 2>/dev/null || echo 16)"
+    if [ "${HOST_CPUS}" -gt 24 ]; then
+        export JOBS=24
+    else
+        export JOBS="${HOST_CPUS}"
+    fi
 fi
 if [ -z "${MAKEFLAGS:-}" ]; then
     export MAKEFLAGS="-j${JOBS}"

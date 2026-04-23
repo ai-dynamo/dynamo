@@ -67,6 +67,31 @@ on:
         required: false
         type: boolean
         default: false
+      fresh_builder:
+        description: 'Force creation of a fresh K8s BuildKit builder for this pipeline. Useful for pipelines that need to size the builder independently (e.g. TRTLLM fork wheel builds).'
+        required: false
+        type: boolean
+        default: false
+      builder_requests_cpu:
+        description: 'CPU requests for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+        required: false
+        type: string
+        default: ''
+      builder_requests_memory:
+        description: 'Memory requests for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+        required: false
+        type: string
+        default: ''
+      builder_limits_memory:
+        description: 'Memory limit for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+        required: false
+        type: string
+        default: ''
+      builder_ephemeral_storage:
+        description: 'Ephemeral storage request for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -123,6 +148,11 @@ jobs:
           extra_tags: ${{ inputs.extra_tags }}
           show_summary: ${{ inputs.push_image }}
           make_efa: ${{ inputs.make_efa }}
+          fresh_builder: ${{ inputs.fresh_builder }}
+          builder_requests_cpu: ${{ inputs.builder_requests_cpu }}
+          builder_requests_memory: ${{ inputs.builder_requests_memory }}
+          builder_limits_memory: ${{ inputs.builder_limits_memory }}
+          builder_ephemeral_storage: ${{ inputs.builder_ephemeral_storage }}
       - name: Copy image to ACR
         if: inputs.copy_to_acr
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}

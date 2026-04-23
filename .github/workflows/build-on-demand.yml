@@ -104,6 +104,18 @@ jobs:
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
+      # The TRTLLM fork wheel build is CUDA-kernel-heavy and OOMs on the
+      # shared remote BuildKit pool at its default 26Gi/29Gi memory limit
+      # (observed in ai-dynamo/dynamo actions run 24855398208: BuildKit
+      # pod died with "rpc error: code = Unavailable desc = error reading
+      # from server: EOF" during CUDA compile). Force a dedicated K8s
+      # BuildKit pod for this pipeline and size it up so the wheel build
+      # has both the parallelism and the memory headroom to finish.
+      fresh_builder: true
+      builder_requests_cpu: '24'
+      builder_requests_memory: '64Gi'
+      builder_limits_memory: '96Gi'
+      builder_ephemeral_storage: '800Gi'
     secrets: inherit
 
   # ============================================================================

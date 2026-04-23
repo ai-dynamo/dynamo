@@ -84,6 +84,22 @@ inputs:
     description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
     required: false
     default: 'false'
+  builder_requests_cpu:
+    description: 'CPU requests for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  builder_requests_memory:
+    description: 'Memory requests for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  builder_limits_memory:
+    description: 'Memory limit for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  builder_ephemeral_storage:
+    description: 'Ephemeral storage request for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
 outputs:
   target_tag_plain:
     description: 'Target tag (without registry prefix)'
@@ -164,6 +180,10 @@ runs:
         arch: ${{ inputs.platform }}
         cuda_version: ${{ steps.calculate-target-tag.outputs.builder_cuda_version }}
         fresh_builder: ${{ inputs.fresh_builder }}
+        requests_cpu: ${{ inputs.builder_requests_cpu != '' && inputs.builder_requests_cpu || '12' }}
+        requests_memory: ${{ inputs.builder_requests_memory != '' && inputs.builder_requests_memory || '26Gi' }}
+        limits_memory: ${{ inputs.builder_limits_memory != '' && inputs.builder_limits_memory || '29Gi' }}
+        ephemeral_storage: ${{ inputs.builder_ephemeral_storage != '' && inputs.builder_ephemeral_storage || '400Gi' }}
     - name: Calculate extra tags
       id: extra-tags
       shell: bash
