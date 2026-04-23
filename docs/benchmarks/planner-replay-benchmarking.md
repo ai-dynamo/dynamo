@@ -49,7 +49,7 @@ Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--d
 | `aic_system` | GPU SKU for the perf model, e.g. `"h200_sxm"`, `"h100_sxm"`, `"b200"`. |
 | `aic_model_path` | HF model identifier used by the perf model. |
 | `aic_tp_size` | Tensor-parallel size of each engine replica. |
-| `startup_time` | Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or `0` means workers activate instantly (unrealistic — real k8s pods typically take 60–120 s). |
+| `startup_time` | Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or `0` means workers activate instantly. |
 
 Other fields follow the standard mocker engine protocol (see [Mocker Offline Trace Replay](mocker-trace-replay.md)).
 
@@ -99,7 +99,7 @@ Run disagg (1P1D, TP=1):
   --num-prefill-workers 1 --num-decode-workers 1 --arrival-speedup-ratio 1.0
 ```
 
-Each run prints the AIPerf summary table to stdout and writes an HTML diagnostics report to `./planner_reports/<report_filename>`. For the agentic trace at this SLA, disagg gets better ITL at the cost of worse TTFT tails and noticeably more GPU-hours, because the planner has to scale each role independently.
+Each run prints the AIPerf summary table to stdout and writes an HTML diagnostics report to `./planner_reports/<report_filename>`. For this trace with a long ISL and short OSL, agg is better than disagg, which gets slightly better ITL at the cost noticeably more GPU-hours.
 
 ## 3. Example: Cold-Start-Time Sweep
 
@@ -142,8 +142,5 @@ Each run emits the AIPerf metrics table (parse TTFT / ITL avg / p90) and its HTM
 Observations from this sweep (agg, TTFT SLA 1,500 ms, ITL SLA 50 ms, H200-SXM, Llama-3.1-8B-FP8, TP=1):
 
 - **SLA cliff near 100–120 s.** Below that, the planner scales up fast enough to hold TTFT; above it, p99 TTFT diverges and the system stays perpetually backlogged.
-- **Scaling-event count drops monotonically** (42 → 8) as startup grows — long-startup runs make fewer, longer-lived decisions.
-- **GPU-hours is relatively flat** (~2.0 → ~2.4). The planner responds to costly scaling by holding a slightly larger steady-state worker count rather than flapping.
+- **Scaling-event count drops monotonically** (42 → 8) as startup grows — long-startup runs require load planner to wait for stabilization before the next scaling decision.
 - **ITL is less sensitive than TTFT** until the queue saturates. Below the cliff, ITL rises modestly (25 → 30 ms avg); above it, p90 ITL jumps to ~200 ms as decode requests starve.
-
-Operationally: if your pod boot budget is 60–120 s (typical vLLM on Kubernetes), this is the regime where you want predictive (throughput-based) scaling and over-provisioned initial replicas, not purely reactive load-based scaling.
