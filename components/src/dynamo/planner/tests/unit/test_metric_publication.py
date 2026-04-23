@@ -44,9 +44,7 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
     """
     with patch(
         "dynamo.planner.core.base.PlannerPrometheusMetrics"
-    ) as mock_metrics, patch(
-        "dynamo.planner.core.base.start_http_server"
-    ), patch(
+    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
         "dynamo.planner.connectors.kubernetes.KubernetesAPI"
     ), patch.dict(
         os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
