@@ -259,6 +259,8 @@ navigation:
             path: components/profiler/profiler-guide.md
           - page: Profiler Examples
             path: components/profiler/profiler-examples.md
+          - page: Supported GPU SKUs
+            path: components/profiler/gpu-sku-reference.md
       - section: KVBM
         path: components/kvbm/README.md
         contents:
