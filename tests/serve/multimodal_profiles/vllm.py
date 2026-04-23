@@ -78,6 +78,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
             ),
             "p_d": TopologyConfig(
+                # p_d still exercises NIXL/UCX even when packed into gpu_1 CI.
                 marks=[_xfail_cuda12_upstream_nixl_disagg(), pytest.mark.pre_merge],
                 timeout_s=300,
                 single_gpu=True,
