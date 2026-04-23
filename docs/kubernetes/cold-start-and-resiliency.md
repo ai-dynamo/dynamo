@@ -3,17 +3,29 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Fault Tolerance Support Matrix
+# Cold Start and Resiliency Support Matrix
 
-Backend support for Dynamo's in-flight fault tolerance features.
+Backend status for Dynamo's in-flight features targeting cold-start and resiliency.
 
-This document tracks the status of Dynamo's in-flight fault tolerance features across the supported inference backends.
+## Overview
+
+Dynamo is building composable primitives across two themes:
+
+- **Cold start**: reducing time-to-serve for initialized LLM workers.
+- **Resiliency**: keeping deployments serving through software (and eventually hardware) failures.
+
+This document tracks backend support across three projects:
+
+- **[GPU Memory Service (GMS)](#gpu-memory-service-gms)**: out-of-process GPU memory manager for zero-copy sharing of weights and KV across worker processes; foundation for Bulwark and a building block for future cold-start layouts.
+- **[Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover)**: warm "shadow" engines cut over to the primary on software failure, sharing state via GMS. Targets resiliency.
+- **[Dynamo Snapshot (ChReK)](#dynamo-snapshot-chrek)**: CRIU-based checkpoint/restore of initialized workers, cutting cold starts from minutes to seconds. Targets cold start.
 
 **Legend:**
 
-- ✅ Supported
-- 🚧 In Progress
-- ⬜ Not Started
+- ✅ : Supported
+- 🚧 : Work in Progress / Experimental / Limited
+
+Blank cells indicate "not started" or "not supported".
 
 ## Support Matrix
 
@@ -30,7 +42,7 @@ See the per-feature sections below for detailed per-backend status.
 ### GPU Memory Service (GMS)
 
 - Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Dynamo Bulwark. [Architecture](../../lib/gpu_memory_service/README.md)
-- In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage](../kubernetes/gpu-memory-service.md)
+- In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR. [Operator usage](gpu-memory-service.md)
 
 #### Status
 
@@ -49,15 +61,15 @@ See the per-feature sections below for detailed per-backend status.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
-- Shadow engines share weights (and soon KV) with a primary via [GMS](#gpu-memory-service-gms) and take over within seconds on primary failure using a kernel-mediated flock for leader election. [Architecture](bulwark.md)
-- In Kubernetes, configured through the `failover` field on the `DynamoGraphDeployment` CR (on top of `gpuMemoryService`). [Operator usage](../kubernetes/bulwark.md)
+- Shadow engines share weights (and soon KV) with a primary via [GMS](#gpu-memory-service-gms) and take over within seconds on primary failure using a kernel-mediated flock for leader election. [Architecture](../fault-tolerance/bulwark.md)
+- In Kubernetes, configured through the `failover` field on the `DynamoGraphDeployment` CR (on top of `gpuMemoryService`). [Operator usage](bulwark.md)
 
 #### Status
 
 | Backend | Single Node | Multi-node | Upstream Integration¹ | KV-Cache Reuse² | Hardware Fault Tolerance³ |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ | ✅ | ⬜ | ⬜ |
-| **SGLang** | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| **vLLM** | ✅ | ✅ | ✅ | | |
+| **SGLang** | | | | | |
 | **TensorRT-LLM** | 🚧 | 🚧 | 🚧 | 🚧 | 🚧 |
 
 **Notes:**
@@ -70,7 +82,7 @@ See the per-feature sections below for detailed per-backend status.
 
 Dynamo Snapshot (internal name: **ChReK**, *Checkpoint Restore in Kubernetes*) uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a worker's initialized state once (including GPU memory and CUDA contexts) and restore subsequent workers from that checkpoint, reducing cold starts from roughly a minute to roughly ten seconds for large LLMs.
 
-See [Dynamo Snapshot](../kubernetes/snapshot.md) for usage.
+See [Dynamo Snapshot](snapshot.md) for usage.
 
 ## Contributing
 
