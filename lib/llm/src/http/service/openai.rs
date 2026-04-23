@@ -69,6 +69,16 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const VIDEO_STREAM_BINARY_CMAF_PROTOCOL: &str = "dynamo-video-binary-cmaf-v1";
+const VIDEO_STREAM_BINARY_CMAF_ANNOTATION: &str = "experimental_binary_cmaf";
+const VIDEO_STREAM_BINARY_CMAF_METADATA_TAG: &str = "cmaf:metadata";
+const VIDEO_STREAM_BINARY_CMAF_INIT_TAG: &str = "cmaf:init";
+const VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX: &str = "cmaf:segment:";
+const VIDEO_STREAM_BINARY_CMAF_KIND_METADATA: u8 = 0x01;
+const VIDEO_STREAM_BINARY_CMAF_KIND_INIT: u8 = 0x02;
+const VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT: u8 = 0x03;
+const VIDEO_STREAM_BINARY_CMAF_KIND_ERROR: u8 = 0x04;
+const VIDEO_STREAM_BINARY_CMAF_KIND_DONE: u8 = 0x05;
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -2211,6 +2221,78 @@ pub fn images_router(
     (vec![doc, edits_doc], router)
 }
 
+fn force_streaming_video_response_format(request: &mut NvCreateVideoRequest) {
+    request.response_format = Some("b64_json".to_string());
+}
+
+fn add_video_binary_cmaf_annotation(request: &mut NvCreateVideoRequest) {
+    let nvext = request.nvext.get_or_insert_with(Default::default);
+    let annotations = nvext.annotations.get_or_insert_with(Vec::new);
+    if !annotations
+        .iter()
+        .any(|annotation| annotation == VIDEO_STREAM_BINARY_CMAF_ANNOTATION)
+    {
+        annotations.push(VIDEO_STREAM_BINARY_CMAF_ANNOTATION.to_string());
+    }
+}
+
+fn encode_video_binary_cmaf_frame(kind: u8, payload: &[u8]) -> Bytes {
+    let mut frame = Vec::with_capacity(1 + 4 + payload.len());
+    frame.push(kind);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    Bytes::from(frame)
+}
+
+fn encode_video_binary_cmaf_error_frame(message: impl Into<String>) -> Bytes {
+    let payload = serde_json::json!({ "error": message.into() }).to_string();
+    encode_video_binary_cmaf_frame(VIDEO_STREAM_BINARY_CMAF_KIND_ERROR, payload.as_bytes())
+}
+
+fn encode_video_binary_cmaf_done_frame() -> Bytes {
+    encode_video_binary_cmaf_frame(VIDEO_STREAM_BINARY_CMAF_KIND_DONE, &[])
+}
+
+fn decode_video_binary_cmaf_payloads(
+    response: NvVideosResponse,
+) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    if response.status == "failed" {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "Video backend reported failed status".to_string()));
+    }
+
+    let mut payloads = Vec::with_capacity(response.data.len());
+    for item in response.data {
+        let tag = item
+            .url
+            .ok_or_else(|| "Missing CMAF tag in video response data".to_string())?;
+        let b64 = item
+            .b64_json
+            .ok_or_else(|| format!("Missing b64_json payload for tag `{tag}`"))?;
+        let payload = base64::prelude::BASE64_STANDARD
+            .decode(&b64)
+            .map_err(|e| format!("Failed to decode payload for tag `{tag}`: {e}"))?;
+
+        let kind = match tag.as_str() {
+            VIDEO_STREAM_BINARY_CMAF_METADATA_TAG => VIDEO_STREAM_BINARY_CMAF_KIND_METADATA,
+            VIDEO_STREAM_BINARY_CMAF_INIT_TAG => VIDEO_STREAM_BINARY_CMAF_KIND_INIT,
+            _ if tag.starts_with(VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX) => {
+                VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT
+            }
+            _ => {
+                return Err(format!(
+                    "Unexpected CMAF payload tag `{tag}`; expected metadata, init, or segment"
+                ));
+            }
+        };
+
+        payloads.push((kind, payload));
+    }
+
+    Ok(payloads)
+}
+
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -2432,27 +2514,182 @@ async fn video_stream(
         })
 }
 
+/// [EXPERIMENTAL] Single-POST binary CMAF streaming handler for
+/// `/v1/videos/stream/binary/cmaf`.
+///
+/// The backend yields a sequence of [`NvVideosResponse`] items whose `data[*].url`
+/// fields act as internal tags (`cmaf:metadata`, `cmaf:init`,
+/// `cmaf:segment:{n}`) and whose `data[*].b64_json` fields carry the encoded
+/// payload bytes. This handler decodes those payloads and rewrites them into a
+/// compact framed binary response so the browser can append them directly to a
+/// `MediaSource` buffer over a single HTTP POST response.
+async fn video_stream_binary_cmaf(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    force_streaming_video_response_format(&mut request);
+    add_video_binary_cmaf_annotation(&mut request);
+
+    let request_id = get_or_create_request_id(&headers);
+    let request = Context::with_id(request, request_id);
+    let model = request.model.clone();
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_videos_engine(&model)
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
+
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to start binary CMAF stream");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let ctx = stream.context();
+
+    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+        ctx.clone(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Videos.to_string(),
+            request_type: "stream_binary_cmaf".to_string(),
+        },
+    )
+    .await;
+    connection_handle.disarm();
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    stream_handle.arm();
+    let monitored_stream = async_stream::stream! {
+        tokio::pin!(stream);
+        loop {
+            tokio::select! {
+                item = stream.next() => {
+                    match item {
+                        Some(annotated) => {
+                            let ann = match annotated.ok() {
+                                Ok(ann) => ann,
+                                Err(error) => {
+                                    tracing::error!("Binary CMAF stream error: {error}");
+                                    inflight.mark_error(ErrorType::Internal);
+                                    yield Ok::<Bytes, std::convert::Infallible>(
+                                        encode_video_binary_cmaf_error_frame(error),
+                                    );
+                                    stream_handle.disarm();
+                                    break;
+                                }
+                            };
+
+                            let response = match ann.data {
+                                Some(response) => response,
+                                None => continue,
+                            };
+
+                            match decode_video_binary_cmaf_payloads(response) {
+                                Ok(payloads) => {
+                                    for (kind, payload) in payloads {
+                                        yield Ok::<Bytes, std::convert::Infallible>(
+                                            encode_video_binary_cmaf_frame(kind, &payload),
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!("Binary CMAF payload decode failed: {error}");
+                                    inflight.mark_error(ErrorType::Internal);
+                                    yield Ok::<Bytes, std::convert::Infallible>(
+                                        encode_video_binary_cmaf_error_frame(error),
+                                    );
+                                    stream_handle.disarm();
+                                    break;
+                                }
+                            }
+                        }
+                        None => {
+                            yield Ok::<Bytes, std::convert::Infallible>(
+                                encode_video_binary_cmaf_done_frame(),
+                            );
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        }
+                    }
+                }
+                _ = ctx.stopped() => {
+                    tracing::trace!("Context stopped; breaking binary CMAF stream");
+                    inflight.mark_error(ErrorType::Cancelled);
+                    break;
+                }
+            }
+        }
+    };
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            "x-dynamo-video-binary-protocol",
+            VIDEO_STREAM_BINARY_CMAF_PROTOCOL,
+        )
+        .body(Body::from_stream(monitored_stream))
+        .map(|r| r.into_response())
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to build binary CMAF response: {e}"
+            ))
+        })
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Videos endpoint
 /// If no path is provided, the default path is `/v1/videos`
 ///
-/// Two routes are registered:
-/// - `POST /v1/videos`        — non-streaming, returns a single JSON response
-/// - `POST /v1/videos/stream` — MJPEG streaming via `multipart/x-mixed-replace`
+/// Three routes are registered:
+/// - `POST /v1/videos`                     — non-streaming, returns a single JSON response
+/// - `POST /v1/videos/stream`              — MJPEG streaming via `multipart/x-mixed-replace`
+/// - `POST /v1/videos/stream/binary/cmaf`  — binary CMAF fragments over one response body
 pub fn videos_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/videos".to_string());
     let stream_path = format!("{}/stream", path);
+    let binary_cmaf_stream_path = format!("{}/binary/cmaf", stream_path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let stream_doc = RouteDoc::new(axum::http::Method::POST, &stream_path);
+    let binary_cmaf_stream_doc = RouteDoc::new(axum::http::Method::POST, &binary_cmaf_stream_path);
     let router = Router::new()
         .route(&path, post(videos))
         .route(&stream_path, post(video_stream))
+        .route(&binary_cmaf_stream_path, post(video_stream_binary_cmaf))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc, stream_doc], router)
+    (vec![doc, stream_doc, binary_cmaf_stream_doc], router)
 }
 
 async fn audio_speech(
@@ -4227,5 +4464,106 @@ mod tests {
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "让我想想 🤔 分析完成 ✅");
+    }
+
+    #[test]
+    fn test_add_video_binary_cmaf_annotation_sets_request_state() {
+        let mut request = NvCreateVideoRequest {
+            prompt: "test".to_string(),
+            model: "synthetic-binary-cmaf-video-stream".to_string(),
+            input_reference: None,
+            seconds: Some(4),
+            size: Some("832x480".to_string()),
+            user: None,
+            response_format: None,
+            nvext: None,
+        };
+
+        force_streaming_video_response_format(&mut request);
+        add_video_binary_cmaf_annotation(&mut request);
+        add_video_binary_cmaf_annotation(&mut request);
+
+        assert_eq!(request.response_format.as_deref(), Some("b64_json"));
+        let annotations = request
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.annotations.as_ref())
+            .expect("annotations should be present");
+        assert_eq!(
+            annotations,
+            &vec![VIDEO_STREAM_BINARY_CMAF_ANNOTATION.to_string()]
+        );
+    }
+
+    #[test]
+    fn test_decode_video_binary_cmaf_payloads_decodes_kinded_frames() {
+        let metadata_payload =
+            br#"{"source_buffer_mime_type":"video/mp4; codecs=\"avc1.4d401f\""}"#;
+        let init_payload = b"init";
+        let segment_payload = b"segment";
+        let response = NvVideosResponse {
+            id: "video_123".to_string(),
+            object: "video".to_string(),
+            model: "synthetic-binary-cmaf-video-stream".to_string(),
+            status: "completed".to_string(),
+            progress: 100,
+            created: 1_777_000_000,
+            data: vec![
+                crate::protocols::openai::videos::VideoData {
+                    url: Some(VIDEO_STREAM_BINARY_CMAF_METADATA_TAG.to_string()),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(metadata_payload)),
+                },
+                crate::protocols::openai::videos::VideoData {
+                    url: Some(VIDEO_STREAM_BINARY_CMAF_INIT_TAG.to_string()),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(init_payload)),
+                },
+                crate::protocols::openai::videos::VideoData {
+                    url: Some(format!("{VIDEO_STREAM_BINARY_CMAF_SEGMENT_PREFIX}0")),
+                    b64_json: Some(base64::prelude::BASE64_STANDARD.encode(segment_payload)),
+                },
+            ],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let payloads = decode_video_binary_cmaf_payloads(response).expect("payloads should parse");
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0].0, VIDEO_STREAM_BINARY_CMAF_KIND_METADATA);
+        assert_eq!(payloads[0].1, metadata_payload);
+        assert_eq!(payloads[1].0, VIDEO_STREAM_BINARY_CMAF_KIND_INIT);
+        assert_eq!(payloads[1].1, init_payload);
+        assert_eq!(payloads[2].0, VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT);
+        assert_eq!(payloads[2].1, segment_payload);
+    }
+
+    #[test]
+    fn test_decode_video_binary_cmaf_payloads_rejects_unexpected_tags() {
+        let response = NvVideosResponse {
+            id: "video_123".to_string(),
+            object: "video".to_string(),
+            model: "synthetic-binary-cmaf-video-stream".to_string(),
+            status: "completed".to_string(),
+            progress: 100,
+            created: 1_777_000_000,
+            data: vec![crate::protocols::openai::videos::VideoData {
+                url: Some("not-cmaf".to_string()),
+                b64_json: Some(base64::prelude::BASE64_STANDARD.encode(b"payload")),
+            }],
+            error: None,
+            inference_time_s: None,
+        };
+
+        let error =
+            decode_video_binary_cmaf_payloads(response).expect_err("tag should be rejected");
+        assert!(error.contains("Unexpected CMAF payload tag"));
+    }
+
+    #[test]
+    fn test_encode_video_binary_cmaf_frame_layout() {
+        let payload = b"abc";
+        let frame = encode_video_binary_cmaf_frame(VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT, payload);
+        assert_eq!(frame[0], VIDEO_STREAM_BINARY_CMAF_KIND_SEGMENT);
+        assert_eq!(&frame[1..5], &(payload.len() as u32).to_be_bytes());
+        assert_eq!(&frame[5..], payload);
     }
 }

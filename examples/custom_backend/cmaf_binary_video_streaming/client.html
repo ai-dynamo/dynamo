@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CMAF Binary Video Streaming POC</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f1e8;
+        --panel: rgba(255, 250, 242, 0.92);
+        --text: #1f2a2e;
+        --muted: #617177;
+        --accent: #0f766e;
+        --accent-strong: #115e59;
+        --border: rgba(31, 42, 46, 0.12);
+        --danger: #b91c1c;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(15, 118, 110, 0.16), transparent 36%),
+          linear-gradient(160deg, #f8f2e7 0%, #efe6d8 100%);
+      }
+
+      main {
+        width: min(1100px, calc(100vw - 32px));
+        margin: 32px auto;
+        display: grid;
+        gap: 20px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        box-shadow: 0 18px 48px rgba(31, 42, 46, 0.08);
+        padding: 22px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2rem, 4vw, 3.2rem);
+        line-height: 1;
+      }
+
+      p,
+      label,
+      button,
+      input {
+        font: inherit;
+      }
+
+      .hero p,
+      .hint {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 14px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field label {
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+
+      .field input {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 11px 12px;
+        background: white;
+      }
+
+      .actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 11px 18px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      #start {
+        background: var(--accent);
+        color: white;
+      }
+
+      #start:hover {
+        background: var(--accent-strong);
+      }
+
+      #stop {
+        background: rgba(31, 42, 46, 0.08);
+        color: var(--text);
+      }
+
+      .stats {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .stat {
+        border-radius: 999px;
+        padding: 9px 12px;
+        background: rgba(15, 118, 110, 0.08);
+        color: var(--accent-strong);
+        font-weight: 600;
+      }
+
+      video {
+        width: 100%;
+        border-radius: 18px;
+        background: #000;
+      }
+
+      pre {
+        margin: 0;
+        padding: 16px;
+        min-height: 240px;
+        max-height: 320px;
+        overflow: auto;
+        background: #172126;
+        color: #d9ecf1;
+        border-radius: 16px;
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+        font-size: 0.92rem;
+        line-height: 1.45;
+      }
+
+      .danger {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel hero">
+        <h1>Single-POST CMAF Binary Streaming</h1>
+        <p>
+          This client opens one <code>POST /v1/videos/stream/binary/cmaf</code> request and
+          appends the returned <code>init.mp4 + .m4s</code> fragments into a
+          browser <code>MediaSource</code> timeline.
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="controls">
+          <div class="field">
+            <label for="baseUrl">Frontend Base URL</label>
+            <input id="baseUrl" type="text" />
+          </div>
+          <div class="field">
+            <label for="model">Model</label>
+            <input id="model" type="text" value="synthetic-binary-cmaf-video-stream" />
+          </div>
+          <div class="field">
+            <label for="prompt">Prompt</label>
+            <input id="prompt" type="text" value="continuous binary CMAF stream" />
+          </div>
+          <div class="field">
+            <label for="seconds">Duration Seconds</label>
+            <input
+              id="seconds"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="blank = full source"
+            />
+          </div>
+        </div>
+        <div class="actions" style="margin-top: 16px">
+          <button id="start">Start CMAF Stream</button>
+          <button id="stop">Stop</button>
+          <span class="hint" id="browserHint"></span>
+        </div>
+        <div class="stats" style="margin-top: 16px">
+          <div class="stat" id="modeStat">Mode: idle</div>
+          <div class="stat" id="queueStat">Queued: 0</div>
+          <div class="stat" id="appendStat">Appended: 0</div>
+          <div class="stat" id="audioStat">Audio: unknown</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <video id="player" controls playsinline></video>
+      </section>
+
+      <section class="panel">
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script>
+      const FRAME_KIND = {
+        METADATA: 0x01,
+        INIT: 0x02,
+        SEGMENT: 0x03,
+        ERROR: 0x04,
+        DONE: 0x05,
+      };
+
+      const logEl = document.getElementById("log");
+      const player = document.getElementById("player");
+      const baseUrlInput = document.getElementById("baseUrl");
+      const modelInput = document.getElementById("model");
+      const promptInput = document.getElementById("prompt");
+      const secondsInput = document.getElementById("seconds");
+      const modeStat = document.getElementById("modeStat");
+      const queueStat = document.getElementById("queueStat");
+      const appendStat = document.getElementById("appendStat");
+      const audioStat = document.getElementById("audioStat");
+      const browserHint = document.getElementById("browserHint");
+
+      let abortController = null;
+      let activeReader = null;
+      let mediaSource = null;
+      let sourceBuffer = null;
+      let objectUrl = null;
+      let frameBuffer = new Uint8Array(0);
+      let appendQueue = [];
+      let appendedCount = 0;
+      let streamDone = false;
+      let metadata = null;
+      const CONNECT_TIMEOUT_MS = 15000;
+
+      function describeError(error) {
+        if (error instanceof Error) {
+          return error.message || error.name || "Unknown error";
+        }
+        if (typeof error === "string") {
+          return error;
+        }
+        try {
+          return JSON.stringify(error);
+        } catch (_) {
+          return String(error);
+        }
+      }
+
+      function inferBaseUrl() {
+        if (window.location.origin && window.location.origin !== "null") {
+          return window.location.origin;
+        }
+        return "http://localhost:8000";
+      }
+
+      function appendLog(message, isError = false) {
+        const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+        logEl.textContent += `[${stamp}] ${message}\n`;
+        if (isError) {
+          logEl.classList.add("danger");
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setStat(element, text) {
+        element.textContent = text;
+      }
+
+      function joinUrl(base, path) {
+        return `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+      }
+
+      function resetPlaybackState() {
+        if (activeReader) {
+          activeReader.cancel().catch(() => {});
+          activeReader = null;
+        }
+        if (abortController) {
+          abortController.abort();
+          abortController = null;
+        }
+        if (sourceBuffer) {
+          sourceBuffer.removeEventListener("updateend", onSourceBufferUpdateEnd);
+          sourceBuffer = null;
+        }
+        if (mediaSource && mediaSource.readyState === "open") {
+          try {
+            mediaSource.endOfStream();
+          } catch (_) {}
+        }
+        mediaSource = null;
+        frameBuffer = new Uint8Array(0);
+        appendQueue = [];
+        appendedCount = 0;
+        streamDone = false;
+        metadata = null;
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
+        player.removeAttribute("src");
+        player.load();
+        setStat(modeStat, "Mode: idle");
+        setStat(queueStat, "Queued: 0");
+        setStat(appendStat, "Appended: 0");
+        setStat(audioStat, "Audio: unknown");
+      }
+
+      function setQueuedStat() {
+        setStat(queueStat, `Queued: ${appendQueue.length}`);
+      }
+
+      function onSourceBufferUpdateEnd() {
+        appendedCount += 1;
+        setStat(appendStat, `Appended: ${appendedCount}`);
+        pumpAppendQueue();
+        if (player.paused) {
+          player.play().catch((error) => {
+            appendLog(`Playback is waiting for a manual play click: ${error.message}`);
+          });
+        }
+      }
+
+      function ensureMediaSource(meta) {
+        if (!("MediaSource" in window)) {
+          throw new Error("This browser does not support MediaSource Extensions");
+        }
+        if (mediaSource) {
+          return;
+        }
+
+        mediaSource = new MediaSource();
+        objectUrl = URL.createObjectURL(mediaSource);
+        player.src = objectUrl;
+        player.load();
+
+        mediaSource.addEventListener(
+          "sourceopen",
+          () => {
+            try {
+              sourceBuffer = mediaSource.addSourceBuffer(meta.source_buffer_mime_type);
+              sourceBuffer.mode = "segments";
+              sourceBuffer.addEventListener("updateend", onSourceBufferUpdateEnd);
+              appendLog(`MediaSource ready with ${meta.source_buffer_mime_type}`);
+              pumpAppendQueue();
+            } catch (error) {
+              appendLog(`Failed to create SourceBuffer: ${error.message}`, true);
+            }
+          },
+          { once: true }
+        );
+      }
+
+      function queueAppend(bytes) {
+        appendQueue.push(bytes);
+        setQueuedStat();
+        pumpAppendQueue();
+      }
+
+      function pumpAppendQueue() {
+        if (!sourceBuffer || sourceBuffer.updating) {
+          return;
+        }
+        if (appendQueue.length === 0) {
+          setQueuedStat();
+          if (streamDone && mediaSource && mediaSource.readyState === "open") {
+            try {
+              mediaSource.endOfStream();
+              appendLog("MediaSource ended cleanly");
+            } catch (error) {
+              appendLog(`endOfStream failed: ${error.message}`, true);
+            }
+          }
+          return;
+        }
+
+        const next = appendQueue.shift();
+        setQueuedStat();
+        try {
+          sourceBuffer.appendBuffer(next);
+        } catch (error) {
+          appendLog(`appendBuffer failed: ${error.message}`, true);
+        }
+      }
+
+      function concatUint8Arrays(left, right) {
+        const merged = new Uint8Array(left.length + right.length);
+        merged.set(left, 0);
+        merged.set(right, left.length);
+        return merged;
+      }
+
+      function drainFrames(chunk) {
+        frameBuffer = concatUint8Arrays(frameBuffer, chunk);
+        while (frameBuffer.length >= 5) {
+          const kind = frameBuffer[0];
+          const length =
+            (frameBuffer[1] << 24) |
+            (frameBuffer[2] << 16) |
+            (frameBuffer[3] << 8) |
+            frameBuffer[4];
+          if (frameBuffer.length < 5 + length) {
+            return;
+          }
+          const payload = frameBuffer.slice(5, 5 + length);
+          frameBuffer = frameBuffer.slice(5 + length);
+          handleFrame(kind, payload);
+        }
+      }
+
+      function handleFrame(kind, payload) {
+        const textDecoder = new TextDecoder();
+        switch (kind) {
+          case FRAME_KIND.METADATA: {
+            metadata = JSON.parse(textDecoder.decode(payload));
+            setStat(modeStat, "Mode: streaming");
+            setStat(audioStat, `Audio: ${metadata.has_audio ? "yes" : "no"}`);
+            appendLog(`Metadata: ${JSON.stringify(metadata, null, 2)}`);
+            ensureMediaSource(metadata);
+            break;
+          }
+          case FRAME_KIND.INIT:
+            appendLog(`Received init fragment (${payload.length} bytes)`);
+            queueAppend(payload);
+            break;
+          case FRAME_KIND.SEGMENT:
+            appendLog(`Received media fragment (${payload.length} bytes)`);
+            queueAppend(payload);
+            break;
+          case FRAME_KIND.ERROR: {
+            const decoded = JSON.parse(textDecoder.decode(payload));
+            appendLog(`Worker stream error: ${decoded.error}`, true);
+            break;
+          }
+          case FRAME_KIND.DONE:
+            appendLog("Received stream done frame");
+            streamDone = true;
+            pumpAppendQueue();
+            break;
+          default:
+            appendLog(`Unknown frame kind ${kind}`, true);
+        }
+      }
+
+      async function startStream() {
+        resetPlaybackState();
+
+        const baseUrl = baseUrlInput.value.trim().replace(/\/$/, "");
+        const url = joinUrl(baseUrl, "/v1/videos/stream/binary/cmaf");
+        const secondsRaw = secondsInput.value.trim();
+        const seconds = secondsRaw ? Number.parseInt(secondsRaw, 10) : null;
+        const body = {
+          model: modelInput.value.trim(),
+          prompt: promptInput.value.trim(),
+          size: "832x480",
+        };
+        if (secondsRaw) {
+          if (!Number.isFinite(seconds) || seconds <= 0) {
+            appendLog("Duration Seconds must be a positive integer or blank for full source.", true);
+            return;
+          }
+          body.seconds = seconds;
+        }
+
+        appendLog(`POST ${url}`);
+        appendLog(`Waiting for stream response (timeout ${CONNECT_TIMEOUT_MS / 1000}s)`);
+        setStat(modeStat, "Mode: connecting");
+        abortController = new AbortController();
+        let connectTimedOut = false;
+        const timeoutId = setTimeout(() => {
+          if (abortController) {
+            connectTimedOut = true;
+            abortController.abort();
+          }
+        }, CONNECT_TIMEOUT_MS);
+
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: abortController.signal,
+          });
+          clearTimeout(timeoutId);
+          appendLog(`HTTP status: ${response.status}`);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Request failed with ${response.status}: ${text}`);
+          }
+          appendLog(
+            `Protocol: ${response.headers.get("x-dynamo-video-binary-protocol") || "missing"}`
+          );
+          if (!response.body) {
+            throw new Error("Browser did not expose a readable response body");
+          }
+
+          activeReader = response.body.getReader();
+          while (true) {
+            const { value, done } = await activeReader.read();
+            if (done) {
+              appendLog("ReadableStream closed by server");
+              break;
+            }
+            drainFrames(value);
+          }
+        } catch (error) {
+          clearTimeout(timeoutId);
+          const errorMessage = describeError(error);
+          if (connectTimedOut) {
+            appendLog(
+              `Stream request timed out after 15s. This minimal branch does not enable CORS, so browser playback requires the page and API to share the same origin. Note that localhost:8080 and localhost:8001 are different origins because the port is part of the origin.`,
+              true
+            );
+          } else if (error instanceof TypeError || /failed to fetch/i.test(errorMessage)) {
+            appendLog(
+              `Failed to fetch. If client.html is not served from the exact same origin as ${baseUrl}, this minimal branch will usually fail in the browser because it does not enable CORS. The origin must match scheme, host, and port.`,
+              true
+            );
+          } else if (error instanceof DOMException && error.name === "AbortError") {
+            appendLog("Stream aborted");
+          } else {
+            appendLog(errorMessage, true);
+          }
+        } finally {
+          streamDone = true;
+          pumpAppendQueue();
+          setStat(modeStat, "Mode: complete");
+        }
+      }
+
+      function stopStream() {
+        resetPlaybackState();
+        appendLog("Stopped stream");
+      }
+
+      baseUrlInput.value = inferBaseUrl();
+      browserHint.textContent = `MediaSource support: ${"MediaSource" in window ? "yes" : "no"}`;
+      if (window.location.hostname && window.location.hostname !== "localhost" && /localhost/.test(baseUrlInput.value)) {
+        appendLog(
+          "This page is not on localhost, but the frontend base URL is. If you are using port forwarding, replace it with the browser-reachable forwarded URL."
+        );
+      }
+
+      document.getElementById("start").addEventListener("click", startStream);
+      document.getElementById("stop").addEventListener("click", stopStream);
+    </script>
+  </body>
+</html>
