@@ -77,14 +77,8 @@ def extract_mm_urls(
     return mm_data or None
 
 
-def make_backend_error(
-    engine_response: dict[str, Any], request_id: str
-) -> dict[str, Any]:
-    """Build an OpenAI-style error dict from a backend error response.
-
-    Handles ``{"status": "error", "message": ...}`` dicts from the backend,
-    guarding against ``None`` or missing ``message`` values.
-    """
+def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:
+    """Build an OpenAI-style error dict, guarding against None/missing message."""
     backend_msg = engine_response.get("message") or "unknown backend error"
     return {
         "error": {
@@ -95,7 +89,7 @@ def make_backend_error(
 
 
 def make_internal_error(request_id: str, detail: str | None = None) -> dict[str, Any]:
-    """Build an OpenAI-style internal error dict."""
+    """Build an OpenAI-style internal error dict with request-specific fallback."""
     message = detail or f"Invalid engine response for request {request_id}"
     return {
         "error": {

@@ -488,7 +488,7 @@ class SglangProcessor:
                         isinstance(engine_response, dict)
                         and engine_response.get("status") == "error"
                     ):
-                        err = make_backend_error(engine_response, request_id)
+                        err = make_backend_error(engine_response)
                         logger.error(
                             "Backend error for request %s: %s",
                             request_id,

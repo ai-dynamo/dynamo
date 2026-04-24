@@ -2580,7 +2580,6 @@ mod tests {
         assert_eq!(success_count, 1);
     }
 
-    /// Helper: run EventConverter through the metrics function and return the result.
     fn run_event_converter(
         annotated: crate::types::Annotated<String>,
     ) -> Result<Option<Event>, axum::Error> {
@@ -2594,71 +2593,50 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_error_event_uses_dynamo_error_message() {
-        use dynamo_runtime::error::DynamoError;
-        let annotated = crate::types::Annotated::<String> {
+    fn error_annotated(
+        error: Option<dynamo_runtime::error::DynamoError>,
+        comment: Option<Vec<String>>,
+    ) -> crate::types::Annotated<String> {
+        crate::types::Annotated {
             data: None,
             id: None,
             event: Some("error".to_string()),
-            comment: None,
-            error: Some(DynamoError::msg("image load failed: 403 Forbidden")),
-        };
-        let result = run_event_converter(annotated);
+            comment,
+            error,
+        }
+    }
+
+    #[test]
+    fn test_error_event_uses_dynamo_error_message() {
+        use dynamo_runtime::error::DynamoError;
+        let result = run_event_converter(error_annotated(
+            Some(DynamoError::msg("image load failed: 403 Forbidden")),
+            None,
+        ));
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("403 Forbidden"),
-            "Expected DynamoError message, got: {err_msg}"
-        );
+        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
     }
 
     #[test]
     fn test_error_event_falls_back_to_comment() {
-        let annotated = crate::types::Annotated::<String> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: Some(vec!["connection lost".to_string()]),
-            error: None,
-        };
-        let result = run_event_converter(annotated);
+        let result =
+            run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("connection lost"),
-            "Expected comment fallback, got: {err_msg}"
-        );
+        assert!(result.unwrap_err().to_string().contains("connection lost"));
     }
 
     #[test]
     fn test_error_event_unspecified_when_no_message() {
-        let annotated = crate::types::Annotated::<String> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: None,
-            error: None,
-        };
-        let result = run_event_converter(annotated);
+        let result = run_event_converter(error_annotated(None, None));
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert_eq!(err_msg, "unspecified error");
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
     }
 
     #[test]
     fn test_error_event_empty_comment_falls_through() {
-        let annotated = crate::types::Annotated::<String> {
-            data: None,
-            id: None,
-            event: Some("error".to_string()),
-            comment: Some(vec!["".to_string()]),
-            error: None,
-        };
-        let result = run_event_converter(annotated);
+        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert_eq!(err_msg, "unspecified error");
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
     }
 
     #[test]
@@ -2667,11 +2645,9 @@ mod tests {
             data: Some("test".to_string()),
             id: None,
             event: Some("metrics".to_string()),
-            comment: Some(vec!["line1\nline2\r\nline3".to_string()]),
+            comment: Some(vec!["line1\nline2\r\nline3".into()]),
             error: None,
         };
-        // Should not panic — axum's Event::comment() panics on \n/\r
-        let result = run_event_converter(annotated);
-        assert!(result.is_ok());
+        assert!(run_event_converter(annotated).is_ok());
     }
 }
