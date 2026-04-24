@@ -60,6 +60,9 @@ pub enum ThinkingMode {
 }
 
 impl ThinkingMode {
+    /// Tiny branch-free mapping to a static string. `#[inline]` because this
+    /// is called from inside the per-message render hot path.
+    #[inline]
     pub fn as_str(&self) -> &'static str {
         match self {
             ThinkingMode::Chat => "chat",
@@ -204,9 +207,8 @@ fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
         .rev()
         .find(|(_, msg)| {
             msg.get("role")
-                .and_then(|r| r.as_str())
-                .map(|r| r == "user" || r == "developer")
-                .unwrap_or(false)
+                .and_then(JsonValue::as_str)
+                .is_some_and(|r| matches!(r, "user" | "developer"))
         })
         .map(|(idx, _)| idx)
 }
@@ -224,11 +226,11 @@ fn extract_visible_text(content: &JsonValue) -> Result<String> {
                 if let Some(text) = item.as_str() {
                     return Some(text.to_string());
                 }
-                let item_type = item.get("type").and_then(|v| v.as_str());
+                let item_type = item.get("type").and_then(JsonValue::as_str);
                 if item_type == Some("text") {
                     return item
                         .get("text")
-                        .and_then(|v| v.as_str())
+                        .and_then(JsonValue::as_str)
                         .map(|text| text.to_string());
                 }
                 tracing::warn!(
@@ -264,7 +266,7 @@ fn normalize_message_contents(messages: &mut [JsonValue]) -> Result<()> {
 fn encode_arguments_to_dsml(tool_call: &JsonValue) -> Result<String> {
     let arguments_str = tool_call
         .get("arguments")
-        .and_then(|a| a.as_str())
+        .and_then(JsonValue::as_str)
         .context("Missing or invalid 'arguments' field")?;
 
     // Python falls back to `{"arguments": raw_string}` on parse failure.
@@ -300,6 +302,11 @@ fn encode_arguments_to_dsml(tool_call: &JsonValue) -> Result<String> {
 }
 
 /// Lookup the task token for a quick-instruction task.
+///
+/// Called once per assistant-turn in `render_message` and once per transition
+/// token lookup; `#[inline]` because the static-str match is smaller than the
+/// call overhead.
+#[inline]
 fn task_token(task: &str) -> Option<&'static str> {
     match task {
         "action" => Some(tokens::TASK_ACTION),
@@ -325,7 +332,7 @@ fn render_message(
 
     let role = msg
         .get("role")
-        .and_then(|r| r.as_str())
+        .and_then(JsonValue::as_str)
         .context("Missing 'role' field")?;
 
     let mut prompt = String::new();
@@ -340,9 +347,9 @@ fn render_message(
 
     match role {
         "system" => {
-            let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
             prompt.push_str(content);
-            if let Some(tools) = msg.get("tools").and_then(|t| t.as_array()) {
+            if let Some(tools) = msg.get("tools").and_then(JsonValue::as_array) {
                 prompt.push_str("\n\n");
                 prompt.push_str(&render_tools(tools)?);
             }
@@ -358,14 +365,14 @@ fn render_message(
         "developer" => {
             let content = msg
                 .get("content")
-                .and_then(|c| c.as_str())
+                .and_then(JsonValue::as_str)
                 .filter(|s| !s.is_empty())
                 .context("Developer role requires content")?;
 
             let mut content_developer = String::from(tokens::USER_START);
             content_developer.push_str(content);
 
-            if let Some(tools) = msg.get("tools").and_then(|t| t.as_array()) {
+            if let Some(tools) = msg.get("tools").and_then(JsonValue::as_array) {
                 content_developer.push_str("\n\n");
                 content_developer.push_str(&render_tools(tools)?);
             }
@@ -381,13 +388,13 @@ fn render_message(
 
         "user" => {
             prompt.push_str(tokens::USER_START);
-            if let Some(blocks) = msg.get("content_blocks").and_then(|b| b.as_array()) {
+            if let Some(blocks) = msg.get("content_blocks").and_then(JsonValue::as_array) {
                 let mut parts: Vec<String> = Vec::with_capacity(blocks.len());
                 for block in blocks {
-                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let block_type = block.get("type").and_then(JsonValue::as_str).unwrap_or("");
                     match block_type {
                         "text" => {
-                            let text = block.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            let text = block.get("text").and_then(JsonValue::as_str).unwrap_or("");
                             parts.push(text.to_string());
                         }
                         "tool_result" => {
@@ -407,13 +414,13 @@ fn render_message(
                 }
                 prompt.push_str(&parts.join("\n\n"));
             } else {
-                let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
                 prompt.push_str(content);
             }
         }
 
         "latest_reminder" => {
-            let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
             prompt.push_str(tokens::LATEST_REMINDER);
             prompt.push_str(content);
         }
@@ -425,12 +432,15 @@ fn render_message(
         }
 
         "assistant" => {
-            let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
             let reasoning = msg
                 .get("reasoning_content")
-                .and_then(|c| c.as_str())
+                .and_then(JsonValue::as_str)
                 .unwrap_or("");
-            let wo_eos = msg.get("wo_eos").and_then(|v| v.as_bool()).unwrap_or(false);
+            let wo_eos = msg
+                .get("wo_eos")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false);
 
             let prev_has_task = index > 0
                 && messages[index - 1]
@@ -450,7 +460,7 @@ fn render_message(
             prompt.push_str(&thinking_part);
             prompt.push_str(content);
 
-            if let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array())
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(JsonValue::as_array)
                 && !tool_calls.is_empty()
             {
                 prompt.push_str("\n\n");
@@ -467,7 +477,7 @@ fn render_message(
                     let fn_obj = tc.get("function").unwrap_or(tc);
                     let name = fn_obj
                         .get("name")
-                        .and_then(|n| n.as_str())
+                        .and_then(JsonValue::as_str)
                         .context("Missing tool call name")?;
                     let arguments = encode_arguments_to_dsml(fn_obj)?;
                     invocations.push(format!(
@@ -491,19 +501,19 @@ fn render_message(
             }
         }
 
-        other => anyhow::bail!("Unknown role: {}", other),
+        other => anyhow::bail!("Unknown role: {other}"),
     }
 
     // Early return if the next message is not assistant/latest_reminder — no transition appended.
     if index + 1 < messages.len() {
-        let next_role = messages[index + 1].get("role").and_then(|r| r.as_str());
+        let next_role = messages[index + 1].get("role").and_then(JsonValue::as_str);
         if !matches!(next_role, Some("assistant") | Some("latest_reminder")) {
             return Ok(prompt);
         }
     }
 
     // Transition tokens based on task field and role.
-    let task = msg.get("task").and_then(|v| v.as_str());
+    let task = msg.get("task").and_then(JsonValue::as_str);
     if let Some(task) = task {
         let sp = task_token(task).with_context(|| format!("Invalid task: '{}'", task))?;
         if task != "action" {
@@ -538,11 +548,11 @@ fn render_tool_result_content(content: &JsonValue) -> Result<String> {
         JsonValue::Array(items) => {
             let mut parts: Vec<String> = Vec::with_capacity(items.len());
             for item in items {
-                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let item_type = item.get("type").and_then(JsonValue::as_str).unwrap_or("");
                 if item_type == "text" {
                     parts.push(
                         item.get("text")
-                            .and_then(|v| v.as_str())
+                            .and_then(JsonValue::as_str)
                             .unwrap_or("")
                             .to_string(),
                     );
@@ -574,7 +584,7 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
     let mut merged: Vec<JsonValue> = Vec::with_capacity(messages.len());
 
     for msg in messages {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let role = msg.get("role").and_then(JsonValue::as_str).unwrap_or("");
 
         if role == "tool" {
             let tool_block = serde_json::json!({
@@ -586,7 +596,7 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
             let can_merge = merged
                 .last()
                 .map(|m| {
-                    m.get("role").and_then(|r| r.as_str()) == Some("user")
+                    m.get("role").and_then(JsonValue::as_str) == Some("user")
                         && m.get("content_blocks").is_some()
                 })
                 .unwrap_or(false);
@@ -600,7 +610,7 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
                     && let Some(blocks) = last
                         .as_object_mut()
                         .and_then(|o| o.get_mut("content_blocks"))
-                        .and_then(|v| v.as_array_mut())
+                        .and_then(JsonValue::as_array_mut)
                 {
                     blocks.push(tool_block);
                 }
@@ -613,7 +623,7 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
         } else if role == "user" {
             let text = msg
                 .get("content")
-                .and_then(|c| c.as_str())
+                .and_then(JsonValue::as_str)
                 .unwrap_or("")
                 .to_string();
             let text_block = serde_json::json!({ "type": "text", "text": text });
@@ -621,7 +631,7 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
             let can_merge = merged
                 .last()
                 .map(|m| {
-                    m.get("role").and_then(|r| r.as_str()) == Some("user")
+                    m.get("role").and_then(JsonValue::as_str) == Some("user")
                         && m.get("content_blocks").is_some()
                         && m.get("task").map(|v| v.is_null()).unwrap_or(true)
                 })
@@ -632,7 +642,7 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
                     && let Some(blocks) = last
                         .as_object_mut()
                         .and_then(|o| o.get_mut("content_blocks"))
-                        .and_then(|v| v.as_array_mut())
+                        .and_then(JsonValue::as_array_mut)
                 {
                     blocks.push(text_block);
                 }
@@ -668,18 +678,18 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
     let mut last_order: HashMap<String, usize> = HashMap::new();
 
     for msg in &mut messages {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let role = msg.get("role").and_then(JsonValue::as_str).unwrap_or("");
         if role == "assistant" {
-            if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+            if let Some(tcs) = msg.get("tool_calls").and_then(JsonValue::as_array) {
                 last_order.clear();
                 for (idx, tc) in tcs.iter().enumerate() {
                     let id = tc
                         .get("id")
-                        .and_then(|v| v.as_str())
+                        .and_then(JsonValue::as_str)
                         .or_else(|| {
                             tc.get("function")
                                 .and_then(|f| f.get("id"))
-                                .and_then(|v| v.as_str())
+                                .and_then(JsonValue::as_str)
                         })
                         .unwrap_or("");
                     if !id.is_empty() {
@@ -691,7 +701,7 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
             let Some(blocks) = msg
                 .as_object_mut()
                 .and_then(|o| o.get_mut("content_blocks"))
-                .and_then(|v| v.as_array_mut())
+                .and_then(JsonValue::as_array_mut)
             else {
                 continue;
             };
@@ -700,7 +710,7 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
             let tool_positions: Vec<usize> = blocks
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| b.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+                .filter(|(_, b)| b.get("type").and_then(JsonValue::as_str) == Some("tool_result"))
                 .map(|(i, _)| i)
                 .collect();
 
@@ -708,7 +718,10 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
                 let mut tool_blocks: Vec<JsonValue> =
                     tool_positions.iter().map(|&i| blocks[i].clone()).collect();
                 tool_blocks.sort_by_key(|b| {
-                    let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = b
+                        .get("tool_use_id")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("");
                     *last_order.get(id).unwrap_or(&0)
                 });
                 for (sorted_idx, &pos) in tool_positions.iter().enumerate() {
@@ -734,7 +747,7 @@ fn drop_thinking_messages(
     let mut out = Vec::with_capacity(messages.len());
     let mut new_last_user_idx: Option<usize> = None;
     for (idx, mut msg) in messages.into_iter().enumerate() {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let role = msg.get("role").and_then(JsonValue::as_str).unwrap_or("");
         if KEEP_ROLES.contains(&role) || last_user_idx.is_none_or(|u| idx >= u) {
             if last_user_idx == Some(idx) {
                 new_last_user_idx = Some(out.len());
@@ -848,20 +861,22 @@ impl DeepSeekV4Formatter {
         &self,
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> ThinkingMode {
-        if let Some(args) = args {
-            if let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool()) {
-                return if thinking {
-                    ThinkingMode::Thinking
-                } else {
-                    ThinkingMode::Chat
-                };
-            }
-            if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                match mode {
-                    "chat" => return ThinkingMode::Chat,
-                    "thinking" => return ThinkingMode::Thinking,
-                    _ => {}
-                }
+        if let Some(args) = args
+            && let Some(thinking) = args.get("thinking").and_then(JsonValue::as_bool)
+        {
+            return if thinking {
+                ThinkingMode::Thinking
+            } else {
+                ThinkingMode::Chat
+            };
+        }
+        if let Some(args) = args
+            && let Some(mode) = args.get("thinking_mode").and_then(JsonValue::as_str)
+        {
+            match mode {
+                "chat" => return ThinkingMode::Chat,
+                "thinking" => return ThinkingMode::Thinking,
+                _ => {}
             }
         }
         self.thinking_mode
@@ -902,7 +917,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
         if tools_json.is_some() || response_format_json.is_some() {
             let system_idx = messages_array
                 .iter()
-                .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+                .position(|msg| msg.get("role").and_then(JsonValue::as_str) == Some("system"));
 
             if let Some(idx) = system_idx {
                 if let Some(msg) = messages_array.get_mut(idx)
@@ -1148,15 +1163,15 @@ mod tests {
             "assistant reasoning_content must be stripped",
         );
         assert_eq!(
-            dropped[0].get("role").and_then(|v| v.as_str()),
+            dropped[0].get("role").and_then(JsonValue::as_str),
             Some("assistant"),
         );
         assert_eq!(
-            dropped[1].get("role").and_then(|v| v.as_str()),
+            dropped[1].get("role").and_then(JsonValue::as_str),
             Some("user")
         );
         assert_eq!(
-            dropped[2].get("role").and_then(|v| v.as_str()),
+            dropped[2].get("role").and_then(JsonValue::as_str),
             Some("developer"),
         );
 
