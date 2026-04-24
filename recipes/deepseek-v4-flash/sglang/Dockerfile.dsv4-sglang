@@ -1,0 +1,103 @@
+# DeepSeek-V4-Flash SGLang + Dynamo runtime image
+#
+# Multi-stage build:
+#   1. wheel_builder: builds dynamo runtime wheel from source (includes V4 parsers)
+#   2. final: layers dynamo onto sglang base
+#
+# Build (from repo root):
+#   docker build -f recipes/deepseek-v4-flash/sglang/Dockerfile.dsv4-sglang \
+#     -t nvcr.io/nvidian/dynamo-dev/kprashanth:sglang-dsv4-<hash> .
+
+ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-blackwell
+ARG DYNAMO_DONOR_IMAGE=nvcr.io/nvidian/dynamo-dev/biswa:vllm-runtime-beaafcba0
+
+# ---------- Stage 1: Build dynamo wheels from source ----------
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder
+
+RUN yum install -y openssl-devel clang-devel && yum clean all
+
+# Install modern protoc (manylinux's protobuf-compiler is too old)
+RUN curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip \
+    -o /tmp/protoc.zip && unzip -o /tmp/protoc.zip -d /usr/local && rm /tmp/protoc.zip
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH=/root/.cargo/bin:${PATH}
+
+# Install maturin
+ENV PATH=/opt/python/cp312-cp312/bin:${PATH}
+RUN pip install maturin
+
+# Copy dynamo source
+COPY lib /workspace/lib
+COPY Cargo.toml Cargo.lock README.md LICENSE /workspace/
+
+WORKDIR /workspace/lib/bindings/python
+RUN maturin build --release --interpreter /opt/python/cp312-cp312/bin/python3 \
+    -o /opt/dynamo/wheelhouse
+
+# Build the pure-python ai-dynamo package
+COPY pyproject.toml hatch_build.py /workspace/
+COPY deploy /workspace/deploy
+COPY components /workspace/components
+WORKDIR /workspace
+RUN pip wheel --no-deps -w /opt/dynamo/wheelhouse .
+
+# ---------- Stage 2: Donor for infra binaries ----------
+FROM ${DYNAMO_DONOR_IMAGE} AS dynamo-donor
+
+# ---------- Stage 3: Final image ----------
+FROM ${DSV4_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# RDMA / IB deps for NIXL UCX transport
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl jq \
+    libibverbs1 rdma-core ibverbs-utils libibumad3 libnuma1 librdmacm1 ibverbs-providers \
+    && rm -rf /var/lib/apt/lists/*
+
+# nats-server + etcd from donor
+COPY --from=dynamo-donor /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo-donor /usr/local/bin/etcd /usr/local/bin/etcd
+ENV PATH=/usr/local/bin/etcd:${PATH}
+
+# UCX from donor
+COPY --from=dynamo-donor /usr/local/ucx /usr/local/ucx
+ENV PATH=/usr/local/ucx/bin:${PATH}
+
+# NIXL from donor
+COPY --from=dynamo-donor /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/nixl_plugins
+ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib:/usr/local/ucx/lib:${LD_LIBRARY_PATH}
+
+# NIXL wheel from donor (pre-built, architecture-specific)
+COPY --from=dynamo-donor /opt/dynamo/wheelhouse/nixl*.whl /opt/dynamo/wheelhouse/
+
+# Dynamo wheels from our source build (includes V4 parsers + routed_experts fix)
+COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl /opt/dynamo/wheelhouse/
+COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo-*.whl /opt/dynamo/wheelhouse/
+
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo-*.whl && \
+    pip install --no-cache-dir --no-deps \
+    /opt/dynamo/wheelhouse/nixl*.whl 2>/dev/null || true && \
+    python3 -c "from dynamo._core import get_tool_parser_names; assert 'deepseek_v4' in get_tool_parser_names(), 'V4 parser missing!'; print('V4 parser verified in wheel')"
+
+# Dynamo Python components (frontend, sglang worker, common) — from our source
+COPY components/src/dynamo /workspace/components/src/dynamo
+
+# Fix: sglang repo dir at /workspace/sglang shadows the Python package
+ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH}
+
+# DeepGEMM JIT env vars
+ENV SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
+    SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1
+
+WORKDIR /workspace
+
+ENTRYPOINT []
+CMD ["bash"]
