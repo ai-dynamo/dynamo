@@ -83,37 +83,41 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 class _StandbyGenerateProxy:
     """Stand-in generate handler for a shadow engine waiting on the failover lock.
 
-    The standby publishes its MDC before acquiring the flock so ``/v1/models``
-    stays populated across failover. In steady state the KV router's tiebreak
-    rules can route real requests to the standby's endpoint even while the
-    primary is alive (see ``lib/kv-router/src/scheduling/selector.rs`` for the
-    min-logit + min-tree-size tiebreak). Those requests block here on
-    ``_delegate_ready_event`` until the real handler is wired in via
-    :meth:`set_delegate`. Health-check probes short-circuit without blocking.
+    The standby starts this proxy before acquiring the flock so startup probes
+    can pass while the real TRTLLM engine initializes in RO mode. Normal model
+    discovery is withheld until the standby wins the failover lock, which keeps
+    the KV router from sending primary-era traffic to a blocked standby.
+    Health-check probes short-circuit without blocking.
     """
 
     def __init__(self, health_check_payload: dict | None = None):
         self._delegate = None
         self._health_check_payload = health_check_payload
         self._delegate_ready_event = asyncio.Event()
+        self._failover_active_event = asyncio.Event()
 
     def set_delegate(self, delegate) -> None:
         self._delegate = delegate
         self._delegate_ready_event.set()
 
+    def activate_failover(self) -> None:
+        self._failover_active_event.set()
+
     async def generate(self, request: dict, context):
+        if (
+            self._health_check_payload is not None
+            and request == self._health_check_payload
+        ):
+            yield {"status": "ok"}
+            return
+
         if self._delegate is None:
-            if (
-                self._health_check_payload is not None
-                and request == self._health_check_payload
-            ):
-                yield {"status": "ok"}
-                return
             # Real request arrived before the engine finished initialization.
             # Block until set_delegate() is called instead of raising; raising
             # would surface as a 500 at the frontend.
             await self._delegate_ready_event.wait()
 
+        await self._failover_active_event.wait()
         async for response in self._delegate(request, context):
             yield response
 
@@ -458,12 +462,12 @@ async def init_llm_worker(
             (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
         ]
 
-    # Build a config-derived ModelRuntimeConfig up front so the shadow standby
-    # can publish its MDC before blocking on the failover lock. All fields are
-    # static config values; total_kv_blocks is intentionally omitted (the
-    # post-lock path does not populate it either — `get_stats_async` requires
-    # active requests to return real numbers, so there is nothing the engine
-    # can contribute here that the config does not already provide).
+    # Build a config-derived ModelRuntimeConfig up front so shadow standby
+    # registration can happen immediately after the failover lock is acquired.
+    # All fields are static config values; total_kv_blocks is intentionally
+    # omitted (the post-lock path does not populate it either — `get_stats_async`
+    # requires active requests to return real numbers, so there is nothing the
+    # engine can contribute here that the config does not already provide).
     runtime_config = ModelRuntimeConfig()
     runtime_config.max_num_seqs = arg_map["max_batch_size"]
     runtime_config.max_num_batched_tokens = arg_map["max_num_tokens"]
@@ -509,35 +513,11 @@ async def init_llm_worker(
         if standby_serve_task.done():
             await standby_serve_task
 
-        # Publish the standby's MDC before waiting on the failover lock so
-        # `/v1/models` stays populated across primary eviction. The frontend's
-        # KV router prefers live engines that publish KV events, so the
-        # standby's MDC with a no-op proxy does not steal traffic from the
-        # primary — see _StandbyGenerateProxy.generate. Registering once here
-        # and keeping the same MDC after lock acquire avoids the
-        # unregister/re-register churn that would otherwise open a gap.
-        if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_model(
-                model_input,
-                model_type,
-                endpoint,
-                config.model,
-                config.served_model_name,
-                context_length=config.max_seq_len,
-                kv_cache_block_size=config.kv_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=config.custom_jinja_template,
-            )
-            logging.info("[Shadow] MDC published; standby is now discoverable")
-
         logging.info(
-            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+            "[Shadow] Standby proxy ready, startup probe now passing, "
+            "starting RO engine init before failover"
         )
         startup_lock = FlockFailoverLock(failover_lock_path)
-        while await startup_lock.owner() != "engine-0":
-            await asyncio.sleep(0.1)
-        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
-        logging.info("[Shadow] Lock acquired, starting engine init")
 
     try:
         async with get_llm_engine(
@@ -551,9 +531,9 @@ async def init_llm_worker(
                 engine_holder.append(engine)
 
             # runtime_config was built from static engine args above so the
-            # shadow standby can register its MDC before waiting on the failover
-            # lock. Cross-check `data_parallel_size` against the live engine in
-            # case extra-engine-args flipped `enable_attention_dp`.
+            # standby can publish accurate MDC immediately after it acquires the
+            # failover lock. Cross-check `data_parallel_size` against the live
+            # engine in case extra-engine-args flipped `enable_attention_dp`.
             attention_dp_size = engine.get_attention_dp_size()
             try:
                 runtime_dp_size = runtime_config.data_parallel_size
@@ -666,6 +646,36 @@ async def init_llm_worker(
                 disagg_machine_id=int(endpoint.connection_id()) % 1021,
             )
 
+            async def serve_shadow_standby(handler) -> None:
+                assert standby_generate_proxy is not None
+                assert standby_serve_task is not None
+                assert startup_lock is not None
+
+                standby_generate_proxy.set_delegate(handler.generate)
+                logging.info(
+                    "[Shadow] Standby engine initialized in RO mode; "
+                    "waiting for failover lock"
+                )
+                await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+                standby_generate_proxy.activate_failover()
+                if config.disaggregation_mode != DisaggregationMode.ENCODE:
+                    await register_model(
+                        model_input,
+                        model_type,
+                        endpoint,
+                        config.model,
+                        config.served_model_name,
+                        context_length=config.max_seq_len,
+                        kv_cache_block_size=config.kv_block_size,
+                        runtime_config=runtime_config,
+                        custom_template_path=config.custom_jinja_template,
+                        media_decoder=media_decoder,
+                        media_fetcher=media_fetcher,
+                    )
+                    logging.info("[Shadow] MDC published; standby is now discoverable")
+                logging.info("[Shadow] Lock acquired, enabling standby traffic")
+                await standby_serve_task
+
             media_decoder = None
             media_fetcher = None
             if config.frontend_decoding:
@@ -717,10 +727,6 @@ async def init_llm_worker(
                         handler_config
                     )
 
-                    # Standby already registered its MDC pre-lock so
-                    # `/v1/models` stays populated across failover; do not
-                    # re-register post-lock because that path would go through
-                    # the discovery conflict check and could fail.
                     if (
                         config.disaggregation_mode != DisaggregationMode.ENCODE
                         and not shadow_standby
@@ -748,8 +754,7 @@ async def init_llm_worker(
                             component_name=config.component,
                         )
                     if shadow_standby:
-                        standby_generate_proxy.set_delegate(handler.generate)
-                        await standby_serve_task
+                        await serve_shadow_standby(handler)
                     else:
                         await endpoint.serve_endpoint(
                             handler.generate,
@@ -780,8 +785,7 @@ async def init_llm_worker(
                         media_fetcher=media_fetcher,
                     )
                 if shadow_standby:
-                    standby_generate_proxy.set_delegate(handler.generate)
-                    await standby_serve_task
+                    await serve_shadow_standby(handler)
                 else:
                     await endpoint.serve_endpoint(
                         handler.generate, health_check_payload=health_check_payload

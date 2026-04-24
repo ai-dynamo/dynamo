@@ -337,27 +337,23 @@ async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
     endpoint.serve_endpoint.return_value = standby_future
     runtime.endpoint.return_value = endpoint
 
-    # Record the order of events so the test asserts register_model runs
-    # before the lock-owner poll (MDC discoverable while primary still alive).
+    # Record the order of events so the test asserts the standby starts
+    # TRTLLM/GMS RO initialization before it waits on the failover lock or
+    # publishes model discovery.
     event_log: list[str] = []
 
     fake_lock = mock.AsyncMock()
 
-    async def fake_owner():
-        event_log.append("lock.owner")
-        return "engine-0"
-
-    fake_lock.owner.side_effect = fake_owner
-
-    # register_model is a PyO3 binding that rejects MagicMock endpoints at
-    # runtime; the standby now publishes its MDC pre-lock, so a mock is
-    # required even before get_llm_engine short-circuits via the side_effect.
     register_model_mock = mock.AsyncMock()
 
     async def record_register_model(*args, **kwargs):
         event_log.append("register_model")
 
     register_model_mock.side_effect = record_register_model
+
+    def record_get_llm_engine(engine_args, *args, **kwargs):
+        event_log.append("get_llm_engine")
+        raise EngineArgsCaptured(engine_args)
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
@@ -374,7 +370,7 @@ async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
         ),
         mock.patch(
             "dynamo.trtllm.workers.llm_worker.get_llm_engine",
-            side_effect=_mock_get_llm_engine,
+            side_effect=record_get_llm_engine,
         ),
     ):
         with pytest.raises(EngineArgsCaptured) as exc_info:
@@ -394,9 +390,10 @@ async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
             engine_args["env_overrides"]["FAILOVER_LOCK_PATH"]
             == "/tmp/test-failover.lock"
         )
-        assert event_log.index("register_model") < event_log.index(
-            "lock.owner"
-        ), f"Standby must publish MDC before polling lock owner; got {event_log}"
+        assert event_log == ["get_llm_engine"]
+        register_model_mock.assert_not_awaited()
+        fake_lock.owner.assert_not_awaited()
+        fake_lock.acquire.assert_not_awaited()
 
 
 class MultimodalProcessorInstantiated(Exception):
@@ -440,8 +437,8 @@ async def test_standby_proxy_health_check_short_circuits():
 
 
 @pytest.mark.asyncio
-async def test_standby_proxy_awaits_delegate_for_real_request():
-    """Real requests arriving before the engine is up must block until set_delegate."""
+async def test_standby_proxy_awaits_delegate_and_failover_for_real_request():
+    """Real requests must block until the handler is ready and failover is active."""
     proxy = _StandbyGenerateProxy(health_check_payload={"health": True})
 
     async def fake_delegate(request, context):
@@ -462,6 +459,12 @@ async def test_standby_proxy_awaits_delegate_for_real_request():
     ), "generate must block on delegate-ready event instead of raising"
 
     proxy.set_delegate(fake_delegate)
+    await asyncio.sleep(0)
+    assert (
+        not consumer_task.done()
+    ), "generate must keep blocking until failover activation"
+
+    proxy.activate_failover()
     results = await asyncio.wait_for(consumer_task, timeout=1.0)
     assert results == [{"token": 1}, {"token": 2}]
 
@@ -487,5 +490,6 @@ async def test_standby_proxy_cancellation_releases_pending_generate():
         yield {"token": "ok"}
 
     proxy.set_delegate(fake_delegate)
+    proxy.activate_failover()
     results = [chunk async for chunk in proxy.generate({"prompt": "y"}, context=None)]
     assert results == [{"token": "ok"}]
