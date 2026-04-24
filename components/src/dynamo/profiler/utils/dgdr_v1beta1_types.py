@@ -59,11 +59,20 @@ class SearchStrategy(str, Enum):
 
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
+    B200SXM = "b200_sxm"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"
-    B200SXM = "b200_sxm"
+    H100PCIe = "h100_pcie"
     A100SXM = "a100_sxm"
+    A100PCIe = "a100_pcie"
     L40S = "l40s"
+    L40 = "l40"
+    L4 = "l4"
+    V100SXM = "v100_sxm"
+    V100PCIe = "v100_pcie"
+    T4 = "t4"
+    MI200 = "mi200"
+    MI300 = "mi300"
 
 
 class BackendType(str, Enum):
@@ -194,21 +203,31 @@ class FeaturesSpec(BaseModel):
 
 
 class HardwareSpec(BaseModel):
-    """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
+    """HardwareSpec describes the GPU hardware for profiling and deployment. All fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). gpuSku is a selector (restricts which nodes are considered); the other fields are pure overrides passed to the profiler. If all four fields are set, discovery is skipped."""
 
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
     )
     vramMb: Optional[float] = Field(
-        default=None, description="VRAMMB is the VRAM per GPU in MiB."
+        default=None,
+        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the total number of GPUs available in the cluster.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
     )
     numGpusPerNode: Optional[int] = Field(
-        default=None, description="NumGPUsPerNode is the number of GPUs per node."
+        default=None,
+        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
+    )
+    interconnect: Optional[str] = Field(
+        default=None,
+        description='Interconnect describes the GPU interconnect type within a node. Examples: "pcie", "nvlink", "infiniband".',
+    )
+    rdma: Optional[bool] = Field(
+        default=None,
+        description="RDMA indicates whether RDMA is available on the cluster.",
     )
 
 
