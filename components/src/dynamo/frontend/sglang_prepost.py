@@ -174,7 +174,7 @@ def build_tool_call_guided_decoding(
         )
         constraint = parser.get_structure_constraint(
             tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
+            # parallel_tool_calls=parallel_tool_calls,
         )
 
     if isinstance(constraint, tuple) and len(constraint) == 2:
