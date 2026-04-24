@@ -108,561 +108,394 @@ OUTPUTS_INTERVAL_1 = [
         index=0,
         text="<think>",
         token_ids=[151667],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="\n",
         token_ids=[198],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="Okay",
         token_ids=[32313],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=",",
         token_ids=[11],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" the",
         token_ids=[279],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" user",
         token_ids=[1196],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" is",
         token_ids=[374],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" asking",
         token_ids=[10161],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" for",
         token_ids=[369],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" the",
         token_ids=[279],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" titles",
         token_ids=[15311],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" of",
         token_ids=[315],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" some",
         token_ids=[1045],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" James",
         token_ids=[7801],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Joyce",
         token_ids=[53626],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" books",
         token_ids=[6467],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" and",
         token_ids=[323],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" wants",
         token_ids=[6801],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" me",
         token_ids=[752],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" to",
         token_ids=[311],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" use",
         token_ids=[990],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" the",
         token_ids=[279],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" provided",
         token_ids=[3897],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" tool",
         token_ids=[5392],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=".\n",
         token_ids=[624],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="</think>",
         token_ids=[151668],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="\n\n",
         token_ids=[271],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="<tool_call>",
         token_ids=[151657],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="\n",
         token_ids=[198],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='{"',
         token_ids=[4913],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="name",
         token_ids=[606],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[788],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' "',
         token_ids=[330],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[1836],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_g",
         token_ids=[1889],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="utenberg",
         token_ids=[44433],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_books",
         token_ids=[73084],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='",',
         token_ids=[497],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' "',
         token_ids=[330],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="arguments",
         token_ids=[16370],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[788],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' {"',
         token_ids=[5212],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[1836],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_terms",
         token_ids=[37498],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[788],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' ["',
         token_ids=[4383],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="James",
         token_ids=[28084],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Joyce",
         token_ids=[53626],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='",',
         token_ids=[497],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' "',
         token_ids=[330],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="Project",
         token_ids=[7849],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Gutenberg",
         token_ids=[51586],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='"]',
         token_ids=[1341],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="}}\n",
         token_ids=[11248],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="</tool_call>",
         token_ids=[151658],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="",
         token_ids=[151645],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -676,11 +509,8 @@ OUTPUTS_INTERVAL_20 = [
         index=0,
         text="<think>",
         token_ids=[151667],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -707,11 +537,8 @@ OUTPUTS_INTERVAL_20 = [
             311,
             990,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -738,11 +565,8 @@ OUTPUTS_INTERVAL_20 = [
             729,
             429,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -769,11 +593,8 @@ OUTPUTS_INTERVAL_20 = [
             311,
             990,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -800,11 +621,8 @@ OUTPUTS_INTERVAL_20 = [
             752,
             1744,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -831,11 +649,8 @@ OUTPUTS_INTERVAL_20 = [
             3278,
             5944,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -862,11 +677,8 @@ OUTPUTS_INTERVAL_20 = [
             1265,
             3421,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -893,11 +705,8 @@ OUTPUTS_INTERVAL_20 = [
             330,
             16370,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -920,11 +729,9 @@ OUTPUTS_INTERVAL_20 = [
             151658,
             151645,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -939,11 +746,8 @@ OUTPUTS_NO_TOOL_CALL = [
         index=0,
         text="<think>",
         token_ids=[151667],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -970,11 +774,8 @@ OUTPUTS_NO_TOOL_CALL = [
             88646,
             1128,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1001,11 +802,8 @@ OUTPUTS_NO_TOOL_CALL = [
             53142,
             304,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1032,11 +830,8 @@ OUTPUTS_NO_TOOL_CALL = [
             2598,
             472,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1063,11 +858,8 @@ OUTPUTS_NO_TOOL_CALL = [
             911,
             29000,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1094,11 +886,8 @@ OUTPUTS_NO_TOOL_CALL = [
             10362,
             11285,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1125,11 +914,8 @@ OUTPUTS_NO_TOOL_CALL = [
             1265,
             1779,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1156,11 +942,8 @@ OUTPUTS_NO_TOOL_CALL = [
             518,
             279,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1187,11 +970,8 @@ OUTPUTS_NO_TOOL_CALL = [
             429,
             13,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1218,11 +998,8 @@ OUTPUTS_NO_TOOL_CALL = [
             576,
             1196,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1249,11 +1026,8 @@ OUTPUTS_NO_TOOL_CALL = [
             432,
             624,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1274,11 +1048,9 @@ OUTPUTS_NO_TOOL_CALL = [
             13,
             151645,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -1654,8 +1426,11 @@ def test_stream_interval_1(processor):
     assert tc["id"] is not None and tc["id"].startswith("chatcmpl-tool-")
     assert tc["type"] == "function"
 
+    # finish_reason remapped "stop" → "tool_calls" per openai-openapi
+    # ChatCompletion finish_reason enum.
+    # See https://github.com/ai-dynamo/dynamo/issues/8636
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
     seen_content = False
     for r in results:
@@ -1721,9 +1496,9 @@ def test_stream_interval_20(tokenizer, request_for_sampling, sampling_params):
     ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
     assert "</tool_call>" not in all_content
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -1752,11 +1527,9 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
         index=0,
         text=(penultimate.text or "") + (final.text or ""),
         token_ids=list(penultimate.token_ids) + list(final.token_ids),
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     )
     outputs = [*OUTPUTS_INTERVAL_20[:-2], merged_final]
 
@@ -1776,8 +1549,10 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
     assert "<tool_call>" not in all_content
     assert "</tool_call>" not in all_content
 
+    # finish_reason remapped "stop" → "tool_calls" per OpenAI spec.
+    # See https://github.com/ai-dynamo/dynamo/issues/8636
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -1807,11 +1582,9 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
         index=0,
         text=all_text,
         token_ids=all_token_ids,
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     )
 
     results = _collect_results(proc, [single_chunk])
@@ -1840,9 +1613,9 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
     ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
     assert "</tool_call>" not in all_content
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -1883,6 +1656,118 @@ def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
     tool_calls = _collect_tool_calls(results)
     assert len(tool_calls) == 0, f"Expected 0 tool calls but got {len(tool_calls)}"
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: no tool calls ⇒ "stop" is passed through unchanged.
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["stop"]
+
+
+# ---------------------------------------------------------------------------
+# vllm chat processor + hermes tool parser + Qwen3 reasoning drops the second
+# tool call in streaming mode on parallel-tool prompts. Observed symptom: 0
+# tool_calls reach the client, tool-call markup is routed into
+# reasoning_content, finish_reason="stop".
+# See https://github.com/ai-dynamo/dynamo/issues/8636
+#
+# Token IDs for the tool-call JSON bodies are arbitrary non-special ints
+# — the hermes parser operates on the text attribute, not decoded tokens.
+# ---------------------------------------------------------------------------
+_FAKE_TC_BODY_1 = tuple(range(1000, 1020))
+_FAKE_TC_BODY_2 = tuple(range(2000, 2020))
+_FAKE_TC_BODY_3 = tuple(range(3000, 3020))
+
+OUTPUTS_PARALLEL_NO_THINK = [
+    CompletionOutput(
+        index=0,
+        text=(
+            '<tool_call>\n{"name": "search_gutenberg_books", "arguments":'
+            ' {"search_terms": ["James Joyce"]}}\n</tool_call>\n'
+            '<tool_call>\n{"name": "search_gutenberg_books", "arguments"'
+        ),
+        token_ids=[
+            151657,
+            198,
+            *_FAKE_TC_BODY_1,
+            198,
+            151658,
+            198,
+            151657,
+            198,
+            *_FAKE_TC_BODY_2,
+        ],
+        cumulative_logprob=None,
+        logprobs=None,
+    ),
+    CompletionOutput(
+        index=0,
+        text=': {"search_terms": ["Charles Dickens"]}}\n</tool_call>',
+        token_ids=[
+            *_FAKE_TC_BODY_3,
+            198,
+            151658,
+            151645,
+        ],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    ),
+]
+
+
+@pytest.mark.vllm
+def test_streaming_parallel_tool_calls_no_think(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Regression: parallel tools with thinking disabled.
+
+    See https://github.com/ai-dynamo/dynamo/issues/8636
+
+    Shape: `enable_thinking=False` ⇒ <think>…</think> lives in the
+    prompt, the generated output has neither. In streaming mode the
+    reasoning parser stays engaged for every chunk (is_reasoning_end_streaming
+    never fires because </think> never arrives), so the tool-call markup is
+    mis-classified as reasoning_content and 0 tool_calls reach the client.
+
+    Pre-fix: this test FAILS — 0 tool_calls extracted, all tool-call markup
+    routed into reasoning_content, finish_reason="stop".
+    """
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=Qwen3ReasoningParser,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    results = _collect_results(proc, OUTPUTS_PARALLEL_NO_THINK)
+    tool_calls = _collect_tool_calls(results)
+
+    # -- both tool calls reach the client -----------------------------------
+    assert len(tool_calls) == 2, (
+        f"Expected 2 tool calls (parallel-tool regression, see #8636); got "
+        f"{len(tool_calls)}. Results: {results!r}"
+    )
+    args = [json.loads(tc["function"]["arguments"]) for tc in tool_calls]
+    assert args[0] == {"search_terms": ["James Joyce"]}
+    assert args[1] == {"search_terms": ["Charles Dickens"]}
+    assert tool_calls[0]["id"] != tool_calls[1]["id"]
+
+    # -- no tool-call markup leaks into content or reasoning_content --------
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<tool_call>" not in all_content
+    assert "</tool_call>" not in all_content
+    all_reasoning = _collect_reasoning(results)
+    assert (
+        "search_gutenberg_books" not in all_reasoning
+    ), f"Tool-call content leaked into reasoning_content: {all_reasoning!r}"
+
+    # -- finish_reason must be remapped to "tool_calls" (acc #1 of #8636).
+    # openai-openapi ChatCompletion finish_reason enum is {stop, length,
+    # tool_calls, content_filter, function_call}; vLLM emits "stop" at
+    # <|im_end|>, so the frontend remaps when tool calls were produced.
+    finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
+    assert finish_reasons == [
+        "tool_calls"
+    ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
