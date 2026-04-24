@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hand-curated overlay for native dependencies built from source in Dynamo Dockerfiles.
+# Syft sees these as unowned binaries in /usr/local/... and cannot infer name/version/license.
+# This overlay supplies that metadata. CI verifies every `RUN git clone` / `wget ...tar` in
+# Dockerfiles has a matching entry here (see container/compliance/README.md §Drift Detection).
+
+packages:
+  - name: criu
+    repo: https://github.com/checkpoint-restore/criu
+    version_arg: CRIU_REF
+    dockerfile: deploy/snapshot/Dockerfile
+    artifacts:
+      - { name: criu, license: GPL-2.0-only }
+      - { name: libcriu, license: LGPL-2.1-only }
+      - { name: cuda_plugin.so, license: GPL-2.0-only }
+
+  - name: cuda-checkpoint
+    repo: https://github.com/NVIDIA/cuda-checkpoint
+    version_arg: CUDA_CHECKPOINT_REF
+    dockerfile: deploy/snapshot/Dockerfile
+    artifacts:
+      - { name: cuda-checkpoint, license: NVIDIA-Software-License }
+
+  - name: gdrcopy
+    repo: https://github.com/NVIDIA/gdrcopy
+    version_arg: GDRCOPY_REF
+    dockerfile: container/templates/wheel_builder.Dockerfile
+    artifacts:
+      - { name: gdrcopy, license: MIT }
+
+  - name: ffmpeg
+    repo: https://ffmpeg.org
+    version_arg: FFMPEG_REF
+    dockerfile: container/templates/wheel_builder.Dockerfile
+    notes: "Built with --disable-gpl --disable-nonfree (LGPL-2.1-or-later core only)."
+    artifacts:
+      - { name: ffmpeg, license: LGPL-2.1-or-later }
+
+  - name: ucx
+    repo: https://github.com/openucx/ucx
+    version_arg: UCX_REF
+    dockerfile: container/templates/wheel_builder.Dockerfile
+    artifacts:
+      - { name: ucx, license: BSD-3-Clause }
+
+  - name: libfabric
+    repo: https://github.com/ofiwg/libfabric
+    version_arg: LIBFABRIC_REF
+    dockerfile: container/templates/wheel_builder.Dockerfile
+    artifacts:
+      - { name: libfabric, license: BSD-2-Clause OR GPL-2.0-only }
+
+  - name: aws-sdk-cpp
+    repo: https://github.com/aws/aws-sdk-cpp
+    version_arg: AWS_SDK_CPP_REF
+    dockerfile: container/templates/wheel_builder.Dockerfile
+    artifacts:
+      - { name: aws-sdk-cpp, license: Apache-2.0 }
+
+  - name: nixl
+    repo: https://github.com/ai-dynamo/nixl
+    version_arg: NIXL_REF
+    dockerfile: container/templates/wheel_builder.Dockerfile
+    notes: "First-party NVIDIA Dynamo component."
+    artifacts:
+      - { name: nixl, license: Apache-2.0 }
+
+  - name: vllm
+    repo: https://github.com/vllm-project/vllm
+    version_arg: VLLM_REF
+    dockerfile: container/deps/vllm/install_vllm.sh
+    notes: "Included only when built from source (not the PyPI wheel path)."
+    artifacts:
+      - { name: vllm, license: Apache-2.0 }
+
+  - name: vllm-omni
+    repo: https://github.com/vllm-project/vllm-omni
+    version_arg: VLLM_OMNI_REF
+    dockerfile: container/deps/vllm/install_vllm.sh
+    artifacts:
+      - { name: vllm-omni, license: Apache-2.0 }
+
+  - name: LMCache
+    repo: https://github.com/LMCache/LMCache
+    version_arg: LMCACHE_REF
+    dockerfile: container/deps/vllm/install_vllm.sh
+    artifacts:
+      - { name: LMCache, license: Apache-2.0 }
+
+  - name: intel-oneCCL
+    repo: https://github.com/uxlfoundation/oneCCL
+    version_arg: ONECCL_REF
+    dockerfile: container/templates/vllm_runtime.Dockerfile
+    notes: "Installed from the uxlfoundation/oneCCL GitHub release tarball."
+    artifacts:
+      - { name: intel-oneCCL, license: Apache-2.0 }

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: 'Compliance Scan'
-description: 'Generate attribution CSVs (dpkg + Python) for a container image and upload as workflow artifacts'
+description: 'Generate SBOM (syft) + attribution CSVs + ATTRIBUTIONS-*.md for a container image and upload as workflow artifacts'
 
 inputs:
   image:
@@ -118,6 +118,12 @@ runs:
         if [ -n "${{ steps.resolve-base.outputs.base_image }}" ]; then
           ARGS+=(--base-dir /tmp/compliance-base)
         fi
+        if [ -f "$GITHUB_WORKSPACE/Cargo.lock" ]; then
+          ARGS+=(--cargo-lock "$GITHUB_WORKSPACE/Cargo.lock")
+        fi
+        while IFS= read -r gm; do
+          [ -n "$gm" ] && ARGS+=(--go-mod "$gm")
+        done < <(find "$GITHUB_WORKSPACE" -maxdepth 5 -name go.mod -not -path '*/node_modules/*')
         python3 container/compliance/process_results.py "${ARGS[@]}"
 
     - name: Upload attribution artifacts
@@ -125,7 +131,10 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: ${{ inputs.artifact_name }}
-        path: ${{ inputs.artifact_name }}*.csv
+        path: |
+          ${{ inputs.artifact_name }}*.csv
+          /tmp/compliance-target/sbom.spdx.json
+          /tmp/compliance-target/ATTRIBUTIONS-*.md
         retention-days: ${{ inputs.retention_days }}
 
     - name: Cleanup compliance builder

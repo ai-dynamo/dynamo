@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# BuildKit-based extraction Dockerfile.
-# Mounts the target image filesystem read-only and runs helper scripts to extract
-# dpkg and Python package data — no `docker run` of the target image required.
+# BuildKit-based extraction Dockerfile using Syft to produce an SPDX 2.3 JSON
+# SBOM for the target image filesystem, plus back-compat dpkg.tsv / python.tsv
+# derived from the SBOM.
 #
 # Usage:
 #   docker buildx build \
@@ -21,32 +21,89 @@
 # stale results. BuildKit's cache key for RUN --mount=type=bind,from=<stage>
 # does not reliably include the mounted stage's content digest when the source
 # is a stage name rather than a direct image reference, so a cache hit could
-# return TSVs from a previous run against a different image.
+# return SBOMs from a previous run against a different image.
 #
 # Output files in <output_dir>:
-#   dpkg.tsv         - tab-separated: package_name\tversion\tspdx_license
-#   python.tsv       - tab-separated: package_name\tversion\tspdx_license
-#   dpkg_err.txt     - stderr from dpkg extraction (for debugging)
-#   python_err.txt   - stderr from python extraction (for debugging)
+#   sbom.spdx.json   - SPDX 2.3 JSON SBOM produced by syft (source of truth)
+#   syft.err.txt     - stderr from syft (for debugging)
+#   dpkg.tsv         - tab-separated: package_name\tversion\tspdx_license  (pkg:deb/* packages)
+#   python.tsv       - tab-separated: package_name\tversion\tspdx_license  (pkg:pypi/* packages)
 
 ARG TARGET_IMAGE=scratch
-ARG EXTRACTOR_IMAGE=python:3.12-slim
+# TODO: pin anchore/syft by digest once a stable digest for v1.42.4 is confirmed.
+ARG SYFT_IMAGE=anchore/syft:v1.42.4
+ARG POST_IMAGE=python:3.12-slim
+
 FROM ${TARGET_IMAGE} AS target
-FROM ${EXTRACTOR_IMAGE} AS extractor
-RUN mkdir /output
-COPY helpers/dpkg_helper.py /helpers/dpkg_helper.py
-COPY helpers/python_helper.py /helpers/python_helper.py
-RUN --mount=type=bind,from=target,target=/target \
-    python3 /helpers/dpkg_helper.py --root /target > /output/dpkg.tsv 2>/output/dpkg_err.txt ; \
-    python3 /helpers/python_helper.py --root /target > /output/python.tsv 2>/output/python_err.txt ; \
-    cat /output/dpkg_err.txt >&2 ; \
-    cat /output/python_err.txt >&2 ; \
-    if [ -f /target/var/lib/dpkg/status ]; then \
-        [ -s /output/dpkg.tsv ] || { echo "ERROR: dpkg extraction produced no output" >&2; exit 1; } ; \
-    else \
-        echo "⚠️  WARNING: dpkg status file not present; skipping OS package extraction" >&2 ; \
-    fi ; \
-    [ -s /output/python.tsv ] || echo "⚠️  WARNING: python extraction produced no output" >&2
+
+# anchore/syft is a distroless image (no shell, no /etc/passwd, no mkdir),
+# so it cannot be used as a `FROM ... AS extractor` base for further `RUN`
+# commands. Pull just the statically-linked syft binary out of it and run it
+# from a regular Debian-based stage.
+FROM ${SYFT_IMAGE} AS syft_bin
+
+# Syft stage: scan the target filesystem and emit an SPDX 2.3 JSON SBOM.
+# Stage name MUST remain `extractor` so `--no-cache-filter extractor` keeps working.
+FROM ${POST_IMAGE} AS extractor
+COPY --from=syft_bin /syft /usr/local/bin/syft
+RUN mkdir -p /output
+RUN --mount=type=bind,from=target,target=/target,rw=false \
+    /usr/local/bin/syft scan dir:/target -o spdx-json=/output/sbom.spdx.json 2> /output/syft.err.txt ; \
+    syft_rc=$? ; \
+    cat /output/syft.err.txt 1>&2 ; \
+    [ -s /output/sbom.spdx.json ] || { echo "ERROR: syft produced no SBOM" 1>&2; exit "${syft_rc:-1}"; } ; \
+    exit 0
+
+# Post-process stage: derive dpkg.tsv and python.tsv from the SBOM.
+FROM ${POST_IMAGE} AS postprocess
+RUN mkdir -p /output
+COPY --from=extractor /output/ /output/
+RUN python3 - <<'PY'
+import json, os, re, sys
+
+SBOM = "/output/sbom.spdx.json"
+OUT_DIR = "/output"
+
+def pick_license(pkg):
+    for key in ("licenseConcluded", "licenseDeclared"):
+        val = pkg.get(key)
+        if val and val != "NOASSERTION":
+            return val
+    return "UNKNOWN"
+
+def purl_of(pkg):
+    for ref in pkg.get("externalRefs", []) or []:
+        if ref.get("referenceType") == "purl":
+            return ref.get("referenceLocator", "")
+    return ""
+
+with open(SBOM, "r", encoding="utf-8") as f:
+    doc = json.load(f)
+
+rows_deb = []
+rows_pypi = []
+for pkg in doc.get("packages", []) or []:
+    purl = purl_of(pkg)
+    name = pkg.get("name", "") or ""
+    version = pkg.get("versionInfo", "") or ""
+    lic = pick_license(pkg)
+    # Strip tabs/newlines defensively so TSV stays three columns per row.
+    name = re.sub(r"[\t\r\n]+", " ", name).strip()
+    version = re.sub(r"[\t\r\n]+", " ", version).strip()
+    lic = re.sub(r"[\t\r\n]+", " ", lic).strip() or "UNKNOWN"
+    if purl.startswith("pkg:deb/"):
+        rows_deb.append(f"{name}\t{version}\t{lic}\n")
+    elif purl.startswith("pkg:pypi/"):
+        rows_pypi.append(f"{name}\t{version}\t{lic}\n")
+
+# Empty files are intentional when no packages of a type are present.
+with open(os.path.join(OUT_DIR, "dpkg.tsv"), "w", encoding="utf-8") as f:
+    f.writelines(rows_deb)
+with open(os.path.join(OUT_DIR, "python.tsv"), "w", encoding="utf-8") as f:
+    f.writelines(rows_pypi)
+
+print(f"dpkg rows: {len(rows_deb)}  python rows: {len(rows_pypi)}", file=sys.stderr)
+PY
 
 FROM scratch
-COPY --from=extractor /output/ /
+COPY --from=postprocess /output/ /
