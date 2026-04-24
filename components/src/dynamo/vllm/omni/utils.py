@@ -31,7 +31,17 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
     prompt = OmniTextPrompt(
         prompt=request.get("prompt", ""),
         negative_prompt=request.get("negative_prompt", None),
+        # Downstream stage processors (e.g. GLM-Image's ar2diffusion) read
+        # target size from mm_processor_kwargs when upsampling AR-generated
+        # prior tokens; without it they default to 1024x1024 and decouple
+        # from the requested size.
+        mm_processor_kwargs={"target_h": height, "target_w": width},
     )
+    # Older vllm-omni ar2diffusion implementations (e.g. 0.19.0rc1) read
+    # height/width from the top level of the prompt dict rather than from
+    # mm_processor_kwargs. Keep both so the fix works across versions.
+    prompt["height"] = height
+    prompt["width"] = width
     if request.get("multi_modal_data"):
         prompt["multi_modal_data"] = request["multi_modal_data"]
     return prompt
