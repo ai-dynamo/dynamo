@@ -17,11 +17,24 @@ use super::{OAIChatLikeRequest, OAIPromptFormatter, PromptFormatter};
 pub use tokcfg::ChatTemplate;
 use tokcfg::ChatTemplateValue;
 
+/// Returns true when the model display name identifies a DeepSeek V4 model.
+/// Matches only when `v4` is adjacent to the `deepseek` series boundary, e.g.
+/// `deepseek-v4`, `deepseek_v4`, `deepseekv4`, or `deepseek v4`. Rejects
+/// composite/derivative names like `deepseek-llm-coder-v4-tuned` or
+/// `deepseek-v3.2-v4-merge` where `v4` is not at the series boundary.
+fn is_deepseek_v4_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("deepseek-v4")
+        || n.contains("deepseek_v4")
+        || n.contains("deepseekv4")
+        || n.contains("deepseek v4")
+}
+
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
         // Special handling for DeepSeek models whose HF repos don't ship a Jinja chat_template.
         let name_lower = mdc.display_name.to_lowercase();
-        if name_lower.contains("deepseek") && name_lower.contains("v4") {
+        if is_deepseek_v4_name(&name_lower) {
             tracing::info!("Detected DeepSeek V4 model, using native Rust formatter");
             return Ok(Self::OAI(Arc::new(
                 super::deepseek_v4::DeepSeekV4Formatter::new_thinking(),
@@ -192,4 +205,23 @@ struct HfTokenizerConfigJsonFormatter {
 #[derive(Debug, Clone, Default)]
 pub struct ContextMixins {
     context_mixins: HashSet<PromptContextMixin>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_deepseek_v4_name;
+
+    #[test]
+    fn deepseek_v4_name_match_is_tight() {
+        assert!(is_deepseek_v4_name("deepseek-v4-pro"));
+        assert!(is_deepseek_v4_name("DeepSeek-V4-Pro"));
+        assert!(is_deepseek_v4_name("DeepSeek-V4-Chat"));
+        assert!(is_deepseek_v4_name("deepseek_v4"));
+        assert!(is_deepseek_v4_name("deepseekv4"));
+        assert!(is_deepseek_v4_name("deepseek v4"));
+
+        assert!(!is_deepseek_v4_name("deepseek-v3.2-v4-merge"));
+        assert!(!is_deepseek_v4_name("deepseek-llm-coder-v4-tuned"));
+        assert!(!is_deepseek_v4_name("deepseek-v3"));
+    }
 }
