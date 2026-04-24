@@ -1,14 +1,21 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-
 import logging
+
+import pytest
 
 from dynamo.frontend.utils import (
     handle_engine_error,
     make_backend_error,
     make_internal_error,
 )
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 class TestMakeBackendError:
