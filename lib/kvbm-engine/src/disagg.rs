@@ -15,7 +15,7 @@ use std::task::{Context, Poll};
 use anyhow::{Context as _, Result, anyhow};
 use dashmap::{DashMap, DashSet};
 use futures::{FutureExt, Stream, StreamExt, future::BoxFuture};
-use kvbm_disagg_protocol::{DisaggSequenceHash, SessionEndpoint, SessionId};
+use kvbm_disagg_protocol::{SessionEndpoint, SessionId};
 use kvbm_logical::blocks::ImmutableBlock;
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
@@ -25,13 +25,14 @@ use crate::{BlockId, G2, InstanceId, LogicalLayoutHandle, SequenceHash};
 
 /// Session endpoint kind for a bidirectional session composed from two
 /// velo-streaming SPSC anchors.
-pub const VELO_STREAM_ENDPOINT_KIND: &str = "velo_streaming_spsc_v1";
+pub const CONDITIONAL_DISAGG_STREAM_SCHEMA: &str = "kvbm_conditional_disagg_v1";
 
 /// Serializable reference to a block made available through a disagg session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteBlockRef {
     pub block_id: BlockId,
-    pub sequence_hash: DisaggSequenceHash,
+    #[serde(with = "serde_hash::single")]
+    pub sequence_hash: SequenceHash,
 }
 
 /// A set of blocks that all share the same remote logical source layout.
@@ -44,22 +45,11 @@ pub struct RemoteBlockSet {
     pub blocks: Vec<RemoteBlockRef>,
 }
 
-/// Backward-compatible name for older call sites while descriptor-shaped code
-/// migrates to block-set messages.
-pub type DisaggBlockRef = RemoteBlockRef;
-
-/// Deprecated compatibility wrapper. Real CD paths should not carry per-block
-/// NIXL descriptor bytes; peer transfer metadata is exchanged separately.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockDescriptor {
-    pub bytes: Vec<u8>,
-}
-
 /// Select all session blocks, or a specific hash subset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashSelection {
     All,
-    Hashes(Vec<DisaggSequenceHash>),
+    Hashes(Vec<SequenceHash>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,8 +63,8 @@ enum HashSelectionKind {
 struct HashSelectionWire {
     #[serde(rename = "type")]
     kind: HashSelectionKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    hashes: Vec<DisaggSequenceHash>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_hash::vec")]
+    hashes: Vec<SequenceHash>,
 }
 
 impl Serialize for HashSelection {
@@ -121,11 +111,14 @@ pub struct BlockSetRequest {
 pub struct BlockSetResponse {
     pub request_id: String,
     pub ready: Vec<RemoteBlockSet>,
-    pub pending_hashes: Vec<DisaggSequenceHash>,
+    #[serde(with = "serde_hash::vec")]
+    pub pending_hashes: Vec<SequenceHash>,
 }
 
 /// Backward-compatible names for the initial descriptor terminology.
+#[deprecated(since = "0.1.0", note = "use BlockSetRequest instead")]
 pub type DescriptorRequest = BlockSetRequest;
+#[deprecated(since = "0.1.0", note = "use BlockSetRequest instead")]
 pub type DescriptorResponse = BlockSetResponse;
 
 /// Request that the peer release session-held pins for all or a subset of
@@ -148,7 +141,8 @@ pub struct UnpinAck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullComplete {
     pub pull_id: u64,
-    pub hashes: Vec<DisaggSequenceHash>,
+    #[serde(with = "serde_hash::vec")]
+    pub hashes: Vec<SequenceHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,10 +166,11 @@ pub enum DecodeToPrefillFrame {
     },
     /// Compatibility variant for older descriptor terminology.
     BlocksReady {
-        blocks: Vec<DisaggBlockRef>,
+        blocks: Vec<RemoteBlockRef>,
     },
     OutputBlocksPulled {
-        hashes: Vec<DisaggSequenceHash>,
+        #[serde(with = "serde_hash::vec")]
+        hashes: Vec<SequenceHash>,
     },
     Detach,
     Error {
@@ -201,14 +196,15 @@ pub enum PrefillToDecodeFrame {
     PullComplete(PullComplete),
     PullAck(PullAck),
     InitialBlocksPulled {
-        hashes: Vec<DisaggSequenceHash>,
+        #[serde(with = "serde_hash::vec")]
+        hashes: Vec<SequenceHash>,
     },
     OutputBlockSetsReady {
         block_sets: Vec<RemoteBlockSet>,
     },
     /// Compatibility variant for older descriptor terminology.
     OutputBlocksReady {
-        blocks: Vec<DisaggBlockRef>,
+        blocks: Vec<RemoteBlockRef>,
     },
     Detach,
     Error {
@@ -239,16 +235,75 @@ mod serde_instance_id_string {
     }
 }
 
+/// Serde helpers for [`SequenceHash`] in velo wire frames.
+///
+/// rmp-serde (MessagePack) has no u128 type. We serialize each hash as a
+/// `[u64; 2]` pair (hi word, lo word), which every serializer handles natively.
+///
+/// SAFETY for `from_u128`: `SequenceHash = PositionalLineageHash(u128)` is a
+/// single-field tuple struct. Rust guarantees this has the same size and
+/// alignment as u128, making the transmute sound for any bit pattern.
+mod serde_hash {
+    use super::SequenceHash;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+
+    #[inline]
+    fn to_pair(hash: SequenceHash) -> [u64; 2] {
+        let v = hash.as_u128();
+        [(v >> 64) as u64, v as u64]
+    }
+
+    #[inline]
+    fn from_pair([hi, lo]: [u64; 2]) -> SequenceHash {
+        let v: u128 = ((hi as u128) << 64) | lo as u128;
+        // SAFETY: see module-level comment.
+        unsafe { std::mem::transmute::<u128, SequenceHash>(v) }
+    }
+
+    pub mod single {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(hash: &SequenceHash, s: S) -> Result<S::Ok, S::Error> {
+            to_pair(*hash).serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SequenceHash, D::Error> {
+            let pair = <[u64; 2]>::deserialize(d)?;
+            Ok(from_pair(pair))
+        }
+    }
+
+    pub mod vec {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            hashes: &Vec<SequenceHash>,
+            s: S,
+        ) -> Result<S::Ok, S::Error> {
+            let pairs: Vec<[u64; 2]> = hashes.iter().map(|h| to_pair(*h)).collect();
+            pairs.serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Vec<SequenceHash>, D::Error> {
+            let pairs = Vec::<[u64; 2]>::deserialize(d)
+                .map_err(|e| D::Error::custom(format!("serde_hash::vec: {e}")))?;
+            Ok(pairs.into_iter().map(from_pair).collect())
+        }
+    }
+}
+
 /// Stream of session events consumed by connector/coordinator monitor tasks.
 pub type SessionEventStream = Pin<Box<dyn Stream<Item = SessionEvent> + Send + 'static>>;
 
-/// Convert native KVBM sequence hashes to the JSON-safe protocol form.
-pub fn hash_to_wire(hash: SequenceHash) -> DisaggSequenceHash {
-    hash.as_u128().to_string()
-}
+// /// Convert native KVBM sequence hashes to the JSON-safe protocol form.
+// pub fn hash_to_wire(hash: SequenceHash) -> SequenceHash {
+//     hash.as_u128().to_string()
+// }
 
-pub fn hashes_to_wire(hashes: impl IntoIterator<Item = SequenceHash>) -> Vec<DisaggSequenceHash> {
-    hashes.into_iter().map(hash_to_wire).collect()
+pub fn hashes_to_wire(hashes: impl IntoIterator<Item = SequenceHash>) -> Vec<SequenceHash> {
+    hashes.into_iter().collect()
 }
 
 /// Blocks used to seed a decode-side remote-prefill session.
@@ -268,30 +323,39 @@ impl SessionBlocks {
         }
     }
 
-    pub fn ready_hashes_wire(&self) -> Vec<DisaggSequenceHash> {
+    pub fn ready_hashes_wire(&self) -> Vec<SequenceHash> {
         self.ready_g2
             .iter()
-            .map(|block| hash_to_wire(block.sequence_hash()))
+            .map(|block| block.sequence_hash())
             .collect()
     }
 
-    pub fn pending_hashes_wire(&self) -> Vec<DisaggSequenceHash> {
+    pub fn pending_hashes_wire(&self) -> Vec<SequenceHash> {
         hashes_to_wire(self.pending_hashes.iter().copied())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
-    Attached { peer_instance_id: InstanceId },
+    Attached {
+        peer_instance_id: InstanceId,
+    },
     BlockSetRequest(BlockSetRequest),
-    DescriptorRequest(DescriptorRequest),
+    #[deprecated(since = "0.1.0", note = "use BlockSetRequest instead")]
+    DescriptorRequest(BlockSetRequest),
     UnpinRequested(UnpinRequest),
     UnpinAcked(UnpinAck),
     PullComplete(PullComplete),
     PullAcked(PullAck),
-    BlockSetsAdded { block_sets: Vec<RemoteBlockSet> },
-    Detached { reason: Option<String> },
-    Failed { reason: String },
+    BlockSetsAdded {
+        block_sets: Vec<RemoteBlockSet>,
+    },
+    Detached {
+        reason: Option<String>,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 /// Abstraction over a bidirectional decode/prefill session.
@@ -304,13 +368,14 @@ pub trait PrefillSession: Send + Sync {
 
     fn add_pending_hashes(&self, hashes: Vec<SequenceHash>) -> Result<()>;
 
+    // TODO(cd-review): seems like this can only be called once? perhaps the return type shoudl be an Option/Result?
     fn subscribe(&self) -> SessionEventStream;
 
     fn respond_to_block_set_request(&self, response: BlockSetResponse) -> Result<()>;
 
     /// Release session-owned pins matching `selection`. This must not release
     /// coordinator-owned references to the same blocks.
-    fn release_session_pins(&self, selection: &HashSelection) -> Result<Vec<DisaggSequenceHash>>;
+    fn release_session_pins(&self, selection: &HashSelection) -> Result<Vec<SequenceHash>>;
 
     fn ack_unpin(&self, ack: UnpinAck) -> Result<()>;
 
@@ -476,10 +541,7 @@ impl DisaggSession {
             .context("block-set response channel closed before ack")?
     }
 
-    pub async fn request_descriptors(
-        &self,
-        request: DescriptorRequest,
-    ) -> Result<DescriptorResponse> {
+    pub async fn request_descriptors(&self, request: BlockSetRequest) -> Result<BlockSetResponse> {
         self.request_block_sets(request).await
     }
 
@@ -488,7 +550,7 @@ impl DisaggSession {
             .await
     }
 
-    pub async fn respond_to_descriptor_request(&self, response: DescriptorResponse) -> Result<()> {
+    pub async fn respond_to_descriptor_request(&self, response: BlockSetResponse) -> Result<()> {
         self.respond_to_block_set_request(response).await
     }
 
@@ -613,7 +675,7 @@ impl PrefillSession for DisaggSession {
         Ok(())
     }
 
-    fn release_session_pins(&self, selection: &HashSelection) -> Result<Vec<DisaggSequenceHash>> {
+    fn release_session_pins(&self, selection: &HashSelection) -> Result<Vec<SequenceHash>> {
         let mut state = self.inner.block_state.lock();
         let mut released = Vec::new();
         match selection {
@@ -621,14 +683,14 @@ impl PrefillSession for DisaggSession {
                 released = state
                     .ready_blocks
                     .iter()
-                    .map(|block| hash_to_wire(block.sequence_hash()))
+                    .map(|block| block.sequence_hash())
                     .collect();
                 state.ready_blocks.clear();
             }
             HashSelection::Hashes(hashes) => {
                 let selected: std::collections::HashSet<_> = hashes.iter().cloned().collect();
                 state.ready_blocks.retain(|block| {
-                    let hash = hash_to_wire(block.sequence_hash());
+                    let hash = block.sequence_hash();
                     if selected.contains(&hash) {
                         released.push(hash);
                         false
@@ -746,13 +808,13 @@ impl DisaggSessionInner {
 
 fn endpoint_from_handle(handle: velo::StreamAnchorHandle) -> SessionEndpoint {
     SessionEndpoint {
-        kind: VELO_STREAM_ENDPOINT_KIND.to_string(),
+        kind: CONDITIONAL_DISAGG_STREAM_SCHEMA.to_string(),
         payload: serde_json::to_value(handle).expect("serialize stream anchor handle"),
     }
 }
 
 fn handle_from_endpoint(endpoint: &SessionEndpoint) -> Result<velo::StreamAnchorHandle> {
-    if endpoint.kind != VELO_STREAM_ENDPOINT_KIND {
+    if endpoint.kind != CONDITIONAL_DISAGG_STREAM_SCHEMA {
         anyhow::bail!(
             "unsupported disagg session endpoint kind: {}",
             endpoint.kind
@@ -1089,8 +1151,8 @@ mod tests {
 
     use super::*;
 
-    fn hash(position: u64) -> DisaggSequenceHash {
-        position.to_string()
+    fn hash(position: u64) -> SequenceHash {
+        SequenceHash::new(position, None, position)
     }
 
     #[test]

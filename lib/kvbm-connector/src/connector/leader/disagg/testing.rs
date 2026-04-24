@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, Stream, future::BoxFuture};
-use kvbm_disagg_protocol::{DisaggSequenceHash, RemotePrefillRequest, SessionEndpoint, SessionId};
+use kvbm_disagg_protocol::{RemotePrefillRequest, SessionEndpoint, SessionId};
 use kvbm_engine::disagg::{BlockSetResponse, HashSelection, UnpinAck, UnpinRequest};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::create_token_sequence;
@@ -19,9 +19,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use super::queue::RemotePrefillQueue;
-use super::session::{
-    PrefillSession, PrefillSessionFactory, SessionEvent, SessionEventStream, hash_to_wire,
-};
+use super::session::{PrefillSession, PrefillSessionFactory, SessionEvent, SessionEventStream};
 use crate::{G2, SequenceHash};
 
 pub const TEST_BLOCK_SIZE: usize = 16;
@@ -37,13 +35,6 @@ impl TestG2Blocks {
         self.blocks
             .iter()
             .map(|block| block.sequence_hash())
-            .collect()
-    }
-
-    pub fn hashes_wire(&self) -> Vec<DisaggSequenceHash> {
-        self.blocks
-            .iter()
-            .map(|block| hash_to_wire(block.sequence_hash()))
             .collect()
     }
 }
@@ -129,22 +120,17 @@ impl MockPrefillSession {
             .map_err(|err| anyhow!("failed to push session event: {err}"))
     }
 
-    pub fn ready_hashes(&self) -> Vec<DisaggSequenceHash> {
+    pub fn ready_hashes(&self) -> Vec<SequenceHash> {
         self.state
             .lock()
             .ready_blocks
             .iter()
-            .map(|block| hash_to_wire(block.sequence_hash()))
+            .map(|block| block.sequence_hash())
             .collect()
     }
 
-    pub fn pending_hashes(&self) -> Vec<DisaggSequenceHash> {
-        self.state
-            .lock()
-            .pending_hashes
-            .iter()
-            .map(|hash| hash_to_wire(*hash))
-            .collect()
+    pub fn pending_hashes(&self) -> Vec<SequenceHash> {
+        self.state.lock().pending_hashes.clone()
     }
 
     pub fn block_set_responses(&self) -> Vec<BlockSetResponse> {
@@ -198,7 +184,7 @@ impl PrefillSession for MockPrefillSession {
         Ok(())
     }
 
-    fn release_session_pins(&self, selection: &HashSelection) -> Result<Vec<DisaggSequenceHash>> {
+    fn release_session_pins(&self, selection: &HashSelection) -> Result<Vec<SequenceHash>> {
         let mut state = self.state.lock();
         let mut released = Vec::new();
         match selection {
@@ -206,14 +192,14 @@ impl PrefillSession for MockPrefillSession {
                 released = state
                     .ready_blocks
                     .iter()
-                    .map(|block| hash_to_wire(block.sequence_hash()))
+                    .map(|block| block.sequence_hash())
                     .collect();
                 state.ready_blocks.clear();
             }
             HashSelection::Hashes(hashes) => {
                 let selected: std::collections::HashSet<_> = hashes.iter().cloned().collect();
                 state.ready_blocks.retain(|block| {
-                    let hash = hash_to_wire(block.sequence_hash());
+                    let hash = block.sequence_hash();
                     if selected.contains(&hash) {
                         released.push(hash);
                         false

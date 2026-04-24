@@ -7,6 +7,7 @@
 //! is shared by the connector, hub, and future admission code without making
 //! any one of those crates depend on another.
 
+use kvbm_common::SequenceHash;
 use serde::{Deserialize, Serialize};
 use velo_common::InstanceId;
 
@@ -111,7 +112,7 @@ pub struct RemotePrefillParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_endpoint: Option<SessionEndpoint>,
     #[serde(default)]
-    pub sequence_hashes: Vec<DisaggSequenceHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
 }
 
 impl RemotePrefillParams {
@@ -138,7 +139,7 @@ pub struct RemotePrefillRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_endpoint: Option<SessionEndpoint>,
     #[serde(default)]
-    pub sequence_hashes: Vec<DisaggSequenceHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
     pub token_ids: Vec<u32>,
     pub num_computed_tokens: usize,
 }
@@ -176,10 +177,6 @@ pub enum ControlSignal {
 mod tests {
     use super::*;
 
-    fn hash(position: u64) -> DisaggSequenceHash {
-        position.to_string()
-    }
-
     fn instance_id() -> InstanceId {
         uuid::Uuid::new_v4().into()
     }
@@ -195,7 +192,10 @@ mod tests {
                 kind: "test".to_string(),
                 payload: serde_json::json!({"anchor": "a"}),
             }),
-            sequence_hashes: vec![hash(0), hash(1)],
+            sequence_hashes: vec![
+                SequenceHash::new(0, None, 0),
+                SequenceHash::new(1, Some(0), 1),
+            ],
             token_ids: vec![1, 2, 3],
             num_computed_tokens: 16,
         };
@@ -218,7 +218,7 @@ mod tests {
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: instance_id(),
             decode_endpoint: None,
-            sequence_hashes: vec![hash(0)],
+            sequence_hashes: vec![SequenceHash::new(0, None, 0)],
         });
 
         let encoded = serde_json::to_vec(&params).unwrap();

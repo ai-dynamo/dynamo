@@ -32,8 +32,8 @@ pub use metadata::{
 };
 pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
 pub use session::{
-    DisaggSession, PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent,
-    SessionEventStream, VELO_STREAM_ENDPOINT_KIND, VeloPrefillSessionFactory, hash_to_wire,
+    CONDITIONAL_DISAGG_STREAM_SCHEMA, DisaggSession, PrefillSession, PrefillSessionFactory,
+    SessionBlocks, SessionEvent, SessionEventStream, VeloPrefillSessionFactory,
 };
 
 /// Scheduler-facing connector leader API used by wrappers/compositions.

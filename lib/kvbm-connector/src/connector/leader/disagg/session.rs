@@ -5,7 +5,6 @@
 //! session primitives.
 
 pub use kvbm_engine::disagg::{
-    DisaggSession, PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent,
-    SessionEventStream, VELO_STREAM_ENDPOINT_KIND, VeloPrefillSessionFactory, hash_to_wire,
-    hashes_to_wire,
+    CONDITIONAL_DISAGG_STREAM_SCHEMA, DisaggSession, PrefillSession, PrefillSessionFactory,
+    SessionBlocks, SessionEvent, SessionEventStream, VeloPrefillSessionFactory,
 };

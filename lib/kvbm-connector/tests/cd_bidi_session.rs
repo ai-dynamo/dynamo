@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use kvbm_common::LogicalLayoutHandle;
+use kvbm_common::{LogicalLayoutHandle, SequenceHash};
 use kvbm_connector::connector::leader::disagg::{DisaggSession, SessionEvent};
 use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest};
 use kvbm_engine::disagg::{
@@ -144,7 +144,10 @@ async fn cd_prefill_and_decode_coordinate_with_bidi_control_stream() {
         session_id,
         initiator_instance_id: d_id,
         decode_endpoint: Some(decode_session.endpoint()),
-        sequence_hashes: vec!["100".to_string(), "101".to_string()],
+        sequence_hashes: vec![
+            SequenceHash::new(0, None, 0),
+            SequenceHash::new(1, Some(0), 1),
+        ],
         token_ids: vec![1, 2, 3, 4],
         num_computed_tokens: 16,
     };
@@ -197,17 +200,20 @@ async fn cd_prefill_and_decode_coordinate_with_bidi_control_stream() {
         other => panic!("decode expected block-set request, got {other:?}"),
     }
 
-    let selected_hashes = vec!["100".to_string(), "101".to_string()];
+    let selected_hashes = vec![
+        SequenceHash::new(0, None, 0),
+        SequenceHash::new(1, Some(0), 1),
+    ];
     let initial_block_set = RemoteBlockSet {
         source_layout: LogicalLayoutHandle::G2,
         blocks: vec![
             RemoteBlockRef {
                 block_id: 7,
-                sequence_hash: selected_hashes[0].clone(),
+                sequence_hash: selected_hashes[0],
             },
             RemoteBlockRef {
                 block_id: 8,
-                sequence_hash: selected_hashes[1].clone(),
+                sequence_hash: selected_hashes[1],
             },
         ],
     };
@@ -283,7 +289,7 @@ async fn cd_prefill_and_decode_coordinate_with_bidi_control_stream() {
         source_layout: LogicalLayoutHandle::G2,
         blocks: vec![RemoteBlockRef {
             block_id: 99,
-            sequence_hash: "200".to_string(),
+            sequence_hash: SequenceHash::new(0, None, 0),
         }],
     }];
     prefill_session
@@ -302,7 +308,7 @@ async fn cd_prefill_and_decode_coordinate_with_bidi_control_stream() {
             session
                 .pull_complete_from_decode(PullComplete {
                     pull_id: 42,
-                    hashes: vec!["200".to_string()],
+                    hashes: vec![SequenceHash::new(0, None, 0)],
                 })
                 .await
         })
@@ -313,7 +319,7 @@ async fn cd_prefill_and_decode_coordinate_with_bidi_control_stream() {
             complete,
             PullComplete {
                 pull_id: 42,
-                hashes: vec!["200".to_string()],
+                hashes: vec![SequenceHash::new(0, None, 0)],
             }
         ),
         other => panic!("prefill expected pull complete, got {other:?}"),

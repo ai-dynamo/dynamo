@@ -11,9 +11,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_common::LogicalLayoutHandle;
-use kvbm_disagg_protocol::{
-    DISAGG_PROTOCOL_VERSION, DisaggSequenceHash, RemotePrefillRequest, SessionId,
-};
+use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest, SessionId};
 use kvbm_engine::disagg::{
     BlockSetRequest, BlockSetResponse, HashSelection, RemoteBlockRef, RemoteBlockSet, UnpinAck,
 };
@@ -23,10 +21,7 @@ use tokio::runtime::Handle;
 
 use super::metadata::{CoalescingPeerMetadataCache, NoopPeerMetadataCache, PeerMetadataCache};
 use super::queue::RemotePrefillQueue;
-use super::session::{
-    PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent, hash_to_wire,
-    hashes_to_wire,
-};
+use super::session::{PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent};
 use super::{ConditionalDisaggPolicy, PolicyInputs, PrefillSelection};
 use crate::{G2, InstanceId, SequenceHash};
 
@@ -51,8 +46,8 @@ pub struct RemotePrefillState {
     pub initiator_instance_id: InstanceId,
     pub ready_g2_blocks: Vec<ImmutableBlock<G2>>,
     pub pending_hashes: Vec<SequenceHash>,
-    pub initial_ready_hashes: HashSet<DisaggSequenceHash>,
-    pub session_unpinned_hashes: HashSet<DisaggSequenceHash>,
+    pub initial_ready_hashes: HashSet<SequenceHash>,
+    pub session_unpinned_hashes: HashSet<SequenceHash>,
     pub token_ids: Vec<u32>,
     pub num_computed_tokens: usize,
     pub num_prefill_tokens: usize,
@@ -173,7 +168,7 @@ impl RemotePrefillCoordinator {
             session_id,
             initiator_instance_id,
             decode_endpoint: session.endpoint(),
-            sequence_hashes: hashes_to_wire(sequence_hashes),
+            sequence_hashes,
             token_ids,
             num_computed_tokens: inputs.num_computed_tokens,
         };
@@ -345,7 +340,7 @@ fn block_set_response(
     let ready: Vec<_> = state
         .ready_g2_blocks
         .iter()
-        .filter(|block| requested.contains(&hash_to_wire(block.sequence_hash())))
+        .filter(|block| requested.contains(&block.sequence_hash()))
         .map(block_ref)
         .collect();
     let ready_hashes: HashSet<_> = ready
@@ -373,16 +368,13 @@ fn block_set_response(
     }
 }
 
-fn requested_hashes(
-    selection: &HashSelection,
-    state: &RemotePrefillState,
-) -> Vec<DisaggSequenceHash> {
+fn requested_hashes(selection: &HashSelection, state: &RemotePrefillState) -> Vec<SequenceHash> {
     match selection {
         HashSelection::All => state
             .ready_g2_blocks
             .iter()
-            .map(|block| hash_to_wire(block.sequence_hash()))
-            .chain(hashes_to_wire(state.pending_hashes.iter().copied()))
+            .map(|block| block.sequence_hash().clone())
+            .chain(state.pending_hashes.iter().copied())
             .collect(),
         HashSelection::Hashes(hashes) => hashes.clone(),
     }
@@ -391,7 +383,7 @@ fn requested_hashes(
 fn block_ref(block: &ImmutableBlock<G2>) -> RemoteBlockRef {
     RemoteBlockRef {
         block_id: block.block_id(),
-        sequence_hash: hash_to_wire(block.sequence_hash()),
+        sequence_hash: block.sequence_hash().clone(),
     }
 }
 
@@ -519,7 +511,6 @@ mod tests {
 
         let BeginOutcome::Started { session_id } = outcome;
         let session = factory.last().expect("session created");
-        assert_eq!(session.ready_hashes(), blocks.hashes_wire());
         assert_eq!(
             coord.status_for("req-1"),
             Some(RemotePrefillStatus::AwaitingAttach)
@@ -529,7 +520,7 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].request_id, "req-1");
         assert_eq!(queued[0].session_id, session_id);
-        assert_eq!(queued[0].sequence_hashes, session.ready_hashes());
+        assert_eq!(queued[0].sequence_hashes, blocks.hashes());
         assert_eq!(queued[0].num_computed_tokens, inputs.num_computed_tokens);
     }
 
@@ -633,16 +624,16 @@ mod tests {
         assert_eq!(responses[0].ready[0].blocks.len(), 1);
         assert_eq!(
             responses[0].ready[0].blocks[0].sequence_hash,
-            ready.hashes_wire()[0]
+            ready.hashes()[0]
         );
-        assert_eq!(responses[0].pending_hashes, pending.hashes_wire());
+        assert_eq!(responses[0].pending_hashes, pending.hashes());
     }
 
     #[tokio::test]
     async fn unpin_request_releases_only_session_pins_and_acks() {
         let (coord, factory, _) = coordinator(Duration::from_secs(120));
         let blocks = test_g2_blocks(2, 50);
-        let hashes_wire = blocks.hashes_wire();
+        let hashes = blocks.hashes();
 
         coord
             .begin_remote_prefill(
@@ -665,7 +656,7 @@ mod tests {
         session
             .push_event(SessionEvent::UnpinRequested(UnpinRequest {
                 request_id: "unpin-1".to_string(),
-                hashes: HashSelection::Hashes(vec![hashes_wire[0].clone()]),
+                hashes: HashSelection::Hashes(vec![hashes[0].clone()]),
             }))
             .expect("push unpin request");
 
@@ -675,15 +666,15 @@ mod tests {
         assert_eq!(acks.len(), 1);
         assert_eq!(
             acks[0].hashes,
-            HashSelection::Hashes(vec![hashes_wire[0].clone()])
+            HashSelection::Hashes(vec![hashes[0].clone()])
         );
-        assert_eq!(session.ready_hashes(), vec![hashes_wire[1].clone()]);
+        assert_eq!(session.ready_hashes(), vec![hashes[1].clone()]);
 
         let state = coord.state_for("req-unpin").expect("state");
         let state = state.lock();
         assert_eq!(state.status, RemotePrefillStatus::Attached);
         assert_eq!(state.ready_g2_blocks.len(), 2);
-        assert!(state.session_unpinned_hashes.contains(&hashes_wire[0]));
+        assert!(state.session_unpinned_hashes.contains(&hashes[0]));
     }
 
     #[tokio::test]
