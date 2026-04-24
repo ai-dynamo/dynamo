@@ -665,10 +665,6 @@ impl ModelWatcher {
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
 
-        if let Some(tx) = &self.model_update_tx {
-            tx.send(ModelUpdate::Added(card.clone())).await.ok();
-        }
-
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
         let ws_key = worker_set_key(&namespace, card.model_type);
@@ -876,8 +872,8 @@ impl ModelWatcher {
             let push_router = PushRouter::<
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+            >::from_client_with_monitor(
+                client, self.router_config.router_mode, None
             )
             .await?;
             worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -896,11 +892,8 @@ impl ModelWatcher {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_threshold(
-                    client.clone(),
-                    self.router_config.router_mode,
-                    None,
-                    None,
+                >::from_client_with_monitor(
+                    client.clone(), self.router_config.router_mode, None
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -910,8 +903,8 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_threshold(
-                    client.clone(), self.router_config.router_mode, None, None
+                >::from_client_with_monitor(
+                    client.clone(), self.router_config.router_mode, None
                 )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
@@ -921,8 +914,8 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_threshold(
-                    client.clone(), self.router_config.router_mode, None, None
+                >::from_client_with_monitor(
+                    client.clone(), self.router_config.router_mode, None
                 )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
@@ -932,11 +925,8 @@ impl ModelWatcher {
                 let audios_router = PushRouter::<
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
-                >::from_client_with_threshold(
-                    client.clone(),
-                    self.router_config.router_mode,
-                    None,
-                    None,
+                >::from_client_with_monitor(
+                    client.clone(), self.router_config.router_mode, None
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
@@ -946,8 +936,8 @@ impl ModelWatcher {
             let push_router = PushRouter::<
                 NvCreateChatCompletionRequest,
                 Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+            >::from_client_with_monitor(
+                client, self.router_config.router_mode, None
             )
             .await?;
             worker_set.chat_engine = Some(Arc::new(push_router));
@@ -956,8 +946,8 @@ impl ModelWatcher {
             let push_router = PushRouter::<
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+            >::from_client_with_monitor(
+                client, self.router_config.router_mode, None
             )
             .await?;
             worker_set.completions_engine = Some(Arc::new(push_router));
@@ -975,8 +965,8 @@ impl ModelWatcher {
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+            >::from_client_with_monitor(
+                client, self.router_config.router_mode, None
             )
             .await?;
 
@@ -999,8 +989,8 @@ impl ModelWatcher {
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+            >::from_client_with_monitor(
+                client, self.router_config.router_mode, None
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
@@ -1023,6 +1013,10 @@ impl ModelWatcher {
             // then activate the prefill router.
             self.manager
                 .add_worker_set(card.name(), &ws_key, worker_set);
+
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Added(card.clone())).await.ok();
+            }
 
             // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
             // because it coordinates between decode and prefill WorkerSets that share
@@ -1057,6 +1051,10 @@ impl ModelWatcher {
         // Add the completed WorkerSet to the Model
         self.manager
             .add_worker_set(card.name(), &ws_key, worker_set);
+
+        if let Some(tx) = &self.model_update_tx {
+            tx.send(ModelUpdate::Added(card.clone())).await.ok();
+        }
 
         Ok(())
     }

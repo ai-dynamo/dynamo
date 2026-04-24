@@ -7,6 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
+    metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -44,26 +45,13 @@ pub struct KvPushRouter {
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
 struct WorkerSelection {
     instance_id: u64,
-    backend_dp_rank: Option<u32>,
-    bookkeeping_dp_rank: Option<u32>,
-    overlap_amount: Option<u32>,
-}
-
-fn pinned_worker_hint(
-    phase: RequestPhase,
-    routing: Option<&RoutingHints>,
-) -> Option<(u64, Option<u32>)> {
-    let routing = routing?;
-    let worker_id = match phase {
-        RequestPhase::Prefill => routing.prefill_worker_id.or(routing.backend_instance_id),
-        RequestPhase::Decode => routing.decode_worker_id.or(routing.backend_instance_id),
-        RequestPhase::Aggregated => routing.backend_instance_id,
-    }?;
-    let dp_rank = match phase {
-        RequestPhase::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
-        RequestPhase::Decode | RequestPhase::Aggregated => routing.dp_rank,
-    };
-    Some((worker_id, dp_rank))
+    dp_rank: u32,
+    overlap_amount: u32,
+    effective_overlap_blocks: f64,
+    cached_tokens: usize,
+    /// Whether the scheduler is tracking this request (add_request or
+    /// find_best_match_details with update_states=true was called).
+    scheduler_tracked: bool,
 }
 
 /// Drop guard that manages the full lifecycle of a routed request:
@@ -83,6 +71,8 @@ struct RequestGuard {
     freed: bool,
     prefill_marked: bool,
     first_token_recorded: bool,
+    first_response_received: bool,
+    dispatch_guard: Option<StageGuard>,
     track_output_blocks: bool,
     current_total_blocks: usize,
     isl_tokens: usize,
@@ -99,6 +89,12 @@ struct RequestGuard {
 
 impl RequestGuard {
     async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
+        // End dispatch stage on first response from backend (any item, not just tokens).
+        if !self.first_response_received {
+            self.first_response_received = true;
+            self.dispatch_guard.take();
+        }
+
         if !self.prefill_marked {
             let has_tokens = item
                 .data
@@ -309,9 +305,9 @@ impl KvPushRouter {
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let (best_worker, overlap_amount) = self
+            let selection = self
                 .chooser
-                .find_best_match(
+                .find_best_match_details(
                     Some(context_id),
                     routing_token_ids,
                     block_mm_infos,
@@ -324,6 +320,10 @@ impl KvPushRouter {
                     allowed_worker_ids,
                 )
                 .await?;
+            let best_worker = selection.worker;
+            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
+            let cached_tokens = selection.cache_hit.cached_tokens;
+            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -348,20 +348,22 @@ impl KvPushRouter {
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,
-                backend_dp_rank: Some(best_worker.dp_rank),
-                bookkeeping_dp_rank: Some(best_worker.dp_rank),
-                overlap_amount: Some(overlap_amount),
+                dp_rank: best_worker.dp_rank,
+                overlap_amount,
+                effective_overlap_blocks,
+                cached_tokens,
+                scheduler_tracked: !is_query_only,
             });
         };
 
-        let resolved_pinned_worker = requested_dp_rank
+        let resolved_pinned_worker: Option<WorkerWithDpRank> = requested_dp_rank
             .or_else(|| self.chooser.unique_dp_rank_for_worker(pinned_worker_id))
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
         if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
-            let (best_worker, overlap_amount) = self
+            let selection = self
                 .chooser
-                .find_best_match(
+                .find_best_match_details(
                     Some(context_id),
                     routing_token_ids,
                     block_mm_infos,
@@ -374,43 +376,60 @@ impl KvPushRouter {
                     allowed_worker_ids,
                 )
                 .await?;
+            let best_worker = selection.worker;
+            let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
+            let cached_tokens = selection.cache_hit.cached_tokens;
+            let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,
-                backend_dp_rank: Some(best_worker.dp_rank),
-                bookkeeping_dp_rank: Some(best_worker.dp_rank),
-                overlap_amount: Some(overlap_amount),
+                dp_rank: best_worker.dp_rank,
+                overlap_amount,
+                effective_overlap_blocks,
+                cached_tokens,
+                scheduler_tracked: true,
             });
         }
 
-        let backend_dp_rank = resolved_pinned_worker.map(|worker| worker.dp_rank);
+        // Fallback: pinned worker hint was present but dp_rank could not be
+        // resolved (or this is a query-only request that skipped the scheduler
+        // path above).  Estimate cache hit directly and, when possible, register
+        // the request with the scheduler for bookkeeping.
+        let resolved_dp_rank: Option<u32> = resolved_pinned_worker.map(|w| w.dp_rank);
 
         tracing::debug!(
             worker_id = pinned_worker_id,
-            dp_rank = ?backend_dp_rank,
+            dp_rank = ?resolved_dp_rank,
             ?phase,
             "Routing to specified worker"
         );
 
-        let (bookkeeping_dp_rank, overlap_amount) = if let Some(dp_rank) = backend_dp_rank {
-            let worker = WorkerWithDpRank::new(pinned_worker_id, dp_rank);
-            let overlap_blocks = self
-                .chooser
-                .get_overlap_blocks(
-                    routing_token_ids,
-                    block_mm_infos,
-                    worker,
-                    lora_name.as_deref(),
-                )
-                .await?;
+        // Build a WorkerWithDpRank; use 0 as a fallback dp_rank when it
+        // couldn't be resolved -- this is only used for the cache-hit
+        // estimate query and won't affect scheduler state.
+        let effective_dp_rank = resolved_dp_rank.unwrap_or(0);
+        let worker = WorkerWithDpRank::new(pinned_worker_id, effective_dp_rank);
+        let cache_hit = self
+            .chooser
+            .get_cache_hit_estimate(
+                routing_token_ids,
+                block_mm_infos,
+                worker,
+                lora_name.as_deref(),
+            )
+            .await?;
+        let effective_overlap_blocks = cache_hit.effective_overlap_blocks;
+        let cached_tokens = cache_hit.cached_tokens;
+        let overlap_blocks = cache_hit.rounded_overlap_blocks();
 
-            if !is_query_only {
+        if !is_query_only {
+            if let Some(_dp_rank) = resolved_dp_rank {
                 self.chooser
                     .add_request(
                         context_id.to_string(),
                         routing_token_ids,
                         block_mm_infos,
-                        overlap_blocks,
+                        cached_tokens,
                         expected_output_tokens,
                         worker,
                         lora_name,
@@ -421,27 +440,26 @@ impl KvPushRouter {
                 tracing::debug!(
                     request_id = %context_id,
                     worker_id = pinned_worker_id,
-                    dp_rank = dp_rank,
-                    "Skipping add_request - query-only request"
+                    ?phase,
+                    "Routing to specified worker without resolved dp_rank; skipping scheduler bookkeeping"
                 );
             }
-
-            (Some(dp_rank), Some(overlap_blocks))
         } else {
             tracing::debug!(
                 request_id = %context_id,
                 worker_id = pinned_worker_id,
-                ?phase,
-                "Routing to specified worker without resolved dp_rank; skipping scheduler bookkeeping"
+                dp_rank = ?resolved_dp_rank,
+                "Skipping add_request - query-only request"
             );
-            (None, None)
-        };
+        }
 
         Ok(WorkerSelection {
             instance_id: pinned_worker_id,
-            backend_dp_rank,
-            bookkeeping_dp_rank,
-            overlap_amount,
+            dp_rank: effective_dp_rank,
+            overlap_amount: overlap_blocks,
+            effective_overlap_blocks,
+            cached_tokens,
+            scheduler_tracked: !is_query_only && resolved_dp_rank.is_some(),
         })
     }
 }
@@ -503,6 +521,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
         let block_size = self.chooser.block_size() as usize;
         let selection = self
@@ -511,47 +531,40 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await?;
         let WorkerSelection {
             instance_id,
-            backend_dp_rank,
-            bookkeeping_dp_rank,
+            dp_rank,
             overlap_amount,
+            effective_overlap_blocks,
+            cached_tokens,
+            scheduler_tracked,
         } = selection;
-        let scheduler_tracked = !is_query_only && bookkeeping_dp_rank.is_some();
 
         // In approximate mode (use_kv_events=false), record the routing decision
         // so the indexer can track cache state based on routing decisions.
         // This covers both pre-selected workers and find_best_match selections.
         if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
-            if let Some(dp_rank) = bookkeeping_dp_rank {
-                let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
-                let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
-                let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-                let mut tokens_with_hashes =
-                    TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
-                        .with_is_eagle(self.chooser.is_eagle());
-                if let Some(infos) = block_mm_infos {
-                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
-                }
-                if let Some(lora_name) = lora_name {
-                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
-                }
-                if let Err(e) = self
-                    .chooser
-                    .record_routing_decision(tokens_with_hashes, worker)
-                    .await
-                {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        worker_id = instance_id,
-                        dp_rank = dp_rank,
-                        error = %e,
-                        "Failed to record routing decision in approximate mode"
-                    );
-                }
-            } else {
-                tracing::debug!(
+            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
+            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
+            let mut tokens_with_hashes =
+                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
+                    .with_is_eagle(self.chooser.is_eagle());
+            if let Some(infos) = block_mm_infos {
+                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+            }
+            if let Some(lora_name) = lora_name {
+                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+            }
+            if let Err(e) = self
+                .chooser
+                .record_routing_decision(tokens_with_hashes, worker)
+                .await
+            {
+                tracing::warn!(
                     request_id = %context_id,
                     worker_id = instance_id,
-                    "Skipping approximate-mode routing decision for unresolved dp_rank"
+                    dp_rank = dp_rank,
+                    error = %e,
+                    "Failed to record routing decision in approximate mode"
                 );
             }
         }
@@ -562,14 +575,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
-            if let Some(overlap_amount) = overlap_amount {
-                tracker.record_kv_hit(overlap_amount, isl_blocks);
-            }
-            tracker.record_isl(
-                routing_token_ids.len(),
-                overlap_amount.map(|overlap| overlap as usize * block_size),
-            );
-            tracker.record_worker(instance_id, backend_dp_rank, self.chooser.worker_type());
+            tracker.record_kv_hit(effective_overlap_blocks, isl_blocks);
+            tracker.record_isl(routing_token_ids.len(), Some(cached_tokens));
+            tracker.record_worker(instance_id, Some(dp_rank), self.chooser.worker_type());
             tracker.record_router_queue_depth(self.chooser.pending_count());
             if let Some(hit_rate) = tracker.kv_hit_rate() {
                 request_metrics.kv_hit_rate.observe(hit_rate);
@@ -603,7 +611,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        // Route to worker
+        // End route stage — worker has been selected and routing metrics recorded.
+        // Dispatch stage starts immediately so there is no gap between stages.
+        drop(route_guard);
+        let stage_dispatch_guard = StageGuard::new(STAGE_DISPATCH, &phase_label);
+
+        // Dispatch to worker
         let isl_tokens = request.token_ids.len();
         let expected_output_tokens = request
             .routing
@@ -625,7 +638,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await?;
 
         let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = backend_dp_rank;
+        backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
 
         // Record prefill start right before pushing to backend (OnceLock: first call wins).
@@ -657,6 +670,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             freed: false,
             prefill_marked: false,
             first_token_recorded: false,
+            first_response_received: false,
+            dispatch_guard: Some(stage_dispatch_guard),
             track_output_blocks: scheduler_tracked && track_output_blocks,
             current_total_blocks: isl_tokens.div_ceil(block_size),
             isl_tokens,
@@ -673,8 +688,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 "kv_router.route_request",
                 request_id = %context_id,
                 worker_id = instance_id,
-                dp_rank = ?backend_dp_rank,
-                overlap_blocks = ?overlap_amount,
+                dp_rank = dp_rank,
+                overlap_blocks = overlap_amount,
                 phase = ?phase,
             ))
             .await?;
@@ -713,6 +728,35 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             guard.finish().await;
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
+    }
+}
+
+/// Extract a phase-specific (worker_id, dp_rank) pin from routing hints.
+///
+/// Returns `Some((worker_id, optional_dp_rank))` when the request should be
+/// pinned to a particular worker, or `None` when the normal KV-overlap
+/// selection path should be used.
+fn pinned_worker_hint(
+    phase: RequestPhase,
+    routing: Option<&RoutingHints>,
+) -> Option<(u64, Option<u32>)> {
+    let routing = routing?;
+    match phase {
+        RequestPhase::Prefill => {
+            let worker_id = routing.prefill_worker_id.or(routing.backend_instance_id)?;
+            let dp_rank = routing.prefill_dp_rank.or(routing.dp_rank);
+            Some((worker_id, dp_rank))
+        }
+        RequestPhase::Decode => {
+            let worker_id = routing.decode_worker_id.or(routing.backend_instance_id)?;
+            let dp_rank = routing.dp_rank;
+            Some((worker_id, dp_rank))
+        }
+        RequestPhase::Aggregated => {
+            let worker_id = routing.backend_instance_id?;
+            let dp_rank = routing.dp_rank;
+            Some((worker_id, dp_rank))
+        }
     }
 }
 

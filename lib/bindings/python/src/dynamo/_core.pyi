@@ -906,6 +906,23 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_model_cards(self) -> dict[str, str]:
+        """
+        Snapshot of model deployment cards keyed by worker id.
+
+        The snapshot is filtered against the known-workers set so entries
+        for already-removed workers are not returned.  Values are the raw
+        ``ModelDeploymentCard`` serialized as a JSON string; callers parse
+        whichever fields they need (e.g. ``runtime_config``,
+        ``display_name``).
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``worker_id`` to ``card_json`` (JSON string).
+        """
+        ...
+
     def shutdown(self) -> None:
         """Shut down the subscriber (all background tasks)."""
         ...
@@ -1541,6 +1558,9 @@ def run_mocker_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     trace_block_size: int = 512,
+    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
+    trace_shared_prefix_ratio: float = 0.0,
+    trace_num_prefix_groups: int = 0,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...

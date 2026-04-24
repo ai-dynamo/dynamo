@@ -152,6 +152,33 @@ def _write_multiturn_trace(tmp_path):
     return trace_path
 
 
+def _write_applied_compute_agentic_trace(tmp_path):
+    trace_path = tmp_path / "applied_compute_agentic_trace.jsonl"
+    records = [
+        {
+            "num_turns": 2,
+            "input_prompt_length": 64,
+            "assistant_response_length": [2, 2],
+            "tool_call_output_length": [2, 2],
+            "tool_call_latency": [0.001, 0.001],
+            "final_assistant_response_length": 2,
+        },
+        {
+            "num_turns": 1,
+            "input_prompt_length": 64,
+            "assistant_response_length": [2],
+            "tool_call_output_length": [2],
+            "tool_call_latency": [0.001],
+            "final_assistant_response_length": 2,
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return trace_path
+
+
 def _write_cli_smoke_trace(tmp_path):
     trace_path = tmp_path / "cli_smoke_trace.jsonl"
     records = []

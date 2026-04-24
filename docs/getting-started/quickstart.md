@@ -27,13 +27,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
 ```
 
 See [Release Artifacts](../reference/release-artifacts.md#container-images) for available
@@ -86,7 +86,8 @@ Start the frontend, then start a worker for your chosen backend.
 
 ```bash
 # Start the OpenAI compatible frontend (default port is 8000)
-# --discovery-backend file avoids needing etcd (frontend and workers must share a disk)
+# --discovery-backend file avoids needing etcd. Frontend and workers must share a disk.
+# The event plane automatically defaults to ZMQ (no NATS required) with this backend.
 python3 -m dynamo.frontend --discovery-backend file
 ```
 

@@ -286,6 +286,7 @@ fn kv_event_create_stored_from_parts(
         data: KvCacheEventData::Stored(KvCacheStoreData {
             blocks,
             parent_hash: kv_params.parent_hash.map(ExternalSequenceBlockHash),
+            start_position: None,
         }),
         event_id: kv_params.event_id,
         dp_rank: 0,
@@ -519,7 +520,6 @@ impl RouterHandles {
                 false,
                 None,
                 0.0,
-                None,
                 None,
                 allowed_worker_ids,
             )
@@ -883,12 +883,13 @@ pub unsafe extern "C" fn add_request(
                 }
             };
 
+            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
             decode_router
                 .add_request(
                     request_id_str.clone(),
                     &tokens,
                     None,
-                    overlap_blocks,
+                    cached_tokens,
                     None,
                     worker,
                     None, // lora_name
@@ -1117,7 +1118,14 @@ unsafe fn preprocess_request(
         }
     };
 
-    Ok(encoding.token_ids().to_vec())
+    let token_ids = encoding.token_ids().to_vec();
+    tracing::info!(
+        token_count = token_ids.len(),
+        first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+        "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
+    );
+
+    Ok(token_ids)
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
