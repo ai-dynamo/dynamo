@@ -6,7 +6,7 @@ require (
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/ai-dynamo/dynamo/deploy/snapshot v0.0.0
-	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.6
+	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.8
 	github.com/bsm/gomega v1.27.10
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0
@@ -26,7 +26,7 @@ require (
 	k8s.io/apiextensions-apiserver v0.34.3
 	k8s.io/apimachinery v0.34.3
 	k8s.io/client-go v0.34.3
-	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
+	k8s.io/utils v0.0.0-20260108192941-914a6e750570
 	sigs.k8s.io/controller-runtime v0.22.4
 	sigs.k8s.io/gateway-api-inference-extension v1.2.0
 	sigs.k8s.io/lws v0.6.1
@@ -74,7 +74,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
-	github.com/spf13/cobra v1.9.1 // indirect
+	github.com/spf13/cobra v1.10.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

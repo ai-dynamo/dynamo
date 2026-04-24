@@ -755,12 +755,38 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Try to parse reasoning content only if parser is configured
+        // Tool-continuation turns (last message role=tool) gate the force-
+        // reasoning flag off: the model produces the final user-facing answer
+        // directly from the tool result and typically does not re-enter
+        // reasoning, so leaving the parser in forced-reasoning mode would
+        // mislabel the final answer as reasoning_content. Matches SGLang's
+        // observed behavior for Kimi K2.5 tool-result follow-ups.
+        let last_is_tool = matches!(
+            request.inner.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(_))
+        );
+        let prompt_injected_reasoning = prompt_injected_reasoning && !last_is_tool;
+
+        // tool_choice=required/named forces the backend into guided decoding,
+        // which constrains output to a bare JSON shape with no reasoning
+        // wrapper. Running the reasoning parser on that output is both
+        // pointless (nothing to extract) and actively harmful for parsers
+        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
+        // append-think), because the prefix would contaminate the
+        // tool-call JSON fed into the jail.
+        let tool_choice_forces_guided_json = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+
+        // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !Self::is_reasoning_disabled_by_request(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
-            );
+            )
+            && !tool_choice_forces_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -1160,33 +1186,27 @@ impl OpenAIPreprocessor {
 
         // Configure jail based on tool_choice
         //
-        // When a tool_call_parser is configured, always use marker-based mode
-        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
-        // Immediate JSON mode is only a fallback for required/named when no
-        // parser exists (the model is expected to emit raw JSON in that case).
+        // For tool_choice=required or named we mirror SGLang / vLLM: assume the
+        // backend applied guided decoding and emit a bare JSON shape, so parse
+        // via the JSON array parser (base_json_parser) rather than the model's
+        // native-format parser.  If a parser is also configured we still carry
+        // it so the Immediate branch can fall back to marker-based parsing for
+        // backends that do not honor guided decoding (e.g. XML-native models
+        // like qwen3_coder — see regression test_tool_choice_required_with_
+        // qwen3_coder_parser).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                builder = builder
+                    .tool_choice_named(named.function.name.clone())
+                    .named_tool_filter(named.function.name.clone());
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
-                    // Also install a named-tool filter so that if the model emits
-                    // the wrong tool, the parsed call is rejected before emission.
-                    builder = builder
-                        .tool_call_parser(parser)
-                        .named_tool_filter(named.function.name.clone());
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_named(named.function.name.clone());
+                    builder = builder.tool_call_parser(parser);
                 }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
+                builder = builder.tool_choice_required();
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
                     builder = builder.tool_call_parser(parser);
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_required();
                 }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
