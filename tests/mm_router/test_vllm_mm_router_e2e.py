@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end tests for multimodal KV routing with vLLM.
+"""End-to-end tests for multimodal KV routing with vLLM frontend processor.
 
 Architecture:
-  Frontend -> MM Router Worker -> vLLM Worker
-                (computes mm_hash)   (publishes KV events)
+  Frontend (vLLM processor + KV router) → vLLM Worker
+       (process_inputs, mm_hash, NIXL)     (publishes KV events)
 
 This test validates MM-aware routing by sending repeated multimodal requests and
 asserting that router overlap is greater than 1 block (regression guard against
@@ -110,12 +110,13 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--model",
                 VLLM_MM_MODEL,
                 "--enable-multimodal",
+                "--block-size",
+                str(BLOCK_SIZE),
+                "--enforce-eager",
                 "--gpu-memory-utilization",
-                "0.85",
+                "0.40",
                 "--max-model-len",
-                "8192",
-                "--served-model-name",
-                f"{VLLM_MM_MODEL}__internal",
+                "4096",
                 "--kv-events-config",
                 (
                     f'{{"publisher":"zmq","topic":"kv-events",'
@@ -134,48 +135,20 @@ class VLLMWorkerProcess(ManagedProcess):
         )
 
 
-class VLLMMMRouterWorkerProcess(ManagedProcess):
-    """vLLM MM router worker."""
-
-    def __init__(self, request, *, system_port: int):
-        super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "examples.backends.vllm.mm_router_worker",
-                "--model",
-                VLLM_MM_MODEL,
-                "--namespace",
-                NAMESPACE,
-                "--component",
-                "mm_router",
-                "--endpoint",
-                "generate",
-                "--downstream-component",
-                "backend",
-                "--downstream-endpoint",
-                "generate",
-                "--block-size",
-                str(BLOCK_SIZE),
-            ],
-            env=_make_process_env(
-                DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
-                DYN_SYSTEM_PORT=str(system_port),
-            ),
-            health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready)
-            ],
-            timeout=240,
-            straggler_commands=["mm_router_worker"],
-            log_dir=_prepare_log_dir(request, "vllm-mm-router"),
-            **_COMMON_PROCESS_KWARGS,
-        )
-
-
 class FrontendProcess(ManagedProcess):
-    """Frontend HTTP ingress."""
+    """Frontend with vLLM processor and KV router."""
 
-    def __init__(self, request, *, frontend_port: int):
+    def __init__(self, request, *, frontend_port: int, transfer_mode: str = "shm"):
+        # Transfer mode controls how mm_kwargs are sent from frontend to backend:
+        #   shm: shared memory (same-node, ~2ms)
+        #   nixl: NIXL RDMA (cross-node capable)
+        #   disabled: no transfer; backend re-processes images from URLs
+        extra_env: dict[str, str] = {}
+        if transfer_mode == "disabled":
+            extra_env["DYNAMO_DISABLE_NIXL_MM"] = "1"
+        else:
+            extra_env["DYNAMO_MM_TRANSFER"] = transfer_mode
+
         super().__init__(
             command=[
                 "python3",
@@ -183,16 +156,22 @@ class FrontendProcess(ManagedProcess):
                 "dynamo.frontend",
                 "--http-port",
                 str(frontend_port),
+                "--dyn-chat-processor",
+                "vllm",
                 "--router-mode",
-                "round-robin",
+                "kv",
+                "--kv-cache-block-size",
+                str(BLOCK_SIZE),
+                "--model-name",
+                VLLM_MM_MODEL,
             ],
-            env=_make_process_env(log_level="info"),
+            env=_make_process_env(log_level="debug", **extra_env),
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             ],
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
-            log_dir=_prepare_log_dir(request, "vllm-mm-frontend"),
+            log_dir=_prepare_log_dir(request, f"vllm-mm-frontend-{transfer_mode}"),
             **_COMMON_PROCESS_KWARGS,
         )
 
@@ -207,20 +186,20 @@ def mm_runtime_services(request):
         os.environ.pop("ETCD_ENDPOINTS", None)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module", params=["shm", "nixl", "disabled"])
 def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
-    frontend_port, vllm_port, router_port, kv_event_port = allocate_ports(
-        count=4, start_port=10000
-    )
+    transfer_mode = request.param
+    frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=10000)
 
     with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
-        time.sleep(10)
-        with VLLMMMRouterWorkerProcess(request, system_port=router_port) as router_proc:
-            time.sleep(3)
-            with FrontendProcess(request, frontend_port=frontend_port):
-                yield frontend_port, router_proc
+        # Worker health check passed; wait briefly for ZMQ publisher to bind.
+        time.sleep(2)
+        with FrontendProcess(
+            request, frontend_port=frontend_port, transfer_mode=transfer_mode
+        ) as frontend_proc:
+            yield frontend_port, frontend_proc
 
 
 def _make_png_bytes(color: tuple[int, int, int], size: int = 1024) -> bytes:
