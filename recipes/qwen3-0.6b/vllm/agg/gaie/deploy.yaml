@@ -11,7 +11,6 @@ spec:
       create: false
   services:
     Epp:
-      envFromSecret: hf-token-secret
       componentType: epp
       replicas: 1
       extraPodSpec:
@@ -63,7 +62,6 @@ spec:
           - dynamo.frontend
           - --router-mode
           - direct
-        envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
           env:

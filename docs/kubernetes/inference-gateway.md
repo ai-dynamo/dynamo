@@ -20,7 +20,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-0.6b/vllm/agg/gaie).
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](../../recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -45,7 +45,7 @@ export NAMESPACE=my-model # You can put the inference gateway into another names
 ```
 This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
-#### f. Verify the Gateway is running
+#### Verify the Gateway is running
 
 ```bash
 kubectl get gateway inference-gateway -n ${NAMESPACE}
@@ -73,7 +73,7 @@ spec:
       mode: SIMPLE
 ```
 
-Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
+Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](../../recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
 
 ### 3. Setup secrets ###
 
