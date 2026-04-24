@@ -231,6 +231,90 @@ func TestDiscoverGPUs_NoNodes(t *testing.T) {
 	assert.Contains(t, err.Error(), "no nodes found")
 }
 
+func TestDiscoverGPUsFiltered_MixedSKU(t *testing.T) {
+	ctx := context.Background()
+
+	h100Node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	a100Node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "a100-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "4",
+				LabelGPUProduct: "A100-SXM4-40GB",
+				LabelGPUMemory:  "40960",
+			},
+		},
+	}
+	k8sClient := newFakeClient(h100Node, a100Node)
+
+	t.Run("unfiltered selects best and counts only matching SKU", func(t *testing.T) {
+		info, err := DiscoverGPUsFiltered(ctx, k8sClient, "")
+		require.NoError(t, err)
+		// H100 wins (8 GPUs > 4 GPUs)
+		assert.Equal(t, 8, info.GPUsPerNode)
+		assert.Equal(t, "H100-SXM5-80GB", info.Model)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUType("h100_sxm"), info.System)
+		// Only 1 node with matching H100 SKU
+		assert.Equal(t, 1, info.NodesWithGPUs)
+	})
+
+	t.Run("filter by a100_sxm selects A100 node", func(t *testing.T) {
+		info, err := DiscoverGPUsFiltered(ctx, k8sClient, "a100_sxm")
+		require.NoError(t, err)
+		assert.Equal(t, 4, info.GPUsPerNode)
+		assert.Equal(t, "A100-SXM4-40GB", info.Model)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUType("a100_sxm"), info.System)
+		assert.Equal(t, 1, info.NodesWithGPUs)
+	})
+
+	t.Run("filter by nonexistent SKU returns error", func(t *testing.T) {
+		_, err := DiscoverGPUsFiltered(ctx, k8sClient, "l40s")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "l40s")
+	})
+}
+
+func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
+	ctx := context.Background()
+
+	// Two H100 nodes
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-1",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-2",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	k8sClient := newFakeClient(node1, node2)
+
+	info, err := DiscoverGPUsFiltered(ctx, k8sClient, "")
+	require.NoError(t, err)
+	assert.Equal(t, 8, info.GPUsPerNode)
+	assert.Equal(t, 2, info.NodesWithGPUs)
+}
+
 func TestDiscoverGPUs_NoGPUNodes(t *testing.T) {
 	ctx := context.Background()
 
