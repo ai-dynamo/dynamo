@@ -1149,4 +1149,51 @@ mod tests {
             out_keep
         );
     }
+
+    // N4: developer-role interactions with drop_thinking.
+    // find_last_user_index returns the index of user OR developer messages; the
+    // drop_thinking reasoning cutoff and the thinking-seed insertion treat
+    // user and developer identically.
+
+    #[test]
+    fn test_developer_only_conversation_renders_developer_content() {
+        let messages = json!([
+            {"role": "system", "content": "sys"},
+            {"role": "developer", "content": "x"},
+            {"role": "assistant", "reasoning_content": "R", "content": "ok"}
+        ]);
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+        assert!(
+            out.contains("x"),
+            "developer content should appear in output, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_developer_as_last_user_index_controls_reasoning_cutoff() {
+        // Indices: 0=user, 1=assistant(FIRST), 2=developer(y), 3=assistant(SECOND).
+        // find_last_user_index = 2 (developer). With drop_thinking=true:
+        //   - assistant idx=1 < 2  → reasoning_content stripped.
+        //   - assistant idx=3 >= 2 → reasoning_content preserved.
+        let messages = json!([
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "reasoning_content": "FIRST", "content": "r1"},
+            {"role": "developer", "content": "y"},
+            {"role": "assistant", "reasoning_content": "SECOND", "content": "r2"}
+        ]);
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+        assert!(
+            !out.contains("FIRST"),
+            "reasoning before last user/developer (idx 1 < 2) should be stripped, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("SECOND"),
+            "reasoning at/after last user/developer (idx 3 > 2) should survive, got:\n{}",
+            out
+        );
+    }
 }
