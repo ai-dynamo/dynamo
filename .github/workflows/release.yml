@@ -60,7 +60,10 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            if [[ "${BRANCH_NAME}" != "main" ]]; then
+            # TODO(anants): REVERT before merge — temporarily allow dispatching
+            # nightly from anants/release-stage-wheels-artifactory to validate
+            # the new stage-wheels-artifactory job end-to-end.
+            if [[ "${BRANCH_NAME}" != "main" && "${BRANCH_NAME}" != "anants/release-stage-wheels-artifactory" ]]; then
               echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
               exit 1
             fi
