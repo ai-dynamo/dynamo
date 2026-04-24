@@ -29,6 +29,9 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("basic", ReasoningParserType::Basic);
         map.insert("gpt_oss", ReasoningParserType::GptOss);
         map.insert("qwen3", ReasoningParserType::Qwen);
+        map.insert("deepseek_v4", ReasoningParserType::Qwen);
+        map.insert("deepseek-v4", ReasoningParserType::Qwen);
+        map.insert("deepseekv4", ReasoningParserType::Qwen);
         map.insert("nemotron_deci", ReasoningParserType::NemotronDeci);
         map.insert("kimi", ReasoningParserType::Kimi);
         map.insert("kimi_k25", ReasoningParserType::KimiK25);
@@ -246,6 +249,9 @@ mod tests {
             "basic",
             "gpt_oss",
             "qwen3",
+            "deepseek_v4",
+            "deepseek-v4",
+            "deepseekv4",
             "nemotron_deci",
             "kimi",
             "kimi_k25",
@@ -260,6 +266,42 @@ mod tests {
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
         }
+    }
+
+    #[test]
+    fn test_deepseek_v4_detect_and_parse() {
+        for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            let mut parser = ReasoningParserType::get_reasoning_parser_from_name(parser_name);
+            let result = parser.detect_and_parse_reasoning("<think>thinking</think>answer", &[]);
+            assert_eq!(result.reasoning_text, "thinking");
+            assert_eq!(result.normal_text, "answer");
+        }
+    }
+
+    #[test]
+    fn test_deepseek_v4_no_forced_reasoning_without_tags() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        let result = parser.detect_and_parse_reasoning("answer only", &[]);
+        assert_eq!(result.reasoning_text, "");
+        assert_eq!(result.normal_text, "answer only");
+    }
+
+    #[test]
+    fn test_deepseek_v4_streaming() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+
+        let chunks = ["<think>rea", "son</think>answer"];
+        let mut reasoning = String::new();
+        let mut normal = String::new();
+
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            reasoning.push_str(&result.reasoning_text);
+            normal.push_str(&result.normal_text);
+        }
+
+        assert_eq!(reasoning, "reason");
+        assert_eq!(normal, "answer");
     }
 
     #[test]

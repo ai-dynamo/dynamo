@@ -224,6 +224,14 @@ mod tests {
         DsmlParserConfig::default()
     }
 
+    fn get_v4_test_config() -> DsmlParserConfig {
+        DsmlParserConfig {
+            function_calls_start: "<｜DSML｜tool_calls>".to_string(),
+            function_calls_end: "</｜DSML｜tool_calls>".to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_detect_tool_call_start() {
         let config = get_test_config();
@@ -240,9 +248,33 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_tool_call_start_v4() {
+        let config = get_v4_test_config();
+        assert!(detect_tool_call_start_dsml("<｜DSML｜tool_calls>", &config));
+        assert!(detect_tool_call_start_dsml(
+            "text <｜DSML｜tool_calls>",
+            &config
+        ));
+        assert!(detect_tool_call_start_dsml("<｜DSML｜tool_c", &config));
+        assert!(!detect_tool_call_start_dsml(
+            "<｜DSML｜function_calls>",
+            &config
+        ));
+        assert!(!detect_tool_call_start_dsml("no tool call here", &config));
+    }
+
+    #[test]
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
         let text = "<｜DSML｜function_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜function_calls>more";
+        let pos = find_tool_call_end_position_dsml(text, &config);
+        assert_eq!(&text[pos..], "more");
+    }
+
+    #[test]
+    fn test_find_tool_call_end_position_v4() {
+        let config = get_v4_test_config();
+        let text = "<｜DSML｜tool_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜tool_calls>more";
         let pos = find_tool_call_end_position_dsml(text, &config);
         assert_eq!(&text[pos..], "more");
     }
@@ -318,6 +350,52 @@ mod tests {
         let (name2, args2) = extract_name_and_args(calls[1].clone());
         assert_eq!(name2, "get_weather");
         assert_eq!(args2["location"], "Hangzhou");
+    }
+
+    #[test]
+    fn test_parse_deepseek_v4_multiple_tool_calls() {
+        let input = r#"Let's check this. <｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_favorite_tourist_spot">
+<｜DSML｜parameter name="city" string="true">Beijing</｜DSML｜parameter>
+</｜DSML｜invoke>
+<｜DSML｜invoke name="search">
+<｜DSML｜parameter name="query" string="true">search agent benchmark 2024</｜DSML｜parameter>
+<｜DSML｜parameter name="topn" string="false">10</｜DSML｜parameter>
+<｜DSML｜parameter name="source" string="true">web</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        let config = get_v4_test_config();
+        let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(normal, Some("Let's check this.".to_string()));
+
+        let (name1, args1) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name1, "get_favorite_tourist_spot");
+        assert_eq!(args1["city"], "Beijing");
+
+        let (name2, args2) = extract_name_and_args(calls[1].clone());
+        assert_eq!(name2, "search");
+        assert_eq!(args2["query"], "search agent benchmark 2024");
+        assert_eq!(args2["topn"], 10);
+        assert_eq!(args2["source"], "web");
+    }
+
+    #[test]
+    fn test_parse_deepseek_v4_no_parameters() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_current_time">
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        let config = get_v4_test_config();
+        let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(normal, Some("".to_string()));
+
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "get_current_time");
+        assert_eq!(args, serde_json::json!({}));
     }
 
     #[test]
