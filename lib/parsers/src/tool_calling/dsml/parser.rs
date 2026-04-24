@@ -56,6 +56,21 @@ pub fn find_tool_call_end_position_dsml(chunk: &str, config: &DsmlParserConfig) 
     }
 }
 
+/// Build the regex that matches a complete DSML tool_calls / function_calls block.
+/// Shared by `extract_tool_calls_with_regex` and `try_tool_call_parse_dsml` so
+/// the two stay in lockstep on how a block is recognised.
+fn build_block_regex(config: &DsmlParserConfig) -> anyhow::Result<Regex> {
+    // Matches: <｜DSML｜function_calls> ... </｜DSML｜function_calls>
+    // Pattern: (?s) = dot matches newlines
+    //          \s*(.*?)\s* = capture content between start/end tags (non-greedy)
+    let block_pattern = format!(
+        r"(?s){}\s*(.*?)\s*{}",
+        regex::escape(&config.block_start),
+        regex::escape(&config.block_end)
+    );
+    Ok(Regex::new(&block_pattern)?)
+}
+
 /// Parse DSML formatted tool calls from a message
 /// Returns (parsed_tool_calls, normal_text_content)
 pub fn try_tool_call_parse_dsml(
@@ -70,27 +85,23 @@ pub fn try_tool_call_parse_dsml(
     }
 
     // Check if tool call block exists
-    if !trimmed.contains(&config.block_start) {
+    let start_idx = trimmed.find(&config.block_start);
+    if start_idx.is_none() {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
-    // Extract normal text before tool calls.
-    // Preserve whitespace verbatim for parity with vLLM: clients that reassemble
-    // streams must not see different prompts depending on which server they talk to.
-    let start_idx = trimmed.find(&config.block_start);
-    let normal_text = if let Some(idx) = start_idx {
-        trimmed[..idx].to_string()
-    } else {
-        String::new()
-    };
-
     // Extract tool calls blocks
-    let tool_calls = extract_tool_calls(trimmed, config)?;
+    let block_regex = build_block_regex(config)?;
+    let tool_calls = extract_tool_calls_with_regex(trimmed, &block_regex, config)?;
 
     if tool_calls.is_empty() {
         // A block-start was detected but no valid invokes parsed. Do NOT leak
         // the DSML markup back to the client; return only the pre-block text
         // and emit a diagnostic with a prefix of the failed block.
+        //
+        // Note: an unterminated block-start here means `block_regex` finds no
+        // match at all, so any valid block *after* the unterminated one is
+        // lost. This matches the pre-existing conservative P1-3 contract.
         if let Some(idx) = start_idx {
             let failed = &trimmed[idx..];
             let prefix: String = failed.chars().take(120).collect();
@@ -99,29 +110,27 @@ pub fn try_tool_call_parse_dsml(
                 prefix
             );
         }
-        return Ok((vec![], Some(normal_text)));
+        let pre_block_text = start_idx
+            .map(|idx| trimmed[..idx].to_string())
+            .unwrap_or_default();
+        return Ok((vec![], Some(pre_block_text)));
     }
+
+    // Preserve inter-block and trailing text: strip every complete block span
+    // from the trimmed input rather than slicing up to the first start token.
+    // Without this we silently lose text between and after multiple blocks.
+    let normal_text = block_regex.replace_all(trimmed, "").to_string();
 
     Ok((tool_calls, Some(normal_text)))
 }
 
-/// Extract all tool calls from the DSML formatted text
-fn extract_tool_calls(
+/// Extract all tool calls matched by `block_regex` from the DSML formatted text.
+fn extract_tool_calls_with_regex(
     text: &str,
+    block_regex: &Regex,
     config: &DsmlParserConfig,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
     let mut tool_calls = Vec::new();
-
-    // Find all function_calls blocks
-    // Matches: <｜DSML｜function_calls> ... </｜DSML｜function_calls>
-    // Pattern: (?s) = dot matches newlines
-    //          \s*(.*?)\s* = capture content between start/end tags (non-greedy)
-    let block_pattern = format!(
-        r"(?s){}\s*(.*?)\s*{}",
-        regex::escape(&config.block_start),
-        regex::escape(&config.block_end)
-    );
-    let block_regex = Regex::new(&block_pattern)?;
 
     for block_match in block_regex.captures_iter(text) {
         if let Some(block_content) = block_match.get(1) {
@@ -681,6 +690,79 @@ mod tests {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "hex suffix must match [0-9a-f]{{24}}: {}",
             suffix
+        );
+    }
+
+    #[test]
+    fn test_multi_block_preserves_inter_and_trailing_text() {
+        // Two complete DSML blocks with text before, between, and after.
+        // Both blocks must be parsed AND the inter-block / trailing text must
+        // survive in normal_content.
+        let input = "pre <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"a\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> middle <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"b\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> tail";
+
+        let config = get_v4_test_config();
+        let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 2, "expected both blocks parsed");
+        assert_eq!(calls[0].function.name, "a");
+        assert_eq!(calls[1].function.name, "b");
+
+        let normal = normal.unwrap();
+        assert!(
+            normal.contains(" middle "),
+            "inter-block text lost: {:?}",
+            normal
+        );
+        assert!(normal.contains(" tail"), "trailing text lost: {:?}", normal);
+        assert!(
+            !normal.contains("<｜DSML｜"),
+            "normal_content leaked DSML markup: {:?}",
+            normal
+        );
+    }
+
+    #[test]
+    fn test_unterminated_block_followed_by_valid_block() {
+        // An unterminated DSML start appears before a complete block. The
+        // non-greedy block regex spans from the FIRST block_start to the
+        // sole block_end, swallowing the nested second block_start as part
+        // of the block content.
+        //
+        // Within that captured span the non-greedy invoke regex pairs the
+        // FIRST `<invoke name="broken">` with the FIRST `</invoke>` — so
+        // one tool call is recovered under the name "broken". This is the
+        // observed contract today; the test locks it in so any future
+        // behavior change is explicit rather than silent.
+        let input = "pre <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"broken\">\n mid <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"ok\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> tail";
+
+        let config = get_v4_test_config();
+        let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert_eq!(calls.len(), 1, "exactly one invoke recovered");
+        assert_eq!(
+            calls[0].function.name, "broken",
+            "outer invoke name is matched first (non-greedy)"
+        );
+
+        let normal = normal.unwrap();
+        assert!(
+            normal.starts_with("pre"),
+            "pre-block text must survive: {:?}",
+            normal
+        );
+        assert!(
+            normal.contains(" tail"),
+            "trailing text must survive: {:?}",
+            normal
+        );
+        assert!(
+            !normal.contains("<｜DSML｜tool_calls>"),
+            "normal_content leaked block_start: {:?}",
+            normal
+        );
+        assert!(
+            !normal.contains("</｜DSML｜tool_calls>"),
+            "normal_content leaked block_end: {:?}",
+            normal
         );
     }
 
