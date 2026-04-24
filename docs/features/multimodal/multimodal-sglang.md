@@ -461,7 +461,6 @@ Key NVTX ranges emitted:
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported
 - **No pre-computed embeddings** - Cannot use `.pt`, `.pth`, `.bin` embedding files; vision encoder runs for every request
-- **No video support** - No video encoder implementation
 - **No audio support** - No audio encoder implementation
 - **Only Processor registers with Dynamo** - Workers are internal components, frontend routes to Processor only
 - **Disaggregated routing** - Decode Worker is the entry point (calls Prefill), cannot route directly to Prefill workers
