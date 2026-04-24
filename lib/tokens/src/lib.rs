@@ -44,6 +44,33 @@ pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
     xxhash_rust::xxh3::xxh3_64_with_seed(data, seed)
 }
 
+/// Custom serde codec that encodes a `u128` as a 16-byte big-endian byte sequence.
+///
+/// MessagePack (`rmp-serde`) has no native 128-bit integer type, so the default
+/// `u128` derive does not roundtrip reliably. Encoding as raw bytes is supported
+/// uniformly across msgpack, JSON, CBOR, etc.
+mod serde_bytes_u128 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(val: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&val.to_be_bytes())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        let array: [u8; 16] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected 16 bytes"))?;
+        Ok(u128::from_be_bytes(array))
+    }
+}
+
 /// A 128-bit positional sequence hash combining traditional sequence hash with positional information.
 ///
 /// Layout:
@@ -56,7 +83,8 @@ pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
 /// - Mode 10: 24-bit position (max 16,777,215) + 38-bit LBH
 /// - Mode 11: 31-bit position (max 2,147,483,647) + 31-bit LBH
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
-pub struct PositionalSequenceHash(u128);
+#[serde(transparent)]
+pub struct PositionalSequenceHash(#[serde(with = "serde_bytes_u128")] u128);
 
 impl PositionalSequenceHash {
     /// Creates a new PositionalSequenceHash from components.
@@ -198,7 +226,8 @@ impl std::fmt::Debug for PositionalSequenceHash {
 /// This encoding enables backward traversal through the radix tree by matching
 /// parent fragments at position-1.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
-pub struct PositionalLineageHash(u128);
+#[serde(transparent)]
+pub struct PositionalLineageHash(#[serde(with = "serde_bytes_u128")] u128);
 
 impl PositionalLineageHash {
     /// Creates a new PositionalLineageHash from components.
@@ -2655,5 +2684,40 @@ mod tests {
         let last = seq.last_complete_block();
         assert!(last.is_some());
         assert_eq!(last.unwrap().tokens().as_ref(), &[5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_positional_hashes_msgpack_roundtrip() {
+        let psh = PositionalSequenceHash::new(0xDEAD_BEEF_CAFE_BABE, 12345, 0x0123_4567_89AB_CDEF);
+        let bytes = rmp_serde::to_vec(&psh).expect("psh serialize");
+        let decoded: PositionalSequenceHash = rmp_serde::from_slice(&bytes).expect("psh deserialize");
+        assert_eq!(psh, decoded);
+        assert_eq!(psh.as_u128(), decoded.as_u128());
+
+        let plh = PositionalLineageHash::new(0x1111_2222_3333_4444, Some(0x5555_6666_7777_8888), 256);
+        let bytes = rmp_serde::to_vec(&plh).expect("plh serialize");
+        let decoded: PositionalLineageHash = rmp_serde::from_slice(&bytes).expect("plh deserialize");
+        assert_eq!(plh, decoded);
+        assert_eq!(plh.as_u128(), decoded.as_u128());
+
+        // Vec roundtrip — exercises the codec inside a container.
+        let vec = vec![psh, PositionalSequenceHash::default(), psh];
+        let bytes = rmp_serde::to_vec(&vec).expect("vec serialize");
+        let decoded: Vec<PositionalSequenceHash> = rmp_serde::from_slice(&bytes).expect("vec deserialize");
+        assert_eq!(vec, decoded);
+    }
+
+    #[test]
+    fn test_positional_hashes_json_roundtrip() {
+        // Confirm the byte-array codec also roundtrips through JSON (array of u8).
+        let psh = PositionalSequenceHash::new(0xAAAA_BBBB_CCCC_DDDD, 7, 0xEEEE_FFFF_0000_1111);
+        let json = serde_json::to_string(&psh).expect("psh json serialize");
+        let decoded: PositionalSequenceHash = serde_json::from_str(&json).expect("psh json deserialize");
+        assert_eq!(psh, decoded);
+
+        let plh = PositionalLineageHash::new(0x1234_5678, Some(0xABCD_EF01), 42);
+        let json = serde_json::to_string(&plh).expect("plh json serialize");
+        let decoded: PositionalLineageHash = serde_json::from_str(&json).expect("plh json deserialize");
+        assert_eq!(plh, decoded);
     }
 }
