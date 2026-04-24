@@ -9,9 +9,12 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v1.0.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
+**Latest stable release:** [v1.0.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.2) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.16.0` | NIXL `0.10.1`
 
-**Experimental release:** [v1.1.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.17.1` | NIXL `0.10.1`
+**Experimental releases:**
+- [v1.1.0-dev.3](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3) *(partial -- TensorRT-LLM container only)* -- TensorRT-LLM `1.3.0rc11` | branch ToT also pins SGLang `0.5.10.post1` | vLLM `0.19.0` | NIXL `0.10.1`
+- [v1.1.0-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.2) *(partial -- SGLang + TensorRT-LLM containers)* -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc9` | branch ToT also pins vLLM `0.19.0` | NIXL `0.10.1`
+- [v1.1.0-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.1) -- SGLang `0.5.9` | TensorRT-LLM `1.3.0rc5.post1` | vLLM `0.17.1` | NIXL `0.10.1`
 
 | Requirement | Supported |
 | :--- | :--- |
@@ -29,8 +32,11 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
+| **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.3** *(experimental, partial)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
+| **v1.1.0-dev.2** *(experimental, partial)* | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
 | **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
+| **v1.0.2** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v0.9.1** | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
@@ -47,9 +53,12 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 | **v0.6.0** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 
+For **v1.1.0-dev.2** and **v1.1.0-dev.3**, the cells above match `container/context.yaml` on the corresponding release branch (pins used to build images). Those dev lines are **partial releases**: not every backend has a published Dynamo runtime container for that tag. See [Pre-Release Artifacts](release-artifacts.md#pre-release-artifacts) for what actually shipped.
+
 ### Version Labels
 
 - **main (ToT)** reflects the current development branch.
+- Releases marked *(experimental, partial)* are pre-releases: the table shows branch build pins, which may include backends with no NGC image for that dev tag yet.
 - Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
 ### Version Compatibility
@@ -63,6 +72,11 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| **1.0.2** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
 | **1.0.1** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
@@ -97,6 +111,8 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | | **vLLM** | 12.8 | 570.xx+ | |
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
+
+Experimental `v1.1.0-dev.*` images follow the same CUDA matrix as `v1.0.2`.
 
 Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 

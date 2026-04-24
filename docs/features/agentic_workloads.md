@@ -30,7 +30,7 @@ Agentic hints are per-request metadata that the agent client (e.g. Claude Code, 
 
 ![Agentic workflow: Harness → hints in request → Dynamo frontend → routing hints → KV router (queue order, worker choice) → backend](../assets/img/agentic-hints-workflow.svg)
 
-The request body includes `nvext.agent_hints` for routing and scheduling metadata; the frontend passes those hints to the KV router for queue ordering and worker selection.
+The request body includes `nvext.agent_hints` for routing and scheduling metadata that the frontend passes through to the KV router and backend runtime.
 
 | Hint | Description |
 |------|-------------|
@@ -45,6 +45,7 @@ The request body includes `nvext.agent_hints` for routing and scheduling metadat
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---------|:----:|:------:|:-------------:|
 | Priority-based cache eviction | 🚧 | ✅ | 🚧 |
+| Subagent KV isolation (session control) | | 🚧 | |
 | Cache prefetching | | 🚧 | |
 | Subagent / thinking-aware cache eviction | | 🚧 | |
 | Speculative prefill | ✅ | ✅ | ✅ |
@@ -64,11 +65,13 @@ Dynamo is now supported directly in LangChain using the [NVIDIA AI Endpoints int
 
 - **Priority-based KV cache eviction:** Instead of evicting by LRU alone, the backend can evict **low-priority** cache entries first when the GPU (and, with HiCache, host) cache is full. The `priority` value in `nvext.agent_hints` is forwarded to the engine; with SGLang, enable `--enable-priority-scheduling` and `--radix-eviction-policy priority`.
 
+- **Subagent KV isolation (experimental):** Session control holds subagent KV in dedicated streaming session slots outside the radix tree. Session KV is invisible to eviction and freed deterministically on close or timeout. The router manages sticky session affinity so subsequent turns always hit the same worker. See [SGLang for Agentic Workloads -- Session Control](../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental).
+
 - **Cache prefetching (future work):** Using the predictable agentic lifecycle (e.g. parent-child subagents, known next turn), Dynamo could proactively prefetch or move KV cache to a different worker so that the next request hits warm cache.
 
 ### Speculative prefill
 
-After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/src/bin/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
+After a turn finishes, the system can send a **speculative** `max_tokens=1` prefill with the **predicted next-turn prefix** (conversation history + assistant text, e.g. thinking stripped) to the same worker. When the real next request arrives, it hits a warm KV cache. Per-turn TTFT on turns 2+ can drop significantly (e.g. up to ~3× in [multiturn benchmarks](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/README.md)). This can be extended so that Dynamo automatically sends tools and system prompt for subagents to a worker in advance, so subagent requests always hit warm cache.
 
 ### Priority-aware routing
 

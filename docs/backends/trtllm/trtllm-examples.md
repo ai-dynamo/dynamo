@@ -32,7 +32,7 @@ docker compose -f deploy/docker-compose.yml up -d
 Each launch script runs the frontend and worker(s) in a single terminal. You can run each command separately in different terminals for testing. Each shell script simply runs `python3 -m dynamo.frontend <args>` to start up the ingress and `python3 -m dynamo.trtllm <args>` to start up the workers.
 </Tip>
 
-For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router-guide.md).
+For detailed information about KV-aware routing behavior, see [Routing Concepts](../../components/router/router-concepts.md). For deployment modes, see the [Router Guide](../../components/router/router-guide.md).
 
 ## Single Node Examples
 

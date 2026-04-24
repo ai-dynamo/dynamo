@@ -653,7 +653,7 @@ func TestContinueRollingUpdate_UpdatedServicesPartialCompletion(t *testing.T) {
 	ctx := context.Background()
 
 	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Prefill is updated (new ready >= desired, old gone), decode is not
@@ -736,8 +736,8 @@ func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, newPrefillDCD, newDecodeDCD)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Only prefill is updated; decode has 0 ready replicas
@@ -765,10 +765,10 @@ func TestStartRollingUpdate_UpdatedServicesInitializedToNil(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, testNewWorkerHash)
+	err := r.startRollingUpdate(ctx, dgd, testNewWorkerHash)
 	require.NoError(t, err)
 
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	assert.Nil(t, rollingUpdateStatus.UpdatedServices)
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, rollingUpdateStatus.Phase)
 }
@@ -801,14 +801,14 @@ func TestCompleteRollingUpdate_UpdatedServicesContainsAllWorkers(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
-	// Should contain all worker services (sorted), but not frontend
-	assert.Equal(t, []string{"decode", "prefill"}, rollingUpdateStatus.UpdatedServices)
-	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, rollingUpdateStatus.Phase)
-	assert.NotNil(t, rollingUpdateStatus.EndTime)
+	// Check dgd.Status.RollingUpdate directly because r.Update() inside completeRollingUpdate
+	// decodes the API server response back into dgd, and status is re-set after the update.
+	assert.Equal(t, []string{"decode", "prefill"}, dgd.Status.RollingUpdate.UpdatedServices)
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+	assert.NotNil(t, dgd.Status.RollingUpdate.EndTime)
 }
 
 func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
@@ -884,13 +884,14 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, newPrefillDCD, newDecodeDCD)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
-	// Rolling update should complete, and all services should be listed
-	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, rollingUpdateStatus.Phase)
-	assert.Equal(t, []string{"decode", "prefill"}, rollingUpdateStatus.UpdatedServices)
+	// Rolling update should complete, and all services should be listed.
+	// Check dgd.Status.RollingUpdate directly because r.Update() inside completeRollingUpdate
+	// decodes the API server response back into dgd, and status is re-set after the update.
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+	assert.Equal(t, []string{"decode", "prefill"}, dgd.Status.RollingUpdate.UpdatedServices)
 }
 
 func TestGetWorkerInfoForWorkerHash(t *testing.T) {
@@ -2440,11 +2441,11 @@ func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd, genADCD, genBDCD, genCDCD)
 	ctx := context.Background()
 
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+	err := r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
 
 	// Both A and B have ready replicas, C has 0 — rolling update not complete
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
 	assert.Empty(t, rollingUpdateStatus.UpdatedServices, "No services should be fully updated yet")
 }
@@ -2685,4 +2686,33 @@ func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
 	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
 	assert.NotNil(t, dgd.Status.RollingUpdate.StartTime)
 	assert.Nil(t, dgd.Status.RollingUpdate.UpdatedServices)
+}
+
+func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate(t *testing.T) {
+	// Stuck case: hashes match but phase is InProgress (e.g., operator restarted between
+	// annotation write and status persistence). Should call completeRollingUpdate which
+	// cleans up old DCDs, updates annotation, and sets Completed.
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {ComponentType: consts.ComponentTypePrefill},
+		"decode":  {ComponentType: consts.ComponentTypeDecode},
+	})
+	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
+	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
+		Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	err := r.reconcileRollingUpdate(context.Background(), dgd)
+	require.NoError(t, err)
+
+	// Phase should be Completed
+	assert.Equal(t, nvidiacomv1alpha1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+	// EndTime should be set
+	assert.NotNil(t, dgd.Status.RollingUpdate.EndTime)
+	// UpdatedServices should contain all worker services
+	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedServices, "prefill")
+	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedServices, "decode")
+	// Annotation should still have the correct hash
+	assert.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 }

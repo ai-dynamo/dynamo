@@ -5,10 +5,11 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
 
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
@@ -47,15 +48,23 @@ pub struct WorkerKvQueryRequest {
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,
-    /// End event ID (inclusive). If `None`, returns up to newest available.
+    /// End event ID (inclusive). Used for validation and `TooNew` responses.
+    /// Successful buffer-backed recovery may still return through the current
+    /// newest buffered event.
     pub end_event_id: Option<u64>,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WorkerKvQueryResponse {
-    /// Events served from the circular buffer (with original event IDs)
-    Events(Vec<RouterEvent>),
+    /// Events served from the circular buffer (with original event IDs),
+    /// always covering the requested `start_event_id` through the current
+    /// buffered tail. `last_event_id` is taken from the same buffer snapshot
+    /// and should be used as the recovery watermark after applying the batch.
+    Events {
+        events: Vec<RouterEvent>,
+        last_event_id: u64,
+    },
     /// Full tree dump (with synthetic 0-indexed event IDs).
     /// Includes `last_event_id`: the newest real event ID in the worker's buffer
     /// at the time of the dump, so the caller can set its tracking cursor correctly.
@@ -242,6 +251,21 @@ impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerRecordRouting
     }
 }
 
+/// Rich non-wire query result for router-local device tier lookups.
+#[derive(Debug, Clone, Default)]
+pub struct MatchDetails {
+    /// Existing overlap scores used by scheduling.
+    pub overlap_scores: OverlapScores,
+    /// Last matched device sequence hash per worker, used to seed lower-tier queries.
+    pub last_matched_hashes: FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
+}
+
+impl MatchDetails {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// A request to find matches in the Radix Tree.
 pub struct MatchRequest {
     /// A vector of `LocalBlockHash` representing the sequence to match.
@@ -271,6 +295,30 @@ impl MatchRequest {
     }
 }
 
+/// A request to find matches while also returning continuation metadata.
+pub struct MatchDetailsRequest {
+    /// A vector of `LocalBlockHash` representing the sequence to match.
+    pub sequence: Vec<LocalBlockHash>,
+    /// A boolean indicating whether to exit early if a single match is found.
+    pub early_exit: bool,
+    /// A channel sender to send the `MatchDetails` response.
+    pub resp: oneshot::Sender<MatchDetails>,
+}
+
+impl MatchDetailsRequest {
+    pub(super) fn new(
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        resp: oneshot::Sender<MatchDetails>,
+    ) -> Self {
+        Self {
+            sequence,
+            early_exit,
+            resp,
+        }
+    }
+}
+
 /// A request to dump the tree as events
 pub struct DumpRequest {
     /// Channel to send the dumped events
@@ -289,6 +337,8 @@ pub enum WorkerTask {
     RemoveWorker(WorkerId),
     /// Remove a single dp_rank for a worker.
     RemoveWorkerDpRank(WorkerId, DpRank),
+    /// Best-effort maintenance task for shared-state backends.
+    CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
     Terminate,
 }
@@ -298,29 +348,4 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShardedMatchRequest {
-    pub(super) sequence: Vec<LocalBlockHash>,
-    pub(super) early_exit: bool,
-    pub(super) resp: mpsc::Sender<OverlapScores>,
-    #[cfg(feature = "bench")]
-    pub(super) created_at: Instant,
-}
-
-impl ShardedMatchRequest {
-    pub(super) fn new(
-        sequence: Vec<LocalBlockHash>,
-        early_exit: bool,
-        resp: mpsc::Sender<OverlapScores>,
-    ) -> Self {
-        Self {
-            sequence,
-            early_exit,
-            resp,
-            #[cfg(feature = "bench")]
-            created_at: Instant::now(),
-        }
-    }
 }

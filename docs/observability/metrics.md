@@ -85,7 +85,7 @@ Dynamo exposes several categories of metrics:
 - **Frontend Metrics** (`dynamo_frontend_*`) - Request handling, token processing, and latency measurements
 - **Component Metrics** (`dynamo_component_*`) - Request counts, processing times, byte transfers, and system uptime
 - **Specialized Component Metrics** (e.g., `dynamo_preprocessor_*`) - Component-specific metrics
-- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/vllm-observability.md) (`vllm:*`), [SGLang](../backends/sglang/sglang-observability.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/trtllm-prometheus.md) (`trtllm_*`)
+- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/vllm-observability.md) (`vllm:*`), [SGLang](../backends/sglang/sglang-observability.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/trtllm-observability.md) (`trtllm_*`)
 
 ## Runtime Hierarchy
 
@@ -99,6 +99,8 @@ The Dynamo metrics API is available on `DistributedRuntime`, `Namespace`, `Compo
 This hierarchical structure allows you to create metrics at the appropriate level of granularity for your monitoring needs.
 
 ## Available Metrics
+
+**Note:** Labeled metrics (`HistogramVec`, `CounterVec`, `GaugeVec`) register a metric *family*, not individual time series. A series for a given label combination only appears at `/metrics` after the first `with_label_values(...)` call for that combination — i.e., after the first matching request is served. For example, `dynamo_frontend_request_duration_seconds{model="Qwen/Qwen3-0.6B"}` will not appear on a freshly-started frontend until a request for that model is handled. This is expected Prometheus client behavior, not a missing metric.
 
 ### Backend Component Metrics
 
@@ -132,8 +134,10 @@ Some components expose additional metrics specific to their functionality:
 
 The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_*` metrics on port 8000 by default (configurable via `--http-port` or `DYN_HTTP_PORT`) at the `/metrics` endpoint. Most metrics include `model` labels containing the model name:
 
-- `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
-- `dynamo_frontend_queued_requests`: Number of requests in HTTP processing queue (gauge)
+- `dynamo_frontend_active_requests`: Number of requests currently being handled by the frontend, from HTTP handler entry until the response stream completes (gauge). This is the top-level in-flight count with no stage breakdown.
+- `dynamo_frontend_stage_requests`: Number of requests currently in a given frontend pipeline stage (gauge, labels: `stage`, `phase`). See [Stage and phase labels](#stage-and-phase-labels) below.
+- `dynamo_frontend_inflight_requests`: Inflight requests (gauge). **Deprecated** — kept for backward compatibility; prefer `dynamo_frontend_active_requests`, which has identical semantics with a clearer name.
+- `dynamo_frontend_queued_requests`: Number of requests in HTTP processing queue (gauge). **Deprecated** — kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages.
 - `dynamo_frontend_disconnected_clients`: Number of disconnected clients (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_cached_tokens`: Number of cached tokens (prefix cache hits) per request (histogram)
@@ -150,7 +154,44 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 curl http://localhost:8000/metrics
 ```
 
-**Note**: The `dynamo_frontend_inflight_requests` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
+#### Stage and phase labels
+
+`dynamo_frontend_stage_requests` decomposes the lifetime of an active frontend request into three sequential pipeline stages. A request is counted in exactly one stage at a time (via an RAII guard that increments on stage entry and decrements on stage exit), and is counted in `dynamo_frontend_active_requests` for its entire lifetime. Between stages — and after `dispatch` exits while the backend is streaming tokens — the request is still in `active_requests` but in no `stage_requests` bucket.
+
+**`stage` label values:**
+
+| Stage | What it covers | Enters when | Exits when |
+|-------|----------------|-------------|------------|
+| `preprocess` | Tokenization and chat-template application | The frontend enters `preprocess_request` | Preprocessing returns |
+| `route` | Worker selection (including parking in the KV-router queue while waiting for a worker) | The router's `generate()` is called | A worker is selected or the request is queued for one |
+| `dispatch` | Serialization, transport to the chosen worker, and waiting for the backend's first response (includes backend prefill time) | `generate()` is called in `AddressedPushRouter` | The first response is received from the backend |
+
+**`phase` label values:**
+
+| Phase | Meaning |
+|-------|---------|
+| `prefill` | The request is being handled by a prefill worker in disaggregated serving |
+| `decode` | The request is being handled by a decode worker in disaggregated serving |
+| `aggregated` | Aggregated (non-disaggregated) serving — a single worker handles both prefill and decode |
+| `""` (empty) | The stage does not distinguish phases (used by `preprocess`) |
+
+**Derived signals operators commonly want.** These are cluster-wide totals across all frontend pods. `stage_requests` has no `model` label, so you cannot split these by model; add `by (pod)` or `by (instance)` to any `sum(...)` below if you need per-pod visibility. The stage filter `stage=~"preprocess|route|dispatch"` is used explicitly to keep the "pre-first-token" semantic stable if additional stages (e.g. `postprocess`) are added in the future.
+
+- **Requests waiting for a worker to start generating (the old "queued" semantic):** `sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})` — i.e. still in `preprocess`, `route`, or `dispatch`.
+- **Requests currently being processed by a backend worker:** use the worker-side gauge `sum(dynamo_component_inflight_requests{dynamo_component="backend",dynamo_endpoint="generate"})` — this is the authoritative count, available whenever `DYN_SYSTEM_PORT` is set on workers (see [Backend Component Metrics](#backend-component-metrics)).
+    - *Frontend-perspective variant* (useful if worker metrics aren't being scraped, or when sizing frontend pods rather than workers): `sum(dynamo_frontend_active_requests) - sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})`. This differs from the worker gauge because its window starts when the first token arrives at the frontend and extends through streaming to the client, so it includes transit and client-buffering time.
+- **Router saturation:** `sum(dynamo_frontend_stage_requests{stage="route"})` spiking indicates workers can't be selected fast enough (e.g. all backends busy, KV-router queue full).
+- **Backend prefill saturation:** `sum(dynamo_frontend_stage_requests{stage="dispatch"})` spiking indicates the backend is slow to produce first tokens.
+
+
+#### Deprecated frontend gauges
+
+The following gauges are still emitted but will be removed in a future release. They were superseded by the gauges above as part of the frontend-metrics rework (PR #8162). Dashboards and alerts should migrate off them.
+
+| Deprecated metric | Replacement |
+|-------------------|-------------|
+| `dynamo_frontend_inflight_requests` | `dynamo_frontend_active_requests` (same semantics, clearer name) |
+| `dynamo_frontend_queued_requests` | `sum(dynamo_frontend_stage_requests{stage=~"preprocess\|route\|dispatch"})` |
 
 #### Model Configuration Metrics
 
@@ -171,6 +212,8 @@ These metrics come from the Model Deployment Card information provided by worker
 - `dynamo_frontend_model_migration_limit`: Request migration limit for a worker serving the model (gauge)
 
 ### Request Processing Flow
+
+> **Deprecated framing.** The two-metric model below (inflight vs. HTTP queue) describes the legacy `dynamo_frontend_inflight_requests` and `dynamo_frontend_queued_requests` gauges and is kept only to help operators reading existing dashboards. New work should use `dynamo_frontend_active_requests` and the per-stage `dynamo_frontend_stage_requests` gauges described under [Stage and phase labels](#stage-and-phase-labels).
 
 This section explains the distinction between two key metrics used to track request processing:
 
@@ -223,7 +266,7 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 The router exposes metrics for monitoring routing decisions and overhead. Defined in `lib/llm/src/kv_router/metrics.rs`.
 
-For router configuration, deployment modes, and tuning, see the [Router Guide](../components/router/router-guide.md).
+For router deployment modes, see the [Router Guide](../components/router/router-guide.md). For router flags and tuning, see [Configuration and Tuning](../components/router/router-configuration.md).
 
 #### Metrics Availability by Configuration
 

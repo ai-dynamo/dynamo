@@ -63,8 +63,11 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     return config.__dict__
 
 
-def parse_args() -> Config:
+def parse_args(argv: list[str] | None = None) -> Config:
     """Parse command-line arguments for the vLLM backend.
+
+    Args:
+        argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
 
     Returns:
         Config: Parsed configuration object.
@@ -94,7 +97,7 @@ def parse_args() -> Config:
             continue
         vg._group_actions.append(action)
 
-    args, unknown = parser.parse_known_args()
+    args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
 
     # Validate arguments
@@ -123,10 +126,10 @@ def cross_validate_config(
     """Validate dynamo and engine config together. This should not modify the configs."""
 
     if hasattr(engine_config, "stream_interval") and engine_config.stream_interval != 1:
-        logger.warning(
-            "--stream-interval is currently not respected in Dynamo. "
-            "Dynamo uses its own post-processing implementation on the frontend, "
-            "bypassing vLLM's OutputProcessor buffering."
+        logger.info(
+            "--stream-interval=%d will be propagated to the Dynamo frontend. "
+            "Set DYN_VLLM_STREAM_INTERVAL env var to override.",
+            engine_config.stream_interval,
         )
 
     # Validate --gms-shadow-mode requires --load-format gms

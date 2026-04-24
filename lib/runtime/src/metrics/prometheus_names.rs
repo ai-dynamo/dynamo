@@ -177,6 +177,10 @@ pub mod frontend_service {
     /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
+    /// Number of requests currently being handled by the frontend, from HTTP handler
+    /// entry to response completion. Clearer name for what inflight_requests measures.
+    pub const ACTIVE_REQUESTS: &str = "active_requests";
+
     /// Number of disconnected clients (gauge that can go up and down)
     pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
@@ -191,6 +195,15 @@ pub mod frontend_service {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
+
+    /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
+
+    /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    pub const SHARED_CACHE_HIT_RATE: &str = "shared_cache_hit_rate";
+
+    /// Shared cache blocks beyond device overlap for the selected worker
+    pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
 
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
@@ -231,6 +244,11 @@ pub mod frontend_service {
 
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Total number of times migration was disabled because the sequence length
+    /// exceeded the configured max_seq_len limit
+    pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
+        "model_migration_max_seq_len_exceeded_total";
 
     /// Total number of request cancellations
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
@@ -322,6 +340,9 @@ pub mod frontend_service {
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
+
+        /// Backend accepted the request but stopped responding (response inactivity timeout)
+        pub const RESPONSE_TIMEOUT: &str = "response_timeout";
 
         /// Internal server error (500 and other unexpected errors)
         pub const INTERNAL: &str = "internal";
@@ -493,6 +514,12 @@ pub mod routing_overhead {
 
     /// Total routing overhead per request
     pub const TOTAL_MS: &str = "overhead_total_ms";
+
+    /// Time spent querying the shared KV cache (Mooncake)
+    pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
+
+    /// Total shared cache query errors (timeouts, HTTP failures)
+    pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
 /// Router request metrics (component-scoped aggregate histograms + counter)
@@ -525,12 +552,30 @@ pub mod router {
 
     /// Output sequence length in tokens observed at the router
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+
+    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
+
+    /// Shared cache blocks beyond device overlap for the selected worker
+    pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
 }
 
 /// Frontend pipeline stage and event-loop metrics
 pub mod frontend_perf {
     /// Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     pub const STAGE_DURATION_SECONDS: &str = "stage_duration_seconds";
+    /// Per-stage inflight request gauge (labels: stage, phase)
+    /// Tracks how many requests are currently in each pipeline stage.
+    /// Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    pub const STAGE_REQUESTS: &str = "stage_requests";
+
+    /// Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    pub const STAGE_PREPROCESS: &str = "preprocess";
+    pub const STAGE_ROUTE: &str = "route";
+    pub const STAGE_DISPATCH: &str = "dispatch";
     /// Tokenization time in preprocessor
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor

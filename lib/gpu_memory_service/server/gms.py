@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
@@ -42,15 +43,10 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
 )
-from gpu_memory_service.common.types import (
-    GrantedLockType,
-    RequestedLockType,
-    ServerState,
-    StateEvent,
-)
 
 from .allocations import AllocationInfo, GMSAllocationManager
-from .session import Connection, GMSSessionManager
+from .fsm import Connection, ServerState, StateEvent
+from .session import GMSSessionManager
 
 logger = logging.getLogger(__name__)
 

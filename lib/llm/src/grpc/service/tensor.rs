@@ -86,7 +86,12 @@ pub async fn tensor_response_stream(
     let engine = state
         .manager()
         .get_tensor_engine(model)
-        .map_err(|_| Status::not_found("model not found"))?;
+        .map_err(|e| match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                Status::unavailable("model temporarily unavailable")
+            }
+            _ => Status::not_found("model not found"),
+        })?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 

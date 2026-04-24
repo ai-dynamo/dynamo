@@ -6,7 +6,7 @@
 # candidate DGDs exceeding cluster GPU capacity (totalGpus=16).
 model: "Qwen/Qwen3-30B-A3B"
 backend: sglang
-image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0"
+image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2"
 hardware:
   gpuSku: b200_sxm
   totalGpus: 16
