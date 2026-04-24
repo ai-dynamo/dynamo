@@ -337,14 +337,18 @@ async def test_connector_unsupported_and_noop_operations(connector):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_planner", [False, True])
 async def test_connector_wait_for_deployment_ready_delegates_to_local_k8s(
-    connector_runtime,
+    connector_runtime, include_planner
 ):
     """wait_for_deployment_ready must wait for the pool's own workers to be
     ready before returning. Without this, _async_init returns within
     milliseconds and get_worker_info races with MDC registration, caching a
     fallback WorkerInfo (context_length/max_kv_tokens unset) for the pod's
     lifetime and silently disabling load scaling.
+
+    Parametrized to guard against a refactor that hardcodes ``include_planner``
+    or drops the kwarg when forwarding.
     """
     c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
     fake_local = MagicMock()
@@ -352,8 +356,31 @@ async def test_connector_wait_for_deployment_ready_delegates_to_local_k8s(
     c._local_k8s_connector = fake_local
     c._local_k8s_init_attempted = True
 
-    await c.wait_for_deployment_ready(include_planner=False)
-    fake_local.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
+    await c.wait_for_deployment_ready(include_planner=include_planner)
+    fake_local.wait_for_deployment_ready.assert_awaited_once_with(
+        include_planner=include_planner
+    )
+
+
+@pytest.mark.asyncio
+async def test_connector_wait_for_deployment_ready_propagates_exceptions(
+    connector_runtime,
+):
+    """A TimeoutError (or similar) from the pool-local wait must propagate so
+    _async_init surfaces a broken pool DGD rather than silently swallowing the
+    failure and falling back into the original bug (fallback WorkerInfo cached
+    forever). Mirrors the standalone environment=kubernetes behavior.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.wait_for_deployment_ready = AsyncMock(
+        side_effect=TimeoutError("workers not ready")
+    )
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    with pytest.raises(TimeoutError, match="workers not ready"):
+        await c.wait_for_deployment_ready(include_planner=False)
 
 
 def test_connector_model_name_and_predicted_load(connector_runtime):
