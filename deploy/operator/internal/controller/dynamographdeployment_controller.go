@@ -94,6 +94,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -422,9 +423,14 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 
 		var isReady bool
 		var reason string
-		if component.GetNumberOfNodes() > 1 {
+		// Keep in sync with reconcileGroveScaling: any service that requires a
+		// PodCliqueScalingGroup (multinode OR inter-pod GMS failover) must be
+		// queried via CheckPCSGReady, otherwise single-node GMS services stall
+		// in the "in progress" list because the corresponding PodClique never
+		// exists.
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
+		if usesPCSG {
 			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
-
 		} else {
 			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
@@ -625,13 +631,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 			continue
 		}
 
-		numberOfNodes := component.GetNumberOfNodes()
-		isMultinode := numberOfNodes > 1
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
+		resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
 
-		if isMultinode {
-			// Scale PodCliqueScalingGroup for multinode services
-			// Grove naming pattern: {DGD.name}-{replicaIndex}-{serviceName}
-			resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
+		if usesPCSG {
 			err := r.scaleGroveResource(ctx,
 				resourceName,
 				dynamoDeployment.Namespace,
@@ -642,9 +645,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 				return fmt.Errorf("failed to scale PodCliqueScalingGroup %s: %w", resourceName, err)
 			}
 		} else {
-			// Scale individual PodClique for single-node services
-			// Grove naming pattern: {DGD.name}-{replicaIndex}-{serviceName}
-			resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
 			err := r.scaleGroveResource(ctx,
 				resourceName,
 				dynamoDeployment.Namespace,
@@ -661,28 +661,48 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
+// reconcileGMSResourceClaimTemplates syncs one ResourceClaimTemplate per
+// service when DRA is available, and otherwise fails fast if any service
+// needs DRA-backed GPU allocation.
+//
+// Both the GMS sidecar (gpuMemoryService.enabled=true) and inter-pod GMS
+// failover (failover.mode=interPod) allocate GPUs via DRA ResourceClaims.
+// Without DRA, pods would be admitted by the webhook but silently reference
+// ResourceClaimTemplates that reconcile never creates, producing a confusing
+// "resourceclaim not found" at schedule time. We fail fast here so the user
+// gets an actionable error instead.
+func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	if !r.RuntimeConfig.DRAEnabled {
+		for _, component := range dynamoDeployment.Spec.Services {
+			if (component.GPUMemoryService != nil && component.GPUMemoryService.Enabled) ||
+				component.IsInterPodFailoverEnabled() {
+				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but DRA is not available (either the resource.k8s.io API group is not registered on this cluster, which requires Kubernetes 1.32+, or DRA has been explicitly disabled in the operator configuration)")
+			}
+		}
+		return nil
+	}
+
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
+		claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
+		})
+		if err != nil {
+			logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+			return fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
+		}
+	}
+	return nil
+}
+
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
-	if r.RuntimeConfig.DRAEnabled {
-		for serviceName, component := range dynamoDeployment.Spec.Services {
-			gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
-			claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
-			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-				return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
-			})
-			if err != nil {
-				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
-				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
-			}
-		}
-	} else {
-		for _, component := range dynamoDeployment.Spec.Services {
-			if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
-				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
-			}
-		}
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
@@ -1455,6 +1475,7 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		consts.MultinodeDeploymentTypeGrove, // Use Grove (single-node backends return early)
 		serviceName,
 		nil, // No checkpoint info for checkpoint creation jobs
+		nil, // Use default deployer
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
@@ -1606,6 +1627,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
 	}
 
+	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule).
+	// Only attempt DestinationRule reconciliation when the Istio CRDs are
+	// present on the cluster; otherwise the API call would fail on every
+	// reconcile for Istio-less clusters.
+	if r.RuntimeConfig.IstioAvailable {
+		meshEnabled := r.Config.ServiceMesh.IsEnabled()
+		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
+		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
+			return destinationRule, !meshEnabled, nil
+		})
+		if err != nil {
+			logger.Error(err, "Failed to sync EPP DestinationRule")
+			return fmt.Errorf("failed to sync EPP DestinationRule: %w", err)
+		}
+		if meshEnabled {
+			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		}
+	} else if r.Config.ServiceMesh.IsEnabled() {
+		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
+	}
+
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
 }
@@ -1659,6 +1701,14 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
+	if r.RuntimeConfig.IstioAvailable {
+		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return false },
+		}))
+	}
 	if r.RuntimeConfig.GroveEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set

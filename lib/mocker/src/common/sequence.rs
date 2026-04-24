@@ -164,12 +164,8 @@ impl ActiveSequence {
 
     /// Positional lineage hashes for all fully-tokenised blocks in the sequence.
     /// Mirrors `block_hashes()` but returns the PLH identity used by kvbm-logical.
-    pub fn positional_lineage_hashes(&self) -> Vec<PositionalLineageHash> {
-        self.tokens
-            .blocks()
-            .iter()
-            .map(|block| block.positional_lineage_hash())
-            .collect()
+    pub fn positional_lineage_hashes(&self) -> &[PositionalLineageHash] {
+        &self.plhs
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.

@@ -14,6 +14,12 @@ pub struct Trace {
     pub sessions: Vec<SessionTrace>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceFileFormat {
+    Mooncake,
+    AppliedComputeAgentic,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionTrace {
     pub session_id: String,

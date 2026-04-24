@@ -107,6 +107,8 @@ navigation:
         path: benchmarks/benchmarking.md
       - page: Mocker Offline Trace Replay
         path: benchmarks/mocker-trace-replay.md
+      - page: Planner Replay Benchmarking
+        path: benchmarks/planner-replay-benchmarking.md
       - section: Testing
         contents:
           - page: Mocker

@@ -140,10 +140,6 @@ impl From<RouterStorageTier> for StorageTier {
     }
 }
 
-/// Legacy type alias for backward compatibility
-#[deprecated(note = "Use StorageTier instead")]
-pub type StorageMedium = StorageTier;
-
 /// Minimal metadata for tracking which event sources have a block
 /// All other metadata (tokens, parent, etc.) is stored in the ConsolidatedEvent when queued
 #[derive(Debug, Clone)]
@@ -195,65 +191,58 @@ pub enum ConsolidatedEvent {
         block_size: usize,
         lora_name: Option<String>,
         source: String,
+        tier: Option<StorageTier>,
     },
     /// Block removed (removed from all sources)
     Remove {
         block_hash: String,
         source: String, // The source where it was last removed
+        tier: Option<StorageTier>,
     },
     /// All blocks cleared
     ClearAll,
 }
 
-/// Cache Status Tracker
-///
-/// Deduplication logic:
-/// - Uses SequenceHash (computed from tokens + parent) as the key for deduplication
-/// - SequenceHash is position-aware: same tokens at different positions = different keys
-/// - Always uses KVBM's xxHash3 hashing function, regardless of source
-/// - This allows vLLM and KVBM blocks at the same position to be deduplicated
-/// - Emit Store: Only when a block is first stored from ANY source
-/// - Emit Remove: Only when a block is removed from ALL sources
-#[derive(Debug)]
-pub struct CacheStatusTracker {
-    /// Map of SequenceHash -> BlockMetadata (tracking which sources have this block)
-    /// The key is position-aware: includes parent context
+#[derive(Debug, Clone)]
+pub struct StoreEventInput {
+    pub block_hash: String,
+    pub source: EventSource,
+    pub token_ids: Vec<u32>,
+    pub parent_hash: Option<String>,
+    pub block_size: usize,
+    pub lora_name: Option<String>,
+    pub tier: Option<StorageTier>,
+    pub data_parallel_rank: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveEventInput {
+    pub block_hash: String,
+    pub source: EventSource,
+    pub tier: Option<StorageTier>,
+}
+
+pub trait CacheStatusTracker: std::fmt::Debug + Send + Sync {
+    fn handle_store(&mut self, event: StoreEventInput) -> bool;
+    fn handle_remove(&mut self, event: RemoveEventInput) -> bool;
+    fn handle_clear_all(&mut self);
+    fn drain_events(&mut self) -> Vec<ConsolidatedEvent>;
+    fn num_blocks(&self) -> usize;
+}
+
+/// Deduplicating cache-status tracker.
+#[derive(Debug, Default)]
+pub struct DedupCacheStatusTracker {
     blocks: HashMap<SequenceHash, BlockMetadata>,
-
-    /// Reverse mapping: external_block_hash -> SequenceHash (that we computed)
-    /// Needed because remove events only provide external hash, not token IDs
-    /// Maps each source's external hash to our computed sequence hash
     hash_mapping: HashMap<String, SequenceHash>,
-
-    /// Queue of events to be published
     event_queue: Vec<ConsolidatedEvent>,
 }
 
-impl Default for CacheStatusTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CacheStatusTracker {
+impl DedupCacheStatusTracker {
     pub fn new() -> Self {
-        Self {
-            blocks: HashMap::new(),
-            hash_mapping: HashMap::new(),
-            event_queue: Vec::new(),
-        }
+        Self::default()
     }
 
-    /// Handle a STORE event
-    ///
-    /// Returns true if a consolidated STORE event should be published.
-    /// Only publishes when a block is stored for the FIRST TIME from ANY source.
-    ///
-    /// # Arguments
-    /// * `block_hash` - The external block hash (from vLLM or KVBM)
-    /// * `source` - The event source (vLLM or KVBM) that stored this block
-    /// * `token_ids` - The token IDs in this block (for content-based deduplication)
-    /// * `tier` - Optional storage tier information (for metadata/debugging)
     #[allow(clippy::too_many_arguments)]
     pub fn handle_store(
         &mut self,
@@ -266,16 +255,65 @@ impl CacheStatusTracker {
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) -> bool {
-        // Compute LocalBlockHash from token IDs (content only)
-        let local_block_hash = compute_local_block_hash(&token_ids);
+        CacheStatusTracker::handle_store(
+            self,
+            StoreEventInput {
+                block_hash,
+                source,
+                token_ids,
+                parent_hash,
+                block_size,
+                lora_name,
+                tier,
+                data_parallel_rank,
+            },
+        )
+    }
 
-        // Resolve parent sequence hash from parent's external hash (if provided)
+    pub fn handle_remove(
+        &mut self,
+        block_hash: &str,
+        source: EventSource,
+        tier: Option<StorageTier>,
+    ) -> bool {
+        CacheStatusTracker::handle_remove(
+            self,
+            RemoveEventInput {
+                block_hash: block_hash.to_string(),
+                source,
+                tier,
+            },
+        )
+    }
+
+    pub fn get_block_sources(&self, external_block_hash: &str) -> Option<&HashSet<EventSource>> {
+        let local_hash = self.hash_mapping.get(external_block_hash)?;
+        self.blocks.get(local_hash).map(|m| &m.sources)
+    }
+
+    #[deprecated(note = "Use get_block_sources instead")]
+    pub fn get_block_tiers(&self, block_hash: &str) -> Option<&HashSet<EventSource>> {
+        self.get_block_sources(block_hash)
+    }
+}
+
+impl CacheStatusTracker for DedupCacheStatusTracker {
+    fn handle_store(&mut self, event: StoreEventInput) -> bool {
+        let StoreEventInput {
+            block_hash,
+            source,
+            token_ids,
+            parent_hash,
+            block_size,
+            lora_name,
+            tier,
+            data_parallel_rank,
+        } = event;
+
+        let local_block_hash = compute_local_block_hash(&token_ids);
         let parent_sequence_hash = parent_hash
             .as_ref()
             .and_then(|ph| self.hash_mapping.get(ph).copied());
-
-        // Compute SequenceHash using KVBM's hashing method (position-aware)
-        // This ensures consistent deduplication regardless of source
         let sequence_hash = compute_sequence_hash(parent_sequence_hash, local_block_hash);
 
         tracing::debug!(
@@ -286,11 +324,7 @@ impl CacheStatusTracker {
         );
 
         if let Some(metadata) = self.blocks.get_mut(&sequence_hash) {
-            // Block already exists from another source (deduplication!), just add the new source
             let is_new_source = metadata.add_source(source);
-
-            // Add this external hash to the mapping so remove events from this source can find the block
-            // Multiple external hashes (from different sources) can map to the same SequenceHash
             self.hash_mapping.insert(block_hash.clone(), sequence_hash);
 
             if is_new_source {
@@ -314,10 +348,8 @@ impl CacheStatusTracker {
                     &token_ids
                 );
             }
-            // Don't publish a new STORE event (block already exists)
             false
         } else {
-            // First time seeing this block from any source - create metadata and queue STORE event
             let metadata = BlockMetadata::new(source, block_hash.clone());
 
             tracing::debug!(
@@ -338,34 +370,16 @@ impl CacheStatusTracker {
             );
 
             self.blocks.insert(sequence_hash, metadata);
-
-            // Add to hash mapping so remove events can find the block by external hash
             self.hash_mapping.insert(block_hash.clone(), sequence_hash);
 
-            // Resolve parent_hash to first_block_hash if parent was deduplicated
-            //
-            // Problem: When the same block is stored from multiple sources (deduplication),
-            // each source may use a different external hash for the same logical block.
-            // Example:
-            //   - Source A (TRTLLM) stores parent with hash "hash_A"
-            //   - Source B (KVBM) stores same parent with hash "hash_B" (different format/algorithm)
-            //   - Router only received STORE event with "hash_A" (first source)
-            //   - When Source B stores child with parent_hash="hash_B", router won't recognize it
-            //
-            // Resolve the parent's external hash to its first_block_hash (the hash
-            // that was sent to the router in the first STORE event) so the router can find it.
             let resolved_parent_hash = parent_hash.and_then(|ph| {
-                // Look up parent's sequence hash from its external hash
                 self.hash_mapping.get(&ph).and_then(|&parent_seq_hash| {
-                    // Get parent's metadata to find first_block_hash
                     self.blocks
                         .get(&parent_seq_hash)
                         .map(|parent_metadata| parent_metadata.first_block_hash.clone())
                 })
             });
 
-            // Queue a STORE event with full metadata
-            // Use resolved_parent_hash (first_block_hash) so router can find the parent
             self.event_queue.push(ConsolidatedEvent::Store {
                 block_hash: block_hash.clone(),
                 parent_hash: resolved_parent_hash,
@@ -373,6 +387,7 @@ impl CacheStatusTracker {
                 block_size,
                 lora_name,
                 source: source.to_str().to_string(),
+                tier,
             });
 
             tracing::debug!(
@@ -387,17 +402,14 @@ impl CacheStatusTracker {
         }
     }
 
-    /// Handle a REMOVE event
-    ///
-    /// Returns true if a consolidated REMOVE event should be published.
-    /// Only publishes when a block is removed from ALL sources.
-    ///
-    /// # Arguments
-    /// * `block_hash` - The external block hash to remove
-    /// * `source` - The event source (vLLM or KVBM) that removed this block
-    pub fn handle_remove(&mut self, block_hash: &str, source: EventSource) -> bool {
-        // Look up the SequenceHash from the external block hash
-        let sequence_hash = match self.hash_mapping.get(block_hash) {
+    fn handle_remove(&mut self, event: RemoveEventInput) -> bool {
+        let RemoveEventInput {
+            block_hash,
+            source,
+            tier,
+        } = event;
+
+        let sequence_hash = match self.hash_mapping.get(&block_hash) {
             Some(&hash) => hash,
             None => {
                 tracing::warn!(
@@ -410,7 +422,6 @@ impl CacheStatusTracker {
         };
 
         if let Some(metadata) = self.blocks.get_mut(&sequence_hash) {
-            // Remove the source
             let was_removed = metadata.remove_source(source);
             if !was_removed {
                 tracing::warn!(
@@ -421,11 +432,7 @@ impl CacheStatusTracker {
                 return false;
             }
 
-            // Remove this external hash immediately when the source removes it
-            // This keeps hash_mapping clean
-            // Each external hash belongs to exactly one source, so when that source
-            // removes the block, we can safely remove the hash_mapping entry
-            self.hash_mapping.remove(block_hash);
+            self.hash_mapping.remove(&block_hash);
 
             tracing::debug!(
                 "Removed hash_mapping entry for {} (hash_mapping size: {})",
@@ -433,17 +440,13 @@ impl CacheStatusTracker {
                 self.hash_mapping.len()
             );
 
-            // Check if this was the last source
             if !metadata.exists_in_any_source() {
-                // Block is gone from all sources - remove from tracker and publish REMOVE
                 let first_block_hash = metadata.first_block_hash.clone();
                 self.blocks.remove(&sequence_hash);
 
-                // Double-check: clean up any stray hash mappings (should be empty by now)
-                // This is a safety check
                 let stray_count_before = self.hash_mapping.len();
                 self.hash_mapping
-                    .retain(|_ext_hash, &mut seq_hash| seq_hash != sequence_hash);
+                    .retain(|_ext_hash, seq_hash| *seq_hash != sequence_hash);
                 let stray_count = stray_count_before - self.hash_mapping.len();
 
                 if stray_count > 0 {
@@ -458,6 +461,7 @@ impl CacheStatusTracker {
                 self.event_queue.push(ConsolidatedEvent::Remove {
                     block_hash: first_block_hash.clone(),
                     source: source.to_str().to_string(),
+                    tier,
                 });
 
                 tracing::debug!(
@@ -470,7 +474,6 @@ impl CacheStatusTracker {
                 );
                 true
             } else {
-                // Block still exists in other sources
                 tracing::debug!(
                     "Block {} (seq_hash={}) removed from source {:?}, still in {} source(s): {:?} (hash_mapping: {})",
                     &metadata.first_block_hash[..16.min(metadata.first_block_hash.len())],
@@ -492,8 +495,7 @@ impl CacheStatusTracker {
         }
     }
 
-    /// Handle a CLEAR_ALL event
-    pub fn handle_clear_all(&mut self) {
+    fn handle_clear_all(&mut self) {
         let num_blocks = self.blocks.len();
         tracing::debug!("Clearing all {} blocks from tracker", num_blocks);
         self.blocks.clear();
@@ -501,8 +503,7 @@ impl CacheStatusTracker {
         self.event_queue.push(ConsolidatedEvent::ClearAll);
     }
 
-    /// Drain all pending events to be published
-    pub fn drain_events(&mut self) -> Vec<ConsolidatedEvent> {
+    fn drain_events(&mut self) -> Vec<ConsolidatedEvent> {
         let events = std::mem::take(&mut self.event_queue);
         if !events.is_empty() {
             tracing::debug!(
@@ -513,22 +514,106 @@ impl CacheStatusTracker {
         events
     }
 
-    /// Get the number of tracked blocks
-    pub fn num_blocks(&self) -> usize {
+    fn num_blocks(&self) -> usize {
         self.blocks.len()
     }
+}
 
-    /// Get sources for a specific block by external block hash
-    pub fn get_block_sources(&self, external_block_hash: &str) -> Option<&HashSet<EventSource>> {
-        // Look up the local hash from external hash, then get sources
-        let local_hash = self.hash_mapping.get(external_block_hash)?;
-        self.blocks.get(local_hash).map(|m| &m.sources)
+/// Pass-through cache-status tracker.
+#[derive(Debug, Default)]
+pub struct PassthroughCacheStatusTracker {
+    event_queue: Vec<ConsolidatedEvent>,
+}
+
+impl PassthroughCacheStatusTracker {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Legacy method for backwards compatibility
-    #[deprecated(note = "Use get_block_sources instead")]
-    pub fn get_block_tiers(&self, block_hash: &str) -> Option<&HashSet<EventSource>> {
-        self.get_block_sources(block_hash)
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_store(
+        &mut self,
+        block_hash: String,
+        source: EventSource,
+        token_ids: Vec<u32>,
+        parent_hash: Option<String>,
+        block_size: usize,
+        lora_name: Option<String>,
+        tier: Option<StorageTier>,
+        data_parallel_rank: Option<i32>,
+    ) -> bool {
+        CacheStatusTracker::handle_store(
+            self,
+            StoreEventInput {
+                block_hash,
+                source,
+                token_ids,
+                parent_hash,
+                block_size,
+                lora_name,
+                tier,
+                data_parallel_rank,
+            },
+        )
+    }
+
+    pub fn handle_remove(
+        &mut self,
+        block_hash: &str,
+        source: EventSource,
+        tier: Option<StorageTier>,
+    ) -> bool {
+        CacheStatusTracker::handle_remove(
+            self,
+            RemoveEventInput {
+                block_hash: block_hash.to_string(),
+                source,
+                tier,
+            },
+        )
+    }
+}
+
+impl CacheStatusTracker for PassthroughCacheStatusTracker {
+    fn handle_store(&mut self, event: StoreEventInput) -> bool {
+        self.event_queue.push(ConsolidatedEvent::Store {
+            block_hash: event.block_hash,
+            parent_hash: event.parent_hash,
+            token_ids: event.token_ids,
+            block_size: event.block_size,
+            lora_name: event.lora_name,
+            source: event.source.to_str().to_string(),
+            tier: event.tier,
+        });
+        true
+    }
+
+    fn handle_remove(&mut self, event: RemoveEventInput) -> bool {
+        self.event_queue.push(ConsolidatedEvent::Remove {
+            block_hash: event.block_hash,
+            source: event.source.to_str().to_string(),
+            tier: event.tier,
+        });
+        true
+    }
+
+    fn handle_clear_all(&mut self) {
+        self.event_queue.push(ConsolidatedEvent::ClearAll);
+    }
+
+    fn drain_events(&mut self) -> Vec<ConsolidatedEvent> {
+        let events = std::mem::take(&mut self.event_queue);
+        if !events.is_empty() {
+            tracing::debug!(
+                "Draining {} pending kv event(s) for publishing",
+                events.len()
+            );
+        }
+        events
+    }
+
+    fn num_blocks(&self) -> usize {
+        0
     }
 }
 
@@ -536,9 +621,11 @@ impl CacheStatusTracker {
 mod tests {
     use super::*;
 
+    type TestTracker = DedupCacheStatusTracker;
+
     #[test]
     fn test_first_store_publishes() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         let should_publish = tracker.handle_store(
             "hash1".to_string(),
@@ -558,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_store_no_publish() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         tracker.handle_store(
             "hash1".to_string(),
@@ -589,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_multi_source_store() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // First store from vLLM
         tracker.handle_store(
@@ -624,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_remove_from_single_source_publishes() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         tracker.handle_store(
             "hash1".to_string(),
@@ -638,18 +725,24 @@ mod tests {
         );
         tracker.drain_events();
 
-        let should_publish = tracker.handle_remove("hash1", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("hash1", EventSource::Vllm, Some(StorageTier::Device));
 
         assert!(should_publish);
         assert_eq!(tracker.num_blocks(), 0);
         let events = tracker.drain_events();
         assert_eq!(events.len(), 1);
-        matches!(events[0], ConsolidatedEvent::Remove { .. });
+        match &events[0] {
+            ConsolidatedEvent::Remove { tier, .. } => {
+                assert_eq!(*tier, Some(StorageTier::Device));
+            }
+            other => panic!("expected Remove event, got: {:?}", other),
+        }
     }
 
     #[test]
     fn test_remove_from_multi_source_no_publish() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // Store from vLLM - first STORE event published
         tracker.handle_store(
@@ -676,14 +769,19 @@ mod tests {
         tracker.drain_events();
 
         // Remove from vLLM - should not publish (still in KVBM)
-        let should_publish = tracker.handle_remove("vllm_hash1", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("vllm_hash1", EventSource::Vllm, Some(StorageTier::Device));
 
         assert!(!should_publish);
         assert_eq!(tracker.num_blocks(), 1);
         assert_eq!(tracker.drain_events().len(), 0);
 
         // Remove from KVBM (last source) - should publish REMOVE event
-        let should_publish = tracker.handle_remove("kvbm_hash1", EventSource::Kvbm);
+        let should_publish = tracker.handle_remove(
+            "kvbm_hash1",
+            EventSource::Kvbm,
+            Some(StorageTier::HostPinned),
+        );
 
         assert!(should_publish);
         assert_eq!(tracker.num_blocks(), 0);
@@ -691,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_sequence_hash_first_block() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // First block (no parent)
         let should_publish = tracker.handle_store(
@@ -714,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_sequence_hash_with_parent() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // First block
         tracker.handle_store(
@@ -747,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_same_tokens_different_position_different_blocks() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // First occurrence: tokens [1,2,3,4] at position 0 (no parent)
         tracker.handle_store(
@@ -782,7 +880,7 @@ mod tests {
 
     #[test]
     fn test_clear_all() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // Add multiple blocks
         tracker.handle_store(
@@ -815,13 +913,14 @@ mod tests {
         assert_eq!(tracker.num_blocks(), 0);
 
         // Verify hash_mapping is also cleared
-        let should_publish = tracker.handle_remove("block1", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("block1", EventSource::Vllm, Some(StorageTier::Device));
         assert!(!should_publish); // Should fail because block is gone
     }
 
     #[test]
     fn test_deduplication_across_sources_with_parent() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         // vLLM stores block 1 (parent)
         tracker.handle_store(
@@ -870,9 +969,10 @@ mod tests {
 
     #[test]
     fn test_remove_non_existent_block() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
-        let should_publish = tracker.handle_remove("non_existent", EventSource::Vllm);
+        let should_publish =
+            tracker.handle_remove("non_existent", EventSource::Vllm, Some(StorageTier::Device));
 
         assert!(!should_publish);
         assert_eq!(tracker.num_blocks(), 0);
@@ -896,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_lora_name_round_trip_through_tracker() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         let should_publish = tracker.handle_store(
             "hash_lora".to_string(),
@@ -916,10 +1016,12 @@ mod tests {
             ConsolidatedEvent::Store {
                 lora_name,
                 token_ids,
+                tier,
                 ..
             } => {
                 assert_eq!(lora_name.as_deref(), Some("my-adapter"));
                 assert_eq!(token_ids, &[1, 2, 3, 4]);
+                assert_eq!(*tier, Some(StorageTier::Device));
             }
             other => panic!("expected Store event, got: {:?}", other),
         }
@@ -927,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_lora_name_none_for_base_model() {
-        let mut tracker = CacheStatusTracker::new();
+        let mut tracker = TestTracker::new();
 
         tracker.handle_store(
             "hash_base".to_string(),
@@ -943,8 +1045,11 @@ mod tests {
         let events = tracker.drain_events();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ConsolidatedEvent::Store { lora_name, .. } => {
+            ConsolidatedEvent::Store {
+                lora_name, tier, ..
+            } => {
                 assert!(lora_name.is_none());
+                assert_eq!(*tier, Some(StorageTier::Device));
             }
             other => panic!("expected Store event, got: {:?}", other),
         }
@@ -970,5 +1075,54 @@ mod tests {
         let different_parent = compute_local_block_hash(&[9, 10, 11, 12]);
         let seq_hash2_different = compute_sequence_hash(Some(different_parent), block_hash2);
         assert_ne!(seq_hash2_v1, seq_hash2_different);
+    }
+
+    #[test]
+    fn test_passthrough_tracker_forwards_duplicate_store() {
+        let mut tracker = PassthroughCacheStatusTracker::new();
+
+        assert!(tracker.handle_store(
+            "hash1".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::Device),
+            None,
+        ));
+        assert!(tracker.handle_store(
+            "hash1".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3],
+            None,
+            3,
+            None,
+            Some(StorageTier::Device),
+            None,
+        ));
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn test_passthrough_tracker_remove_and_clear() {
+        let mut tracker = PassthroughCacheStatusTracker::new();
+
+        assert!(tracker.handle_remove("hash1", EventSource::Kvbm, Some(StorageTier::HostPinned),));
+        tracker.handle_clear_all();
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ConsolidatedEvent::Remove {
+                tier: Some(StorageTier::HostPinned),
+                ..
+            }
+        ));
+        assert!(matches!(&events[1], ConsolidatedEvent::ClearAll));
+        assert_eq!(tracker.num_blocks(), 0);
     }
 }
