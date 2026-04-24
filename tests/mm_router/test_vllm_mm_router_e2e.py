@@ -45,6 +45,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
     pytest.mark.requested_vllm_kv_cache_bytes(
         1_719_075_000
