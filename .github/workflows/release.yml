@@ -429,7 +429,7 @@ jobs:
     name: Stage Wheels to Artifactory
     needs: [prepare-release]
     if: needs.prepare-release.result == 'success'
-    runs-on: prod-builder-amd-v1
+    runs-on: prod-skopeo-v1
     environment: automated-release
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
@@ -481,12 +481,25 @@ jobs:
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*aarch64*.whl'
 
-          # Flatten into a single upload directory. ai_dynamo is arch-agnostic,
-          # so only the amd64 copy is kept.
           OUT="${STAGE}/upload"
           mkdir -p "${OUT}"
-          cp "${STAGE}/amd64/opt/dynamo/wheelhouse/"*.whl "${OUT}/"
-          cp "${STAGE}/arm64/opt/dynamo/wheelhouse/"*.whl "${OUT}/"
+
+          shopt -s nullglob
+          AMD64_WHEELS=("${STAGE}/amd64/opt/dynamo/wheelhouse/"*.whl)
+          ARM64_WHEELS=("${STAGE}/arm64/opt/dynamo/wheelhouse/"*.whl)
+          shopt -u nullglob
+
+          if [ ${#AMD64_WHEELS[@]} -eq 0 ]; then
+            echo "::error::No amd64 wheels extracted from ${ECR_IMAGE}"
+            exit 1
+          fi
+          if [ ${#ARM64_WHEELS[@]} -eq 0 ]; then
+            echo "::error::No arm64 wheels extracted from ${ECR_IMAGE}"
+            exit 1
+          fi
+
+          cp "${AMD64_WHEELS[@]}" "${OUT}/"
+          cp "${ARM64_WHEELS[@]}" "${OUT}/"
 
           echo "Wheels staged for upload:"
           ls -la "${OUT}/"
@@ -532,6 +545,8 @@ jobs:
             TARGET_URL="${BASE_URL}/${WHEEL_FILENAME}"
             BODY_FILE=$(mktemp)
             HTTP_CODE=$(curl -sSL -o "${BODY_FILE}" -w "%{http_code}" \
+              --connect-timeout 30 --max-time 300 \
+              --retry 3 --retry-delay 5 --retry-all-errors \
               -u "${ARTIFACTORY_USER}:${ARTIFACTORY_TOKEN}" \
               -T "${WHEEL}" \
               "${TARGET_URL}")
