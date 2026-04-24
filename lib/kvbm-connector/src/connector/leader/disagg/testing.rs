@@ -293,9 +293,9 @@ impl InMemoryRemotePrefillQueue {
 }
 
 impl RemotePrefillQueue for InMemoryRemotePrefillQueue {
-    fn enqueue(&self, request: RemotePrefillRequest) -> Result<()> {
+    fn enqueue(&self, request: RemotePrefillRequest) -> BoxFuture<'static, Result<()>> {
         self.items.lock().push(request);
-        Ok(())
+        async { Ok(()) }.boxed()
     }
 }
 

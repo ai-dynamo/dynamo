@@ -102,7 +102,7 @@ impl RemotePrefillCoordinator {
         self.policy.evaluate(inputs)
     }
 
-    pub fn begin_remote_prefill(
+    pub async fn begin_remote_prefill(
         self: &Arc<Self>,
         request_id: &str,
         inputs: &PolicyInputs,
@@ -154,8 +154,13 @@ impl RemotePrefillCoordinator {
             num_computed_tokens: inputs.num_computed_tokens,
         };
 
-        if let Err(err) = self.queue.enqueue(request) {
-            self.states.remove(request_id);
+        if let Err(err) = self.queue.enqueue(request).await {
+            if let Some((_, state)) = self.states.remove(request_id) {
+                state
+                    .lock()
+                    .session
+                    .close(Some(format!("remote prefill enqueue failed: {err}")));
+            }
             return Err(err);
         }
 
@@ -466,6 +471,7 @@ mod tests {
                 hashes.clone(),
                 vec![1, 2, 3],
             )
+            .await
             .expect("begin remote prefill");
 
         let BeginOutcome::Started { session_id } = outcome;
@@ -499,6 +505,7 @@ mod tests {
                 hashes,
                 vec![9],
             )
+            .await
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");
@@ -526,6 +533,7 @@ mod tests {
                 hashes,
                 vec![10],
             )
+            .await
             .expect("begin remote prefill");
 
         wait_until(|| coord.status_for("req-timeout") == Some(RemotePrefillStatus::Failed)).await;
@@ -557,6 +565,7 @@ mod tests {
                     .collect(),
                 vec![11],
             )
+            .await
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");
@@ -598,6 +607,7 @@ mod tests {
                 blocks.hashes(),
                 vec![12],
             )
+            .await
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");
@@ -645,6 +655,7 @@ mod tests {
                 hashes,
                 vec![13],
             )
+            .await
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");

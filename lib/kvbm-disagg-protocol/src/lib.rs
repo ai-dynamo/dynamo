@@ -23,6 +23,49 @@ pub type SessionId = uuid::Uuid;
 /// not support directly. The wire protocol carries the decimal representation.
 pub type DisaggSequenceHash = String;
 
+mod serde_uuid_string {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    use uuid::Uuid;
+
+    pub fn serialize<S>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&id.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Uuid::parse_str(&value).map_err(D::Error::custom)
+    }
+}
+
+mod serde_instance_id_string {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    use uuid::Uuid;
+    use velo_common::InstanceId;
+
+    pub fn serialize<S>(id: &InstanceId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&id.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<InstanceId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Uuid::parse_str(&value)
+            .map(InstanceId::from)
+            .map_err(D::Error::custom)
+    }
+}
+
 /// Role advertised by a worker or instance to the hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,7 +182,9 @@ impl TransferParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemotePrefillParams {
     pub protocol_version: u16,
+    #[serde(with = "serde_uuid_string")]
     pub session_id: SessionId,
+    #[serde(with = "serde_instance_id_string")]
     pub initiator_instance_id: InstanceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_endpoint: Option<SessionEndpoint>,
@@ -164,7 +209,9 @@ impl RemotePrefillParams {
 pub struct RemotePrefillRequest {
     pub protocol_version: u16,
     pub request_id: String,
+    #[serde(with = "serde_uuid_string")]
     pub session_id: SessionId,
+    #[serde(with = "serde_instance_id_string")]
     pub initiator_instance_id: InstanceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_endpoint: Option<SessionEndpoint>,
@@ -210,6 +257,7 @@ pub enum DecodeToPrefillFrame {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PrefillToDecodeFrame {
     Attach {
+        #[serde(with = "serde_instance_id_string")]
         prefill_instance_id: InstanceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefill_endpoint: Option<SessionEndpoint>,

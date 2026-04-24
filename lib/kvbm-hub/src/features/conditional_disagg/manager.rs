@@ -15,7 +15,6 @@ use velo_common::InstanceId;
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{
     self, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, Feature, FeatureKey,
-    PrefillRequest,
 };
 
 /// Tracks which instances participate in ConditionalDisagg and under what role.
@@ -149,7 +148,7 @@ impl FeatureManager for ConditionalDisaggManager {
             // their first enqueue. Dropping the receiver is fine — the
             // underlying queue service stays alive as long as the backend
             // is held.
-            velo::queue::receiver::<PrefillRequest>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
+            velo::queue::receiver::<Vec<u8>>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
                 .await
                 .map_err(|e| FeatureError::Other(anyhow::anyhow!("CD queue init: {e}")))?;
 

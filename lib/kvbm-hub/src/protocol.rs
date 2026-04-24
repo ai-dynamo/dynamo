@@ -10,6 +10,11 @@
 //!
 //! All request/response bodies are JSON.
 
+/// Remote-prefill request payload carried by the hub's CD queue.
+///
+/// The payload shape is owned by `kvbm-disagg-protocol`; the hub owns only
+/// the queue transport, queue name, and feature registration surface.
+pub use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest as PrefillRequest};
 use serde::{Deserialize, Serialize};
 use velo_common::{InstanceId, PeerInfo, WorkerId};
 
@@ -138,21 +143,6 @@ pub struct ConditionalDisaggInstancesResponse {
     pub prefill: Vec<InstanceId>,
     /// Instance ids currently registered in the Decode role.
     pub decode: Vec<InstanceId>,
-}
-
-/// A prefill request enqueued by a Decode worker and consumed by a Prefill
-/// worker via the hub's CD queue.
-///
-/// v1 is intentionally minimal — it carries enough to let the Prefill
-/// worker route a response back. Future fields (token ids, sampling
-/// parameters, block hashes) are additive.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PrefillRequest {
-    /// Caller-chosen id, stable across the request lifecycle.
-    pub request_id: String,
-    /// Instance id of the Decode worker that issued the request, so the
-    /// Prefill worker knows where to send results.
-    pub decode_instance_id: InstanceId,
 }
 
 /// Response body for `POST /v1/instances`.
@@ -345,8 +335,14 @@ mod tests {
     #[test]
     fn prefill_request_serde_round_trip() {
         let orig = PrefillRequest {
+            protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: "req-123".to_string(),
-            decode_instance_id: InstanceId::new_v4(),
+            session_id: uuid::Uuid::new_v4(),
+            initiator_instance_id: InstanceId::new_v4(),
+            decode_endpoint: None,
+            sequence_hashes: vec!["11".to_string(), "12".to_string()],
+            token_ids: vec![1, 2, 3],
+            num_computed_tokens: 16,
         };
         let json = serde_json::to_string(&orig).unwrap();
         let back: PrefillRequest = serde_json::from_str(&json).unwrap();

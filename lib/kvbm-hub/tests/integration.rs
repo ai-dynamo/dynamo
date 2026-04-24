@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use kvbm_hub::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use kvbm_hub::protocol::{
-    ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, ErrorBody,
-    ErrorCode, Feature, HeartbeatResponse, ListInstancesResponse, PeerLookupResponse,
-    PrefillRequest, ProbeResponse, RegisterRequest, RegisterResponse, instance_by_id,
-    instance_heartbeat, instance_probe, paths, peers_by_instance, peers_by_worker,
+    ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
+    DISAGG_PROTOCOL_VERSION, ErrorBody, ErrorCode, Feature, HeartbeatResponse,
+    ListInstancesResponse, PeerLookupResponse, PrefillRequest, ProbeResponse, RegisterRequest,
+    RegisterResponse, instance_by_id, instance_heartbeat, instance_probe, paths, peers_by_instance,
+    peers_by_worker,
 };
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
 use velo::discovery::PeerDiscovery;
@@ -1079,8 +1080,14 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
 
     // Decode pushes a request.
     let req = PrefillRequest {
+        protocol_version: DISAGG_PROTOCOL_VERSION,
         request_id: "req-golden-1".to_string(),
-        decode_instance_id: d_id,
+        session_id: uuid::Uuid::new_v4(),
+        initiator_instance_id: d_id,
+        decode_endpoint: None,
+        sequence_hashes: vec!["100".to_string(), "101".to_string()],
+        token_ids: vec![1, 2, 3],
+        num_computed_tokens: 16,
     };
     d_cd.push_prefill_request(&req).await.unwrap();
 

@@ -18,6 +18,7 @@ kvbm-common   = { workspace = true }
 kvbm-config   = { workspace = true }
 kvbm-disagg-protocol = { workspace = true }
 kvbm-engine   = { workspace = true }
+kvbm-hub      = { workspace = true }
 kvbm-logical  = { workspace = true }
 kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }

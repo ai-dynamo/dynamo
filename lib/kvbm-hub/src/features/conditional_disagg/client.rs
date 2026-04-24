@@ -176,12 +176,14 @@ impl ConditionalDisaggClient {
                 self.role
             ));
         }
+        let encoded = serde_json::to_vec(req).context("encoding PrefillRequest")?;
         let backend = self.queue_backend().await?;
-        let tx =
-            velo::queue::sender::<PrefillRequest>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
-                .await
-                .context("building CD prefill queue sender")?;
-        tx.enqueue(req).await.context("enqueue PrefillRequest")?;
+        let tx = velo::queue::sender::<Vec<u8>>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
+            .await
+            .context("building CD prefill queue sender")?;
+        tx.enqueue(&encoded)
+            .await
+            .context("enqueue PrefillRequest")?;
         Ok(())
     }
 
@@ -199,14 +201,17 @@ impl ConditionalDisaggClient {
             ));
         }
         let backend = self.queue_backend().await?;
-        let rx =
-            velo::queue::receiver::<PrefillRequest>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
-                .await
-                .context("building CD prefill queue receiver")?;
+        let rx = velo::queue::receiver::<Vec<u8>>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
+            .await
+            .context("building CD prefill queue receiver")?;
         let batch = rx
             .next_with_options(NextOptions::new().batch_size(1).timeout(timeout))
             .await
             .context("dequeue PrefillRequest")?;
-        Ok(batch.into_iter().next())
+        batch
+            .into_iter()
+            .next()
+            .map(|bytes| serde_json::from_slice(&bytes).context("decoding PrefillRequest"))
+            .transpose()
     }
 }

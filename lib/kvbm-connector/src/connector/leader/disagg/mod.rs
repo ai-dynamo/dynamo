@@ -26,7 +26,7 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
 pub use decode::{BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus};
-pub use queue::RemotePrefillQueue;
+pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
 pub use session::{
     PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent, SessionEventStream,
     hash_to_wire,

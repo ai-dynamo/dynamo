@@ -22,6 +22,9 @@ tracing-subscriber = { workspace = true }
 velo        = { workspace = true, features = ["queue-messenger"] }
 velo-common = { workspace = true }
 
+# KVBM
+kvbm-disagg-protocol = { workspace = true }
+
 # Async / core
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }
