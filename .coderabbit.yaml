@@ -33,6 +33,8 @@ reviews:
       instructions: "Review against .ai/pytest-guidelines.md"
     - path: "**/launch/**/*.sh"
       instructions: "Review against .ai/bash-launch-guidelines.md"
+    - path: "**/*.{py,rs,go,ts,tsx,js,mjs,cjs,sh,yaml,yml,toml}"
+      instructions: "Flag internal Linear ticket references (e.g. DIS-XXXX, DYN-XXXX, OPS-XXXX, DEP-XXXX, or any <PROJECT>-NNNN ID) in the added lines; see .ai/linear-ticket-refs.md for what to recommend."
 knowledge_base:
   code_guidelines:
     filePatterns:

@@ -4,6 +4,9 @@
 import asyncio
 import logging
 import os
+
+# MM kwargs NIXL transfer (frontend → backend pre-rendered path)
+import pickle
 import tempfile
 import threading
 import time
@@ -16,6 +19,7 @@ import torch
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -32,7 +36,15 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.mm_kwargs_transfer import (
+    MmKwargsNixlReceiver,
+    MmKwargsReceiver,
+    MmKwargsShmReceiver,
+    MmKwargsShmTransferMetadata,
+    MmKwargsTransferMetadata,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -414,6 +426,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
+        self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
+
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
         # bootstrap creates a fresh TCPStore per scale operation and stores it
         # in engine_client._coord_store.  When two callers race through
@@ -1232,6 +1246,155 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
+    async def _try_receive_mm_kwargs(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """Try to receive pre-processed mm_kwargs from the frontend (SHM or NIXL).
+
+        If ``extra_args`` contains ``mm_kwargs_shm`` or ``mm_kwargs_nixl``, fetch
+        the tensors via the corresponding transport and construct a pre-rendered
+        MultiModalInput dict the vLLM engine can consume directly, skipping the
+        HF processor. Returns None if no transfer metadata is present or the
+        receive fails (caller falls back to normal processing).
+        """
+        extra_args = request.get("extra_args") or {}
+        logger.debug(
+            "[mm-routing] _try_receive_mm_kwargs: extra_args keys=%s",
+            list(extra_args.keys()),
+        )
+
+        # SHM path first (same-node, ~1.5ms). Only works when frontend and
+        # backend share /dev/shm; if the read fails (cross-node), fall through
+        # to normal processing.
+        shm_meta_raw = extra_args.get("mm_kwargs_shm")
+        if shm_meta_raw:
+            shm_meta = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
+            return await self._receive_mm_kwargs(
+                extra_args, "shm", MmKwargsShmReceiver(), shm_meta
+            )
+
+        nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
+        if nixl_meta_raw:
+            nixl_meta = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+            if self._mm_kwargs_receiver is None:
+                self._mm_kwargs_receiver = MmKwargsNixlReceiver()
+            return await self._receive_mm_kwargs(
+                extra_args, "nixl", self._mm_kwargs_receiver, nixl_meta
+            )
+
+        logger.debug("[mm-routing] No mm_kwargs transfer metadata in extra_args")
+        return None
+
+    async def _receive_mm_kwargs(
+        self,
+        extra_args: Dict[str, Any],
+        transport: str,
+        receiver: MmKwargsReceiver,
+        metadata: Any,
+    ) -> Dict[str, Any] | None:
+        """Shared NIXL/SHM receive path.
+
+        Calls ``receiver.receive(metadata)`` to fetch pickled
+        ``MultiModalKwargsItem`` bytes, deserializes them, builds an
+        ``EngineInput`` dict, and injects into the engine's MM processor
+        cache. Returns None on any validation or transport failure
+        (caller falls back).
+        """
+        color = "magenta" if transport == "nixl" else "cyan"
+        rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
+        try:
+            mm_hashes = extra_args.get("mm_hashes")
+            mm_placeholders = extra_args.get("mm_placeholders")
+            if not mm_hashes or not mm_placeholders:
+                logger.warning(
+                    "[mm-routing] %s present but mm_hashes/mm_placeholders missing",
+                    transport,
+                )
+                return None
+
+            # Receive pickled kwargs items (NVTX wrap is owned by the receiver).
+            results = await receiver.receive(metadata)
+
+            pickled_items = results.get("__pickled_kwargs_item__")
+            if not pickled_items:
+                logger.warning(
+                    "[mm-routing] %s: no pickled kwargs items received", transport
+                )
+                return None
+
+            # Unpickle and validate each item.
+            kwargs_items: list[MultiModalKwargsItem] = []
+            with _nvtx.annotate(f"mm_backend:{transport}_pickle_loads", color=color):
+                for pi in pickled_items:
+                    item = pickle.loads(pi)
+                    if not isinstance(item, MultiModalKwargsItem):
+                        logger.warning(
+                            "[mm-routing] %s: deserialized object is %s, expected "
+                            "MultiModalKwargsItem; falling back to normal path",
+                            transport,
+                            type(item).__name__,
+                        )
+                        return None
+                    kwargs_items.append(item)
+
+            # Use the expanded token IDs (with image placeholders) from the
+            # frontend, not the unexpanded request["token_ids"]. The
+            # mm_placeholders and transferred kwargs are aligned to the
+            # expanded sequence — using unexpanded tokens would misplace
+            # every placeholder.
+            expanded_token_ids = extra_args.get("expanded_token_ids")
+            if not expanded_token_ids:
+                logger.warning(
+                    "[mm-routing] %s: no expanded_token_ids in extra_args, "
+                    "cannot use pre-rendered mm_kwargs; falling back",
+                    transport,
+                )
+                return None
+
+            mm_hashes_dict = {metadata.modality: mm_hashes}
+            mm_kwargs_dict = {metadata.modality: kwargs_items}
+            with _nvtx.annotate(
+                f"mm_backend:{transport}_build_engine_input", color=color
+            ):
+                engine_input = {
+                    "type": "multimodal",
+                    "prompt_token_ids": expanded_token_ids,
+                    "mm_kwargs": mm_kwargs_dict,
+                    "mm_hashes": mm_hashes_dict,
+                    "mm_placeholders": {
+                        metadata.modality: [
+                            PlaceholderRange(offset=off, length=length)
+                            for off, length in mm_placeholders
+                        ],
+                    },
+                }
+
+            # Inject into the engine's MM processor cache so subsequent
+            # requests with the same images get cache hits.
+            try:
+                self.engine_client.input_processor.inject_into_mm_cache(
+                    mm_hashes_dict, mm_kwargs_dict
+                )
+            except Exception:
+                logger.debug(
+                    "[mm-routing] Failed to inject into mm_cache", exc_info=True
+                )
+
+            logger.debug(
+                "[mm-routing] %s: constructed pre-rendered MultiModalInput from "
+                "%d kwargs_items, %d hashes, %d placeholders",
+                transport,
+                len(kwargs_items),
+                len(mm_hashes),
+                len(mm_placeholders),
+            )
+            return engine_input
+        except Exception:
+            logger.exception("[mm-routing] %s receive failed, falling back", transport)
+            return None
+        finally:
+            _nvtx.end_range(rng)
+
     @staticmethod
     def _get_mm_processor_kwargs(
         request: Dict[str, Any],
@@ -1258,7 +1421,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         Extract and decode multimodal data from PreprocessedRequest.
         """
+        rng = _nvtx.start_range("mm_backend:extract_multimodal_data", color="orange")
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
+            _nvtx.end_range(rng)
             return None
 
         # Security check: reject multimodal data if not explicitly enabled
@@ -1295,9 +1460,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
         if "image" not in vllm_mm_data and image_mm_items:
-            images = await self.image_loader.load_image_batch(
-                image_mm_items,
-            )
+            with _nvtx.annotate("mm_backend:image_download", color="green"):
+                images = await self.image_loader.load_image_batch(
+                    image_mm_items,
+                )
 
             if images:
                 # vLLM expects single image or list
@@ -1375,6 +1541,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     len(video_audios),
                 )
 
+        _nvtx.end_range(rng)
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
@@ -1446,13 +1613,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs.
-        # In EPD mode multi_modal_data carries pre-computed embeddings from the
-        # encode worker, not raw images — skip UUID production here; raw-image
+        # Prefer frontend-forwarded mm_hashes for hash consistency with the
+        # routing layer. Fall back to computing from loaded image data when
+        # not in EPD mode — in EPD mode multi_modal_data carries pre-computed
+        # embeddings from the encode worker, not raw images, and raw-image
         # identity lives upstream at the Router / URL-keyed encoder cache.
-        if self.embedding_loader is None:
+        extra_args = request.get("extra_args") or {}
+        forwarded_hashes = extra_args.get("mm_hashes")
+        mm_uuids: dict[str, Any] | None = None
+        if forwarded_hashes:
+            mm_uuids = {"image": forwarded_hashes}
+        elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
-        else:
-            mm_uuids = None
+            if mm_uuids and multi_modal_data:
+                logger.warning(
+                    "[mm-routing] No forwarded mm_hashes from frontend; "
+                    "recomputed from image data. KV-cache-aware MM routing "
+                    "may not match the frontend's routing decisions."
+                )
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
@@ -1771,7 +1949,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         mm_processor_kwargs = self._get_mm_processor_kwargs(request)
 
-        multi_modal_data = None
+        multi_modal_data: Dict[str, Any] | None = None
+        pre_rendered: Dict[str, Any] | None = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
             if is_qwen_vl_model(self.config.model):
@@ -1818,21 +1997,52 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         mm_processor_kwargs=mm_processor_kwargs,
                     )
         else:
-            # Aggregated mode: load images normally
-            multi_modal_data = await self._extract_multimodal_data(
-                request,
-                request_id,
-                context,
-                mm_processor_kwargs=mm_processor_kwargs,
-            )
+            # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from frontend.
+            # If available, we skip image downloading AND the HF processor.
+            with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
+                pre_rendered = await self._try_receive_mm_kwargs(request)
+            if pre_rendered is not None:
+                logger.debug(
+                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
+                    request_id,
+                )
+            else:
+                # Aggregated mode: load images normally
+                multi_modal_data = await self._extract_multimodal_data(
+                    request,
+                    request_id,
+                    context,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                )
 
-        # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request,
-            request_id,
-            multi_modal_data,
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
+        # Build prompt from request. `prompt` is either a pre-rendered
+        # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
+        # `_build_prompt_from_request`. Declare as Any so mypy accepts both
+        # branches without spelling out the full union.
+        prompt: Any
+        with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
+            if pre_rendered is not None:
+                # pre_rendered is a MultiModalInput dict with "type": "multimodal".
+                # The engine's InputProcessor.process_inputs() will see the "type"
+                # key and skip the HF processor entirely.
+                prompt = pre_rendered
+                embedding_sequence_length = None
+                error = None
+                logger.debug(
+                    "[mm-routing] Request %s: using pre-rendered MultiModalInput",
+                    request_id,
+                )
+            else:
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    error,
+                ) = self._build_prompt_from_request(
+                    request,
+                    request_id,
+                    multi_modal_data,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                )
         if error is not None:
             yield error
             return
@@ -2040,6 +2250,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        # TODO: Wire up NIXL mm_kwargs passthrough for disaggregated prefill
+        # (similar to DecodeWorkerHandler). For now, prefill
+        # always downloads and processes images via the standard path.
         mm_processor_kwargs = self._get_mm_processor_kwargs(request)
 
         # Extract and decode multimodal data if present
