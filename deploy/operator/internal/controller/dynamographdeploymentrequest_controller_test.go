@@ -1436,7 +1436,7 @@ spec:
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
-			cache.Set(mockGPU, 10*time.Minute)
+			cache.Set("", mockGPU, 10*time.Minute)
 			reconciler.GPUDiscoveryCache = cache
 			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
 			reconciler.APIReader = k8sClient
@@ -1489,6 +1489,7 @@ spec:
 						NumGPUsPerNode: ptr.To[int32](4),
 						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeA100SXM,
 						VRAMMB:         ptr.To(40960.0),
+						TotalGPUs:      ptr.To[int32](4),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1561,7 +1562,7 @@ spec:
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
-			cache.Set(mockGPU, 10*time.Minute)
+			cache.Set("", mockGPU, 10*time.Minute)
 			reconciler.GPUDiscoveryCache = cache
 			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
 			reconciler.APIReader = k8sClient
@@ -1598,7 +1599,10 @@ spec:
 					Backend: "vllm",
 					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
 						NumGPUsPerNode: ptr.To[int32](8),
+						TotalGPUs:      ptr.To[int32](8),
 					},
 					SLA: &nvidiacomv1beta1.SLASpec{
 						TTFT: ptr.To(100.0),
@@ -1685,7 +1689,7 @@ spec:
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
-			cache.Set(mockGPU, 10*time.Minute)
+			cache.Set("", mockGPU, 10*time.Minute)
 			reconciler.GPUDiscoveryCache = cache
 			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
 			reconciler.APIReader = k8sClient
@@ -2307,7 +2311,7 @@ spec:
 			}
 		})
 
-		It("Should validate typed hardware fields without blob parsing", func() {
+		It("Should fail validation with partial hardware when discovery is unavailable", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-typed-hw"
 			namespace := defaultNamespace
@@ -2334,7 +2338,58 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			// Reconcile — partial hardware (GPUSKU only) should pass validation
+			// Reconcile — partial hardware without discovery should fail validation
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+		})
+
+		It("Should pass validation with partial hardware when discovery is available", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-partial-hw-discovery"
+			namespace := defaultNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM,
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Mock GPU discovery so validation and enrichment succeed.
+			mockGPU := &gpu.GPUInfo{
+				GPUsPerNode:   8,
+				VRAMPerGPU:    81920,
+				System:        "a100_sxm",
+				NodesWithGPUs: 1,
+			}
+			cache := gpu.NewGPUDiscoveryCache()
+			cache.Set("", mockGPU, 10*time.Minute)
+			cache.Set("a100_sxm", mockGPU, 10*time.Minute)
+			reconciler.GPUDiscoveryCache = cache
+			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
+			reconciler.APIReader = k8sClient
+
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})

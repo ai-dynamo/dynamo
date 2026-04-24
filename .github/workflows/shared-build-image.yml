@@ -121,7 +121,7 @@ jobs:
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           lfs: true
       - name: Docker Login
@@ -241,8 +241,6 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}

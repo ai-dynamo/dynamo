@@ -38,6 +38,19 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
 }
 
+// resolveMainContainer finds the container named "main" in the pod spec.
+// ExtraPodSpec.PodSpec.Containers can inject user containers before the main
+// container (mergo merge happens before main is appended), so index 0 is
+// not guaranteed to be the main container here.
+func resolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i]
+		}
+	}
+	return nil
+}
+
 func InjectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -45,7 +58,15 @@ func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
 ) error {
-	if checkpointInfo == nil || !checkpointInfo.Enabled {
+	// Only mutate the worker pod spec once the checkpoint is Ready. Before
+	// the checkpoint exists, the worker must cold-start normally without
+	// the snapshot-control volume, DYN_SNAPSHOT_CONTROL_DIR, checkpoint PVC
+	// mount, or localhost seccomp profile — otherwise the Python worker
+	// enters checkpoint mode on env-var presence and sits quiesced waiting
+	// for a sentinel that only the checkpoint Job and restore-target path
+	// produce. The checkpoint Job itself is built separately through
+	// buildCheckpointJob + NewCheckpointJob and does get these.
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil
 	}
 
@@ -62,18 +83,9 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	if len(podSpec.Containers) == 0 {
-		return fmt.Errorf("no container found to inject checkpoint config")
-	}
-	var mainContainer *corev1.Container
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			mainContainer = &podSpec.Containers[i]
-			break
-		}
-	}
+	mainContainer := resolveMainContainer(podSpec)
 	if mainContainer == nil {
-		return fmt.Errorf("main container not found in pod spec")
+		return fmt.Errorf("no container named %q found in pod spec", commonconsts.MainContainerName)
 	}
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
@@ -94,5 +106,19 @@ func InjectCheckpointIntoPodSpec(
 
 	EnsurePodInfoVolume(podSpec)
 	EnsurePodInfoMount(mainContainer)
+	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
+			ctx,
+			reader,
+			namespace,
+			info.Hash,
+			info.ArtifactVersion,
+		)
+		if err != nil {
+			return err
+		}
+		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
+	}
+
 	return nil
 }

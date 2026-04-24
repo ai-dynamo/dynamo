@@ -19,6 +19,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.errors import DuplicateSubComponentError, SubComponentNotFoundError
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -70,6 +71,34 @@ class Service(BaseModel):
             return args[args.index("--model") + 1]
 
         return None
+
+    def get_component_name_from_endpoint_arg(self) -> Optional[str]:
+        """Return the component name from ``--endpoint`` in the container args.
+
+        Worker backends (vLLM, SGLang, TRT-LLM) accept
+        ``--endpoint <namespace>.<component>.<endpoint_name>`` (optionally
+        prefixed with ``dyn://``) which overrides the default component
+        name written to the MDC ``component`` field. When the user sets
+        this, the Planner's MDC filter must match the user's value, not
+        the backend default. Returns ``None`` if ``--endpoint`` is not
+        present or malformed.
+        """
+        args = (
+            self.service.get("extraPodSpec", {})
+            .get("mainContainer", {})
+            .get("args", [])
+        )
+        args = break_arguments(args)
+        if "--endpoint" not in args:
+            return None
+        idx = args.index("--endpoint")
+        if len(args) <= idx + 1:
+            return None
+        try:
+            _, component, _ = parse_endpoint(args[idx + 1])
+            return component
+        except ValueError:
+            return None
 
     def get_gpu_count(self) -> int:
         """Get the GPU count from the service's resource specification.

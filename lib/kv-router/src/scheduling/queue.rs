@@ -57,6 +57,8 @@ pub struct SchedulerQueue<
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
+    /// Serializes admission so worker selection always sees prior bookings.
+    admission_gate: Mutex<()>,
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_count: AtomicUsize,
@@ -96,6 +98,7 @@ impl<
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
+            admission_gate: Mutex::new(()),
             pending_count: AtomicUsize::new(0),
             pending_isl_tokens: AtomicUsize::new(0),
             slots,
@@ -145,17 +148,19 @@ impl<
             return;
         }
 
+        let _admission = self.admission_gate.lock().await;
+        let decay_now = Instant::now();
+
         let Some(threshold) = self.threshold_frac else {
-            self.schedule(request, Instant::now()).await;
+            self.admit_one(request, decay_now).await;
             return;
         };
 
         if request.bypass_capacity_check() {
-            self.schedule(request, Instant::now()).await;
+            self.admit_one(request, decay_now).await;
             return;
         }
 
-        let decay_now = Instant::now();
         if self.all_workers_busy(
             threshold,
             request.allowed_worker_ids.as_ref(),
@@ -171,7 +176,7 @@ impl<
             self.pending_isl_tokens
                 .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
         } else {
-            self.schedule(request, decay_now).await;
+            self.admit_one(request, decay_now).await;
         }
     }
 
@@ -198,6 +203,7 @@ impl<
         }
 
         loop {
+            let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
             let mut heap = self.pending.lock().await;
             let Some(front) = heap.peek() else {
@@ -221,19 +227,19 @@ impl<
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
-            self.schedule(entry.request, decay_now).await;
+            self.admit_one(entry.request, decay_now).await;
         }
     }
 
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
-    async fn schedule(&self, mut request: SchedulingRequest, decay_now: Instant) {
+    async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
                 request.token_seq.as_deref(),
                 request.isl_tokens,
-                request.overlaps.clone(),
+                request.effective_cached_tokens.clone(),
                 request.track_prefill_tokens,
                 decay_now,
             );
@@ -257,7 +263,8 @@ impl<
 
         request.respond(Ok(SchedulingResponse {
             best_worker: selection.worker,
-            overlap_blocks: selection.overlap_blocks,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
         }));
 
         if !request.update_states {
@@ -271,7 +278,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.overlap_blocks,
+            selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -279,15 +286,13 @@ impl<
             SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
                 track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
                 prefill_load_hint,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             },
-            decay_now,
+            Instant::now(),
         ) {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
@@ -296,37 +301,38 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;
         }
 
-        let Some(estimator) = &self.prefill_load_estimator else {
-            return None;
+        let expected_prefill_duration = match &self.prefill_load_estimator {
+            Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+                Ok(expected_prefill_duration) => Some(expected_prefill_duration),
+                Err(error) => {
+                    tracing::warn!(
+                        effective_isl,
+                        prefix,
+                        "failed to predict prefill duration for active load tracking: {error}"
+                    );
+                    None
+                }
+            },
+            None => None,
         };
 
-        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
-            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
-                initial_effective_prefill_tokens: effective_isl,
-                expected_prefill_duration: Some(expected_prefill_duration),
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    effective_isl,
-                    prefix,
-                    "failed to predict prefill duration for active load tracking: {error}"
-                );
-                None
-            }
-        }
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: effective_isl,
+            expected_prefill_duration,
+        })
     }
 
     /// Number of requests currently parked in the pending queue (lock-free).
@@ -396,17 +402,18 @@ impl<
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
-    use tokio::sync::watch;
+    use rustc_hash::FxHashMap;
+    use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::OverlapScores;
+    use crate::protocols::{WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
-    use crate::selector::DefaultWorkerSelector;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::{DefaultWorkerSelector, WorkerSelector};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -427,6 +434,86 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SelectorRendezvous {
+        arrivals: StdMutex<usize>,
+        cv: Condvar,
+    }
+
+    impl SelectorRendezvous {
+        fn wait_for_peer(&self) {
+            let mut arrivals = self.arrivals.lock().unwrap();
+            *arrivals += 1;
+
+            if *arrivals == 1 {
+                let _ = self
+                    .cv
+                    .wait_timeout(arrivals, Duration::from_millis(100))
+                    .unwrap();
+                return;
+            }
+
+            self.cv.notify_all();
+        }
+    }
+
+    #[derive(Clone)]
+    struct MinDecodeSelector {
+        rendezvous: Option<Arc<SelectorRendezvous>>,
+    }
+
+    impl WorkerSelector<SimpleWorkerConfig> for MinDecodeSelector {
+        fn select_worker(
+            &self,
+            workers: &HashMap<WorkerId, SimpleWorkerConfig>,
+            request: &SchedulingRequest,
+            block_size: u32,
+        ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+            if let Some(rendezvous) = &self.rendezvous {
+                rendezvous.wait_for_peer();
+            }
+
+            let Some(worker) = workers
+                .iter()
+                .flat_map(|(worker_id, config)| {
+                    let dp_start = config.data_parallel_start_rank();
+                    let dp_end = dp_start + config.data_parallel_size();
+                    (dp_start..dp_end)
+                        .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
+                })
+                .min_by_key(|worker| {
+                    (
+                        request
+                            .prefill_tokens
+                            .get(worker)
+                            .copied()
+                            .unwrap_or(request.isl_tokens),
+                        request.decode_blocks.get(worker).copied().unwrap_or(0),
+                        worker.worker_id,
+                        worker.dp_rank,
+                    )
+                })
+            else {
+                return Err(KvSchedulerError::NoEndpoints);
+            };
+
+            Ok(WorkerSelectionResult {
+                worker,
+                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
+                effective_overlap_blocks: request
+                    .effective_overlap_blocks
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0.0),
+                cached_tokens: request
+                    .effective_cached_tokens
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0),
+            })
+        }
+    }
+
     fn make_queue(
         num_workers: usize,
         block_size: u32,
@@ -438,6 +525,53 @@ mod tests {
     ) {
         let (queue, slots, _tx) =
             make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_custom_selector<Sel: WorkerSelector<SimpleWorkerConfig>>(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        selector: Sel,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy, Sel>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+        ));
+
         (queue, slots)
     }
 
@@ -504,9 +638,12 @@ mod tests {
             maybe_request_id: Some(request_id.to_string()),
             token_seq: None,
             isl_tokens,
-            overlaps: OverlapScores::default(),
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
+            tree_sizes: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
@@ -515,6 +652,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -557,6 +695,49 @@ mod tests {
                 *tokens, 0,
                 "worker {worker:?} still has {tokens} active tokens"
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_immediate_admissions_see_prior_booking() {
+        let selector = MinDecodeSelector {
+            rendezvous: Some(Arc::new(SelectorRendezvous::default())),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 512, None, selector);
+        let barrier = Arc::new(Barrier::new(3));
+
+        let (req1, rx1) = make_request("req-1", 512);
+        let queue1 = Arc::clone(&queue);
+        let barrier1 = Arc::clone(&barrier);
+        let handle1 = tokio::spawn(async move {
+            barrier1.wait().await;
+            queue1.enqueue(req1).await;
+        });
+
+        let (req2, rx2) = make_request("req-2", 512);
+        let queue2 = Arc::clone(&queue);
+        let barrier2 = Arc::clone(&barrier);
+        let handle2 = tokio::spawn(async move {
+            barrier2.wait().await;
+            queue2.enqueue(req2).await;
+        });
+
+        barrier.wait().await;
+        handle1.await.unwrap();
+        handle2.await.unwrap();
+
+        let resp1 = rx1.await.unwrap().unwrap();
+        let resp2 = rx2.await.unwrap().unwrap();
+        assert_ne!(
+            resp1.best_worker, resp2.best_worker,
+            "second admission should see the first booking and choose the other idle worker"
+        );
+
+        for request_id in ["req-1", "req-2"] {
+            slots
+                .mark_prefill_completed(&request_id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
         }
     }
 
@@ -852,9 +1033,12 @@ mod tests {
             maybe_request_id: Some("filter-0".to_string()),
             token_seq: None,
             isl_tokens: isl,
-            overlaps: OverlapScores::default(),
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
+            tree_sizes: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
@@ -863,6 +1047,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;

@@ -133,6 +133,38 @@ async def mm_encode(encoder: Any, mm_items: Any, modality: Any) -> tuple:
     return result
 
 
+def get_scheduler_info(engine: Any) -> dict:
+    """Return the scheduler-info dict for rank-0 of an ``sgl.Engine``.
+
+    SGLang exposes per-rank scheduler stats (``max_total_num_tokens``,
+    ``max_req_input_len``, ...) on the ``Engine`` via ``_scheduler_init_result``.
+    We return the rank-0 dict, or ``{}`` if it is not reachable on this build.
+
+    Covers:
+      - sglang 0.5.10+: ``engine._scheduler_init_result.scheduler_infos[0]``
+        (canonical; also what ``Engine.get_server_info`` reads internally).
+      - Older probed attributes (``engine.scheduler_info``,
+        ``engine.tokenizer_manager.scheduler_info``) as a best-effort fallback
+        for forks/experimental branches that surfaced the dict directly.
+    """
+    result = getattr(engine, "_scheduler_init_result", None)
+    if result is not None:
+        infos = getattr(result, "scheduler_infos", None)
+        if infos:
+            return infos[0]
+
+    direct = getattr(engine, "scheduler_info", None)
+    if direct:
+        return direct
+
+    tm = getattr(engine, "tokenizer_manager", None)
+    tm_info = getattr(tm, "scheduler_info", None) if tm is not None else None
+    if tm_info:
+        return tm_info
+
+    return {}
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """
     Enable SGLang's disjoint streaming output across ServerArgs field renames.
@@ -170,6 +202,7 @@ __all__ = [
     "NetworkAddress",
     "enable_disjoint_streaming_output",
     "get_local_ip_auto",
+    "get_scheduler_info",
     "get_zmq_socket",
     "mm_encode",
 ]

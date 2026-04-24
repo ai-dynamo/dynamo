@@ -365,7 +365,13 @@ pub mod tcp_response_stream {
 
 /// Event Plane transport environment variables
 pub mod event_plane {
-    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    /// Event transport selection: "zmq" or "nats".
+    ///
+    /// When unset the default depends on the discovery backend:
+    /// - `file` / `mem` backends: defaults to `zmq` (no external services required).
+    /// - `etcd` / `kubernetes` backends: defaults to `nats`.
+    ///
+    /// Set this explicitly to override the context-aware default.
     pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
 
     /// Event plane codec selection: "json" or "msgpack".
@@ -390,6 +396,15 @@ pub mod zmq_broker {
 
     /// Namespace for broker discovery registration
     pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
+}
+
+/// Discovery environment variables
+pub mod discovery {
+    /// Discovery backend: "kubernetes" or "etcd" (default)
+    pub const DYN_DISCOVERY_BACKEND: &str = "DYN_DISCOVERY_BACKEND";
+
+    /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
+    pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 }
 
 /// CUDA and GPU environment variables
@@ -529,6 +544,9 @@ mod tests {
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
+            // Discovery
+            discovery::DYN_DISCOVERY_BACKEND,
+            discovery::DYN_KUBE_DISCOVERY_MODE,
             // CUDA
             cuda::DYN_FATBIN_PATH,
             // Build

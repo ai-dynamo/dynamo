@@ -6,6 +6,7 @@ use async_stream::stream;
 use dynamo_llm::{
     http::service::{metrics::Endpoint, service_v2::HttpService},
     model_card::ModelDeploymentCard,
+    preprocessor::LLMMetricAnnotation,
     protocols::{
         Annotated,
         openai::chat_completions::{
@@ -50,10 +51,32 @@ impl
             // Simulate some processing time
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-            // Generate 5 response chunks
+            // Generate 5 response chunks with LLMMetricAnnotation so that
+            // output_sequence_tokens is properly recorded (the histogram only
+            // records when osl > 0, which requires the annotation to be present).
             for i in 0..5 {
                 let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
-                yield Annotated::from_data(output);
+                let mut annotated = Annotated::from_data(output);
+                let metrics = LLMMetricAnnotation {
+                    input_tokens: 5,
+                    output_tokens: (i + 1) as usize,
+                    chunk_tokens: 1,
+                    cached_tokens: None,
+                    prefill_worker_id: None,
+                    prefill_dp_rank: None,
+                    prefill_worker_type: None,
+                    decode_worker_id: None,
+                    decode_dp_rank: None,
+                    decode_worker_type: None,
+                    tokenize_latency: None,
+                    detokenize_total_latency: None,
+                    detokenize_count: None,
+                };
+                if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    annotated.event = ann.event;
+                    annotated.comment = ann.comment;
+                }
+                yield annotated;
             }
         };
 
@@ -360,7 +383,7 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher
+            Arc::new(model_watcher)
                 .watch(discovery_stream, NamespaceFilter::Global)
                 .await;
         });

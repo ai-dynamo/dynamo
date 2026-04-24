@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
-    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
-    TOKENIZE_SECONDS,
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
+    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
@@ -235,6 +235,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
 
@@ -267,7 +268,7 @@ impl OpenAIPreprocessor {
             .with_context(|| "Failed to gather multimodal data")?;
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["preprocess"])
+            .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
@@ -343,6 +344,9 @@ impl OpenAIPreprocessor {
                 ..Default::default()
             }));
         }
+
+        // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
     }
@@ -560,7 +564,13 @@ impl OpenAIPreprocessor {
                             // Completions will use raw_prompt, no template
                             let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
-                            // Check if backend_instance_id is present and token_data is provided
+                            // If nvext.token_data is present, use the pre-computed tokens
+                            // directly and skip tokenization.  This avoids redundant
+                            // tokenization when an external component (e.g. the GAIE EPP
+                            // KV-router) has already tokenized the prompt.
+                            // When backend_instance_id is set without token_data, warn
+                            // but fall back to tokenization (backward compat for non-GAIE
+                            // routers that set the header without providing tokens).
                             let has_backend_instance_id = request
                                 .nvext()
                                 .and_then(|ext| ext.backend_instance_id)
@@ -569,23 +579,22 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
-                                if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
-                                        tokens.len()
-                                    );
-                                    // need ownership for the builder, so clone.
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
-                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                    (encoding.token_ids().to_vec(), false)
-                                }
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
+                                token_data
+                            {
+                                tracing::info!(
+                                    token_count = tokens.len(),
+                                    first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+                                );
+                                (tokens.clone(), true)
+                            } else if has_backend_instance_id {
+                                tracing::warn!(
+                                    "backend_instance_id provided but no token_data; tokenizing prompt"
+                                );
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
                             } else {
-                                // No backend_instance_id provided, continue the normal flow.
                                 let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
@@ -680,6 +689,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &NvCreateEmbeddingRequest,
     ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
@@ -745,12 +755,38 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Try to parse reasoning content only if parser is configured
+        // Tool-continuation turns (last message role=tool) gate the force-
+        // reasoning flag off: the model produces the final user-facing answer
+        // directly from the tool result and typically does not re-enter
+        // reasoning, so leaving the parser in forced-reasoning mode would
+        // mislabel the final answer as reasoning_content. Matches SGLang's
+        // observed behavior for Kimi K2.5 tool-result follow-ups.
+        let last_is_tool = matches!(
+            request.inner.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(_))
+        );
+        let prompt_injected_reasoning = prompt_injected_reasoning && !last_is_tool;
+
+        // tool_choice=required/named forces the backend into guided decoding,
+        // which constrains output to a bare JSON shape with no reasoning
+        // wrapper. Running the reasoning parser on that output is both
+        // pointless (nothing to extract) and actively harmful for parsers
+        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
+        // append-think), because the prefix would contaminate the
+        // tool-call JSON fed into the jail.
+        let tool_choice_forces_guided_json = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+
+        // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !Self::is_reasoning_disabled_by_request(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
-            );
+            )
+            && !tool_choice_forces_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -1150,33 +1186,27 @@ impl OpenAIPreprocessor {
 
         // Configure jail based on tool_choice
         //
-        // When a tool_call_parser is configured, always use marker-based mode
-        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
-        // Immediate JSON mode is only a fallback for required/named when no
-        // parser exists (the model is expected to emit raw JSON in that case).
+        // For tool_choice=required or named we mirror SGLang / vLLM: assume the
+        // backend applied guided decoding and emit a bare JSON shape, so parse
+        // via the JSON array parser (base_json_parser) rather than the model's
+        // native-format parser.  If a parser is also configured we still carry
+        // it so the Immediate branch can fall back to marker-based parsing for
+        // backends that do not honor guided decoding (e.g. XML-native models
+        // like qwen3_coder — see regression test_tool_choice_required_with_
+        // qwen3_coder_parser).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                builder = builder
+                    .tool_choice_named(named.function.name.clone())
+                    .named_tool_filter(named.function.name.clone());
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
-                    // Also install a named-tool filter so that if the model emits
-                    // the wrong tool, the parsed call is rejected before emission.
-                    builder = builder
-                        .tool_call_parser(parser)
-                        .named_tool_filter(named.function.name.clone());
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_named(named.function.name.clone());
+                    builder = builder.tool_call_parser(parser);
                 }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
+                builder = builder.tool_choice_required();
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
                     builder = builder.tool_call_parser(parser);
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_required();
                 }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
@@ -1459,6 +1489,8 @@ impl
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+
         // unpack the request
         let (mut request, context) = request.into_parts();
 
@@ -1515,6 +1547,9 @@ impl
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
         let annotations_stream = stream::iter(annotations);
+
+        // End preprocess stage before handing off to downstream (route/dispatch).
+        drop(_stage_guard);
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;

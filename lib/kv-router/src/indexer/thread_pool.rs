@@ -12,7 +12,9 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
-use super::{KvIndexerInterface, KvRouterError, SyncIndexer, WorkerTask};
+use super::{
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -73,7 +75,33 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     ///
     /// Panics if `num_workers` is 0.
     pub fn new(backend: T, num_workers: usize, kv_block_size: u32) -> Self {
+        Self::new_with_metrics(backend, num_workers, kv_block_size, None)
+    }
+
+    /// Create a new `ThreadPoolIndexer` with optional metrics.
+    ///
+    /// Same as [`new`](Self::new) but allows passing `KvIndexerMetrics` so that
+    /// each worker thread records `kv_cache_events_applied` counters, matching
+    /// the observability of the single-threaded `KvIndexer` path.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - The thread-safe data structure to wrap
+    /// * `num_workers` - Number of worker threads for event processing
+    /// * `kv_block_size` - Block size for KV cache
+    /// * `metrics` - Optional metrics to record event application counts
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_workers` is 0.
+    pub fn new_with_metrics(
+        backend: T,
+        num_workers: usize,
+        kv_block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
+        super::warn_on_unit_block_size("thread_pool", kv_block_size);
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
@@ -83,9 +111,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             worker_event_senders.push(event_sender);
 
             let backend = Arc::clone(&backend);
+            let metrics = metrics.clone();
 
             let handle = std::thread::spawn(move || {
-                backend.worker(event_receiver).unwrap();
+                backend.worker(event_receiver, metrics).unwrap();
             });
             thread_handles.push(handle);
         }
@@ -106,6 +135,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         &self.backend
     }
 
+    /// Get a cloned `Arc` to the underlying backend.
+    ///
+    /// Useful when a caller needs to hand off an owned `Arc<T>` to a blocking
+    /// task (e.g. `tokio::task::spawn_blocking`) without cloning the backend
+    /// itself.
+    pub fn backend_arc(&self) -> Arc<T> {
+        Arc::clone(&self.backend)
+    }
+
     /// Wait for all worker channels to drain.
     ///
     /// Used primarily for testing and benchmarking to ensure all queued events
@@ -119,6 +157,23 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             }
 
             tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn maybe_enqueue_cleanup(&self, thread_idx: usize) {
+        if !self.backend.try_schedule_cleanup() {
+            return;
+        }
+
+        if let Err(e) =
+            self.worker_event_channels[thread_idx].send(WorkerTask::CleanupStaleChildren)
+        {
+            self.backend.cancel_scheduled_cleanup();
+            tracing::error!(
+                "Failed to send cleanup task to worker thread {}: {:?}",
+                thread_idx,
+                e
+            );
         }
     }
 }
@@ -191,7 +246,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 thread_idx,
                 e
             );
+            return;
         }
+
+        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
@@ -208,13 +266,17 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                         idx,
                         e
                     );
+                    return;
                 }
+
+                self.maybe_enqueue_cleanup(idx);
             }
             None => {
                 // Worker was never assigned a thread - broadcast to all
                 for channel in &self.worker_event_channels {
                     let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
                 }
+                self.maybe_enqueue_cleanup(0);
             }
         }
     }
@@ -225,6 +287,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         for channel in &self.worker_event_channels {
             let _ = channel.send(WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank));
         }
+        self.maybe_enqueue_cleanup(0);
     }
 
     fn shutdown(&self) {
@@ -312,5 +375,18 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         curr_size
+    }
+
+    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        vec![ShardSizeSnapshot {
+            shard_idx: 0,
+            worker_count: self.backend.worker_count(),
+            block_count: self.backend.block_count(),
+            node_count: self.backend.node_count(),
+        }]
+    }
+
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        self.backend.node_edge_lengths()
     }
 }

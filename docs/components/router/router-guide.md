@@ -217,5 +217,6 @@ You can also run the KV router as a standalone service (without the Dynamo front
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
 - **[Router Operations](router-operations.md)**: Replicas, remote indexers, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
+- **[Router Testing](router-testing.md)**: Recommended test layers for non-trivial router changes
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service
 - **[KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md)**: Gap detection and replay behavior

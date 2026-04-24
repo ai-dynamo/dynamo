@@ -338,47 +338,6 @@ class _ConcreteHandler(HandlerBase):
         raise NotImplementedError
 
 
-class TestHandleCancellationAbortToggle:
-    """Tests for the disable_request_abort toggle in _handle_cancellation."""
-
-    def _make_handler(self, disable_request_abort: bool) -> HandlerBase:
-        """Create a HandlerBase with mocked config."""
-        config = MagicMock()
-        config.disable_request_abort = disable_request_abort
-        config.shutdown_event = None
-        return _ConcreteHandler(config)
-
-    @pytest.mark.asyncio
-    async def test_abort_called_by_default(self):
-        handler = self._make_handler(disable_request_abort=False)
-        generation_result = MagicMock()
-        context = MagicMock()
-        # async_killed_or_stopped returns an awaitable that resolves immediately
-        # (simulating the client cancelling the request)
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-id-1"
-
-        await handler._handle_cancellation(generation_result, context)
-
-        generation_result.abort.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_abort_not_called_when_disabled(self):
-        handler = self._make_handler(disable_request_abort=True)
-        generation_result = MagicMock()
-        context = MagicMock()
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-id-2"
-
-        await handler._handle_cancellation(generation_result, context)
-
-        generation_result.abort.assert_not_called()
-
-
 class TestDeferredAbortGuard:
     """Tests for _DeferredAbort in disaggregated decode cancellation.
 
@@ -388,9 +347,8 @@ class TestDeferredAbortGuard:
     that waits for the first token before calling real abort.
     """
 
-    def _make_handler(self, disable_request_abort: bool = False) -> HandlerBase:
+    def _make_handler(self) -> HandlerBase:
         config = MagicMock()
-        config.disable_request_abort = disable_request_abort
         config.shutdown_event = None
         return _ConcreteHandler(config)
 
@@ -456,7 +414,7 @@ class TestDeferredAbortGuard:
     @pytest.mark.asyncio
     async def test_no_guard_in_non_disagg_mode(self):
         """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
-        handler = self._make_handler(disable_request_abort=False)
+        handler = self._make_handler()
         generation_result = MagicMock()
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
@@ -472,7 +430,7 @@ class TestDeferredAbortGuard:
     @pytest.mark.timeout(5)
     async def test_shutdown_calls_abort_directly(self):
         """Shutdown calls abort on whatever is passed (wrapper or real), immediately."""
-        handler = self._make_handler(disable_request_abort=False)
+        handler = self._make_handler()
         handler.shutdown_event = asyncio.Event()
 
         # Pass a _DeferredAbort wrapper — shutdown should still call .abort()
@@ -496,20 +454,6 @@ class TestDeferredAbortGuard:
             await task
         # Shutdown calls guard.abort() → since no first token, spawns background task
         # The important thing is EngineShutdown is raised and abort path is entered
-
-    @pytest.mark.asyncio
-    async def test_disable_request_abort_skips_guard(self):
-        """When disable_request_abort=True, abort is never called (guard irrelevant)."""
-        handler = self._make_handler(disable_request_abort=True)
-        generation_result = MagicMock()
-        context = MagicMock()
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context.async_killed_or_stopped.return_value = killed_future
-        context.id.return_value = "test-disabled"
-
-        await handler._handle_cancellation(generation_result, context)
-        generation_result.abort.assert_not_called()
 
 
 class TestMultimodalGuard:
