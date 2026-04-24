@@ -505,4 +505,30 @@ mod tests {
         assert_eq!(all_reasoning, "reasoning done.");
         assert_eq!(all_content, "Hello world");
     }
+
+    // P2-1: V4 production regime where the prompt ends in <think>, so the stream
+    // begins INSIDE a reasoning block (no opening <think> sentinel). The caller
+    // initializes the parser via set_in_reasoning(true); bytes before </think>
+    // must route to reasoning_content, bytes after to normal content.
+    #[test]
+    fn test_deepseek_v4_streaming_with_set_in_reasoning() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        parser.set_in_reasoning(true);
+
+        // Token-by-token stream, starting with raw reasoning (no <think> prefix),
+        // </think> in the middle, then normal content.
+        let tokens = &[
+            "Wei", "gh", "ing ", "options", ".", "</think>", "Bei", "jing", " is", " sunny.",
+        ];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        assert_eq!(all_reasoning, "Weighing options.");
+        assert_eq!(all_content, "Beijing is sunny.");
+    }
 }
