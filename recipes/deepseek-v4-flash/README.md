@@ -38,8 +38,8 @@ kubectl create secret generic hf-token-secret \
 
 # Download model into the model-cache PVC.
 # Edit model-cache/model-cache.yaml and set storageClassName to a RWX class in your cluster.
-# The PVC requests 700Gi; DeepSeek-V4-Flash is ~300GB on disk in FP4+FP8 mixed form and
-# can take 1-2 hours to download on first apply.
+# The PVC requests 400Gi; DeepSeek-V4-Flash is ~160GB on disk (46 safetensors shards,
+# FP4+FP8 mixed) and typically takes 30-60 min to download on first apply.
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
@@ -153,6 +153,7 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 ## Notes
 
 - **Storage class.** Update `storageClassName` in `model-cache/model-cache.yaml` to a RWX class that can serve the PVC to frontend and worker pods.
+- **Model size.** `deepseek-ai/DeepSeek-V4-Flash` is ~160 GB on disk (46 safetensors shards in FP4+FP8 mixed form). The 400Gi PVC leaves headroom for HF cache metadata and one alternate revision.
 - **Image tag.** The manifest ships with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace with your built Dynamo + vLLM (DeepSeek-V4) image — see Prerequisite 4.
 - **First launch is slow.** The decode worker loads weights and warms CUDA graphs; the startup probe allows up to ~60 min (`failureThreshold: 360` at `periodSeconds: 10`) and `VLLM_ENGINE_READY_TIMEOUT_S=3600` is set to match.
 - **Parser flags.** Use the Dynamo variants on the worker (`--dyn-reasoning-parser`, `--dyn-tool-call-parser`). vLLM's native `--reasoning-parser` / `--tool-call-parser` are engine-side and do not feed the Dynamo OpenAI renderer.
