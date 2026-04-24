@@ -139,6 +139,11 @@ on:
         required: false
         type: boolean
         default: false
+      dev_version_suffix:
+        description: 'PEP 440 dev suffix (e.g. .dev20260423+g1234567). Empty = stable build.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -232,6 +237,7 @@ jobs:
           make_efa: ${{ inputs.make_efa }}
           fresh_builder: ${{ inputs.fresh_builder }}
           extra_tags: ${{ inputs.extra_tags }}
+          dev_version_suffix: ${{ inputs.dev_version_suffix }}
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
 
 

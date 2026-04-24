@@ -1471,7 +1471,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		}
 	}
 	if discoveredInfo == nil {
-		discoveredInfo, err = gpu.DiscoverGPUs(ctx, r.APIReader)
+		discoveredInfo, err = gpu.DiscoverGPUsFiltered(ctx, r.APIReader, hw.GPUSKU)
 		if err != nil {
 			logger.Info("Node-label discovery also failed", "error", err.Error())
 			return fmt.Errorf("auto-discovery failed: %w", err)

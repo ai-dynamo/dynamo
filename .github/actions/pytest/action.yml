@@ -150,6 +150,7 @@ runs:
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
+          --ulimit nofile=65536:65536 \
           --network host \
           --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
@@ -192,7 +193,7 @@ runs:
         # Docker's default is 64MB, which is insufficient and causes segfaults.
         # Do NOT use --ipc=host here — it overrides --shm-size with the host's /dev/shm
         # (64MB in K8s pods by default), silently ignoring the size we set.
-        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864"
+        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:65536"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
