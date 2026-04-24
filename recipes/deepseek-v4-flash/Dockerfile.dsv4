@@ -11,9 +11,9 @@
 # python worker) from an existing nvcr.io/nvidian/dynamo-dev image and layer
 # them on top of the dsv4 vLLM image without touching the vLLM install.
 #
-# Build:
-#   docker build -f container/Dockerfile.dsv4 \
-#     -t nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-<sha> .
+# Build (run from the repo root):
+#   docker build -f recipes/deepseek-v4-flash/Dockerfile.dsv4 \
+#     -t <your-registry>/vllm-dsv4:<tag> .
 #
 # Both base images must be Python 3.12 (verified).
 

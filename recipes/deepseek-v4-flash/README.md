@@ -13,10 +13,11 @@ Aggregated, single-replica: 1 decode pod running DP=4 + Expert Parallel on 4 B20
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
 2. **GPU cluster** with at least 4 B200 GPUs available on one node.
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.
-4. **Dynamo + vLLM image with the DeepSeek-V4 stack.** DeepSeek-V4-Flash is not in a stock vLLM release yet. Use the reference [`container/Dockerfile.dsv4`](../../container/Dockerfile.dsv4) to overlay the Dynamo runtime onto `vllm/vllm-openai:deepseekv4-cu130`:
+4. **Dynamo + vLLM image with the DeepSeek-V4 stack.** DeepSeek-V4-Flash is not in a stock vLLM release yet. Use the reference [`Dockerfile.dsv4`](Dockerfile.dsv4) to overlay the Dynamo runtime onto `vllm/vllm-openai:deepseekv4-cu130`:
 
    ```bash
-   docker build -f container/Dockerfile.dsv4 \
+   # from the repo root
+   docker build -f recipes/deepseek-v4-flash/Dockerfile.dsv4 \
      -t <your-registry>/vllm-dsv4:<tag> .
    ```
 
