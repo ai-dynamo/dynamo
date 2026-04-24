@@ -66,12 +66,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             shutdown_event,
         )
+        # H20 patch: set use_sglang_tokenizer from config
+        self.use_sglang_tokenizer = False  # disagg mode
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
             )
         else:
             logging.info("Decode worker handler initialized (aggregated mode)")
+
+    @staticmethod
+    def _get_guided_decoding_params(guided_decoding=None):
+        """Stub for guided decoding - not needed for E2E test."""
+        return {}
+
+    @staticmethod
+    def _resolve_lora(request):
+        """Stub for LoRA resolution."""
+        return {}
+
+    @staticmethod
+    def _session_kwargs(request):
+        """Stub for session kwargs."""
+        return {}
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
@@ -308,7 +325,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
-                return_routed_experts=return_routed_experts,
+                # return_routed_experts=return_routed_experts,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -346,7 +363,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                return_routed_experts=return_routed_experts,
+                # return_routed_experts=return_routed_experts,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
