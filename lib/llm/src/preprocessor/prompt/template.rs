@@ -263,7 +263,7 @@ fn is_deepseek_v4_name(name_lower: &str) -> bool {
     };
     // `v4` must end the name or be followed by a separator — anything else
     // (e.g. `v40`, `v4pro`) is a different model family.
-    after_v4.is_empty() || after_v4.starts_with(|c: char| matches!(c, '-' | '_' | '.'))
+    after_v4.is_empty() || after_v4.starts_with(['-', '_', '.'])
 }
 
 #[cfg(test)]
