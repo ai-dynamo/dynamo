@@ -219,13 +219,16 @@ fn parse_parameters(
             let param_name = name_match.as_str().trim();
             let param_value = value_match.as_str().trim();
 
-            // Parse value based on string attribute (if present)
-            let value = match param_match.get(2).map(|m| m.as_str()) {
-                Some("true") => serde_json::Value::String(param_value.to_string()),
-                Some(_) => serde_json::from_str(param_value)
-                    .unwrap_or_else(|_| serde_json::Value::String(param_value.to_string())),
-                None => serde_json::from_str(param_value)
-                    .unwrap_or_else(|_| serde_json::Value::String(param_value.to_string())),
+            // Parse value based on string attribute (if present).
+            // `string="true"` forces the String branch; every other case
+            // (`string="false"` or attribute omitted) tries JSON first and
+            // falls back to String.
+            let string_attr = param_match.get(2).map(|m| m.as_str());
+            let value = if string_attr == Some("true") {
+                serde_json::Value::String(param_value.to_string())
+            } else {
+                serde_json::from_str(param_value)
+                    .unwrap_or_else(|_| serde_json::Value::String(param_value.to_string()))
             };
 
             parameters.insert(param_name.to_string(), value);
