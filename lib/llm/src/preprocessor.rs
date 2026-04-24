@@ -262,7 +262,8 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        self.gather_multi_modal_data(request, &mut builder, formatted_prompt.clone())
+        let mm_hashes = self
+            .gather_multi_modal_data(request, &mut builder, formatted_prompt.clone())
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -271,8 +272,11 @@ impl OpenAIPreprocessor {
         // to always do in the Rust frontend: the exact-MM-routing path lives
         // in the Python vLLM processor, which overrides this if needed.
         // No-op for text-only requests.
-        self.gather_mm_approx_routing_info(request, &mut builder, formatted_prompt.as_deref())
-            .with_context(|| "Failed to gather MM approx routing info")?;
+        {
+            let _nvtx = dynamo_nvtx_range!("preprocess.mm_approx_gather");
+            self.gather_mm_approx_routing_info(&mut builder, formatted_prompt.as_deref(), &mm_hashes)
+                .with_context(|| "Failed to gather MM approx routing info")?;
+        }
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["preprocess"])
@@ -424,13 +428,17 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Vec<u64>> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
+        // mm_hashes tracks per-image content-addressed hashes (in message order)
+        // for the approx-routing path. Accumulated here so we don't walk the
+        // messages a second time in gather_mm_approx_routing_info.
+        let mut mm_hashes: Vec<u64> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
-            return Ok(());
+            return Ok(mm_hashes);
         };
         let has_media_loader = self.media_loader.is_some();
 
@@ -443,6 +451,12 @@ impl OpenAIPreprocessor {
                 _ => continue,
             };
             for content_part in content_parts.iter() {
+                // Hash image URLs inline — covers both the NIXL fetch path and
+                // the URL-passthrough path without allocating a separate
+                // `to_string()` copy of base64 data URIs.
+                if let ChatCompletionRequestUserMessageContentPart::ImageUrl(p) = content_part {
+                    mm_hashes.push(Self::hash_image_url(p.image_url.url.as_str()));
+                }
                 if has_media_loader {
                     let type_str = match content_part {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
@@ -494,19 +508,20 @@ impl OpenAIPreprocessor {
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
-            // Preserve original messages and formatted prompt in extra_args for multimodal
-            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
-            // <image> placeholders for embedding-path / NIXL flows).
-            let messages_json = serde_json::to_value(request.messages())?;
-            let mut extra_args = serde_json::json!({
-                "messages": messages_json
-            });
-
-            // Strip redundant inline data: URLs only when frontend decoding is active
-            // (media_loader decoded the images into RDMA descriptors). TRT-LLM and
-            // other backends that pass URLs through still need the original data: URIs.
+            // Build extra_args for downstream multimodal workers. The messages
+            // array is expensive to materialize when inline data: URIs are
+            // present (every base64 image goes through serde_json::to_value
+            // and then over the wire to the worker), so we only serialize it
+            // when a frontend media loader is active — that's the TRT-LLM /
+            // embedding-path case where workers actually need the templated
+            // messages. For backends that pass URLs/data URIs through (e.g.,
+            // vLLM in approx mode), multi_modal_data already carries the URL,
+            // so duplicating it in extra_args["messages"] is wasted work.
+            let mut extra_args = serde_json::json!({});
             if self.media_loader.is_some() {
-                Self::strip_inline_data_urls(&mut extra_args["messages"]);
+                let mut messages_json = serde_json::to_value(request.messages())?;
+                Self::strip_inline_data_urls(&mut messages_json);
+                extra_args["messages"] = messages_json;
             }
 
             if let Some(ref prompt) = formatted_prompt {
@@ -515,7 +530,7 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        Ok(())
+        Ok(mm_hashes)
     }
 
     /// Read the KV block size that we lay `block_mm_infos` out for.
@@ -563,29 +578,6 @@ impl OpenAIPreprocessor {
         xxhash_rust::xxh3::xxh3_64(normalized.as_bytes())
     }
 
-    /// Extract image URLs from the request in message order.
-    fn extract_image_urls_in_order<R: OAIChatLikeRequest>(request: &R) -> Vec<String> {
-        let mut urls = Vec::new();
-        let Some(messages) = request.typed_messages() else {
-            return urls;
-        };
-        for message in messages.iter() {
-            let content_parts = match message {
-                ChatCompletionRequestMessage::User(u) => match &u.content {
-                    ChatCompletionRequestUserMessageContent::Array(parts) => parts,
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            for content_part in content_parts.iter() {
-                if let ChatCompletionRequestUserMessageContentPart::ImageUrl(p) = content_part {
-                    urls.push(p.image_url.url.as_str().to_string());
-                }
-            }
-        }
-        urls
-    }
-
     /// Build `MmRoutingInfo` for approximate MM-aware KV routing.
     ///
     /// Skips the HF image processor entirely: image URLs are hashed and each
@@ -596,28 +588,34 @@ impl OpenAIPreprocessor {
     /// This is approximate-routing-only: the resulting hashes do not
     /// correspond to backend KV blocks. They serve as a routing-affinity
     /// signal so repeat multimodal requests cluster on the same worker.
-    pub fn gather_mm_approx_routing_info<R: OAIChatLikeRequest>(
+    pub fn gather_mm_approx_routing_info(
         &self,
-        request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
+        mm_hashes: &[u64],
     ) -> Result<()> {
-        let urls = Self::extract_image_urls_in_order(request);
-        if urls.is_empty() {
+        if mm_hashes.is_empty() {
             return Ok(());
         }
-        let Some(prompt) = formatted_prompt else {
-            tracing::debug!(
-                "[mm-approx] no formatted_prompt; skipping MM approx routing info"
-            );
-            return Ok(());
-        };
 
-        let encoding = self
-            .tokenizer
-            .encode(prompt)
-            .with_context(|| "MM approx routing: failed to tokenize formatted prompt")?;
-        let routing_token_ids: Vec<u32> = encoding.token_ids().to_vec();
+        // Reuse tokens from gather_tokens when available to avoid a second
+        // sync encode of the same prompt. Fall back to tokenizing the
+        // formatted prompt only if the builder doesn't already have them.
+        let routing_token_ids: Vec<u32> = if let Some(tokens) = builder.peek_token_ids() {
+            tokens.clone()
+        } else {
+            let Some(prompt) = formatted_prompt else {
+                tracing::debug!(
+                    "[mm-approx] no formatted_prompt; skipping MM approx routing info"
+                );
+                return Ok(());
+            };
+            let encoding = self
+                .tokenizer
+                .encode(prompt)
+                .with_context(|| "MM approx routing: failed to tokenize formatted prompt")?;
+            encoding.token_ids().to_vec()
+        };
 
         let block_size = Self::mm_approx_block_size();
         if block_size == 0 || routing_token_ids.is_empty() {
@@ -633,15 +631,10 @@ impl OpenAIPreprocessor {
         // `(i * num_full_blocks) / n_images` so two images can't collide
         // on the same block unless there are more images than blocks (in
         // which case extras pile onto the last block).
-        let n_images = urls.len();
+        let n_images = mm_hashes.len();
         let mut mm_objects = Vec::with_capacity(n_images);
-        for (i, url) in urls.iter().enumerate() {
-            let mm_hash = Self::hash_image_url(url);
-            let block_idx = if num_full_blocks == 0 {
-                0
-            } else {
-                (i * num_full_blocks / n_images).min(num_full_blocks - 1)
-            };
+        for (i, mm_hash) in mm_hashes.iter().copied().enumerate() {
+            let block_idx = (i * num_full_blocks / n_images).min(num_full_blocks - 1);
             // Represent each image as a single-token offset so
             // RequestExtraInfo::to_block_level maps it to exactly one block.
             let token_offset = block_idx * block_size;
