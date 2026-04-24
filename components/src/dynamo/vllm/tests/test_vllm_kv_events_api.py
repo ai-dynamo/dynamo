@@ -61,6 +61,7 @@ class TestVllmKvEventsApi:
         6. medium
         7. lora_name (added in vLLM 0.14.0)
         8. extra_keys (added in vLLM 0.17.0)
+        9. group_idx (added for hybrid KV cache groups)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -73,6 +74,7 @@ class TestVllmKvEventsApi:
             "medium",
             "lora_name",
             "extra_keys",
+            "group_idx",
         )
 
         actual_fields = BlockStored.__struct_fields__
@@ -91,6 +93,7 @@ class TestVllmKvEventsApi:
         expected_fields = (
             "block_hashes",
             "medium",
+            "group_idx",
         )
 
         actual_fields = BlockRemoved.__struct_fields__
@@ -167,6 +170,7 @@ class TestVllmKvEventsApi:
             medium="GPU",
             lora_name=None,
             extra_keys=None,
+            group_idx=0,
         )
 
         encoded = msgspec.msgpack.encode(event)
@@ -178,9 +182,9 @@ class TestVllmKvEventsApi:
             decoded[0] == "BlockStored"
         ), f"Expected tag 'BlockStored', got {decoded[0]}"
 
-        # Verify field count (tag + 8 fields = 9 elements)
-        assert len(decoded) == 9, (
-            f"Expected 9 elements (tag + 8 fields), got {len(decoded)}.\n"
+        # Verify field count (tag + 9 fields = 10 elements)
+        assert len(decoded) == 10, (
+            f"Expected 10 elements (tag + 9 fields), got {len(decoded)}.\n"
             f"Decoded: {decoded}\n"
             f"If field count changed, update Rust deserializers."
         )
@@ -194,6 +198,7 @@ class TestVllmKvEventsApi:
         assert decoded[6] == "GPU", f"medium at wrong position: {decoded[6]}"
         assert decoded[7] is None, f"lora_name at wrong position: {decoded[7]}"
         assert decoded[8] is None, f"extra_keys at wrong position: {decoded[8]}"
+        assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
@@ -209,6 +214,7 @@ class TestVllmKvEventsApi:
             medium="GPU",
             lora_name=None,
             extra_keys=[((mm_hash, 7),)],
+            group_idx=0,
         )
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -218,3 +224,26 @@ class TestVllmKvEventsApi:
             "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
             f"payloads. Decoded: {decoded[8]!r}"
         )
+        assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
+
+    def test_block_removed_serialization_format(self):
+        """Verify BlockRemoved serializes to expected msgpack array format."""
+        import msgspec
+
+        event = BlockRemoved(
+            block_hashes=[123, 456],
+            medium="GPU",
+            group_idx=0,
+        )
+
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+
+        assert decoded[0] == "BlockRemoved"
+        assert len(decoded) == 4, (
+            f"Expected 4 elements (tag + 3 fields), got {len(decoded)}.\n"
+            f"Decoded: {decoded}\n"
+            f"If field count changed, update Rust deserializers."
+        )
+        assert decoded[1] == [123, 456], f"block_hashes at wrong position: {decoded[1]}"
+        assert decoded[2] == "GPU", f"medium at wrong position: {decoded[2]}"
+        assert decoded[3] == 0, f"group_idx at wrong position: {decoded[3]}"
