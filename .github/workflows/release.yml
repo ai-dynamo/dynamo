@@ -429,7 +429,7 @@ jobs:
     name: Stage Wheels to Artifactory
     needs: [prepare-release]
     if: needs.prepare-release.result == 'success'
-    runs-on: prod-skopeo-v1
+    runs-on: prod-tester-amd-v1
     environment: automated-release
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
