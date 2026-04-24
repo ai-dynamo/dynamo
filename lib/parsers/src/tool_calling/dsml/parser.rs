@@ -20,7 +20,7 @@ use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 /// </｜DSML｜function_calls>
 /// Check if a chunk contains the start of a DSML tool call
 pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bool {
-    let start_token = &config.function_calls_start;
+    let start_token = &config.block_start;
 
     // Check for complete start token
     if chunk.contains(start_token.as_str()) {
@@ -41,7 +41,7 @@ pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bo
 
 /// Find the end position of a DSML tool call block
 pub fn find_tool_call_end_position_dsml(chunk: &str, config: &DsmlParserConfig) -> usize {
-    let end_token = &config.function_calls_end;
+    let end_token = &config.block_end;
 
     if let Some(pos) = chunk.find(end_token.as_str()) {
         pos + end_token.len()
@@ -64,12 +64,12 @@ pub fn try_tool_call_parse_dsml(
     }
 
     // Check if tool call block exists
-    if !trimmed.contains(&config.function_calls_start) {
+    if !trimmed.contains(&config.block_start) {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
     // Extract normal text before tool calls
-    let normal_text = if let Some(start_idx) = trimmed.find(&config.function_calls_start) {
+    let normal_text = if let Some(start_idx) = trimmed.find(&config.block_start) {
         let text = trimmed[..start_idx].trim();
         if text.is_empty() {
             String::new()
@@ -104,8 +104,8 @@ fn extract_tool_calls(
     //          \s*(.*?)\s* = capture content between start/end tags (non-greedy)
     let block_pattern = format!(
         r"(?s){}\s*(.*?)\s*{}",
-        regex::escape(&config.function_calls_start),
-        regex::escape(&config.function_calls_end)
+        regex::escape(&config.block_start),
+        regex::escape(&config.block_end)
     );
     let block_regex = Regex::new(&block_pattern)?;
 
@@ -226,8 +226,8 @@ mod tests {
 
     fn get_v4_test_config() -> DsmlParserConfig {
         DsmlParserConfig {
-            function_calls_start: "<｜DSML｜tool_calls>".to_string(),
-            function_calls_end: "</｜DSML｜tool_calls>".to_string(),
+            block_start: "<｜DSML｜tool_calls>".to_string(),
+            block_end: "</｜DSML｜tool_calls>".to_string(),
             ..Default::default()
         }
     }

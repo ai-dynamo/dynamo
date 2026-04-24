@@ -80,10 +80,12 @@ impl Default for XmlParserConfig {
 /// Configuration for DSML-style tool call parser (DeepSeek V3.2+)
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DsmlParserConfig {
-    /// Start token for function_calls block (e.g., "<｜DSML｜function_calls>")
-    pub function_calls_start: String,
-    /// End token for function_calls block (e.g., "</｜DSML｜function_calls>")
-    pub function_calls_end: String,
+    /// Start token for the DSML block (e.g., "<｜DSML｜function_calls>" or "<｜DSML｜tool_calls>")
+    #[serde(alias = "function_calls_start")]
+    pub block_start: String,
+    /// End token for the DSML block (e.g., "</｜DSML｜function_calls>" or "</｜DSML｜tool_calls>")
+    #[serde(alias = "function_calls_end")]
+    pub block_end: String,
     /// Start prefix for invoke (e.g., "<｜DSML｜invoke name=")
     pub invoke_start_prefix: String,
     /// End token for invoke (e.g., "</｜DSML｜invoke>")
@@ -97,8 +99,8 @@ pub struct DsmlParserConfig {
 impl Default for DsmlParserConfig {
     fn default() -> Self {
         Self {
-            function_calls_start: "<｜DSML｜function_calls>".to_string(),
-            function_calls_end: "</｜DSML｜function_calls>".to_string(),
+            block_start: "<｜DSML｜function_calls>".to_string(),
+            block_end: "</｜DSML｜function_calls>".to_string(),
             invoke_start_prefix: "<｜DSML｜invoke name=".to_string(),
             invoke_end: "</｜DSML｜invoke>".to_string(),
             parameter_prefix: "<｜DSML｜parameter name=".to_string(),
@@ -213,7 +215,7 @@ impl ParserConfig {
             ParserConfig::Xml(config) => vec![config.tool_call_start_token.clone()],
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
-            ParserConfig::Dsml(config) => vec![config.function_calls_start.clone()],
+            ParserConfig::Dsml(config) => vec![config.block_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
             ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
         }
@@ -228,7 +230,7 @@ impl ParserConfig {
             ParserConfig::Xml(config) => vec![config.tool_call_end_token.clone()],
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
-            ParserConfig::Dsml(config) => vec![config.function_calls_end.clone()],
+            ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
         }
@@ -400,8 +402,8 @@ impl ToolCallConfig {
         // </｜DSML｜tool_calls>
         Self {
             parser_config: ParserConfig::Dsml(DsmlParserConfig {
-                function_calls_start: "<｜DSML｜tool_calls>".to_string(),
-                function_calls_end: "</｜DSML｜tool_calls>".to_string(),
+                block_start: "<｜DSML｜tool_calls>".to_string(),
+                block_end: "</｜DSML｜tool_calls>".to_string(),
                 ..Default::default()
             }),
         }
@@ -445,5 +447,26 @@ impl ToolCallConfig {
         Self {
             parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dsml_config_deserializes_legacy_function_calls_aliases() {
+        let legacy = serde_json::json!({
+            "function_calls_start": "<｜DSML｜function_calls>",
+            "function_calls_end": "</｜DSML｜function_calls>",
+            "invoke_start_prefix": "<｜DSML｜invoke name=",
+            "invoke_end": "</｜DSML｜invoke>",
+            "parameter_prefix": "<｜DSML｜parameter name=",
+            "parameter_end": "</｜DSML｜parameter>",
+        });
+        let cfg: DsmlParserConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(cfg.block_start, "<｜DSML｜function_calls>");
+        assert_eq!(cfg.block_end, "</｜DSML｜function_calls>");
+        assert_eq!(cfg.invoke_start_prefix, "<｜DSML｜invoke name=");
     }
 }
