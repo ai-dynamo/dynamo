@@ -527,11 +527,17 @@ fn render_tool_result_content(content: &JsonValue) -> String {
 
 /// Merge `tool` role messages into preceding user `content_blocks` and collapse
 /// consecutive user turns, matching Python's `merge_tool_messages`.
+///
+/// Iterates the input by reference. Each message is cloned at most once — and
+/// only when the control flow actually moves it into `merged` (the "other
+/// role" pass-through branch). The `tool` and `user` branches extract the few
+/// fields they need and build fresh JSON objects, so cloning the whole input
+/// message up front (as the original implementation did) was pure overhead
+/// on long chat histories.
 pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
     let mut merged: Vec<JsonValue> = Vec::with_capacity(messages.len());
 
     for msg in messages {
-        let msg = msg.clone();
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
         if role == "tool" {
@@ -550,11 +556,15 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
                 .unwrap_or(false);
 
             if can_merge {
-                let last = merged.last_mut().unwrap();
-                if let Some(blocks) = last
-                    .as_object_mut()
-                    .and_then(|o| o.get_mut("content_blocks"))
-                    .and_then(|v| v.as_array_mut())
+                // `can_merge` already checked `content_blocks.is_some()`; if
+                // the subsequent `as_array_mut()` ever fails (data invariant
+                // violation) we match the original behavior and silently
+                // drop rather than falling through to push a new user msg.
+                if let Some(last) = merged.last_mut()
+                    && let Some(blocks) = last
+                        .as_object_mut()
+                        .and_then(|o| o.get_mut("content_blocks"))
+                        .and_then(|v| v.as_array_mut())
                 {
                     blocks.push(tool_block);
                 }
@@ -582,11 +592,11 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
                 .unwrap_or(false);
 
             if can_merge {
-                let last = merged.last_mut().unwrap();
-                if let Some(blocks) = last
-                    .as_object_mut()
-                    .and_then(|o| o.get_mut("content_blocks"))
-                    .and_then(|v| v.as_array_mut())
+                if let Some(last) = merged.last_mut()
+                    && let Some(blocks) = last
+                        .as_object_mut()
+                        .and_then(|o| o.get_mut("content_blocks"))
+                        .and_then(|v| v.as_array_mut())
                 {
                     blocks.push(text_block);
                 }
@@ -607,7 +617,8 @@ pub fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
                 merged.push(new_msg);
             }
         } else {
-            merged.push(msg);
+            // Pass-through: clone only when we're actually moving the message.
+            merged.push(msg.clone());
         }
     }
 
