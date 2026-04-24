@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Quick functionality smoke: Qwen3-VL-2B on one GPU, single concurrency, single
+# input JSONL. Verifies that aiperf, nsys, and vllm_serve.sh are wired up end
+# to end. Should finish in ~6-8 min (load + 120s nsys window + teardown).
+
+model: Qwen/Qwen3-VL-2B-Instruct
+concurrencies: [4]
+osl: 128
+conversation_num: 5
+warmup_count: 2
+port: 8000
+timeout: 600
+output_dir: /dynamo-tmp/logs/04-21/smoke_2b
+restart_server_every_benchmark: true
+skip_plots: true
+
+env:
+  VLLM_MM_CACHE_PROBE: "1"
+  VLLM_NVTX_SCOPES_FOR_PROFILING: "1"
+  TRANSFORMERS_MM_PROFILING: "1"
+  DYN_NVTX: "1"
+  DYN_NSYS_DELAY_S: "30"
+  DYN_NSYS_DURATION_S: "120"
+  DYN_NSYS_OUT: "/dynamo-tmp/logs/04-21/smoke_2b/vllm_smoke.nsys-rep"
+
+input_files:
+  - benchmarks/multimodal/jsonl/10req_4img_40pool_400word_base64.jsonl
+
+configs:
+  - label: vllm-serve-smoke
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+    extra_args:
+      - --tensor-parallel-size
+      - "1"
+      - --enable-prefix-caching
+      - --max-model-len
+      - "16384"
