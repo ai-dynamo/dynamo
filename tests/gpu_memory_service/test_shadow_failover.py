@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -26,7 +28,7 @@ from tests.gpu_memory_service.flow_assertions import (
     wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.managed_process import ManagedProcess, terminate_process_tree
+from tests.utils.managed_process import ManagedProcess
 
 # TODO: revert to nightly once pre-merge validates the GMS->kvbm cleanup fix.
 pytestmark = [pytest.mark.pre_merge, pytest.mark.fault_tolerance]
@@ -43,13 +45,21 @@ logger = logging.getLogger(__name__)
 
 
 def _kill_process_group(process: ManagedProcess) -> None:
-    # Walk the ppid chain so we kill vLLM's spawn-method EngineCore child too;
-    # killpg alone misses it because spawn gives it its own pgid.
     pid = process.get_pid()
     if pid is None:
         logger.warning("kill process group: no PID available")
         return
-    terminate_process_tree(pid, logger, immediate_kill=True)
+
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        logger.warning("kill process group: process %d already dead", pid)
+        return
+
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
 
 
 def _start_primary(
