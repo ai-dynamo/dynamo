@@ -5,10 +5,83 @@
 // https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding/encoding_dsv32.py
 
 use regex::Regex;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 use uuid::Uuid;
 
 use super::super::config::DsmlParserConfig;
 use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
+
+/// Compiled regex trio for a given `DsmlParserConfig`. Compiled once and
+/// reused across every subsequent parse/stream chunk.
+struct DsmlRegexes {
+    block: Regex,
+    invoke: Regex,
+    parameter: Regex,
+}
+
+/// Cache key = the six config strings that drive the three regex patterns.
+/// V3.2 and V4 are the only variants in use, so the cache has at most two
+/// entries for the lifetime of the process.
+type DsmlRegexKey = (String, String, String, String, String, String);
+
+fn regex_cache() -> &'static RwLock<HashMap<DsmlRegexKey, Arc<DsmlRegexes>>> {
+    static CACHE: OnceLock<RwLock<HashMap<DsmlRegexKey, Arc<DsmlRegexes>>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Return the compiled regex trio for `config`, compiling on first use.
+///
+/// Each parse call previously recompiled three regexes from `format!`'d
+/// patterns that embed the config strings — expensive on streaming hot paths.
+/// The cache is keyed on the raw config strings (not the escaped patterns)
+/// so distinct configs that happen to escape identically still get distinct
+/// entries.
+fn get_dsml_regexes(config: &DsmlParserConfig) -> anyhow::Result<Arc<DsmlRegexes>> {
+    let key: DsmlRegexKey = (
+        config.function_calls_start.clone(),
+        config.function_calls_end.clone(),
+        config.invoke_start_prefix.clone(),
+        config.invoke_end.clone(),
+        config.parameter_prefix.clone(),
+        config.parameter_end.clone(),
+    );
+    // Fast path: shared read lock, common after the first parse of each config.
+    if let Some(regexes) = regex_cache()
+        .read()
+        .expect("DSML regex cache read lock poisoned")
+        .get(&key)
+    {
+        return Ok(Arc::clone(regexes));
+    }
+    // Slow path: compile and install. Use `entry` so a concurrent compiler of
+    // the same key only inserts once (we still compile speculatively, then
+    // drop the duplicate — cheap on a map of <= 2 keys).
+    let block = Regex::new(&format!(
+        r"(?s){}\s*(.*?)\s*{}",
+        regex::escape(&config.function_calls_start),
+        regex::escape(&config.function_calls_end),
+    ))?;
+    let invoke = Regex::new(&format!(
+        r#"(?s){}\"([^"]+)\"\s*>(.*?){}"#,
+        regex::escape(&config.invoke_start_prefix),
+        regex::escape(&config.invoke_end),
+    ))?;
+    let parameter = Regex::new(&format!(
+        r#"(?s){}\"([^"]+)\"\s+string=\"(true|false)\"\s*>(.*?){}"#,
+        regex::escape(&config.parameter_prefix),
+        regex::escape(&config.parameter_end),
+    ))?;
+    let regexes = Arc::new(DsmlRegexes {
+        block,
+        invoke,
+        parameter,
+    });
+    let mut cache = regex_cache()
+        .write()
+        .expect("DSML regex cache write lock poisoned");
+    Ok(Arc::clone(cache.entry(key).or_insert(regexes)))
+}
 
 /// DeepSeek V3.2 uses DSML (DeepSeek Markup Language) format for tool calls:
 ///
@@ -97,24 +170,16 @@ fn extract_tool_calls(
     config: &DsmlParserConfig,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
     let mut tool_calls = Vec::new();
+    let regexes = get_dsml_regexes(config)?;
 
-    // Find all function_calls blocks
-    // Matches: <｜DSML｜function_calls> ... </｜DSML｜function_calls>
-    // Pattern: (?s) = dot matches newlines
-    //          \s*(.*?)\s* = capture content between start/end tags (non-greedy)
-    let block_pattern = format!(
-        r"(?s){}\s*(.*?)\s*{}",
-        regex::escape(&config.function_calls_start),
-        regex::escape(&config.function_calls_end)
-    );
-    let block_regex = Regex::new(&block_pattern)?;
-
-    for block_match in block_regex.captures_iter(text) {
+    // Find all function_calls blocks — the block regex captures the content
+    // between start/end tags (non-greedy, dot-matches-newline).
+    for block_match in regexes.block.captures_iter(text) {
         if let Some(block_content) = block_match.get(1) {
             let block = block_content.as_str();
 
             // Extract individual invokes from this block
-            let invokes = extract_invokes(block, config)?;
+            let invokes = extract_invokes(block, &regexes)?;
             tool_calls.extend(invokes);
         }
     }
@@ -123,29 +188,18 @@ fn extract_tool_calls(
 }
 
 /// Extract individual invoke blocks from function_calls content
-fn extract_invokes(
-    block: &str,
-    config: &DsmlParserConfig,
-) -> anyhow::Result<Vec<ToolCallResponse>> {
+fn extract_invokes(block: &str, regexes: &DsmlRegexes) -> anyhow::Result<Vec<ToolCallResponse>> {
     let mut invokes = Vec::new();
 
-    // Regex to match: <｜DSML｜invoke name="function_name">..content..</｜DSML｜invoke>
-    // Note: invoke_start_prefix is "<｜DSML｜invoke name=" (no quotes, we add them in pattern)
-    let invoke_pattern = format!(
-        r#"(?s){}\"([^"]+)\"\s*>(.*?){}"#,
-        regex::escape(&config.invoke_start_prefix),
-        regex::escape(&config.invoke_end)
-    );
-    let invoke_regex = Regex::new(&invoke_pattern)?;
-
-    for invoke_match in invoke_regex.captures_iter(block) {
+    // Matches: <｜DSML｜invoke name="function_name">..content..</｜DSML｜invoke>
+    for invoke_match in regexes.invoke.captures_iter(block) {
         if let (Some(name_match), Some(content_match)) = (invoke_match.get(1), invoke_match.get(2))
         {
             let function_name = name_match.as_str().trim().to_string();
             let invoke_content = content_match.as_str();
 
             // Parse parameters from invoke content
-            let parameters = parse_parameters(invoke_content, config)?;
+            let parameters = parse_parameters(invoke_content, regexes)?;
 
             // Create tool call response
             let arguments_json = serde_json::to_string(&parameters)?;
@@ -167,24 +221,12 @@ fn extract_invokes(
 /// Parse parameters from invoke content
 fn parse_parameters(
     content: &str,
-    config: &DsmlParserConfig,
+    regexes: &DsmlRegexes,
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let mut parameters = serde_json::Map::new();
 
-    // Build pattern with proper escaping
-    // Match: <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
-    // Note: parameter_prefix is "<｜DSML｜parameter name=" (no quotes, we add them in pattern)
-    let prefix_escaped = regex::escape(&config.parameter_prefix);
-    let end_escaped = regex::escape(&config.parameter_end);
-
-    let param_pattern = format!(
-        r#"(?s){}\"([^"]+)\"\s+string=\"(true|false)\"\s*>(.*?){}"#,
-        prefix_escaped, end_escaped
-    );
-
-    let param_regex = Regex::new(&param_pattern)?;
-
-    for param_match in param_regex.captures_iter(content) {
+    // Matches: <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+    for param_match in regexes.parameter.captures_iter(content) {
         if let (Some(name_match), Some(string_match), Some(value_match)) =
             (param_match.get(1), param_match.get(2), param_match.get(3))
         {
