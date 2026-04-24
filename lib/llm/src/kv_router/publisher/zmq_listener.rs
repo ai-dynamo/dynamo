@@ -103,10 +103,16 @@ pub(super) async fn start_zmq_listener(
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
                 for raw_event in batch.events {
+                    if matches!(raw_event, RawKvEvent::Ignored) {
+                        continue;
+                    }
                     let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
                     let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                    let event =
-                        convert_event(raw_event, event_id, kv_block_size, worker, &warning_count);
+                    let Some(event) =
+                        convert_event(raw_event, event_id, kv_block_size, worker, &warning_count)
+                    else {
+                        continue;
+                    };
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
