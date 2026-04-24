@@ -127,7 +127,14 @@ fn to_json(value: &JsonValue) -> String {
         }
     }
 
-    let mut buf = Vec::with_capacity(64);
+    // Size the buffer from a compact pre-serialization. Python-style spacing
+    // adds exactly one byte per structural separator (`,` → `, `, `:` → `: `),
+    // which bounds the final length by ~1.125× the compact length. This keeps
+    // small payloads cheap and avoids the 5–9 reallocations the prior fixed
+    // 64-byte hint forced on KB-sized tool schemas and response formats.
+    let compact_len = serde_json::to_string(value).map(|s| s.len()).unwrap_or(256);
+    let capacity = compact_len.saturating_add(compact_len / 8).max(256);
+    let mut buf = Vec::with_capacity(capacity);
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonFormatter);
     if value.serialize(&mut ser).is_err() {
         return "{}".to_string();
@@ -1001,6 +1008,47 @@ mod tests {
         assert_eq!(
             got, r#"{"path": "\\", "count": 5}"#,
             "to_json must match Python's json.dumps formatting past an escaped backslash"
+        );
+    }
+
+    /// Larger-than-64-byte inputs (typical tool schemas / response formats)
+    /// must round-trip unchanged — pins that the capacity hint doesn't
+    /// truncate and that Python spacing holds across deep nesting.
+    #[test]
+    fn test_to_json_handles_large_payload() {
+        // Build a ~5 KB tool-like schema by nesting an array of items.
+        let items: Vec<serde_json::Value> = (0..200)
+            .map(|i| json!({"name": format!("field_{i}"), "type": "string", "i": i}))
+            .collect();
+        let v = json!({
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": items}},
+            "required": ["items"],
+        });
+
+        let got = to_json(&v);
+        // Baseline: default serde_json::to_string round-trips.
+        let parsed: serde_json::Value = serde_json::from_str(&got).expect("round-trip parse");
+        assert_eq!(
+            parsed, v,
+            "to_json output must round-trip back to the input"
+        );
+        // Python spacing assertions: no bare `",` or `":` sequences outside of
+        // string literals. The payload contains no commas or colons inside
+        // string values, so a byte scan is sufficient.
+        assert!(
+            !got.contains("\",\""),
+            "expected ', ' between keys — raw '\",\"' should not appear",
+        );
+        assert!(
+            !got.contains("\":\""),
+            "expected ': ' between key and value — raw '\":\"' should not appear",
+        );
+        // Sanity: large payload exercised (> 5KB).
+        assert!(
+            got.len() > 5_000,
+            "test payload is too small: {}",
+            got.len()
         );
     }
 }
