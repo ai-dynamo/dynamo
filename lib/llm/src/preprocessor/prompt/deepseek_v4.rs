@@ -774,6 +774,17 @@ impl DeepSeekV4Formatter {
         Self::new(ThinkingMode::Chat)
     }
 
+    fn resolve_reasoning_effort(
+        args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Option<ReasoningEffort> {
+        let value = args?.get("reasoning_effort")?.as_str()?;
+        match value {
+            "max" => Some(ReasoningEffort::Max),
+            "high" => Some(ReasoningEffort::High),
+            _ => None,
+        }
+    }
+
     fn resolve_thinking_mode(
         &self,
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -807,7 +818,9 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
     }
 
     fn render(&self, req: &dyn super::OAIChatLikeRequest) -> Result<String> {
-        let thinking_mode = self.resolve_thinking_mode(req.chat_template_args());
+        let args = req.chat_template_args();
+        let thinking_mode = self.resolve_thinking_mode(args);
+        let reasoning_effort = Self::resolve_reasoning_effort(args);
 
         let messages_value = req.messages();
         let messages_json =
@@ -865,7 +878,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
             }
         }
 
-        encode_messages(&messages_array, thinking_mode, true)
+        encode_messages_with_options(&messages_array, thinking_mode, true, true, reasoning_effort)
     }
 }
 
@@ -1019,5 +1032,73 @@ mod tests {
         assert_eq!(f.resolve_thinking_mode(Some(&args)), ThinkingMode::Chat);
         args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
         assert_eq!(f.resolve_thinking_mode(Some(&args)), ThinkingMode::Thinking);
+    }
+
+    struct MockRequest {
+        messages: JsonValue,
+        chat_template_args: Option<std::collections::HashMap<String, JsonValue>>,
+    }
+
+    impl MockRequest {
+        fn new(messages: JsonValue) -> Self {
+            Self {
+                messages,
+                chat_template_args: None,
+            }
+        }
+
+        fn with_chat_template_args(
+            mut self,
+            args: std::collections::HashMap<String, JsonValue>,
+        ) -> Self {
+            self.chat_template_args = Some(args);
+            self
+        }
+    }
+
+    impl super::super::OAIChatLikeRequest for MockRequest {
+        fn model(&self) -> String {
+            "deepseek-v4".to_string()
+        }
+
+        fn messages(&self) -> minijinja::value::Value {
+            minijinja::value::Value::from_serialize(&self.messages)
+        }
+
+        fn should_add_generation_prompt(&self) -> bool {
+            true
+        }
+
+        fn chat_template_args(
+            &self,
+        ) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+            self.chat_template_args.as_ref()
+        }
+    }
+
+    #[test]
+    fn test_render_wires_reasoning_effort_max_from_chat_template_args() {
+        use super::super::OAIPromptFormatter;
+        use std::collections::HashMap;
+
+        let mut args = HashMap::new();
+        args.insert("reasoning_effort".to_string(), json!("max"));
+
+        let req = MockRequest::new(json!([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"}
+        ]))
+        .with_chat_template_args(args);
+
+        let formatter = DeepSeekV4Formatter::new_thinking();
+        let out = formatter.render(&req).unwrap();
+
+        assert!(out.starts_with(tokens::BOS));
+        let after_bos = &out[tokens::BOS.len()..];
+        assert!(
+            after_bos.starts_with("Reasoning Effort:"),
+            "REASONING_EFFORT_MAX preamble should appear at start (after BOS), got:\n{}",
+            out
+        );
     }
 }
