@@ -183,7 +183,7 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # EFA PIPELINES (Build only, amd64)
+  # EFA PIPELINES (Build only)
   # ============================================================================
   # ============================================================================
   # VLLM EFA PIPELINE
@@ -193,7 +193,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9"]'
       make_efa: true
       extra_tags: |
@@ -217,7 +217,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       make_efa: true
       extra_tags: |
