@@ -69,8 +69,9 @@ pub fn try_tool_call_parse_dsml(
     }
 
     // Extract normal text before tool calls
-    let normal_text = if let Some(start_idx) = trimmed.find(&config.block_start) {
-        let text = trimmed[..start_idx].trim();
+    let start_idx = trimmed.find(&config.block_start);
+    let normal_text = if let Some(idx) = start_idx {
+        let text = trimmed[..idx].trim();
         if text.is_empty() {
             String::new()
         } else {
@@ -84,8 +85,18 @@ pub fn try_tool_call_parse_dsml(
     let tool_calls = extract_tool_calls(trimmed, config)?;
 
     if tool_calls.is_empty() {
-        // No valid tool calls found
-        return Ok((vec![], Some(trimmed.to_string())));
+        // A block-start was detected but no valid invokes parsed. Do NOT leak
+        // the DSML markup back to the client; return only the pre-block text
+        // and emit a diagnostic with a prefix of the failed block.
+        if let Some(idx) = start_idx {
+            let failed = &trimmed[idx..];
+            let prefix: String = failed.chars().take(120).collect();
+            tracing::warn!(
+                "DSML tool_calls block parsed no invokes; suppressing markup. prefix={:?}",
+                prefix
+            );
+        }
+        return Ok((vec![], Some(normal_text)));
     }
 
     Ok((tool_calls, Some(normal_text)))
@@ -547,6 +558,34 @@ mod tests {
 
         let (_, args) = extract_name_and_args(calls[0].clone());
         assert_eq!(args["empty"], "");
+    }
+
+    #[test]
+    fn test_empty_invokes_does_not_leak_dsml_markup() {
+        // Valid block-start + mangled content (invoke tag but no closing/params)
+        // followed by block-end. extract_tool_calls returns empty; we must not
+        // leak DSML markup into normal_content.
+        let input = "Let me check. <｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"broken\">\n</｜DSML｜tool_calls>";
+
+        let config = get_v4_test_config();
+        let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert!(
+            calls.is_empty(),
+            "Expected no tool calls, got {}",
+            calls.len()
+        );
+        let normal = normal.unwrap();
+        assert!(
+            normal.contains("Let me check."),
+            "Expected preamble in normal_content, got {:?}",
+            normal
+        );
+        assert!(
+            !normal.contains("<｜DSML｜"),
+            "normal_content leaked DSML markup: {:?}",
+            normal
+        );
     }
 
     #[test]
