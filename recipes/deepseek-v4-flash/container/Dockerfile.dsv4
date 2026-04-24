@@ -12,8 +12,11 @@
 # them on top of the dsv4 vLLM image without touching the vLLM install.
 #
 # Build (run from the repo root):
-#   docker build -f recipes/deepseek-v4-flash/Dockerfile.dsv4 \
+#   docker build -f recipes/deepseek-v4-flash/container/Dockerfile.dsv4 \
 #     -t <your-registry>/vllm-dsv4:<tag> .
+#
+# See recipes/deepseek-v4-flash/container/README.md for build args and
+# troubleshooting.
 #
 # Both base images must be Python 3.12 (verified).
 

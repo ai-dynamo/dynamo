@@ -11,9 +11,9 @@
 #        Tested on 4 of 8 GPUs per B200 node.
 #
 # Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
-#        includes the DeepSeek-V4 stack. See `../../Dockerfile.dsv4`
-#        (recipes/deepseek-v4-flash/Dockerfile.dsv4) for the reference build --
-#        it overlays dynamo on vllm/vllm-openai:deepseekv4-cu130.
+#        includes the DeepSeek-V4 stack. See `../../container/README.md`
+#        for the reference build -- it overlays dynamo on
+#        vllm/vllm-openai:deepseekv4-cu130.
 #
 # Weights: served from the `model-cache` PVC populated by
 #          `../../model-cache/model-download.yaml`.
