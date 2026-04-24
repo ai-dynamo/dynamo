@@ -1,0 +1,146 @@
+{
+  "request_id": "deepseek-v4-no-params-test",
+  "expected_output": {
+    "normal_content": "",
+    "reasoning_content": "The user asked for the current time. I'll call get_current_time which takes no parameters.",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "get_current_time",
+          "arguments": "{}"
+        }
+      }
+    ]
+  },
+  "input_stream": [
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<think>The user asked for the current time. I'll call get_current_time which takes no parameters.</think>",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "The user asked for the current time. I'll call get_current_time which takes no parameters."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜tool_calls>\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜invoke name=\"get_current_time\">\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</｜DSML｜invoke>\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</｜DSML｜tool_calls>",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-no-params",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            },
+            "finish_reason": "tool_calls"
+          }
+        ]
+      }
+    }
+  ]
+}

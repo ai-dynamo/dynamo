@@ -1,0 +1,3422 @@
+{
+  "request_id": "deepseek-v4-fragmented-tokens-test",
+  "expected_output": {
+    "normal_content": "",
+    "reasoning_content": "Break tokens apart aggressively.",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "ping",
+          "arguments": "{\"host\": \"example.com\"}"
+        }
+      }
+    ]
+  },
+  "input_stream": [
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<think>",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "B",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "B"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "r"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "e"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "k",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "k"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": " "
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "t"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "o"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "k",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "k"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "e"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "s"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": " "
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "p",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "p"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "r"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "t"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": " "
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "g",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "g"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "g",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "g"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "r"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "e"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "s"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "s"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "i",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "i"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "v",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "v"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "e"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "l"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "y",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "y"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ".",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</think>",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "D",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "S",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "M",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "L",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "_",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "c",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "D",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "S",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "M",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "L",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "i",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "v",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "k",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "m",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "=",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "p",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "i",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "g",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "D",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "S",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "M",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "L",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "p",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "m",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "m",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "=",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "h",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "i",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "g",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "=",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "u",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\"",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "x",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "m",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "p",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ".",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "c",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "m",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "/",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "D",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "S",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "M",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "L",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "p",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "m",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "r",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "/",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "D",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "S",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "M",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "L",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "i",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "v",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "k",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "e",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "/",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "D",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "S",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "M",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "L",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "｜",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "t",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "o",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "_",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "c",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "a",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "l",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "s",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": ">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-fragmented-tokens",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            },
+            "finish_reason": "tool_calls"
+          }
+        ]
+      }
+    }
+  ]
+}
