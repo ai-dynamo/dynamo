@@ -40,7 +40,6 @@ from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleRequest
 
-
 # --------------------------------------------------------------------------- #
 # Mock Kubernetes connector                                                   #
 # --------------------------------------------------------------------------- #
@@ -179,7 +178,9 @@ def _desired_replicas(
     """ceil(n / cap), clamped to min_replicas."""
     if n_requests <= 0:
         return min_replicas
-    return max(min_replicas, (n_requests + capacity_per_replica - 1) // capacity_per_replica)
+    return max(
+        min_replicas, (n_requests + capacity_per_replica - 1) // capacity_per_replica
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -288,8 +289,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace) -> int:
     # Resolve per-pool GPU counts.
-    prefill_gpu = args.prefill_gpu if args.prefill_gpu is not None else args.gpu_per_replica
-    decode_gpu = args.decode_gpu if args.decode_gpu is not None else args.gpu_per_replica
+    prefill_gpu = (
+        args.prefill_gpu if args.prefill_gpu is not None else args.gpu_per_replica
+    )
+    decode_gpu = (
+        args.decode_gpu if args.decode_gpu is not None else args.gpu_per_replica
+    )
 
     dgd_names = [f"dgd-{i}" for i in range(args.num_dgds)]
     handler = ScaleRequestHandler(
@@ -312,7 +317,9 @@ async def _run(args: argparse.Namespace) -> int:
                 "decode": (args.initial_replicas, decode_gpu),
             }
         conn = _MockConnector(name, pools)
-        handler.connectors[f"default/{name}"] = conn
+        # _MockConnector is a structural stand-in for KubernetesConnector; cast
+        # to silence mypy while keeping the handler's expectations satisfied.
+        handler.connectors[f"default/{name}"] = conn  # type: ignore[assignment]
         connectors[name] = conn
 
     # Log capture for classification.
@@ -368,12 +375,14 @@ async def _run(args: argparse.Namespace) -> int:
             conn = connectors[name]
             if args.mode == "agg":
                 desired = _desired_replicas(per_dgd, args.capacity_per_replica, 1)
-                target_groups = [[
-                    TargetReplica(
-                        sub_component_type=SubComponentType.DECODE,
-                        desired_replicas=desired,
-                    )
-                ]]
+                target_groups = [
+                    [
+                        TargetReplica(
+                            sub_component_type=SubComponentType.DECODE,
+                            desired_replicas=desired,
+                        )
+                    ]
+                ]
             else:
                 half = per_dgd // 2
                 prefill_target = TargetReplica(
