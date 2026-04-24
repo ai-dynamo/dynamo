@@ -139,6 +139,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_coverage:
+        description: 'Enable test coverage collection (true/false)'
+        required: false
+        type: boolean
+        default: false
       dev_version_suffix:
         description: 'PEP 440 dev suffix (e.g. .dev20260423+g1234567). Empty = stable build.'
         required: false
@@ -301,6 +306,7 @@ jobs:
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          enable_coverage: ${{ inputs.enable_coverage }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           dind_as_sidecar: 'true'
 
@@ -317,6 +323,7 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          enable_coverage: ${{ inputs.enable_coverage }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
 
@@ -375,6 +382,7 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: amd64
           hf_token: ${{ secrets.HF_TOKEN }}
+          enable_coverage: ${{ inputs.enable_coverage }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
 
