@@ -46,6 +46,10 @@ pytestmark = [
 ]
 
 
+def _has_group_idx(event_cls):
+    return "group_idx" in event_cls.__struct_fields__
+
+
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -61,11 +65,11 @@ class TestVllmKvEventsApi:
         6. medium
         7. lora_name (added in vLLM 0.14.0)
         8. extra_keys (added in vLLM 0.17.0)
-        9. group_idx (added for hybrid KV cache groups)
+        9. group_idx (added for hybrid KV cache groups; optional for older vLLM)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
-        expected_fields = (
+        expected_fields = [
             "block_hashes",
             "parent_block_hash",
             "token_ids",
@@ -74,8 +78,10 @@ class TestVllmKvEventsApi:
             "medium",
             "lora_name",
             "extra_keys",
-            "group_idx",
-        )
+        ]
+        if _has_group_idx(BlockStored):
+            expected_fields.append("group_idx")
+        expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -90,11 +96,13 @@ class TestVllmKvEventsApi:
 
     def test_block_removed_fields(self):
         """Verify BlockRemoved has expected fields in expected order."""
-        expected_fields = (
+        expected_fields = [
             "block_hashes",
             "medium",
-            "group_idx",
-        )
+        ]
+        if _has_group_idx(BlockRemoved):
+            expected_fields.append("group_idx")
+        expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -161,17 +169,19 @@ class TestVllmKvEventsApi:
         """
         import msgspec
 
-        event = BlockStored(
-            block_hashes=[123, 456],
-            parent_block_hash=789,
-            token_ids=[1, 2, 3, 4],
-            block_size=16,
-            lora_id=None,
-            medium="GPU",
-            lora_name=None,
-            extra_keys=None,
-            group_idx=0,
-        )
+        event_kwargs = {
+            "block_hashes": [123, 456],
+            "parent_block_hash": 789,
+            "token_ids": [1, 2, 3, 4],
+            "block_size": 16,
+            "lora_id": None,
+            "medium": "GPU",
+            "lora_name": None,
+            "extra_keys": None,
+        }
+        if _has_group_idx(BlockStored):
+            event_kwargs["group_idx"] = 0
+        event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
@@ -182,9 +192,9 @@ class TestVllmKvEventsApi:
             decoded[0] == "BlockStored"
         ), f"Expected tag 'BlockStored', got {decoded[0]}"
 
-        # Verify field count (tag + 9 fields = 10 elements)
-        assert len(decoded) == 10, (
-            f"Expected 10 elements (tag + 9 fields), got {len(decoded)}.\n"
+        expected_len = 10 if _has_group_idx(BlockStored) else 9
+        assert len(decoded) == expected_len, (
+            f"Expected {expected_len} elements, got {len(decoded)}.\n"
             f"Decoded: {decoded}\n"
             f"If field count changed, update Rust deserializers."
         )
@@ -198,24 +208,27 @@ class TestVllmKvEventsApi:
         assert decoded[6] == "GPU", f"medium at wrong position: {decoded[6]}"
         assert decoded[7] is None, f"lora_name at wrong position: {decoded[7]}"
         assert decoded[8] is None, f"extra_keys at wrong position: {decoded[8]}"
-        assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
+        if _has_group_idx(BlockStored):
+            assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
         import msgspec
 
         mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
-        event = BlockStored(
-            block_hashes=[123],
-            parent_block_hash=None,
-            token_ids=[1, 2, 3, 4],
-            block_size=16,
-            lora_id=None,
-            medium="GPU",
-            lora_name=None,
-            extra_keys=[((mm_hash, 7),)],
-            group_idx=0,
-        )
+        event_kwargs = {
+            "block_hashes": [123],
+            "parent_block_hash": None,
+            "token_ids": [1, 2, 3, 4],
+            "block_size": 16,
+            "lora_id": None,
+            "medium": "GPU",
+            "lora_name": None,
+            "extra_keys": [((mm_hash, 7),)],
+        }
+        if _has_group_idx(BlockStored):
+            event_kwargs["group_idx"] = 0
+        event = BlockStored(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
@@ -224,26 +237,31 @@ class TestVllmKvEventsApi:
             "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
             f"payloads. Decoded: {decoded[8]!r}"
         )
-        assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
+        if _has_group_idx(BlockStored):
+            assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
 
     def test_block_removed_serialization_format(self):
         """Verify BlockRemoved serializes to expected msgpack array format."""
         import msgspec
 
-        event = BlockRemoved(
-            block_hashes=[123, 456],
-            medium="GPU",
-            group_idx=0,
-        )
+        event_kwargs = {
+            "block_hashes": [123, 456],
+            "medium": "GPU",
+        }
+        if _has_group_idx(BlockRemoved):
+            event_kwargs["group_idx"] = 0
+        event = BlockRemoved(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
         assert decoded[0] == "BlockRemoved"
-        assert len(decoded) == 4, (
-            f"Expected 4 elements (tag + 3 fields), got {len(decoded)}.\n"
+        expected_len = 4 if _has_group_idx(BlockRemoved) else 3
+        assert len(decoded) == expected_len, (
+            f"Expected {expected_len} elements, got {len(decoded)}.\n"
             f"Decoded: {decoded}\n"
             f"If field count changed, update Rust deserializers."
         )
         assert decoded[1] == [123, 456], f"block_hashes at wrong position: {decoded[1]}"
         assert decoded[2] == "GPU", f"medium at wrong position: {decoded[2]}"
-        assert decoded[3] == 0, f"group_idx at wrong position: {decoded[3]}"
+        if _has_group_idx(BlockRemoved):
+            assert decoded[3] == 0, f"group_idx at wrong position: {decoded[3]}"
