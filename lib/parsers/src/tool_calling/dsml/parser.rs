@@ -68,15 +68,12 @@ pub fn try_tool_call_parse_dsml(
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
-    // Extract normal text before tool calls
+    // Extract normal text before tool calls.
+    // Preserve whitespace verbatim for parity with vLLM: clients that reassemble
+    // streams must not see different prompts depending on which server they talk to.
     let start_idx = trimmed.find(&config.block_start);
     let normal_text = if let Some(idx) = start_idx {
-        let text = trimmed[..idx].trim();
-        if text.is_empty() {
-            String::new()
-        } else {
-            text.to_string()
-        }
+        trimmed[..idx].to_string()
     } else {
         String::new()
     };
@@ -375,7 +372,7 @@ mod tests {
         let config = get_v4_test_config();
         let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
         assert_eq!(calls.len(), 2);
-        assert_eq!(normal, Some("Let's check this.".to_string()));
+        assert_eq!(normal, Some("Let's check this. ".to_string()));
 
         let (name1, args1) = extract_name_and_args(calls[0].clone());
         assert_eq!(name1, "get_favorite_tourist_spot");
@@ -416,7 +413,29 @@ mod tests {
         let config = get_test_config();
         let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(normal, Some("Here's the result:".to_string()));
+        assert_eq!(normal, Some("Here's the result: ".to_string()));
+    }
+
+    #[test]
+    fn test_parse_preserves_whitespace_before_dsml_block() {
+        // vLLM preserves whitespace verbatim before the DSML block; the parser
+        // must as well so clients see identical prompts across servers.
+        let input = "Let me check the forecast.\n\n<｜DSML｜tool_calls>
+<｜DSML｜invoke name=\"get_weather\">
+<｜DSML｜parameter name=\"city\" string=\"true\">SF</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_test_config();
+        let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+        let normal = normal.unwrap();
+        assert!(
+            normal.ends_with("\n\n"),
+            "Expected trailing \\n\\n preserved, got {:?}",
+            normal
+        );
+        assert_eq!(normal, "Let me check the forecast.\n\n");
     }
 
     #[test]
