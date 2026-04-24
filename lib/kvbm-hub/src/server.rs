@@ -17,6 +17,7 @@
 //! builds an internal `velo::Velo`, self-registers in the registry, and can
 //! push active messages (heartbeats, probes) to registered clients.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,10 +35,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use velo_common::{InstanceId, PeerInfo, WorkerId};
 
+use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use crate::protocol::{
-    self, ErrorBody, ErrorCode, HeartbeatResponse, ListInstancesResponse, PeerLookupResponse,
-    ProbeResponse, RegisterRequest, RegisterResponse,
+    self, ErrorBody, ErrorCode, FeatureKey, HeartbeatResponse, ListInstancesResponse,
+    PeerLookupResponse, ProbeResponse, RegisterRequest, RegisterResponse,
 };
 use crate::registry::{InMemoryRegistry, PeerRegistry, RegistryError};
 
@@ -52,6 +54,7 @@ pub const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(10);
 pub struct HubServerState {
     registry: Arc<dyn PeerRegistry>,
     velo: Option<Arc<velo::Velo>>,
+    managers: Arc<HashMap<FeatureKey, Arc<dyn FeatureManager>>>,
 }
 
 impl std::fmt::Debug for HubServerState {
@@ -59,6 +62,7 @@ impl std::fmt::Debug for HubServerState {
         f.debug_struct("HubServerState")
             .field("peers_count", &self.registry.list().len())
             .field("velo_attached", &self.velo.is_some())
+            .field("feature_managers", &self.managers.len())
             .finish()
     }
 }
@@ -77,6 +81,7 @@ impl HubServerState {
         Self {
             registry: mem,
             velo: None,
+            managers: Arc::new(HashMap::new()),
         }
     }
 
@@ -94,6 +99,12 @@ impl HubServerState {
     pub fn velo(&self) -> Option<&Arc<velo::Velo>> {
         self.velo.as_ref()
     }
+
+    fn fan_out_unregister(&self, id: InstanceId) {
+        for mgr in self.managers.values() {
+            mgr.on_unregister(id);
+        }
+    }
 }
 
 /// Builder for [`HubServer`].
@@ -106,6 +117,7 @@ pub struct HubServerBuilder {
     transports: Vec<Arc<dyn velo::Transport>>,
     registration_ttl: Duration,
     prune_interval: Duration,
+    feature_managers: Vec<Arc<dyn FeatureManager>>,
 }
 
 impl std::fmt::Debug for HubServerBuilder {
@@ -118,6 +130,7 @@ impl std::fmt::Debug for HubServerBuilder {
             .field("registry_injected", &self.registry.is_some())
             .field("registration_ttl", &self.registration_ttl)
             .field("prune_interval", &self.prune_interval)
+            .field("feature_managers", &self.feature_managers.len())
             .finish()
     }
 }
@@ -132,6 +145,7 @@ impl Default for HubServerBuilder {
             transports: Vec::new(),
             registration_ttl: DEFAULT_REGISTRATION_TTL,
             prune_interval: DEFAULT_PRUNE_INTERVAL,
+            feature_managers: Vec::new(),
         }
     }
 }
@@ -192,12 +206,32 @@ impl HubServerBuilder {
         self
     }
 
+    /// Attach a [`FeatureManager`] to the hub. Each manager contributes axum
+    /// routes to both listeners and receives register/unregister dispatch
+    /// for its [`FeatureKey`]. Duplicate keys cause [`serve`](Self::serve) to
+    /// fail.
+    pub fn add_feature_manager(mut self, mgr: Arc<dyn FeatureManager>) -> Self {
+        self.feature_managers.push(mgr);
+        self
+    }
+
     /// Bind both listeners and spawn them. Returns a running [`HubServer`].
     pub async fn serve(self) -> Result<HubServer> {
+        // Duplicate-key guard — enforced once at startup.
+        let mut managers: HashMap<FeatureKey, Arc<dyn FeatureManager>> = HashMap::new();
+        for mgr in &self.feature_managers {
+            let key = mgr.key();
+            if managers.insert(key, Arc::clone(mgr)).is_some() {
+                return Err(anyhow::anyhow!(
+                    "duplicate FeatureManager registered for key {key:?}"
+                ));
+            }
+        }
+
         // Two-phase registry construction: keep a concrete handle to
         // `InMemoryRegistry` (if we built one) until after we've called
-        // `.protect()` with the hub's own id. After that we only need the
-        // trait object.
+        // `.protect()` with the hub's own id and installed the eviction
+        // callback. After that we only need the trait object.
         let (registry, mem_concrete): (Arc<dyn PeerRegistry>, Option<Arc<InMemoryRegistry>>) =
             match self.registry {
                 Some(r) => (r, None),
@@ -235,9 +269,34 @@ impl HubServerBuilder {
             None
         };
 
+        // Attach every manager now that the registry and (optional) Velo
+        // are ready.
+        let ctx = HubContext {
+            velo: velo.clone(),
+            registry: registry.clone(),
+        };
+        for (key, mgr) in &managers {
+            mgr.attach(ctx.clone())
+                .map_err(|e| anyhow::anyhow!("FeatureManager({key:?}) attach: {e}"))?;
+        }
+
+        let managers = Arc::new(managers);
+
+        // Wire eviction fan-out when we own the concrete in-memory registry.
+        // Custom backends manage their own eviction semantics.
+        if let Some(mem) = &mem_concrete {
+            let managers_for_cb = Arc::clone(&managers);
+            mem.set_eviction_callback(Arc::new(move |id: InstanceId| {
+                for mgr in managers_for_cb.values() {
+                    mgr.on_unregister(id);
+                }
+            }));
+        }
+
         let state = HubServerState {
             registry: registry.clone(),
             velo,
+            managers: Arc::clone(&managers),
         };
 
         let discovery_addr = SocketAddr::new(self.bind_addr, self.discovery_port);
@@ -261,8 +320,12 @@ impl HubServerBuilder {
 
         let reaper_task = registry.clone().spawn_liveness_task(cancel.child_token());
 
-        let discovery_router = discovery_router(state.clone());
-        let control_router = control_router(state.clone());
+        let mut discovery_router = discovery_router(state.clone());
+        let mut control_router = control_router(state.clone());
+        for mgr in managers.values() {
+            discovery_router = discovery_router.merge(Arc::clone(mgr).public_router());
+            control_router = control_router.merge(Arc::clone(mgr).control_router());
+        }
 
         let discovery_task = spawn_server(discovery_listener, discovery_router, cancel.clone());
         let control_task = spawn_server(control_listener, control_router, cancel.clone());
@@ -417,6 +480,29 @@ async fn register_instance(
         .await
         .map_err(HubError::from_registry)?;
 
+    // Feature dispatch. All-or-nothing: if any feature rejects the payload
+    // (unknown manager, invalid config, role conflict, ...) we roll back the
+    // base registration so the client sees a single consistent outcome.
+    for feature in &req.features {
+        let dispatch: Result<(), HubError> = match state.managers.get(&feature.key()) {
+            None => Err(HubError::bad_request(format!(
+                "no feature manager registered for {:?}",
+                feature.key()
+            ))),
+            Some(mgr) => mgr
+                .on_register(instance_id, feature)
+                .await
+                .map_err(HubError::from_feature),
+        };
+        if let Err(err) = dispatch {
+            // Roll back: remove base entry and every manager notification we
+            // already emitted (for features dispatched earlier in this loop).
+            let _ = state.registry.unregister(instance_id).await;
+            state.fan_out_unregister(instance_id);
+            return Err(err);
+        }
+    }
+
     // Proactively inform the hub's Velo about this peer so outbound sends
     // don't need to round-trip through discovery. Matches pre-trait behavior.
     if let Some(velo) = state.velo.as_ref() {
@@ -470,6 +556,11 @@ async fn unregister_instance(
         .unregister(instance_id)
         .await
         .map_err(HubError::from_registry)?;
+    // In-memory registry's eviction callback already notifies managers; the
+    // explicit fan-out here covers custom registry backends that don't wire
+    // a callback. The call is cheap and manager `on_unregister` is required
+    // to be idempotent.
+    state.fan_out_unregister(instance_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -530,11 +621,29 @@ impl HubError {
         }
     }
 
+    fn from_feature(e: FeatureError) -> Self {
+        match e {
+            FeatureError::InvalidConfig(m) => Self::bad_request(m),
+            FeatureError::KeyMismatch { .. } => Self::internal(e.to_string()),
+            FeatureError::Other(err) => Self::internal(err.to_string()),
+        }
+    }
+
     fn not_found(message: String) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             body: ErrorBody {
                 code: ErrorCode::NotFound,
+                message,
+            },
+        }
+    }
+
+    fn bad_request(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: ErrorBody {
+                code: ErrorCode::BadRequest,
                 message,
             },
         }

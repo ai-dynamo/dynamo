@@ -97,7 +97,13 @@ pub struct InMemoryRegistry {
     inner: RwLock<RegistryInner>,
     ttl: Duration,
     prune_interval: Duration,
+    eviction_cb: RwLock<Option<EvictionCallback>>,
 }
+
+/// Callback invoked whenever an instance leaves the registry (explicit
+/// unregister or reaper-driven TTL eviction). Always called **outside** the
+/// registry lock. Idempotency is the callback's responsibility.
+pub type EvictionCallback = Arc<dyn Fn(InstanceId) + Send + Sync + 'static>;
 
 #[derive(Default)]
 struct RegistryInner {
@@ -139,30 +145,51 @@ impl InMemoryRegistry {
         self.inner.write().protected.insert(id);
     }
 
+    /// Install (or replace) the eviction callback. Called for every instance
+    /// removed via explicit unregister or the reaper's TTL pass. Always
+    /// invoked outside the registry lock.
+    pub fn set_eviction_callback(&self, cb: EvictionCallback) {
+        *self.eviction_cb.write() = Some(cb);
+    }
+
+    fn eviction_callback(&self) -> Option<EvictionCallback> {
+        self.eviction_cb.read().as_ref().map(Arc::clone)
+    }
+
     /// Immediately evict entries older than `ttl` that are not protected.
     /// Normally called from the reaper task; exposed for tests.
     pub fn prune_stale(&self) {
-        let mut w = self.inner.write();
-        let now = Instant::now();
-        let ttl = self.ttl;
-        let stale: Vec<InstanceId> = w
-            .last_seen
-            .iter()
-            .filter_map(|(id, seen)| {
-                if w.protected.contains(id) {
-                    None
-                } else if now.saturating_duration_since(*seen) > ttl {
-                    Some(*id)
-                } else {
-                    None
+        let evicted = {
+            let mut w = self.inner.write();
+            let now = Instant::now();
+            let ttl = self.ttl;
+            let stale: Vec<InstanceId> = w
+                .last_seen
+                .iter()
+                .filter_map(|(id, seen)| {
+                    if w.protected.contains(id) {
+                        None
+                    } else if now.saturating_duration_since(*seen) > ttl {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for id in &stale {
+                if let Some(peer) = w.by_instance.remove(id) {
+                    w.by_worker.remove(&peer.worker_id());
                 }
-            })
-            .collect();
-        for id in stale {
-            if let Some(peer) = w.by_instance.remove(&id) {
-                w.by_worker.remove(&peer.worker_id());
+                w.last_seen.remove(id);
             }
-            w.last_seen.remove(&id);
+            stale
+        };
+        if !evicted.is_empty()
+            && let Some(cb) = self.eviction_callback()
+        {
+            for id in evicted {
+                cb(id);
+            }
         }
     }
 }
@@ -201,6 +228,7 @@ impl InMemoryRegistryBuilder {
             inner: RwLock::new(RegistryInner::default()),
             ttl: self.ttl,
             prune_interval: self.prune_interval,
+            eviction_cb: RwLock::new(None),
         }
     }
 }
@@ -256,14 +284,19 @@ impl PeerRegistry for InMemoryRegistry {
     }
 
     async fn unregister(&self, id: InstanceId) -> Result<(), RegistryError> {
-        let mut w = self.inner.write();
-        let peer = w
-            .by_instance
-            .remove(&id)
-            .ok_or(RegistryError::NotFound(id))?;
-        w.by_worker.remove(&peer.worker_id());
-        w.last_seen.remove(&id);
-        w.protected.remove(&id);
+        {
+            let mut w = self.inner.write();
+            let peer = w
+                .by_instance
+                .remove(&id)
+                .ok_or(RegistryError::NotFound(id))?;
+            w.by_worker.remove(&peer.worker_id());
+            w.last_seen.remove(&id);
+            w.protected.remove(&id);
+        }
+        if let Some(cb) = self.eviction_callback() {
+            cb(id);
+        }
         Ok(())
     }
 

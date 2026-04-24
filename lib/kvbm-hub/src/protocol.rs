@@ -56,6 +56,12 @@ pub mod paths {
     ///
     /// `GET /health` → `200 OK`
     pub const HEALTH: &str = "/health";
+
+    /// List ConditionalDisagg instances, split by role.
+    ///
+    /// `GET /v1/features/conditional-disagg/instances`
+    /// → [`super::ConditionalDisaggInstancesResponse`]
+    pub const CD_INSTANCES: &str = "/v1/features/conditional-disagg/instances";
 }
 
 /// Request body for `POST /v1/instances`.
@@ -63,6 +69,69 @@ pub mod paths {
 pub struct RegisterRequest {
     /// Full peer information (instance id + opaque worker address).
     pub peer_info: PeerInfo,
+    /// Optional feature declarations. Each entry is dispatched to the
+    /// corresponding [`crate::features::FeatureManager`] on the hub after
+    /// base registration completes. Empty by default for
+    /// backward-compatibility with clients that predate the feature surface.
+    #[serde(default)]
+    pub features: Vec<Feature>,
+}
+
+/// Feature participation declared by a client at registration time.
+///
+/// Non-exhaustive so new variants can be added without breaking downstream
+/// clients that only serialize variants they know about.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "config", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Feature {
+    /// The client participates in the ConditionalDisagg feature. Config is
+    /// required — the manager rejects registrations where this is `None`.
+    ConditionalDisagg(Option<ConditionalDisaggConfig>),
+}
+
+/// Stable discriminant for [`Feature`] — lets managers match by kind
+/// without exhaustively matching the enum's variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FeatureKey {
+    /// Matches [`Feature::ConditionalDisagg`].
+    ConditionalDisagg,
+}
+
+impl Feature {
+    /// Return the stable discriminant for this feature.
+    pub fn key(&self) -> FeatureKey {
+        match self {
+            Feature::ConditionalDisagg(_) => FeatureKey::ConditionalDisagg,
+        }
+    }
+}
+
+/// Configuration payload for the ConditionalDisagg feature.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConditionalDisaggConfig {
+    /// The role this instance is taking inside the ConditionalDisagg split.
+    pub role: ConditionalDisaggRole,
+}
+
+/// Role a ConditionalDisagg participant takes on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalDisaggRole {
+    /// Prefill instance.
+    Prefill,
+    /// Decode instance.
+    Decode,
+}
+
+/// Response body for `GET /v1/features/conditional-disagg/instances`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ConditionalDisaggInstancesResponse {
+    /// Instance ids currently registered in the Prefill role.
+    pub prefill: Vec<InstanceId>,
+    /// Instance ids currently registered in the Decode role.
+    pub decode: Vec<InstanceId>,
 }
 
 /// Response body for `POST /v1/instances`.
@@ -187,10 +256,69 @@ mod tests {
         let peer_info = make_peer_info();
         let orig = RegisterRequest {
             peer_info: peer_info.clone(),
+            features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+                role: ConditionalDisaggRole::Prefill,
+            }))],
         };
         let json = serde_json::to_string(&orig).unwrap();
         let back: RegisterRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.peer_info.instance_id(), peer_info.instance_id());
+        assert_eq!(back.features, orig.features);
+    }
+
+    #[test]
+    fn register_request_accepts_legacy_payload_without_features() {
+        let peer_info = make_peer_info();
+        let legacy_json = format!(
+            r#"{{"peer_info":{}}}"#,
+            serde_json::to_string(&peer_info).unwrap()
+        );
+        let back: RegisterRequest = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(back.peer_info.instance_id(), peer_info.instance_id());
+        assert!(back.features.is_empty());
+    }
+
+    #[test]
+    fn feature_cd_with_config_serde_round_trip() {
+        let f = Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            role: ConditionalDisaggRole::Decode,
+        }));
+        let json = serde_json::to_string(&f).unwrap();
+        // Adjacently-tagged: {"kind":"conditional_disagg","config":{"role":"decode"}}
+        assert!(json.contains("\"kind\":\"conditional_disagg\""));
+        assert!(json.contains("\"role\":\"decode\""));
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+        assert_eq!(back.key(), FeatureKey::ConditionalDisagg);
+    }
+
+    #[test]
+    fn feature_cd_with_no_config_serde_round_trip() {
+        let f = Feature::ConditionalDisagg(None);
+        let json = serde_json::to_string(&f).unwrap();
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+    }
+
+    #[test]
+    fn cd_role_serde_lowercase() {
+        let prefill = serde_json::to_string(&ConditionalDisaggRole::Prefill).unwrap();
+        let decode = serde_json::to_string(&ConditionalDisaggRole::Decode).unwrap();
+        assert_eq!(prefill, "\"prefill\"");
+        assert_eq!(decode, "\"decode\"");
+    }
+
+    #[test]
+    fn cd_instances_response_serde_round_trip() {
+        let a = InstanceId::new_v4();
+        let b = InstanceId::new_v4();
+        let orig = ConditionalDisaggInstancesResponse {
+            prefill: vec![a],
+            decode: vec![b],
+        };
+        let json = serde_json::to_string(&orig).unwrap();
+        let back: ConditionalDisaggInstancesResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, orig);
     }
 
     #[test]

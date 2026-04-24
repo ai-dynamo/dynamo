@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use kvbm_hub::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use kvbm_hub::protocol::{
-    ErrorBody, ErrorCode, HeartbeatResponse, ListInstancesResponse, PeerLookupResponse,
+    ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, ErrorBody,
+    ErrorCode, Feature, HeartbeatResponse, ListInstancesResponse, PeerLookupResponse,
     ProbeResponse, RegisterRequest, RegisterResponse, instance_by_id, instance_heartbeat,
     instance_probe, paths, peers_by_instance, peers_by_worker,
 };
-use kvbm_hub::{HubClientBuilder, HubServer};
+use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
 use velo::discovery::PeerDiscovery;
 use velo_common::{InstanceId, PeerInfo, WorkerAddress};
 use velo_transports::Transport;
@@ -132,6 +133,7 @@ async fn register_success() {
         .post(control_url(&server, paths::INSTANCES))
         .json(&RegisterRequest {
             peer_info: peer.clone(),
+            features: Vec::new(),
         })
         .send()
         .await
@@ -147,6 +149,7 @@ async fn reregister_same_instance_is_idempotent() {
     let peer = make_peer();
     let req = RegisterRequest {
         peer_info: peer.clone(),
+        features: Vec::new(),
     };
     let post = || {
         http()
@@ -166,6 +169,7 @@ async fn unregister_success() {
         .post(control_url(&server, paths::INSTANCES))
         .json(&RegisterRequest {
             peer_info: peer.clone(),
+            features: Vec::new(),
         })
         .send()
         .await
@@ -199,6 +203,7 @@ async fn heartbeat_registered_instance() {
         .post(control_url(&server, paths::INSTANCES))
         .json(&RegisterRequest {
             peer_info: peer.clone(),
+            features: Vec::new(),
         })
         .send()
         .await
@@ -240,6 +245,7 @@ async fn get_peer_by_instance_found() {
         .post(control_url(&server, paths::INSTANCES))
         .json(&RegisterRequest {
             peer_info: peer.clone(),
+            features: Vec::new(),
         })
         .send()
         .await
@@ -281,6 +287,7 @@ async fn get_peer_by_worker_found() {
         .post(control_url(&server, paths::INSTANCES))
         .json(&RegisterRequest {
             peer_info: peer.clone(),
+            features: Vec::new(),
         })
         .send()
         .await
@@ -319,6 +326,7 @@ async fn control_port_mirrors_discovery_endpoints() {
         .post(control_url(&server, paths::INSTANCES))
         .json(&RegisterRequest {
             peer_info: peer.clone(),
+            features: Vec::new(),
         })
         .send()
         .await
@@ -339,6 +347,7 @@ async fn peers_snapshot_tracks_registrations() {
             .post(control_url(&server, paths::INSTANCES))
             .json(&RegisterRequest {
                 peer_info: make_peer(),
+                features: Vec::new(),
             })
             .send()
             .await
@@ -357,6 +366,7 @@ async fn peers_snapshot_tracks_unregistrations() {
             .post(control_url(&server, paths::INSTANCES))
             .json(&RegisterRequest {
                 peer_info: peer.clone(),
+                features: Vec::new(),
             })
             .send()
             .await
@@ -729,4 +739,318 @@ async fn hub_self_entry_survives_reaper() {
         200,
         "hub's self-entry should be protected from reaper"
     );
+}
+
+// ---- ConditionalDisagg feature tests ---------------------------------------
+
+async fn start_server_with_cd() -> (
+    HubServer,
+    Arc<velo_transports::tcp::TcpTransport>,
+    Arc<ConditionalDisaggManager>,
+) {
+    let transport = new_velo_transport();
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_transport(Arc::clone(&transport) as Arc<dyn Transport>)
+        .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
+        .serve()
+        .await
+        .expect("start test server with CD");
+    (server, transport, cd_manager)
+}
+
+/// CD-enabled hub without any velo transport. Use this when a test only
+/// exercises HTTP registration dispatch and does not need velo peer
+/// registration on the hub side — the hub's `velo.register_peer` call
+/// would otherwise reject the opaque addresses produced by `make_peer()`.
+async fn start_server_with_cd_no_velo() -> (HubServer, Arc<ConditionalDisaggManager>) {
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
+        .serve()
+        .await
+        .expect("start test server with CD");
+    (server, cd_manager)
+}
+
+#[tokio::test]
+async fn feature_register_without_manager_rejects() {
+    let server = start_server().await;
+    let peer = make_peer();
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            role: ConditionalDisaggRole::Prefill,
+        }))],
+    };
+    let resp = http()
+        .post(control_url(&server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: ErrorBody = resp.json().await.unwrap();
+    assert_eq!(body.code, ErrorCode::BadRequest);
+
+    // Base entry should have been rolled back.
+    let resp = http()
+        .get(discovery_url(
+            &server,
+            &peers_by_instance(peer.instance_id()),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn feature_cd_register_missing_config_rejects() {
+    let (server, _cd) = start_server_with_cd_no_velo().await;
+    let peer = make_peer();
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::ConditionalDisagg(None)],
+    };
+    let resp = http()
+        .post(control_url(&server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Base entry rolled back.
+    let resp = http()
+        .get(discovery_url(
+            &server,
+            &peers_by_instance(peer.instance_id()),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn feature_cd_list_empty_on_both_ports() {
+    let (server, _cd) = start_server_with_cd_no_velo().await;
+    for url in [
+        discovery_url(&server, paths::CD_INSTANCES),
+        control_url(&server, paths::CD_INSTANCES),
+    ] {
+        let body: ConditionalDisaggInstancesResponse =
+            http().get(url).send().await.unwrap().json().await.unwrap();
+        assert!(body.prefill.is_empty());
+        assert!(body.decode.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn register_without_features_field_still_works() {
+    // Proves `#[serde(default)]` on RegisterRequest.features is honored for
+    // older clients that omit the field entirely.
+    let server = start_server().await;
+    let peer = make_peer();
+    let legacy_json = format!(
+        r#"{{"peer_info":{}}}"#,
+        serde_json::to_string(&peer).unwrap()
+    );
+    let resp = http()
+        .post(control_url(&server, paths::INSTANCES))
+        .header("content-type", "application/json")
+        .body(legacy_json)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn feature_cd_role_conflict_on_reregister() {
+    let (server, _cd) = start_server_with_cd_no_velo().await;
+    let peer = make_peer();
+
+    let post = |role: ConditionalDisaggRole| {
+        let req = RegisterRequest {
+            peer_info: peer.clone(),
+            features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+                role,
+            }))],
+        };
+        http()
+            .post(control_url(&server, paths::INSTANCES))
+            .json(&req)
+            .send()
+    };
+
+    assert_eq!(
+        post(ConditionalDisaggRole::Prefill).await.unwrap().status(),
+        200
+    );
+    let resp = post(ConditionalDisaggRole::Decode).await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn feature_cd_unregister_removes_from_lists() {
+    let (server, cd) = start_server_with_cd_no_velo().await;
+    let peer = make_peer();
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            role: ConditionalDisaggRole::Prefill,
+        }))],
+    };
+    http()
+        .post(control_url(&server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cd.snapshot().prefill.len(), 1);
+
+    http()
+        .delete(control_url(&server, &instance_by_id(peer.instance_id())))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(cd.snapshot().prefill.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feature_cd_reaper_evicts_from_lists() {
+    // No transport — the reaper runs off the in-memory registry ticker and
+    // the eviction callback fires into the CD manager regardless of velo.
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .registration_ttl(Duration::from_millis(60))
+        .prune_interval(Duration::from_millis(20))
+        .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
+        .serve()
+        .await
+        .expect("start test server");
+
+    let peer = make_peer();
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            role: ConditionalDisaggRole::Prefill,
+        }))],
+    };
+    http()
+        .post(control_url(&server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cd_manager.snapshot().prefill.len(), 1);
+
+    // Wait well past TTL + multiple prune cycles so the reaper evicts the
+    // base entry and the eviction callback fans out to the CD manager.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        cd_manager.snapshot().prefill.is_empty(),
+        "reaper eviction should fan out to the feature manager"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feature_cd_prefill_and_decode_register_and_list() {
+    let (server, _hub_transport, _cd) = start_server_with_cd().await;
+
+    // Build two velo participants with their own transports + hub clients.
+    let p_velo = new_velo().await;
+    let d_velo = new_velo().await;
+
+    let p_hub = build_client(&server);
+    let d_hub = build_client(&server);
+    p_hub.register_handlers(&p_velo).unwrap();
+    d_hub.register_handlers(&d_velo).unwrap();
+
+    let p_cd = ConditionalDisaggClient::new(Arc::clone(&p_hub), ConditionalDisaggRole::Prefill);
+    let d_cd = ConditionalDisaggClient::new(Arc::clone(&d_hub), ConditionalDisaggRole::Decode);
+
+    let p_hub_id = p_cd
+        .register(p_velo.peer_info())
+        .await
+        .unwrap()
+        .expect("hub velo id");
+    let d_hub_id = d_cd
+        .register(d_velo.peer_info())
+        .await
+        .unwrap()
+        .expect("hub velo id");
+    assert_eq!(p_hub_id, d_hub_id, "both clients should see the same hub");
+
+    // Give the server a moment to fully settle (listeners + velo peer table).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Both endpoints must report the same role split, with the correct ids.
+    let p_id = p_velo.instance_id();
+    let d_id = d_velo.instance_id();
+    for url in [
+        discovery_url(&server, paths::CD_INSTANCES),
+        control_url(&server, paths::CD_INSTANCES),
+    ] {
+        let body: ConditionalDisaggInstancesResponse =
+            http().get(&url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(body.prefill, vec![p_id], "from {url}");
+        assert_eq!(body.decode, vec![d_id], "from {url}");
+    }
+
+    // Wire the hub's PeerInfo into each participant's velo (needed so velo
+    // probes initiated from the hub can route back through the TCP transport).
+    let hub_peer = p_hub.discover_by_instance_id(p_hub_id).await.unwrap();
+    p_velo.register_peer(hub_peer.clone()).unwrap();
+    d_velo.register_peer(hub_peer).unwrap();
+
+    // Prefill side: await the decode peer and register it into prefill's velo.
+    let d_peer = p_cd
+        .await_peer_of_role(
+            ConditionalDisaggRole::Decode,
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(d_peer.instance_id(), d_id);
+    p_velo.register_peer(d_peer).unwrap();
+
+    // Decode side: symmetric handshake.
+    let p_peer = d_cd
+        .await_peer_of_role(
+            ConditionalDisaggRole::Prefill,
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(p_peer.instance_id(), p_id);
+    d_velo.register_peer(p_peer).unwrap();
+
+    // Hub can now probe both instances — proves velo handshakes succeeded.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for id in [p_id, d_id] {
+        let resp = http()
+            .post(control_url(&server, &instance_probe(id)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "probe failed for {id}");
+        let body: ProbeResponse = resp.json().await.unwrap();
+        assert!(body.ok, "probe returned not-ok for {id}");
+    }
 }

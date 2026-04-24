@@ -22,7 +22,7 @@ use velo_common::{InstanceId, PeerInfo, WorkerId};
 
 use crate::handlers;
 use crate::protocol::{
-    self, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, ErrorBody, PeerLookupResponse,
+    self, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, ErrorBody, Feature, PeerLookupResponse,
     RegisterRequest, RegisterResponse,
 };
 
@@ -199,12 +199,39 @@ impl HubClient {
     /// [`discover_by_instance_id`](velo::discovery::PeerDiscovery::discover_by_instance_id)
     /// and wire it into their own Velo for bidirectional messaging.
     pub async fn register_instance(&self, peer_info: PeerInfo) -> Result<Option<InstanceId>> {
+        self.register_instance_inner(peer_info, Vec::new()).await
+    }
+
+    /// Register an instance with the hub, declaring feature participation.
+    ///
+    /// Semantically identical to [`register_instance`](Self::register_instance)
+    /// except each entry in `features` is dispatched to its hub-side
+    /// [`FeatureManager`](crate::features::FeatureManager) after base
+    /// registration. If any feature manager rejects the payload, the hub
+    /// rolls back base registration and returns an error — this method
+    /// surfaces that as an `Err` and does **not** store a registration guard.
+    pub async fn register_instance_with_features(
+        &self,
+        peer_info: PeerInfo,
+        features: Vec<Feature>,
+    ) -> Result<Option<InstanceId>> {
+        self.register_instance_inner(peer_info, features).await
+    }
+
+    async fn register_instance_inner(
+        &self,
+        peer_info: PeerInfo,
+        features: Vec<Feature>,
+    ) -> Result<Option<InstanceId>> {
         if self.guard.get().is_some() {
             anyhow::bail!("HubClient: instance already registered");
         }
         let instance_id = peer_info.instance_id();
         let url = self.control_url(protocol::paths::INSTANCES)?;
-        let body = RegisterRequest { peer_info };
+        let body = RegisterRequest {
+            peer_info,
+            features,
+        };
         let resp = self
             .http
             .post(url)
