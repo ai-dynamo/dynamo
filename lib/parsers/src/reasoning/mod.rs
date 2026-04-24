@@ -294,6 +294,7 @@ mod tests {
             assert!(parsers.contains(&parser));
         }
     }
+    /// `CASE.10` — reasoning-only (V4 `<think>`/`</think>`).
 
     #[test]
     fn test_deepseek_v4_detect_and_parse() {
@@ -304,6 +305,7 @@ mod tests {
             assert_eq!(result.normal_text, "answer");
         }
     }
+    /// `CASE.3` / `CASE.10` — no reasoning tags ⇒ no `reasoning_content`.
 
     #[test]
     fn test_deepseek_v4_no_forced_reasoning_without_tags() {
@@ -312,6 +314,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
         assert_eq!(result.normal_text, "answer only");
     }
+    /// `CASE.8` — streaming reasoning parse (chunked).
 
     #[test]
     fn test_deepseek_v4_streaming() {
