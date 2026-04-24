@@ -24,7 +24,7 @@
 //! differ only in `WorkerType`.
 
 use bitflags::bitflags;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
@@ -34,7 +34,12 @@ bitflags! {
     /// Canonical values (and the only ones accepted at registration):
     /// `Prefill`, `Decode`, `Encode`, `Aggregated` (= `Prefill | Decode`).
     /// Other combinations (e.g. `Prefill | Encode`) are not valid worker types.
-    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+    ///
+    /// Note: `Serialize`/`Deserialize` are implemented manually (below) so the
+    /// JSON wire format is the canonical lowercase string (`"aggregated"`,
+    /// `"prefill"`, …) rather than bitflags 2.x's default formatted-string
+    /// representation (`"Prefill | Decode"`). Binary formats use raw `u8` bits.
+    #[derive(Copy, Debug, Default, Clone, Eq, PartialEq, Hash)]
     pub struct WorkerType: u8 {
         const Prefill    = 1 << 0;
         const Decode     = 1 << 1;
@@ -44,6 +49,33 @@ bitflags! {
         /// This lets `Encode::needs = Prefill | Decode` be satisfied equally by
         /// a P+D pair or by a single Aggregated worker.
         const Aggregated = Self::Prefill.bits() | Self::Decode.bits();
+    }
+}
+
+impl Serialize for WorkerType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            // JSON / YAML / TOML: canonical lowercase string form. This is the
+            // documented wire format and matches the readiness endpoint JSON.
+            serializer.serialize_str(&self.as_str())
+        } else {
+            // bincode / postcard / etc.: raw bits for compactness.
+            serializer.serialize_u8(self.bits())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkerType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            let s = String::deserialize(deserializer)?;
+            WorkerType::from_str(&s).map_err(serde::de::Error::custom)
+        } else {
+            let bits = u8::deserialize(deserializer)?;
+            WorkerType::from_bits(bits).ok_or_else(|| {
+                serde::de::Error::custom(format!("invalid WorkerType bits: 0b{bits:b}"))
+            })
+        }
     }
 }
 
@@ -331,6 +363,86 @@ mod tests {
             let back: WorkerType = serde_json::from_str(&j).unwrap();
             assert_eq!(back, wt, "serde round-trip failed for {wt:?} (json={j})");
         }
+    }
+
+    /// Strict wire-format test: assert the exact JSON string produced by
+    /// Serialize matches the documented canonical lowercase form. Without
+    /// this, the bitflags 2.x derive would silently produce
+    /// `"Prefill | Decode"` (capitalized, spaced) and the mismatch between
+    /// docs, `as_str()`, `FromStr`, and serde would go unnoticed.
+    #[test]
+    fn serde_json_wire_format_is_canonical_lowercase() {
+        assert_eq!(serde_json::to_string(&WorkerType::empty()).unwrap(), "\"\"");
+        assert_eq!(
+            serde_json::to_string(&WorkerType::Prefill).unwrap(),
+            "\"prefill\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkerType::Decode).unwrap(),
+            "\"decode\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkerType::Encode).unwrap(),
+            "\"encode\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkerType::Aggregated).unwrap(),
+            "\"aggregated\""
+        );
+        // Prefill | Decode is the same value as Aggregated (bitflag alias),
+        // so it also renders as "aggregated".
+        assert_eq!(
+            serde_json::to_string(&(WorkerType::Prefill | WorkerType::Decode)).unwrap(),
+            "\"aggregated\""
+        );
+        // Non-canonical combination decomposes to pipe-joined lowercase.
+        assert_eq!(
+            serde_json::to_string(&(WorkerType::Prefill | WorkerType::Encode)).unwrap(),
+            "\"prefill|encode\""
+        );
+    }
+
+    /// Deserialization accepts both the canonical form and the decomposed
+    /// form; asserts the wire contract documented in `as_str()` and `FromStr`.
+    #[test]
+    fn serde_json_deserialize_accepts_canonical_and_decomposed() {
+        assert_eq!(
+            serde_json::from_str::<WorkerType>("\"aggregated\"").unwrap(),
+            WorkerType::Aggregated,
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkerType>("\"prefill|decode\"").unwrap(),
+            WorkerType::Aggregated,
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkerType>("\"prefill\"").unwrap(),
+            WorkerType::Prefill,
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkerType>("\"\"").unwrap(),
+            WorkerType::empty(),
+        );
+        // Case-insensitive / whitespace-tolerant per FromStr.
+        assert_eq!(
+            serde_json::from_str::<WorkerType>("\"  PREFILL | Decode  \"").unwrap(),
+            WorkerType::Aggregated,
+        );
+        // Unknown tokens fail cleanly.
+        assert!(serde_json::from_str::<WorkerType>("\"wibble\"").is_err());
+    }
+
+    /// Binary formats use raw `u8` bits for compactness. Round-trip via
+    /// bincode (a common non-human-readable format) should use the bit
+    /// representation, not strings.
+    #[test]
+    fn serde_binary_uses_u8_bits() {
+        let wt = WorkerType::Aggregated;
+        let bytes = bincode::serde::encode_to_vec(wt, bincode::config::standard()).unwrap();
+        // Aggregated = 0b011 = 3 in a single byte.
+        assert_eq!(bytes, vec![3u8]);
+        let (back, _): (WorkerType, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        assert_eq!(back, wt);
     }
 
     // -- units() --

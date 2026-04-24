@@ -2018,14 +2018,10 @@ pub fn list_models_router(
     (vec![doc_for_openai, doc_for_retrieve], router)
 }
 
-/// Retrieve a single model by ID (OpenAI format), or its topology readiness
-/// (DGH-706) if the path ends with `/readiness`.
+/// Retrieve a single model by ID (OpenAI format).
 ///
 /// Per the OpenAI API spec: `GET /v1/models/{model}` returns a model object.
-/// This handler also serves `GET /v1/models/{model}/readiness` — the Axum
-/// wildcard (`{*model_id}`) captures the full tail so both paths route here;
-/// dispatch happens below. The wildcard is required to support model IDs with
-/// slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`).
+/// Uses wildcard path to support model IDs with slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`).
 async fn get_model_openai(
     State(state): State<Arc<service_v2::State>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
@@ -2033,13 +2029,6 @@ async fn get_model_openai(
     check_ready(&state)?;
 
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
-
-    // Dispatch to the readiness detail endpoint if the wildcard captured a
-    // `/readiness` suffix. A model whose display name genuinely ends with
-    // `/readiness` is an ambiguity we accept — readiness wins.
-    if let Some(actual_model_id) = model_id.strip_suffix("/readiness") {
-        return get_model_readiness(&state, actual_model_id).await;
-    }
 
     let models: HashSet<String> = state.manager().model_display_names();
     if !models.contains(model_id) {
@@ -2071,87 +2060,6 @@ async fn get_model_openai(
         owned_by: "nvidia".to_string(),
         context_window,
         max_output_tokens,
-    })
-    .into_response())
-}
-
-// -- Per-model topology readiness: `GET /v1/models/{model}/readiness`
-//
-// Introduced by the DGH-706 Disaggregated Topology Readiness DEP
-// (see `docs/proposals/health-disagg-readiness.md`, "Mechanism 3"). The
-// endpoint surfaces the full per-namespace topology diagnostic; the condensed
-// "ready or not" answer is surfaced via `/v1/models` filtering and
-// `check_topology_ready()` (both land in PR 3).
-//
-// In PR 1 this is a live-compute handler on top of the readiness methods on
-// `Model`. Before PR 2 populates `worker_type` on cards, the compatibility
-// contract treats every WorkerSet as `Aggregated` with no needs, so the
-// endpoint reports all models as ready with no missing types. Once PR 2
-// lands and backends set `worker_type`, the same handler starts returning
-// meaningful topology detail.
-
-#[derive(Serialize)]
-struct ModelReadinessResponse {
-    model: String,
-    ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    namespaces: HashMap<String, NamespaceReadiness>,
-}
-
-#[derive(Serialize)]
-struct NamespaceReadiness {
-    ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    required: Vec<String>,
-    present: Vec<String>,
-}
-
-async fn get_model_readiness(
-    state: &Arc<service_v2::State>,
-    model_id: &str,
-) -> Result<Response, ErrorResponse> {
-    let model = match state.manager().get_model(model_id) {
-        Some(m) => m,
-        None => return Err(ErrorMessage::model_not_found()),
-    };
-
-    let mut namespaces: HashMap<String, NamespaceReadiness> = HashMap::new();
-    for ns in model.distinct_namespaces_sorted() {
-        let (required, present) = model.namespace_topology(&ns);
-        let ready_ns = !required.is_empty() && (required & present) == required;
-        let missing = required & !present;
-        let reason = if ready_ns {
-            None
-        } else if required.is_empty() {
-            Some("no workers registered".to_string())
-        } else {
-            Some(format!("missing worker types: {}", missing))
-        };
-        namespaces.insert(
-            ns,
-            NamespaceReadiness {
-                ready: ready_ns,
-                reason,
-                required: required.units().iter().map(|u| u.to_string()).collect(),
-                present: present.units().iter().map(|u| u.to_string()).collect(),
-            },
-        );
-    }
-
-    let ready = model.has_ready_namespace();
-    let reason = if ready {
-        None
-    } else {
-        Some("no namespace is ready".to_string())
-    };
-
-    Ok(Json(ModelReadinessResponse {
-        model: model_id.to_string(),
-        ready,
-        reason,
-        namespaces,
     })
     .into_response())
 }
