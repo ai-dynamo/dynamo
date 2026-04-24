@@ -661,8 +661,15 @@ mod tests {
     use std::sync::atomic::AtomicU32;
 
     use rmp_serde::{from_slice, to_vec};
+    use rstest::rstest;
 
     use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum TestEventKind {
+        BlockStored,
+        BlockRemoved,
+    }
 
     #[test]
     fn test_deserialize_bigram_block_stored_sequence() {
@@ -723,25 +730,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_deserialize_block_stored_sequence_accepts_main_group_idx() {
-        let event: RawKvEvent = from_slice(&block_stored_sequence_with_group_idx(Some(0))).unwrap();
-
-        assert!(matches!(event, RawKvEvent::BlockStored { .. }));
+    fn block_removed_sequence_with_group_idx(group_idx: Option<u32>) -> Vec<u8> {
+        match group_idx {
+            Some(group_idx) => to_vec(&(
+                "BlockRemoved",
+                vec![BlockHashValue::Unsigned(11)],
+                Option::<String>::None,
+                group_idx,
+            ))
+            .unwrap(),
+            None => to_vec(&(
+                "BlockRemoved",
+                vec![BlockHashValue::Unsigned(11)],
+                Option::<String>::None,
+            ))
+            .unwrap(),
+        }
     }
 
-    #[test]
-    fn test_deserialize_block_stored_sequence_ignores_non_main_group_idx() {
-        let event: RawKvEvent = from_slice(&block_stored_sequence_with_group_idx(Some(1))).unwrap();
+    fn sequence_with_group_idx(event_kind: TestEventKind, group_idx: Option<u32>) -> Vec<u8> {
+        match event_kind {
+            TestEventKind::BlockStored => block_stored_sequence_with_group_idx(group_idx),
+            TestEventKind::BlockRemoved => block_removed_sequence_with_group_idx(group_idx),
+        }
+    }
+
+    fn assert_parsed_event_kind(event: RawKvEvent, expected_kind: TestEventKind) {
+        match (event, expected_kind) {
+            (RawKvEvent::BlockStored { .. }, TestEventKind::BlockStored)
+            | (RawKvEvent::BlockRemoved { .. }, TestEventKind::BlockRemoved) => {}
+            (event, expected_kind) => {
+                panic!("expected {expected_kind:?}, got {event:?}");
+            }
+        }
+    }
+
+    #[rstest]
+    #[case(TestEventKind::BlockStored)]
+    #[case(TestEventKind::BlockRemoved)]
+    fn test_deserialize_sequence_accepts_main_group_idx(#[case] event_kind: TestEventKind) {
+        let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, Some(0))).unwrap();
+
+        assert_parsed_event_kind(event, event_kind);
+    }
+
+    #[rstest]
+    #[case(TestEventKind::BlockStored)]
+    #[case(TestEventKind::BlockRemoved)]
+    fn test_deserialize_sequence_ignores_non_main_group_idx(#[case] event_kind: TestEventKind) {
+        let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, Some(1))).unwrap();
 
         assert!(matches!(event, RawKvEvent::Ignored));
     }
 
-    #[test]
-    fn test_deserialize_block_stored_sequence_accepts_missing_group_idx() {
-        let event: RawKvEvent = from_slice(&block_stored_sequence_with_group_idx(None)).unwrap();
+    #[rstest]
+    #[case(TestEventKind::BlockStored)]
+    #[case(TestEventKind::BlockRemoved)]
+    fn test_deserialize_sequence_accepts_missing_group_idx(#[case] event_kind: TestEventKind) {
+        let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, None)).unwrap();
 
-        assert!(matches!(event, RawKvEvent::BlockStored { .. }));
+        assert_parsed_event_kind(event, event_kind);
     }
 
     #[test]
