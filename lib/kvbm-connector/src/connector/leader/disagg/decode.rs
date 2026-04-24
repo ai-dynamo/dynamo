@@ -10,14 +10,18 @@ use std::time::Duration;
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::StreamExt;
+use kvbm_common::LogicalLayoutHandle;
 use kvbm_disagg_protocol::{
-    BlockDescriptor, DISAGG_PROTOCOL_VERSION, DescriptorResponse, DisaggBlockRef,
-    DisaggSequenceHash, HashSelection, RemotePrefillRequest, SessionId, UnpinAck,
+    DISAGG_PROTOCOL_VERSION, DisaggSequenceHash, RemotePrefillRequest, SessionId,
+};
+use kvbm_engine::disagg::{
+    BlockSetRequest, BlockSetResponse, HashSelection, RemoteBlockRef, RemoteBlockSet, UnpinAck,
 };
 use kvbm_logical::blocks::ImmutableBlock;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
+use super::metadata::{CoalescingPeerMetadataCache, NoopPeerMetadataCache, PeerMetadataCache};
 use super::queue::RemotePrefillQueue;
 use super::session::{
     PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent, hash_to_wire,
@@ -63,6 +67,7 @@ pub struct RemotePrefillCoordinator {
     states: DashMap<String, Arc<Mutex<RemotePrefillState>>>,
     tokio_handle: Handle,
     attach_timeout: Duration,
+    metadata_cache: Arc<dyn PeerMetadataCache>,
 }
 
 impl RemotePrefillCoordinator {
@@ -88,6 +93,24 @@ impl RemotePrefillCoordinator {
         tokio_handle: Handle,
         attach_timeout: Duration,
     ) -> Arc<Self> {
+        Self::with_attach_timeout_and_metadata_cache(
+            policy,
+            session_factory,
+            queue,
+            tokio_handle,
+            attach_timeout,
+            NoopPeerMetadataCache::new(),
+        )
+    }
+
+    pub fn with_attach_timeout_and_metadata_cache(
+        policy: Arc<dyn ConditionalDisaggPolicy>,
+        session_factory: Arc<dyn PrefillSessionFactory>,
+        queue: Arc<dyn RemotePrefillQueue>,
+        tokio_handle: Handle,
+        attach_timeout: Duration,
+        metadata_cache: Arc<dyn PeerMetadataCache>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             policy,
             session_factory,
@@ -95,6 +118,7 @@ impl RemotePrefillCoordinator {
             states: DashMap::new(),
             tokio_handle,
             attach_timeout,
+            metadata_cache: CoalescingPeerMetadataCache::new(metadata_cache),
         })
     }
 
@@ -218,7 +242,13 @@ impl RemotePrefillCoordinator {
         }
     }
 
-    fn handle_descriptor_request(&self, request_id: &str, selection: HashSelection) {
+    async fn ensure_peer_metadata(&self, peer_instance_id: InstanceId) -> Result<()> {
+        self.metadata_cache
+            .ensure_remote_metadata(peer_instance_id)
+            .await
+    }
+
+    fn handle_block_set_request(&self, request_id: &str, request: BlockSetRequest) {
         let Some(state) = self.state_for(request_id) else {
             return;
         };
@@ -227,20 +257,16 @@ impl RemotePrefillCoordinator {
             let state = state.lock();
             (
                 state.session.clone(),
-                descriptor_response(&state, &selection),
+                block_set_response(&state, &request.request_id, &request.hashes),
             )
         };
 
-        if let Err(err) = session.respond_to_descriptor_request(response) {
-            self.mark_failed(request_id, format!("descriptor response failed: {err}"));
+        if let Err(err) = session.respond_to_block_set_request(response) {
+            self.mark_failed(request_id, format!("block-set response failed: {err}"));
         }
     }
 
-    fn handle_unpin_requested(
-        &self,
-        request_id: &str,
-        request: kvbm_disagg_protocol::UnpinRequest,
-    ) {
+    fn handle_unpin_requested(&self, request_id: &str, request: kvbm_engine::disagg::UnpinRequest) {
         let Some(state) = self.state_for(request_id) else {
             return;
         };
@@ -310,10 +336,11 @@ impl RemotePrefillCoordinator {
     }
 }
 
-fn descriptor_response(
+fn block_set_response(
     state: &RemotePrefillState,
+    request_id: &str,
     selection: &HashSelection,
-) -> DescriptorResponse {
+) -> BlockSetResponse {
     let requested = requested_hashes(selection, state);
     let ready: Vec<_> = state
         .ready_g2_blocks
@@ -330,8 +357,18 @@ fn descriptor_response(
         .filter(|hash| !ready_hashes.contains(hash))
         .collect();
 
-    DescriptorResponse {
-        ready_blocks: ready,
+    let ready = if ready.is_empty() {
+        Vec::new()
+    } else {
+        vec![RemoteBlockSet {
+            source_layout: LogicalLayoutHandle::G2,
+            blocks: ready,
+        }]
+    };
+
+    BlockSetResponse {
+        request_id: request_id.to_string(),
+        ready,
         pending_hashes,
     }
 }
@@ -351,14 +388,10 @@ fn requested_hashes(
     }
 }
 
-fn block_ref(block: &ImmutableBlock<G2>) -> DisaggBlockRef {
-    DisaggBlockRef {
+fn block_ref(block: &ImmutableBlock<G2>) -> RemoteBlockRef {
+    RemoteBlockRef {
         block_id: block.block_id(),
         sequence_hash: hash_to_wire(block.sequence_hash()),
-        layout_handle_raw: block.block_id().to_string(),
-        descriptor: Some(BlockDescriptor::new(
-            block.block_id().to_le_bytes().to_vec(),
-        )),
     }
 }
 
@@ -378,11 +411,18 @@ async fn monitor_loop(
             }
             event = event_stream.next() => {
                 match event {
-                    Some(SessionEvent::Attached { .. }) => {
+                    Some(SessionEvent::Attached { peer_instance_id }) => {
+                        if let Err(err) = coord.ensure_peer_metadata(peer_instance_id).await {
+                            coord.mark_failed(&request_id, format!("peer metadata import failed: {err}"));
+                            break;
+                        }
                         coord.handle_attached(&request_id);
                     }
+                    Some(SessionEvent::BlockSetRequest(request)) => {
+                        coord.handle_block_set_request(&request_id, request);
+                    }
                     Some(SessionEvent::DescriptorRequest(request)) => {
-                        coord.handle_descriptor_request(&request_id, request.hashes);
+                        coord.handle_block_set_request(&request_id, request);
                     }
                     Some(SessionEvent::UnpinRequested(request)) => {
                         coord.handle_unpin_requested(&request_id, request);
@@ -390,7 +430,10 @@ async fn monitor_loop(
                     Some(SessionEvent::UnpinAcked(_)) => {
                         // Future decode-output path consumes peer acks for decode-initiated unpins.
                     }
-                    Some(SessionEvent::BlocksAdded { .. }) => {
+                    Some(SessionEvent::PullComplete(_)) | Some(SessionEvent::PullAcked(_)) => {
+                        // Future decode-output path consumes pull completion acks.
+                    }
+                    Some(SessionEvent::BlockSetsAdded { .. }) => {
                         // Prefill output path lands in a later phase.
                     }
                     Some(SessionEvent::Detached { reason }) => {
@@ -418,7 +461,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use kvbm_disagg_protocol::{DescriptorRequest, HashSelection, UnpinRequest};
+    use kvbm_engine::disagg::{BlockSetRequest, HashSelection, UnpinRequest};
 
     use super::*;
     use crate::connector::leader::disagg::testing::{
@@ -546,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descriptor_request_returns_ready_and_pending_hashes() {
+    async fn block_set_request_returns_ready_and_pending_hashes() {
         let (coord, factory, _) = coordinator(Duration::from_secs(120));
         let ready = test_g2_blocks(1, 40);
         let pending = test_g2_blocks(1, 100);
@@ -575,20 +618,23 @@ mod tests {
             })
             .expect("push attached");
         session
-            .push_event(SessionEvent::DescriptorRequest(DescriptorRequest {
+            .push_event(SessionEvent::BlockSetRequest(BlockSetRequest {
+                request_id: "blocks-test".to_string(),
                 hashes: HashSelection::All,
             }))
-            .expect("push descriptor request");
+            .expect("push block-set request");
 
-        wait_until(|| !session.descriptor_responses().is_empty()).await;
-        let responses = session.descriptor_responses();
+        wait_until(|| !session.block_set_responses().is_empty()).await;
+        let responses = session.block_set_responses();
         assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].ready_blocks.len(), 1);
+        assert_eq!(responses[0].request_id, "blocks-test");
+        assert_eq!(responses[0].ready.len(), 1);
+        assert_eq!(responses[0].ready[0].source_layout, LogicalLayoutHandle::G2);
+        assert_eq!(responses[0].ready[0].blocks.len(), 1);
         assert_eq!(
-            responses[0].ready_blocks[0].sequence_hash,
+            responses[0].ready[0].blocks[0].sequence_hash,
             ready.hashes_wire()[0]
         );
-        assert!(responses[0].ready_blocks[0].descriptor.is_some());
         assert_eq!(responses[0].pending_hashes, pending.hashes_wire());
     }
 

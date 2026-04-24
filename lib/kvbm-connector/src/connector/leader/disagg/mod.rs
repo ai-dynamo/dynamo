@@ -8,6 +8,7 @@
 //! decode/prefill state machines into the base [`ConnectorLeader`].
 
 pub mod decode;
+pub mod metadata;
 pub mod queue;
 pub mod session;
 
@@ -26,10 +27,13 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
 pub use decode::{BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus};
+pub use metadata::{
+    CoalescingPeerMetadataCache, EnginePeerMetadataCache, NoopPeerMetadataCache, PeerMetadataCache,
+};
 pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
 pub use session::{
-    PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent, SessionEventStream,
-    hash_to_wire,
+    DisaggSession, PrefillSession, PrefillSessionFactory, SessionBlocks, SessionEvent,
+    SessionEventStream, VELO_STREAM_ENDPOINT_KIND, VeloPrefillSessionFactory, hash_to_wire,
 };
 
 /// Scheduler-facing connector leader API used by wrappers/compositions.

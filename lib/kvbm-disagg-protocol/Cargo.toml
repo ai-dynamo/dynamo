@@ -13,9 +13,11 @@ repository.workspace = true
 keywords.workspace = true
 
 [dependencies]
-kvbm-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 velo-common = { workspace = true }
+
+[dev-dependencies]
+rmp-serde = { workspace = true }

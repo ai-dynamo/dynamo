@@ -9,10 +9,8 @@ use std::task::{Context, Poll};
 
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, Stream, future::BoxFuture};
-use kvbm_disagg_protocol::{
-    DescriptorResponse, DisaggSequenceHash, HashSelection, RemotePrefillRequest, SessionEndpoint,
-    SessionId, UnpinAck, UnpinRequest,
-};
+use kvbm_disagg_protocol::{DisaggSequenceHash, RemotePrefillRequest, SessionEndpoint, SessionId};
+use kvbm_engine::disagg::{BlockSetResponse, HashSelection, UnpinAck, UnpinRequest};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::create_token_sequence;
 use kvbm_logical::blocks::ImmutableBlock;
@@ -102,7 +100,7 @@ struct MockSessionState {
     ready_blocks: Vec<ImmutableBlock<G2>>,
     pending_hashes: Vec<SequenceHash>,
     event_rx: Option<mpsc::UnboundedReceiver<SessionEvent>>,
-    descriptor_responses: Vec<DescriptorResponse>,
+    block_set_responses: Vec<BlockSetResponse>,
     unpin_acks: Vec<UnpinAck>,
     requested_unpins: Vec<UnpinRequest>,
     closed_reason: Option<Option<String>>,
@@ -149,8 +147,8 @@ impl MockPrefillSession {
             .collect()
     }
 
-    pub fn descriptor_responses(&self) -> Vec<DescriptorResponse> {
-        self.state.lock().descriptor_responses.clone()
+    pub fn block_set_responses(&self) -> Vec<BlockSetResponse> {
+        self.state.lock().block_set_responses.clone()
     }
 
     pub fn unpin_acks(&self) -> Vec<UnpinAck> {
@@ -195,8 +193,8 @@ impl PrefillSession for MockPrefillSession {
         Box::pin(EventStream { receiver })
     }
 
-    fn respond_to_descriptor_request(&self, response: DescriptorResponse) -> Result<()> {
-        self.state.lock().descriptor_responses.push(response);
+    fn respond_to_block_set_request(&self, response: BlockSetResponse) -> Result<()> {
+        self.state.lock().block_set_responses.push(response);
         Ok(())
     }
 

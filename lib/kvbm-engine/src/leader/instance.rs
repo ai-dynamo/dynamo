@@ -12,7 +12,8 @@ use uuid::Uuid;
 use std::sync::Arc;
 
 use crate::{
-    BlockId, G2, G3, InstanceId, SequenceHash, object::ObjectBlockOps, worker::RemoteDescriptor,
+    BlockId, G2, G3, InstanceId, SequenceHash, disagg::RemoteBlockSet, object::ObjectBlockOps,
+    worker::RemoteDescriptor,
 };
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{
@@ -1038,6 +1039,108 @@ impl InstanceLeader {
             .await?;
 
         Ok(())
+    }
+
+    /// Ensure worker transfer metadata for a remote instance has been imported.
+    ///
+    /// The leader requests `Vec<SerializedLayout>` from the remote leader's
+    /// `kvbm.leader.export_metadata` handler and imports it through the
+    /// configured parallel worker. Repeated calls are no-ops once the metadata
+    /// has been imported.
+    pub async fn ensure_remote_metadata(&self, remote_instance: InstanceId) -> Result<()> {
+        if self.has_remote_metadata(remote_instance) {
+            return Ok(());
+        }
+
+        let metadata = self.transport.request_metadata(remote_instance).await?;
+        self.import_remote_metadata(remote_instance, metadata).await
+    }
+
+    /// Pull remote block sets into local G2 block IDs.
+    ///
+    /// This is the conditional-disaggregation primitive for block-set transfer:
+    /// callers exchange `RemoteBlockSet`s over a disagg session, ensure peer
+    /// metadata once, then execute RDMA pulls through the engine.
+    pub async fn pull_remote_block_sets(
+        &self,
+        remote_instance: InstanceId,
+        block_sets: &[RemoteBlockSet],
+        local_dst_block_ids: &[BlockId],
+    ) -> Result<TransferCompleteNotification> {
+        self.ensure_remote_metadata(remote_instance).await?;
+        self.pull_remote_block_sets_explicit(
+            remote_instance,
+            block_sets,
+            LogicalLayoutHandle::G2,
+            local_dst_block_ids,
+            TransferOptions::default(),
+        )
+    }
+
+    /// Pull remote block sets into a selected local logical layout.
+    ///
+    /// Caller must have already imported peer metadata via
+    /// `ensure_remote_metadata` or `import_remote_metadata`.
+    pub fn pull_remote_block_sets_explicit(
+        &self,
+        remote_instance: InstanceId,
+        block_sets: &[RemoteBlockSet],
+        dst_layout: LogicalLayoutHandle,
+        local_dst_block_ids: &[BlockId],
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
+
+        if !parallel_worker.has_remote_metadata(remote_instance) {
+            anyhow::bail!(
+                "Remote metadata not imported for instance {}",
+                remote_instance
+            );
+        }
+
+        let source_count: usize = block_sets.iter().map(|set| set.blocks.len()).sum();
+        if source_count != local_dst_block_ids.len() {
+            anyhow::bail!(
+                "Block count mismatch: source={}, destination={}",
+                source_count,
+                local_dst_block_ids.len()
+            );
+        }
+
+        let mut offset = 0;
+        let mut notifications = Vec::new();
+        for block_set in block_sets {
+            let len = block_set.blocks.len();
+            if len == 0 {
+                continue;
+            }
+            let src_block_ids: Vec<BlockId> = block_set
+                .blocks
+                .iter()
+                .map(|block| block.block_id)
+                .collect();
+            let dst_block_ids: Arc<[BlockId]> =
+                Arc::from(local_dst_block_ids[offset..offset + len].to_vec());
+            offset += len;
+
+            notifications.push(parallel_worker.execute_remote_onboard_for_instance(
+                remote_instance,
+                block_set.source_layout,
+                src_block_ids,
+                dst_layout,
+                dst_block_ids,
+                options.clone(),
+            )?);
+        }
+
+        TransferCompleteNotification::aggregate(
+            notifications,
+            &Arc::new(self.messenger.event_manager()),
+            &tokio::runtime::Handle::current(),
+        )
     }
 
     // ========================================================================

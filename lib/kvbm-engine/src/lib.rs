@@ -25,6 +25,7 @@ pub struct G4;
 
 #[cfg(feature = "collectives")]
 pub mod collectives;
+pub mod disagg;
 #[doc = include_str!("../docs/leader.md")]
 pub mod leader;
 #[doc = include_str!("../docs/object.md")]

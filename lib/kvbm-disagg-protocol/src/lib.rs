@@ -7,7 +7,6 @@
 //! is shared by the connector, hub, and future admission code without making
 //! any one of those crates depend on another.
 
-use kvbm_common::BlockId;
 use serde::{Deserialize, Serialize};
 use velo_common::InstanceId;
 
@@ -86,83 +85,6 @@ pub struct SessionEndpoint {
     pub payload: serde_json::Value,
 }
 
-/// Serializable descriptor for a block made available through a disagg
-/// session. `layout_handle_raw` is intentionally encoded as a decimal string
-/// so this protocol crate does not depend on kvbm-physical and remains
-/// JSON-compatible.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DisaggBlockRef {
-    pub block_id: BlockId,
-    pub sequence_hash: DisaggSequenceHash,
-    pub layout_handle_raw: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub descriptor: Option<BlockDescriptor>,
-}
-
-/// Opaque RDMA descriptor payload. Real NIXL descriptors are carried here as
-/// bytes; mocks can use small sentinel byte vectors.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockDescriptor {
-    pub bytes: Vec<u8>,
-}
-
-impl BlockDescriptor {
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        Self {
-            bytes: bytes.into(),
-        }
-    }
-}
-
-/// Select all session blocks, or a specific hash subset.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "hashes", rename_all = "snake_case")]
-pub enum HashSelection {
-    All,
-    Hashes(Vec<DisaggSequenceHash>),
-}
-
-/// Ask the holder for descriptors for all or a subset of blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DescriptorRequest {
-    pub hashes: HashSelection,
-}
-
-/// Holder response to a descriptor request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DescriptorResponse {
-    pub ready_blocks: Vec<DisaggBlockRef>,
-    pub pending_hashes: Vec<DisaggSequenceHash>,
-}
-
-/// Request that the peer release session-held pins for all or a subset of
-/// blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnpinRequest {
-    pub request_id: String,
-    pub hashes: HashSelection,
-}
-
-/// Mandatory acknowledgement after a session unpin request has been applied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnpinAck {
-    pub request_id: String,
-    pub hashes: HashSelection,
-}
-
-/// The puller completed an RDMA pull. The corresponding `PullAck` proves the
-/// holder remained live long enough to observe completion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PullComplete {
-    pub pull_id: u64,
-    pub hashes: Vec<DisaggSequenceHash>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PullAck {
-    pub pull_id: u64,
-}
-
 /// Typed transfer parameters carried in request metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferParams {
@@ -237,48 +159,6 @@ impl RemotePrefillRequest {
     }
 }
 
-/// Frames sent from a decode worker to a prefill worker over a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum DecodeToPrefillFrame {
-    DescriptorResponse(DescriptorResponse),
-    UnpinRequest(UnpinRequest),
-    UnpinAck(UnpinAck),
-    PullComplete(PullComplete),
-    PullAck(PullAck),
-    BlocksReady { blocks: Vec<DisaggBlockRef> },
-    OutputBlocksPulled { hashes: Vec<DisaggSequenceHash> },
-    Detach,
-    Error { message: String },
-}
-
-/// Frames sent from a prefill worker to a decode worker over a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PrefillToDecodeFrame {
-    Attach {
-        #[serde(with = "serde_instance_id_string")]
-        prefill_instance_id: InstanceId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefill_endpoint: Option<SessionEndpoint>,
-    },
-    DescriptorRequest(DescriptorRequest),
-    UnpinRequest(UnpinRequest),
-    UnpinAck(UnpinAck),
-    PullComplete(PullComplete),
-    PullAck(PullAck),
-    InitialBlocksPulled {
-        hashes: Vec<DisaggSequenceHash>,
-    },
-    OutputBlocksReady {
-        blocks: Vec<DisaggBlockRef>,
-    },
-    Detach,
-    Error {
-        message: String,
-    },
-}
-
 /// Hub-issued lifecycle/control signal for decode or prefill workers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -345,49 +225,6 @@ mod tests {
         let decoded: TransferParams = serde_json::from_slice(&encoded).unwrap();
 
         assert_eq!(decoded, params);
-    }
-
-    #[test]
-    fn session_frames_round_trip_json() {
-        let block = DisaggBlockRef {
-            block_id: 7,
-            sequence_hash: hash(0),
-            layout_handle_raw: "42".to_string(),
-            descriptor: Some(BlockDescriptor::new([1, 2, 3])),
-        };
-        let frame = PrefillToDecodeFrame::OutputBlocksReady {
-            blocks: vec![block],
-        };
-
-        let encoded = serde_json::to_vec(&frame).unwrap();
-        let decoded: PrefillToDecodeFrame = serde_json::from_slice(&encoded).unwrap();
-
-        assert_eq!(decoded, frame);
-    }
-
-    #[test]
-    fn descriptor_and_unpin_frames_round_trip_json() {
-        let descriptor = DescriptorResponse {
-            ready_blocks: vec![DisaggBlockRef {
-                block_id: 9,
-                sequence_hash: hash(9),
-                layout_handle_raw: "100".to_string(),
-                descriptor: Some(BlockDescriptor::new([0xaa])),
-            }],
-            pending_hashes: vec![hash(10)],
-        };
-        let frame = DecodeToPrefillFrame::DescriptorResponse(descriptor);
-        let encoded = serde_json::to_vec(&frame).unwrap();
-        let decoded: DecodeToPrefillFrame = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, frame);
-
-        let ack = PrefillToDecodeFrame::UnpinAck(UnpinAck {
-            request_id: "req".to_string(),
-            hashes: HashSelection::All,
-        });
-        let encoded = serde_json::to_vec(&ack).unwrap();
-        let decoded: PrefillToDecodeFrame = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, ack);
     }
 
     #[test]
