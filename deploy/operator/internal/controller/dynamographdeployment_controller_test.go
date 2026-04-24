@@ -770,7 +770,9 @@ func Test_reconcileGroveResources(t *testing.T) {
 		name                   string
 		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
 		existingGroveResources []client.Object
+		draEnabled             bool
 		wantReconcileResult    ReconcileResult
+		wantErrSubstring       string
 	}{
 		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
@@ -1038,6 +1040,25 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "inter-pod GMS failover requires DRA - returns clear error when DRA is disabled",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(1)),
+						Failover: &v1alpha1.FailoverSpec{
+							Enabled:    true,
+							Mode:       v1alpha1.GMSModeInterPod,
+							NumShadows: 1,
+						},
+					},
+				},
+			},
+			draEnabled:       false,
+			wantErrSubstring: "requires DRA",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1073,7 +1094,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: tt.draEnabled},
 				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
@@ -1083,6 +1104,11 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 
 			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+			if tt.wantErrSubstring != "" {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err.Error()).To(gomega.ContainSubstring(tt.wantErrSubstring))
+				return
+			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))

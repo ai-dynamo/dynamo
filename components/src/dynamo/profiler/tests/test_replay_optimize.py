@@ -18,6 +18,7 @@ except ImportError:
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,
+    DenseReplayState,
     EngineSpec,
     HardwareSpec,
     ReplayObjective,
@@ -124,6 +125,22 @@ def _trace_workload(trace_file: Path, speedup: float = 100.0) -> WorkloadSpec:
     return WorkloadSpec(traceFile=str(trace_file), arrivalSpeedupRatio=speedup)
 
 
+def _applied_compute_agentic_trace_workload(
+    trace_file: Path,
+    *,
+    concurrency: int = 8,
+    shared_prefix_ratio: float = 0.5,
+    num_prefix_groups: int = 1,
+) -> WorkloadSpec:
+    return WorkloadSpec(
+        traceFile=str(trace_file),
+        traceFormat="applied_compute_agentic",
+        traceReplayConcurrency=concurrency,
+        traceSharedPrefixRatio=shared_prefix_ratio,
+        traceNumPrefixGroups=num_prefix_groups,
+    )
+
+
 def _sla(**bounds: float) -> SLASpec:
     """Build an SLASpec from keyword bounds.
 
@@ -139,6 +156,63 @@ def _sla(**bounds: float) -> SLASpec:
         "p95_e2e_latency_ms": "p95E2eLatency",
     }
     return SLASpec(**{translate.get(k, k): v for k, v in bounds.items()})
+
+
+def test_applied_compute_agentic_trace_workload_requires_trace_replay_concurrency(
+    tmp_path,
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    with pytest.raises(ValueError, match="traceReplayConcurrency"):
+        WorkloadSpec(
+            traceFile=str(trace_path),
+            traceFormat="applied_compute_agentic",
+        )
+
+
+def test_applied_compute_agentic_trace_workload_rejects_shared_prefix_ratio_without_groups(
+    tmp_path,
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    with pytest.raises(ValueError, match="traceNumPrefixGroups"):
+        WorkloadSpec(
+            traceFile=str(trace_path),
+            traceFormat="applied_compute_agentic",
+            traceReplayConcurrency=8,
+            traceSharedPrefixRatio=0.5,
+            traceNumPrefixGroups=0,
+        )
+
+
+def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
+    tmp_path, monkeypatch
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    workload = _applied_compute_agentic_trace_workload(trace_path, concurrency=9)
+    captured: dict[str, Any] = {}
+
+    def fake_run_trace_replay(trace_file, **kwargs):
+        captured["trace_file"] = trace_file
+        captured["kwargs"] = kwargs
+        return {"output_throughput_tok_s": 1.0}
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.replay_optimize.evaluate.run_trace_replay",
+        fake_run_trace_replay,
+    )
+
+    replay_optimize.evaluate._run_replay_for_state(
+        state=DenseReplayState(1, 1, 1, 1, 0.5),
+        workload=workload,
+        prefill_engine_args=_base_prefill_args(),
+        decode_engine_args=_base_decode_args(),
+        router_config=KvRouterConfig(),
+    )
+
+    assert Path(captured["trace_file"]) == trace_path
+    assert captured["kwargs"]["replay_concurrency"] == 9
+    assert captured["kwargs"]["trace_format"] == "applied_compute_agentic"
+    assert captured["kwargs"]["trace_shared_prefix_ratio"] == 0.5
+    assert captured["kwargs"]["trace_num_prefix_groups"] == 1
 
 
 def _disagg_spec(

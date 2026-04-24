@@ -118,6 +118,16 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
+    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    serviceMesh:
+      provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
+      {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
+      istio:
+        {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
+        tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify | default true }}
+      {{- end }}
+    {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
     rbac:
       plannerClusterRoleName: {{ include "dynamo-operator.fullname" . }}-planner

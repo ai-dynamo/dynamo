@@ -221,12 +221,22 @@ class StreamingPostProcessor:
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
+        # See https://github.com/ai-dynamo/dynamo/issues/8636 —
+        # when the chat template runs with enable_thinking=False,
+        # the reasoning open/close tags live in the prompt and the generated
+        # output carries none — so is_reasoning_end_streaming() never fires,
+        # reasoning_is_done stays false, and tool-call markup leaks into
+        # reasoning_content. Skip the reasoning parser in that case.
+        # `enable_thinking` is the convention adopted across the modern
+        # reasoning-capable model families that vLLM supports; templates
+        # that don't honor it simply leave it unset (no effect here).
+        thinking_disabled = chat_template_kwargs.get("enable_thinking") is False
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class
+            if reasoning_parser_class and not thinking_disabled
             else None
         )
         self._fast_plain_text = (
@@ -241,6 +251,11 @@ class StreamingPostProcessor:
         self.previous_token_ids: list[int] = []
         self.reasoning_is_done = False
         self.in_progress_tool_calls: dict[int, DeltaToolCall] = {}
+        # Per-choice tracking (https://github.com/ai-dynamo/dynamo/issues/8636) of whether a tool_call delta was
+        # emitted on that choice, keyed by `output.index`. Required because
+        # `n > 1` requests stream multiple choices interleaved; a remap on
+        # one choice must not bleed into another. See _remap_finish_reason().
+        self._tool_call_choices_emitted: set[int] = set()
         # Buffer for post-reasoning tool text when </think> and <tool_call>
         # arrive in the same chunk.  The streaming tool parser cannot handle
         # this correctly, so we accumulate text here and fall back to the
@@ -355,25 +370,44 @@ class StreamingPostProcessor:
             for _, tool_call in self.in_progress_tool_calls.items()
         ]
 
+    def _remap_finish_reason(
+        self, output_index: int, finish_reason: str | None
+    ) -> str | None:
+        # Per https://github.com/ai-dynamo/dynamo/issues/8636 — OpenAI ChatCompletion finish_reason must be "tool_calls"
+        # when the model called a tool. vLLM stops at <|im_end|> and reports
+        # "stop"; remap once a tool_call delta has been emitted on THIS
+        # choice. Per-choice tracking is required for `n > 1` requests —
+        # choice 0 emitting tool_calls must not remap choice 1's stop.
+        # Spec: https://github.com/openai/openai-openapi/blob/master/openapi.yaml
+        if finish_reason == "stop" and output_index in self._tool_call_choices_emitted:
+            return "tool_calls"
+        return finish_reason
+
     def _emit_tool_calls_choice(self, output: Any) -> dict[str, Any]:
+        self._tool_call_choices_emitted.add(output.index)
         choice = {
             "index": output.index,
             "delta": {
                 "role": "assistant",
                 "tool_calls": self._dump_in_progress_tool_calls(),
             },
-            "finish_reason": output.finish_reason,
+            "finish_reason": self._remap_finish_reason(
+                output.index, output.finish_reason
+            ),
             "logprobs": output.logprobs,
         }
         self.in_progress_tool_calls.clear()
         return choice
 
-    @staticmethod
-    def _build_choice(output: Any, delta: dict[str, Any]) -> dict[str, Any]:
+    def _build_choice(self, output: Any, delta: dict[str, Any]) -> dict[str, Any]:
+        if delta.get("tool_calls"):
+            self._tool_call_choices_emitted.add(output.index)
         return {
             "index": output.index,
             "delta": delta,
-            "finish_reason": output.finish_reason,
+            "finish_reason": self._remap_finish_reason(
+                output.index, output.finish_reason
+            ),
             "logprobs": output.logprobs,
         }
 
