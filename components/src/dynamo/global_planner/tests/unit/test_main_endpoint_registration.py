@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dynamo.global_planner import __main__ as gp_main
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
@@ -30,16 +32,16 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)
 async def test_main_registers_both_endpoints_concurrently():
     """Both scale_request and health endpoints must be registered before the
     entrypoint blocks. Sequential awaits would leave health unregistered.
     """
-    from dynamo.global_planner import __main__ as gp_main
-
     # Track which endpoint names get created and their serve_endpoint calls.
     created_endpoints: dict[str, MagicMock] = {}
 
     def make_endpoint(name: str) -> MagicMock:
+        """Build a mock endpoint whose serve_endpoint never resolves."""
         ep = MagicMock()
         # serve_endpoint is a sync function that returns an awaitable (Rust's
         # future_into_py). Return a never-completing Future so ``await
@@ -47,7 +49,7 @@ async def test_main_registers_both_endpoints_concurrently():
         # If the entrypoint awaits the endpoints sequentially, the first
         # call blocks forever and the second is never registered.
         ep.serve_endpoint = MagicMock(
-            side_effect=lambda *a, **kw: asyncio.get_event_loop().create_future()
+            side_effect=lambda *a, **kw: asyncio.get_running_loop().create_future()
         )
         created_endpoints[name] = ep
         return ep
