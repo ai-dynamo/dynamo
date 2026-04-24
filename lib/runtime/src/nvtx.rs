@@ -152,6 +152,63 @@ impl Drop for NvtxRangeGuard {
     fn drop(&mut self) {}
 }
 
+// ── Async-safe RAII guard (handle-based, not thread-local) ───────────────────
+
+/// RAII guard over a handle-based NVTX range (`nvtxRangeStart`/`nvtxRangeEnd`).
+///
+/// Unlike [`NvtxRangeGuard`] (which uses `nvtxRangePush`/`nvtxRangePop` — a
+/// thread-local LIFO stack), this guard stores an `nvtxRangeId_t` handle at
+/// start and passes it to `nvtxRangeEnd` at drop. The end call is therefore
+/// **not** tied to the starting thread, so the guard is safe to carry across
+/// `.await` points where the tokio runtime may migrate the task between
+/// worker threads.
+///
+/// Construct with [`dynamo_nvtx_range_async!`].
+#[cfg(feature = "nvtx")]
+pub struct NvtxAsyncRangeGuard {
+    id: Option<u64>,
+}
+
+/// Zero-sized no-op guard used when the `nvtx` feature is off.
+#[cfg(not(feature = "nvtx"))]
+pub struct NvtxAsyncRangeGuard;
+
+impl NvtxAsyncRangeGuard {
+    #[doc(hidden)]
+    pub fn new(name: &str) -> Self {
+        #[cfg(feature = "nvtx")]
+        {
+            let id = if NVTX_ENABLED.load(Ordering::Relaxed) {
+                Some(cudarc::nvtx::result::range_start(name))
+            } else {
+                None
+            };
+            return NvtxAsyncRangeGuard { id };
+        }
+        #[cfg(not(feature = "nvtx"))]
+        {
+            let _ = name;
+            NvtxAsyncRangeGuard {}
+        }
+    }
+}
+
+#[cfg(feature = "nvtx")]
+impl Drop for NvtxAsyncRangeGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            // SAFETY: `id` was produced by a matching `range_start` above and
+            // is ended exactly once (Drop runs at most once).
+            unsafe { cudarc::nvtx::result::range_end(id) }
+        }
+    }
+}
+
+#[cfg(not(feature = "nvtx"))]
+impl Drop for NvtxAsyncRangeGuard {
+    fn drop(&mut self) {}
+}
+
 // ── Macros ───────────────────────────────────────────────────────────────────
 
 /// Push a named NVTX range onto the calling thread's stack.
@@ -183,6 +240,29 @@ macro_rules! dynamo_nvtx_pop {
 macro_rules! dynamo_nvtx_range {
     ($name:expr) => {
         $crate::nvtx::NvtxRangeGuard::new($name)
+    };
+}
+
+/// Open a named NVTX range that closes automatically at end of scope, using
+/// the handle-based (`nvtxRangeStart`/`nvtxRangeEnd`) API.
+///
+/// Unlike [`dynamo_nvtx_range!`] (stack-based push/pop, thread-local), this
+/// variant is safe to carry across `.await` — the end call uses a stored
+/// handle and is not tied to the thread that started the range. Use this
+/// for NVTX spans that wrap async code that may park and resume on a
+/// different worker thread, or that may interleave with other concurrent
+/// tasks' ranges on the same thread.
+///
+/// ```rust,ignore
+/// let _r = dynamo_nvtx_range_async!("mm:frontend:decode:batch");
+/// let results = futures::future::join_all(...).await;  // safe across await
+/// // range closes here
+/// ```
+/// Zero-cost when the `nvtx` Cargo feature is off.
+#[macro_export]
+macro_rules! dynamo_nvtx_range_async {
+    ($name:expr) => {
+        $crate::nvtx::NvtxAsyncRangeGuard::new($name)
     };
 }
 
