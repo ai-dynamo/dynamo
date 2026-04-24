@@ -612,11 +612,9 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     if cpu_blocks is not None:
         env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_blocks)
 
-    # DIAGNOSTIC (temp): capture driver-level memory state + any process with
-    # a GPU handle. --query-compute-apps reported empty even while 2.5 GiB was
-    # allocated, so we also print the plain nvidia-smi table (shows driver
-    # allocations without an active compute process) and fuser on /dev/nvidia0
-    # (shows every PID still holding a GPU file descriptor).
+    # DIAGNOSTIC (temp): nvidia-smi reports 2.4 GiB used but "No running
+    # processes". Dig deeper to find who actually owns it: pytest's own
+    # /proc/<pid>/maps, fd list, memory stats, plus NVML verbose + pmon.
     import subprocess as _diag_sp
 
     def _diag_run(cmd):
@@ -625,19 +623,13 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         except Exception as exc:
             return f"(failed: {exc})"
 
+    _self_pid = os.getpid()
+    _ppid = os.getppid()
+
     print("\n=== [kvbm-diag] GPU state BEFORE vllm launch ===", flush=True)
+    print(f"pytest worker pid={_self_pid} ppid={_ppid}")
     print("--- nvidia-smi ---")
     print(_diag_run(["nvidia-smi"]))
-    print("--- nvidia-smi --query-compute-apps=pid,process_name,used_memory ---")
-    print(
-        _diag_run(
-            [
-                "nvidia-smi",
-                "--query-compute-apps=pid,process_name,used_memory",
-                "--format=csv",
-            ]
-        )
-    )
     print("--- nvidia-smi --query-gpu=memory.used,memory.free,memory.total ---")
     print(
         _diag_run(
@@ -648,8 +640,50 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
             ]
         )
     )
-    print("--- fuser /dev/nvidia* ---")
-    print(_diag_run(["fuser", "-v", "/dev/nvidia0", "/dev/nvidiactl"]))
+    print("--- nvidia-smi -q -d PIDS (verbose NVML pid listing) ---")
+    print(_diag_run(["nvidia-smi", "-q", "-d", "PIDS"]))
+    print("--- nvidia-smi pmon -c 1 (process monitor snapshot) ---")
+    print(_diag_run(["nvidia-smi", "pmon", "-c", "1"]))
+    print(f"--- /proc/{_self_pid}/status (pytest worker) ---")
+    print(
+        _diag_run(
+            [
+                "bash",
+                "-c",
+                f"grep -E '^(Name|Pid|PPid|VmPeak|VmSize|VmRSS|VmData|VmHWM):' /proc/{_self_pid}/status",
+            ]
+        )
+    )
+    print(f"--- /proc/{_self_pid}/maps | grep -i 'nvidia\\|uvm' ---")
+    print(
+        _diag_run(
+            [
+                "bash",
+                "-c",
+                f"grep -i -E 'nvidia|uvm' /proc/{_self_pid}/maps | head -30 || echo '(no nvidia/uvm mappings)'",
+            ]
+        )
+    )
+    print(f"--- /proc/{_self_pid}/fd | grep nvidia ---")
+    print(
+        _diag_run(
+            [
+                "bash",
+                "-c",
+                f"ls -la /proc/{_self_pid}/fd/ 2>/dev/null | grep -i nvidia || echo '(no nvidia fds)'",
+            ]
+        )
+    )
+    print(f"--- /proc/{_ppid}/maps | grep -i 'nvidia\\|uvm' (parent) ---")
+    print(
+        _diag_run(
+            [
+                "bash",
+                "-c",
+                f"grep -i -E 'nvidia|uvm' /proc/{_ppid}/maps 2>/dev/null | head -30 || echo '(no nvidia/uvm mappings)'",
+            ]
+        )
+    )
     print("--- ps -ef | grep python/vllm ---")
     print(
         _diag_run(
