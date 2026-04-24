@@ -48,10 +48,24 @@ def _kill_process_group(process: ManagedProcess) -> None:
         return
 
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        parent_pgid = os.getpgid(pid)
     except ProcessLookupError:
         logger.warning("kill process group: process %d already dead", pid)
         return
+    child_pgids: list[int] = []
+    for child in process.subprocesses():
+        try:
+            child_pgid = os.getpgid(child.pid)
+        except ProcessLookupError:
+            continue
+        if child_pgid != parent_pgid and child_pgid not in child_pgids:
+            child_pgids.append(child_pgid)
+
+    for pgid in [*child_pgids, parent_pgid]:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     try:
         os.waitpid(pid, 0)

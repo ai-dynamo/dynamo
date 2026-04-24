@@ -12,7 +12,8 @@ import json
 import logging
 import os
 import sys
-from contextlib import suppress
+import time
+from pathlib import Path
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -27,6 +28,7 @@ from tensorrt_llm.llmapi.llm_args import (
     TOKENIZER_ALIASES,
     KvCacheConnectorConfig,
     LoadFormat,
+    SleepConfig,
 )
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
@@ -80,46 +82,43 @@ except ImportError:
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
-class _StandbyGenerateProxy:
-    """Stand-in generate handler for a shadow engine waiting on the failover lock.
+def _shadow_sleep_tags() -> list[str]:
+    raw_tags = os.environ.get(
+        "DYN_TRTLLM_SHADOW_SLEEP_TAGS", SleepConfig.SHADOW_FAILOVER_PRESET
+    )
+    return [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
 
-    The standby starts this proxy before acquiring the flock so startup probes
-    can pass while the real TRTLLM engine initializes in RO mode. Normal model
-    discovery is withheld until the standby wins the failover lock, which keeps
-    the KV router from sending primary-era traffic to a blocked standby.
-    Health-check probes short-circuit without blocking.
-    """
 
-    def __init__(self, health_check_payload: dict | None = None):
-        self._delegate = None
-        self._health_check_payload = health_check_payload
-        self._delegate_ready_event = asyncio.Event()
-        self._failover_active_event = asyncio.Event()
+def _shadow_prewarm_expected_standbys() -> int:
+    return int(os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_EXPECTED_STANDBYS", "0"))
 
-    def set_delegate(self, delegate) -> None:
-        self._delegate = delegate
-        self._delegate_ready_event.set()
 
-    def activate_failover(self) -> None:
-        self._failover_active_event.set()
+def _shadow_prewarm_dir(failover_lock_path: str) -> Path:
+    override = os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_DIR")
+    if override:
+        return Path(override)
+    return Path(failover_lock_path).with_suffix(".prewarm")
 
-    async def generate(self, request: dict, context):
-        if (
-            self._health_check_payload is not None
-            and request == self._health_check_payload
-        ):
-            yield {"status": "ok"}
-            return
 
-        if self._delegate is None:
-            # Real request arrived before the engine finished initialization.
-            # Block until set_delegate() is called instead of raising; raising
-            # would surface as a 500 at the frontend.
-            await self._delegate_ready_event.wait()
+def _shadow_prewarm_lock_path(failover_lock_path: str) -> str:
+    override = os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_LOCK_PATH")
+    if override:
+        return override
+    return f"{failover_lock_path}.prewarm"
 
-        await self._failover_active_event.wait()
-        async for response in self._delegate(request, context):
-            yield response
+
+async def _run_trtllm_shadow_control(engine, method: str, tags: list[str]) -> None:
+    if not tags:
+        return
+
+    start = time.monotonic()
+    await asyncio.to_thread(engine.llm._collective_rpc, method, args=(tags,))
+    logging.info(
+        "[Shadow] TRTLLM %s completed for tags=%s in %.2fs",
+        method,
+        tags,
+        time.monotonic() - start,
+    )
 
 
 def build_kv_connector_config(config: Config):
@@ -260,8 +259,6 @@ async def init_llm_worker(
     # Enable sleep_config when GMS manages weights. TRTLLM uses it to
     # unmap/remap allocations during shadow failover.
     if config.load_format == "gms":
-        from tensorrt_llm.llmapi.llm_args import SleepConfig
-
         arg_map["sleep_config"] = SleepConfig()
 
     # Add guided decoding backend if specified
@@ -491,33 +488,110 @@ async def init_llm_worker(
 
     failover_lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
     startup_lock = None
-    standby_generate_proxy = None
-    standby_serve_task = None
+    prewarm_lock = None
+    prewarm_lock_held = False
+    prewarm_expected_standbys = _shadow_prewarm_expected_standbys()
+    prewarm_enabled = (
+        config.gms_shadow_mode
+        and prewarm_expected_standbys > 0
+        and (primary_shadow_owner or shadow_standby)
+    )
+    prewarm_mark_dir = _shadow_prewarm_dir(failover_lock_path)
+    prewarm_tags = _shadow_sleep_tags()
+
+    async def acquire_prewarm_lock() -> None:
+        nonlocal prewarm_lock, prewarm_lock_held
+        if not prewarm_enabled or prewarm_lock_held:
+            return
+
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        prewarm_mark_dir.mkdir(parents=True, exist_ok=True)
+        if prewarm_lock is None:
+            prewarm_lock = FlockFailoverLock(
+                _shadow_prewarm_lock_path(failover_lock_path)
+            )
+        await prewarm_lock.acquire(engine_id=f"engine-{shadow_engine_id}-prewarm")
+        prewarm_lock_held = True
+        logging.info(
+            "[Shadow] Engine %s acquired prewarm lock for serialized init",
+            shadow_engine_id,
+        )
+
     if primary_shadow_owner:
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
         startup_lock = FlockFailoverLock(failover_lock_path)
         await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+        await acquire_prewarm_lock()
         logging.info("[Shadow] Primary acquired startup lock, starting engine init")
 
     if shadow_standby:
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
-        standby_generate_proxy = _StandbyGenerateProxy(health_check_payload)
-        standby_serve_task = endpoint.serve_endpoint(
-            standby_generate_proxy.generate,
-            metrics_labels=metrics_labels,
-            health_check_payload=health_check_payload,
-        )
-        await asyncio.sleep(0)
-        if standby_serve_task.done():
-            await standby_serve_task
-
+        runtime.set_health_status(True)
         logging.info(
-            "[Shadow] Standby proxy ready, startup probe now passing, "
+            "[Shadow] Standby startup probe now passing; "
             "starting RO engine init before failover"
         )
         startup_lock = FlockFailoverLock(failover_lock_path)
+        await acquire_prewarm_lock()
+
+    async def release_prewarm_lock(reason: str) -> None:
+        nonlocal prewarm_lock_held
+        if prewarm_lock is None or not prewarm_lock_held:
+            return
+        await prewarm_lock.release()
+        prewarm_lock_held = False
+        logging.info(
+            "[Shadow] Engine %s released prewarm lock after %s",
+            shadow_engine_id,
+            reason,
+        )
+
+    def write_prewarm_marker() -> None:
+        marker = prewarm_mark_dir / f"engine-{shadow_engine_id}.parked"
+        marker.write_text(str(time.time()), encoding="utf-8")
+
+    async def wait_for_prewarm_markers() -> None:
+        timeout_s = float(
+            os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_TIMEOUT_SECONDS", "1800")
+        )
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            parked = list(prewarm_mark_dir.glob("engine-*.parked"))
+            if len(parked) >= prewarm_expected_standbys:
+                logging.info(
+                    "[Shadow] Primary observed %s/%s parked standbys",
+                    len(parked),
+                    prewarm_expected_standbys,
+                )
+                return
+            await asyncio.sleep(0.5)
+
+        parked = list(prewarm_mark_dir.glob("engine-*.parked"))
+        raise TimeoutError(
+            "Timed out waiting for shadow standby prewarm markers: "
+            f"{len(parked)}/{prewarm_expected_standbys} present in {prewarm_mark_dir}"
+        )
+
+    primary_prewarm_complete = False
+
+    async def prepare_primary_after_shadow_prewarm(engine) -> None:
+        nonlocal primary_prewarm_complete
+        if not (prewarm_enabled and primary_shadow_owner) or primary_prewarm_complete:
+            return
+
+        logging.info(
+            "[Shadow] Primary initialized; parking tags=%s before standby prewarm",
+            prewarm_tags,
+        )
+        await _run_trtllm_shadow_control(engine, "sleep", prewarm_tags)
+        await release_prewarm_lock("primary park")
+        await wait_for_prewarm_markers()
+        await _run_trtllm_shadow_control(engine, "wakeup", prewarm_tags)
+        primary_prewarm_complete = True
+        logging.info("[Shadow] Primary prewarm complete; starting serving path")
 
     try:
         async with get_llm_engine(
@@ -647,17 +721,25 @@ async def init_llm_worker(
             )
 
             async def serve_shadow_standby(handler) -> None:
-                assert standby_generate_proxy is not None
-                assert standby_serve_task is not None
                 assert startup_lock is not None
 
-                standby_generate_proxy.set_delegate(handler.generate)
+                if prewarm_enabled:
+                    logging.info(
+                        "[Shadow] Standby initialized; parking tags=%s before failover",
+                        prewarm_tags,
+                    )
+                    await _run_trtllm_shadow_control(engine, "sleep", prewarm_tags)
+                    write_prewarm_marker()
+                    await release_prewarm_lock("standby park")
+                    logging.info("[Shadow] Standby parked for fast failover")
+
                 logging.info(
                     "[Shadow] Standby engine initialized in RO mode; "
                     "waiting for failover lock"
                 )
                 await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
-                standby_generate_proxy.activate_failover()
+                if prewarm_enabled:
+                    await _run_trtllm_shadow_control(engine, "wakeup", prewarm_tags)
                 if config.disaggregation_mode != DisaggregationMode.ENCODE:
                     await register_model(
                         model_input,
@@ -673,8 +755,12 @@ async def init_llm_worker(
                         media_fetcher=media_fetcher,
                     )
                     logging.info("[Shadow] MDC published; standby is now discoverable")
-                logging.info("[Shadow] Lock acquired, enabling standby traffic")
-                await standby_serve_task
+                logging.info("[Shadow] Lock acquired, starting standby endpoint")
+                await endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=metrics_labels,
+                    health_check_payload=health_check_payload,
+                )
 
             media_decoder = None
             media_fetcher = None
@@ -726,6 +812,7 @@ async def init_llm_worker(
                     handler = RequestHandlerFactory().get_request_handler(
                         handler_config
                     )
+                    await prepare_primary_after_shadow_prewarm(engine)
 
                     if (
                         config.disaggregation_mode != DisaggregationMode.ENCODE
@@ -767,6 +854,7 @@ async def init_llm_worker(
                     consolidator_publisher.shutdown()
             else:
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+                await prepare_primary_after_shadow_prewarm(engine)
                 if (
                     config.disaggregation_mode != DisaggregationMode.ENCODE
                     and not shadow_standby
@@ -790,12 +878,7 @@ async def init_llm_worker(
                     await endpoint.serve_endpoint(
                         handler.generate, health_check_payload=health_check_payload
                     )
-    except Exception:
-        if standby_serve_task is not None:
-            standby_serve_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await standby_serve_task
-        raise
     finally:
+        await release_prewarm_lock("worker shutdown")
         if startup_lock is not None:
             await startup_lock.release()

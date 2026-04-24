@@ -33,8 +33,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_KV_BLOCK_SIZE = 32
 _MIN_FREE_GPU_MEMORY_FRACTION = 0.8
-_DEFAULT_MAX_POST_KILL_RESPONSE_SECONDS = 15.0
+_DEFAULT_MAX_FAILOVER_READY_SECONDS = 5.0
+_DEFAULT_POST_RESTORE_RESPONSE_TIMEOUT_SECONDS = 30.0
+_DEFAULT_RETRY_INTERVAL_SECONDS = 0.05
 _DEFAULT_RESPONSE_MAX_TOKENS = 128
+_DEFAULT_COHERENCE_MAX_TOKENS = 8
 _DEFAULT_CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 _DEFAULT_COHERENCE_PROMPT = (
     "What is seven plus five? /no_think\n"
@@ -123,6 +126,7 @@ def _wait_for_log(
     *,
     timeout_s: float,
     processes: dict[str, ManagedProcess],
+    interval_s: float = 1.0,
 ) -> None:
     def contains_needle() -> bool:
         _require_running(name, process)
@@ -132,6 +136,7 @@ def _wait_for_log(
         f"{name} log contains {needle!r}",
         contains_needle,
         timeout_s=timeout_s,
+        interval_s=interval_s,
         processes=processes,
     )
 
@@ -143,6 +148,7 @@ def _wait_for_any_log(
     *,
     timeout_s: float,
     processes: dict[str, ManagedProcess],
+    interval_s: float = 1.0,
 ) -> str:
     def contains_any_needle() -> str | None:
         _require_running(name, process)
@@ -153,6 +159,7 @@ def _wait_for_any_log(
         f"{name} log contains any of {needles!r}",
         contains_any_needle,
         timeout_s=timeout_s,
+        interval_s=interval_s,
         processes=processes,
     )
 
@@ -163,6 +170,7 @@ def _wait_for_any_process_log(
     *,
     timeout_s: float,
     processes: dict[str, ManagedProcess],
+    interval_s: float = 1.0,
 ) -> tuple[str, ManagedProcess]:
     def contains_needle() -> tuple[str, ManagedProcess] | None:
         for name, process in process_by_name.items():
@@ -175,6 +183,7 @@ def _wait_for_any_process_log(
         f"one process log contains {needle!r}",
         contains_needle,
         timeout_s=timeout_s,
+        interval_s=interval_s,
         processes=processes,
     )
 
@@ -233,11 +242,14 @@ def _post_chat(
     *,
     timeout_s: float,
     retry_status_codes: tuple[int, ...] = (404, 503),
+    retry_interval_s: float | None = None,
+    max_tokens: int | None = None,
 ):
-    max_tokens = _env_int(
-        "DYN_TRTLLM_SHADOW_FAILOVER_RESPONSE_MAX_TOKENS",
-        _DEFAULT_RESPONSE_MAX_TOKENS,
-    )
+    if max_tokens is None:
+        max_tokens = _env_int(
+            "DYN_TRTLLM_SHADOW_FAILOVER_RESPONSE_MAX_TOKENS",
+            _DEFAULT_RESPONSE_MAX_TOKENS,
+        )
     chat_template_kwargs = _env_json_object(
         "DYN_TRTLLM_SHADOW_FAILOVER_CHAT_TEMPLATE_KWARGS",
         _DEFAULT_CHAT_TEMPLATE_KWARGS,
@@ -260,6 +272,11 @@ def _post_chat(
     deadline = time.monotonic() + timeout_s
     last_error: Exception | None = None
     request_timeout_s = max(1.0, min(120.0, timeout_s))
+    if retry_interval_s is None:
+        retry_interval_s = _env_float(
+            "DYN_TRTLLM_SHADOW_FAILOVER_RETRY_INTERVAL_SECONDS",
+            _DEFAULT_RETRY_INTERVAL_SECONDS,
+        )
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(request, timeout=request_timeout_s) as response:
@@ -270,7 +287,7 @@ def _post_chat(
                 raise
         except urllib.error.URLError as exc:
             last_error = exc
-        time.sleep(2)
+        time.sleep(min(retry_interval_s, max(0.0, deadline - time.monotonic())))
 
     raise TimeoutError(f"chat request did not succeed: {last_error}")
 
@@ -362,6 +379,7 @@ def _write_default_engine_yaml(
             "DYN_TRTLLM_SHADOW_FAILOVER_MAX_NUM_TOKENS", 2048
         ),
         "max_batch_size": _env_int("DYN_TRTLLM_SHADOW_FAILOVER_MAX_BATCH_SIZE", 1),
+        "enable_autotuner": False,
         "disable_overlap_scheduler": True,
         "cuda_graph_config": None,
         "kv_cache_config": {
@@ -415,6 +433,10 @@ def _base_env(
             "DYN_LOG": os.environ.get("DYN_LOG", "debug"),
             "DYN_NAMESPACE": namespace,
             "DYN_REQUEST_PLANE": "tcp",
+            "DYN_ETCD_LEASE_TTL_SECS": os.environ.get(
+                "DYN_TRTLLM_SHADOW_FAILOVER_ETCD_LEASE_TTL_SECS",
+                "600",
+            ),
             "ETCD_ENDPOINTS": etcd_endpoint,
             "FAILOVER_LOCK_PATH": str(failover_lock_path),
             "GMS_SOCKET_DIR": str(gms_socket_dir),
@@ -428,7 +450,27 @@ def _base_env(
     env.setdefault("OMPI_MCA_coll_ucc_enable", "0")
     env.setdefault("OMPI_MCA_pml", "ob1")
     env.setdefault("UCX_TLS", "tcp,self")
+    env.setdefault("HF_MODULES_CACHE", str(gms_socket_dir / "hf-modules-cache"))
+    Path(env["HF_MODULES_CACHE"]).mkdir(parents=True, exist_ok=True)
     return env
+
+
+def _enable_shadow_prewarm(
+    env: dict[str, str], *, gms_socket_dir: Path, shadow_count: int
+) -> None:
+    env.setdefault("DYN_TRTLLM_SHADOW_PREWARM_EXPECTED_STANDBYS", str(shadow_count))
+    env.setdefault(
+        "DYN_TRTLLM_SHADOW_PREWARM_DIR",
+        str(gms_socket_dir / "shadow-prewarm"),
+    )
+    env.setdefault(
+        "DYN_TRTLLM_SHADOW_PREWARM_LOCK_PATH",
+        str(gms_socket_dir / "shadow-prewarm.lock"),
+    )
+    env.setdefault(
+        "DYN_TRTLLM_SHADOW_SLEEP_TAGS",
+        "shadow_failover",
+    )
 
 
 def _engine_command(
@@ -481,6 +523,7 @@ def _start_engine(
     stack: ExitStack,
     request,
     *,
+    log_prefix: str,
     name: str,
     engine_id: str,
     system_port: int,
@@ -497,23 +540,51 @@ def _start_engine(
         },
         timeout=1,
         display_output=True,
-        log_dir=f"{request.node.name}_{name}",
+        log_dir=f"{log_prefix}_{name}",
         display_name=name,
         terminate_all_matching_process_names=False,
     )
     return stack.enter_context(process)
 
 
-def _kill_process_group(process: ManagedProcess) -> None:
+def _kill_process_group(process: ManagedProcess, *, wait: bool = True) -> float:
     pid = process.get_pid()
     if pid is None:
-        return
+        return time.monotonic()
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        parent_pgid = os.getpgid(pid)
     except ProcessLookupError:
-        return
-    if process.proc is not None:
+        return time.monotonic()
+    child_pgids: list[int] = []
+    for child in process.subprocesses():
+        try:
+            child_pgid = os.getpgid(child.pid)
+        except ProcessLookupError:
+            continue
+        if child_pgid != parent_pgid and child_pgid not in child_pgids:
+            child_pgids.append(child_pgid)
+
+    signal_started_at = time.monotonic()
+    logger.info(
+        "Sending SIGKILL to process groups: child_pgids=%s parent_pgid=%s",
+        child_pgids,
+        parent_pgid,
+    )
+    for pgid in [*child_pgids, parent_pgid]:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if wait and process.proc is not None:
         process.proc.wait(timeout=60)
+    elif process.proc is not None:
+        process.proc.poll()
+    logger.info(
+        "SIGKILL process group %s in %.2fs",
+        "wait completed" if wait else "signals sent",
+        time.monotonic() - signal_started_at,
+    )
+    return signal_started_at
 
 
 def _gms_ready_file_exists(gms_socket_dir: Path) -> bool:
@@ -544,12 +615,19 @@ def test_gms_shadow_engine_failover_trtllm(
             f"TRTLLM shadow failover needs at least {tp_size} visible GPU(s), "
             f"got CUDA_VISIBLE_DEVICES={cuda_visible_devices!r}"
         )
-    shadow_count = _env_int("DYN_TRTLLM_SHADOW_FAILOVER_SHADOW_COUNT", 1)
+    shadow_count = _env_int("DYN_TRTLLM_SHADOW_FAILOVER_SHADOW_COUNT", 2)
     if shadow_count < 1:
         raise ValueError("DYN_TRTLLM_SHADOW_FAILOVER_SHADOW_COUNT must be >= 1")
-    max_post_kill_response_s = _env_float(
-        "DYN_TRTLLM_SHADOW_FAILOVER_MAX_POST_KILL_RESPONSE_SECONDS",
-        _DEFAULT_MAX_POST_KILL_RESPONSE_SECONDS,
+    max_failover_ready_s = _env_float(
+        "DYN_TRTLLM_SHADOW_FAILOVER_MAX_READY_SECONDS",
+        _env_float(
+            "DYN_TRTLLM_SHADOW_FAILOVER_MAX_POST_KILL_RESPONSE_SECONDS",
+            _DEFAULT_MAX_FAILOVER_READY_SECONDS,
+        ),
+    )
+    post_restore_response_timeout_s = _env_float(
+        "DYN_TRTLLM_SHADOW_FAILOVER_POST_RESTORE_RESPONSE_TIMEOUT_SECONDS",
+        _DEFAULT_POST_RESTORE_RESPONSE_TIMEOUT_SECONDS,
     )
 
     engine_yaml = _engine_yaml(
@@ -560,6 +638,7 @@ def test_gms_shadow_engine_failover_trtllm(
     namespace = (
         f"{request.node.name}-{os.getpid()}".replace("[", "-").replace("]", "")
     )
+    log_prefix = namespace
     socket_root = Path(
         os.environ.get(
             "DYN_TRTLLM_SHADOW_FAILOVER_SOCKET_ROOT", tempfile.gettempdir()
@@ -581,6 +660,11 @@ def test_gms_shadow_engine_failover_trtllm(
         gms_socket_dir=gms_socket_dir,
         failover_lock_path=failover_lock_path,
         cuda_visible_devices=cuda_visible_devices,
+    )
+    _enable_shadow_prewarm(
+        base_env,
+        gms_socket_dir=gms_socket_dir,
+        shadow_count=shadow_count,
     )
     engine_command = _engine_command(
         namespace=namespace,
@@ -617,7 +701,7 @@ def test_gms_shadow_engine_failover_trtllm(
                     health_check_urls=[f"{etcd_endpoint}/health"],
                     timeout=60,
                     display_output=True,
-                    log_dir=f"{request.node.name}_etcd",
+                    log_dir=f"{log_prefix}_etcd",
                     display_name="etcd",
                     terminate_all_matching_process_names=False,
                 )
@@ -633,43 +717,17 @@ def test_gms_shadow_engine_failover_trtllm(
                     ],
                     timeout=300,
                     display_output=True,
-                    log_dir=f"{request.node.name}_gms",
+                    log_dir=f"{log_prefix}_gms",
                     display_name="gms",
                     terminate_all_matching_process_names=False,
                 )
             )
             processes["gms"] = gms
 
-            frontend = stack.enter_context(
-                DynamoFrontendProcess(
-                    request,
-                    frontend_port=frontend_port,
-                    router_mode="kv",
-                    extra_args=[
-                        "--namespace",
-                        namespace,
-                        "--model-name",
-                        served_model_name,
-                        "--kv-cache-block-size",
-                        str(_DEFAULT_KV_BLOCK_SIZE),
-                        "--discovery-backend",
-                        "etcd",
-                        "--request-plane",
-                        "tcp",
-                        "--event-plane",
-                        "zmq",
-                        "--router-min-initial-workers",
-                        "1",
-                    ],
-                    extra_env=base_env,
-                    display_name="frontend",
-                )
-            )
-            processes["frontend"] = frontend
-
             primary = _start_engine(
                 stack,
                 request,
+                log_prefix=log_prefix,
                 name="primary",
                 engine_id="0",
                 system_port=primary_system_port,
@@ -684,30 +742,6 @@ def test_gms_shadow_engine_failover_trtllm(
                 timeout_s=300,
                 processes=processes,
             )
-            _wait_for_http_json(
-                f"http://127.0.0.1:{primary_system_port}/health",
-                "primary health",
-                timeout_s=1800,
-                processes=processes,
-                process_to_check=("primary", primary),
-            )
-            _wait_for_model(
-                frontend_port,
-                served_model_name,
-                timeout_s=300,
-                processes=processes,
-            )
-
-            primary_response = _post_chat(
-                frontend_port,
-                served_model_name,
-                "What is two plus two? Answer in one short sentence.",
-                timeout_s=600,
-            )
-            primary_content, _, _ = _extract_message_text(primary_response)
-            assert primary_content.strip(), (
-                f"primary response was empty: {primary_response}"
-            )
 
             standbys: dict[str, ManagedProcess] = {}
             standby_ports_by_name: dict[str, int] = {}
@@ -720,6 +754,7 @@ def test_gms_shadow_engine_failover_trtllm(
                 standby = _start_engine(
                     stack,
                     request,
+                    log_prefix=log_prefix,
                     name=standby_name,
                     engine_id=str(engine_index),
                     system_port=standby_system_port,
@@ -734,7 +769,7 @@ def test_gms_shadow_engine_failover_trtllm(
                 _wait_for_log(
                     standby_name,
                     standby,
-                    "[Shadow] Standby proxy ready, startup probe now passing, "
+                    "[Shadow] Standby startup probe now passing; "
                     "starting RO engine init before failover",
                     timeout_s=600,
                     processes=processes,
@@ -757,15 +792,81 @@ def test_gms_shadow_engine_failover_trtllm(
                 _wait_for_log(
                     standby_name,
                     standby,
+                    "[Shadow] Standby parked for fast failover",
+                    timeout_s=900,
+                    processes=processes,
+                )
+                _wait_for_log(
+                    standby_name,
+                    standby,
                     "[Shadow] Standby engine initialized in RO mode; "
                     "waiting for failover lock",
                     timeout_s=900,
                     processes=processes,
                 )
 
+            _wait_for_log(
+                "primary",
+                primary,
+                "[Shadow] Primary prewarm complete; starting serving path",
+                timeout_s=1800,
+                processes=processes,
+            )
+            _wait_for_http_json(
+                f"http://127.0.0.1:{primary_system_port}/health",
+                "primary health",
+                timeout_s=1800,
+                processes=processes,
+                process_to_check=("primary", primary),
+            )
+            frontend = stack.enter_context(
+                DynamoFrontendProcess(
+                    request,
+                    frontend_port=frontend_port,
+                    router_mode="kv",
+                    extra_args=[
+                        "--namespace",
+                        namespace,
+                        "--model-name",
+                        served_model_name,
+                        "--kv-cache-block-size",
+                        str(_DEFAULT_KV_BLOCK_SIZE),
+                        "--discovery-backend",
+                        "etcd",
+                        "--request-plane",
+                        "tcp",
+                        "--event-plane",
+                        "zmq",
+                        "--router-min-initial-workers",
+                        "1",
+                    ],
+                    extra_env=base_env,
+                    log_dir=f"{log_prefix}_frontend",
+                    display_name="frontend",
+                )
+            )
+            processes["frontend"] = frontend
+            _wait_for_model(
+                frontend_port,
+                served_model_name,
+                timeout_s=300,
+                processes=processes,
+            )
+
+            primary_response = _post_chat(
+                frontend_port,
+                served_model_name,
+                "What is two plus two? Answer in one short sentence.",
+                timeout_s=600,
+            )
+            primary_content, _, _ = _extract_message_text(primary_response)
+            assert primary_content.strip(), (
+                f"primary response was empty: {primary_response}"
+            )
+
             _require_running("primary", primary)
             for standby_name, standby in standbys.items():
-                assert "[Shadow] Lock acquired, enabling standby traffic" not in (
+                assert "[Shadow] Lock acquired, starting standby endpoint" not in (
                     standby.read_logs()
                 ), f"{standby_name} became active before primary failover"
                 assert "[Shadow] MDC published; standby is now discoverable" not in (
@@ -783,24 +884,30 @@ def test_gms_shadow_engine_failover_trtllm(
                 f"pre-failover response was empty: {pre_failover_response}"
             )
 
-            failover_started_at = time.monotonic()
-            _kill_process_group(primary)
+            failover_started_at = _kill_process_group(primary, wait=False)
             processes.pop("primary", None)
 
             winner_name, winner = _wait_for_any_process_log(
                 standbys,
-                "[Shadow] Lock acquired, enabling standby traffic",
-                timeout_s=300,
+                "[Shadow] Lock acquired, starting standby endpoint",
+                timeout_s=max_failover_ready_s,
+                interval_s=0.05,
                 processes=processes,
             )
             _wait_for_http_json(
                 f"http://127.0.0.1:{standby_ports_by_name[winner_name]}/health",
                 f"{winner_name} health after failover",
-                timeout_s=1800,
+                timeout_s=30,
                 processes=processes,
                 process_to_check=(winner_name, winner),
             )
+            failover_ready_s = time.monotonic() - failover_started_at
+            assert failover_ready_s <= max_failover_ready_s, (
+                f"standby failover readiness took {failover_ready_s:.2f}s, "
+                f"exceeding {max_failover_ready_s:.2f}s"
+            )
 
+            post_restore_started_at = time.monotonic()
             post_restore_response = _post_chat(
                 frontend_port,
                 served_model_name,
@@ -808,21 +915,24 @@ def test_gms_shadow_engine_failover_trtllm(
                     "DYN_TRTLLM_SHADOW_FAILOVER_COHERENCE_PROMPT",
                     _DEFAULT_COHERENCE_PROMPT,
                 ),
-                timeout_s=max_post_kill_response_s,
+                timeout_s=post_restore_response_timeout_s,
                 retry_status_codes=(404, 500, 502, 503, 504),
+                max_tokens=_env_int(
+                    "DYN_TRTLLM_SHADOW_FAILOVER_COHERENCE_MAX_TOKENS",
+                    _DEFAULT_COHERENCE_MAX_TOKENS,
+                ),
             )
-            post_kill_response_s = time.monotonic() - failover_started_at
-            _assert_coherent_post_restore_response(post_restore_response)
+            post_restore_response_s = time.monotonic() - post_restore_started_at
+            kill_to_coherent_s = time.monotonic() - failover_started_at
             logger.info(
-                "%s coherent post-failover response in %.2fs",
+                "%s failover ready in %.2fs; coherent post-restore response "
+                "in %.2fs (%.2fs after SIGKILL)",
                 winner_name,
-                post_kill_response_s,
+                failover_ready_s,
+                post_restore_response_s,
+                kill_to_coherent_s,
             )
-            assert post_kill_response_s <= max_post_kill_response_s, (
-                "post-failover coherent response took "
-                f"{post_kill_response_s:.2f}s, exceeding "
-                f"{max_post_kill_response_s:.2f}s"
-            )
+            _assert_coherent_post_restore_response(post_restore_response)
     finally:
         deallocate_ports(allocated_ports)
         shutil.rmtree(gms_socket_dir, ignore_errors=True)

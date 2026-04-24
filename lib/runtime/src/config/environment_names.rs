@@ -155,6 +155,9 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
+    /// ETCD primary lease TTL in seconds
+    pub const DYN_ETCD_LEASE_TTL_SECS: &str = "DYN_ETCD_LEASE_TTL_SECS";
+
     /// ETCD authentication environment variables
     pub mod auth {
         /// Username for ETCD authentication
@@ -488,6 +491,7 @@ mod tests {
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
+            etcd::DYN_ETCD_LEASE_TTL_SECS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,

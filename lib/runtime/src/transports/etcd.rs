@@ -33,6 +33,8 @@ pub use lock::*;
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
 
+const DEFAULT_LEASE_TTL_SECS: u64 = 10;
+
 /// ETCD Client
 #[derive(Clone)]
 pub struct Client {
@@ -83,7 +85,7 @@ impl Client {
                     })?;
 
                 let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), 10, token)
+                    create_lease(connector.clone(), config.lease_ttl_secs, token)
                         .await
                         .with_context(|| {
                             format!(
@@ -570,6 +572,10 @@ pub struct ClientOptions {
     /// If true, the client will attach a lease to the primary [`CancellationToken`].
     #[builder(default = "true")]
     pub attach_lease: bool,
+
+    /// Primary lease TTL in seconds.
+    #[builder(default = "lease_ttl_secs_from_env()")]
+    pub lease_ttl_secs: u64,
 }
 
 impl Default for ClientOptions {
@@ -601,8 +607,17 @@ impl Default for ClientOptions {
             etcd_url: default_servers(),
             etcd_connect_options: connect_options,
             attach_lease: true,
+            lease_ttl_secs: lease_ttl_secs_from_env(),
         }
     }
+}
+
+fn lease_ttl_secs_from_env() -> u64 {
+    std::env::var(env_etcd::DYN_ETCD_LEASE_TTL_SECS)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ttl| *ttl > 0)
+        .unwrap_or(DEFAULT_LEASE_TTL_SECS)
 }
 
 fn default_servers() -> Vec<String> {
