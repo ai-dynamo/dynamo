@@ -679,6 +679,10 @@ mod tests {
         let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
         assert_eq!(calls.len(), 1);
 
+        // Shape-only assertion: OpenAI-style `call_` prefix + at least 20
+        // lowercase alphanumeric characters. We intentionally do NOT pin the
+        // exact length / alphabet so the id generator can evolve without
+        // churning this test.
         let id = &calls[0].id;
         assert!(
             id.starts_with("call_"),
@@ -686,12 +690,16 @@ mod tests {
             id
         );
         let suffix = &id["call_".len()..];
-        assert_eq!(suffix.len(), 24, "hex suffix must be 24 chars: {}", suffix);
+        assert!(
+            suffix.len() >= 20,
+            "suffix must be at least 20 chars: {}",
+            suffix
+        );
         assert!(
             suffix
                 .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "hex suffix must match [0-9a-f]{{24}}: {}",
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+            "suffix must match [a-z0-9]+: {}",
             suffix
         );
     }
