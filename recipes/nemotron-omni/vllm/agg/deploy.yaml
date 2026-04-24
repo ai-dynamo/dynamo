@@ -81,6 +81,9 @@ spec:
           env:
             - name: HF_HOME
               value: /model-store
+            # DYN-2884
+            - name: DYN_MM_VIDEO_NUM_FRAMES
+              value: "512"
           command:
             - /bin/bash
             - -lc
