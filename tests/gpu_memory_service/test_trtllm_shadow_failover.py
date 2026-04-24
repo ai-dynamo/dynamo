@@ -1,0 +1,707 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import shlex
+import signal
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from contextlib import ExitStack
+from pathlib import Path
+from typing import Any
+
+import pytest
+import torch
+import yaml
+
+from tests.utils.constants import QWEN
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.port_utils import allocate_ports, deallocate_ports
+
+pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_KV_BLOCK_SIZE = 32
+_MIN_FREE_GPU_MEMORY_FRACTION = 0.8
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
+
+
+def _redact(text: str) -> str:
+    text = re.sub(r"(HF_TOKEN=)[^\s]+", r"\1<redacted>", text)
+    text = re.sub(r'("HF_TOKEN"\s*:\s*")[^"]+', r"\1<redacted>", text)
+    text = re.sub(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", text)
+    return text
+
+
+def _tail_log(process: ManagedProcess, lines: int = 160) -> str:
+    logs = process.read_logs().splitlines()
+    return _redact("\n".join(logs[-lines:]))
+
+
+def _fail_with_logs(message: str, processes: dict[str, ManagedProcess]) -> None:
+    sections = [message]
+    for name, process in processes.items():
+        sections.append(f"\n--- tail {name} ---\n{_tail_log(process)}")
+    pytest.fail("\n".join(sections))
+
+
+def _require_running(name: str, process: ManagedProcess) -> None:
+    if not process.is_running():
+        raise RuntimeError(
+            f"{name} exited early with code "
+            f"{process.proc.returncode if process.proc else '<not-started>'}"
+        )
+
+
+def _wait_until(
+    label: str,
+    predicate,
+    *,
+    timeout_s: float,
+    interval_s: float = 1.0,
+    processes: dict[str, ManagedProcess] | None = None,
+) -> Any:
+    deadline = time.monotonic() + timeout_s
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return_value = predicate()
+            if return_value:
+                logger.info("wait succeeded: %s", label)
+                return return_value
+        except Exception as exc:
+            last_error = exc
+        time.sleep(interval_s)
+
+    message = f"Timed out waiting for {label}"
+    if last_error is not None:
+        message += f": {last_error}"
+    if processes:
+        _fail_with_logs(message, processes)
+    raise TimeoutError(message)
+
+
+def _wait_for_log(
+    name: str,
+    process: ManagedProcess,
+    needle: str,
+    *,
+    timeout_s: float,
+    processes: dict[str, ManagedProcess],
+) -> None:
+    def contains_needle() -> bool:
+        _require_running(name, process)
+        return needle in process.read_logs()
+
+    _wait_until(
+        f"{name} log contains {needle!r}",
+        contains_needle,
+        timeout_s=timeout_s,
+        processes=processes,
+    )
+
+
+def _wait_for_any_log(
+    name: str,
+    process: ManagedProcess,
+    needles: tuple[str, ...],
+    *,
+    timeout_s: float,
+    processes: dict[str, ManagedProcess],
+) -> str:
+    def contains_any_needle() -> str | None:
+        _require_running(name, process)
+        logs = process.read_logs()
+        return next((needle for needle in needles if needle in logs), None)
+
+    return _wait_until(
+        f"{name} log contains any of {needles!r}",
+        contains_any_needle,
+        timeout_s=timeout_s,
+        processes=processes,
+    )
+
+
+def _http_json(url: str, *, timeout_s: float = 10.0) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout_s) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _wait_for_http_json(
+    url: str,
+    label: str,
+    *,
+    timeout_s: float,
+    processes: dict[str, ManagedProcess],
+    process_to_check: tuple[str, ManagedProcess] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] | None = None
+
+    def request_succeeds() -> bool:
+        nonlocal result
+        if process_to_check is not None:
+            _require_running(process_to_check[0], process_to_check[1])
+        result = _http_json(url)
+        return True
+
+    _wait_until(label, request_succeeds, timeout_s=timeout_s, processes=processes)
+    assert result is not None
+    return result
+
+
+def _wait_for_model(
+    frontend_port: int,
+    model: str,
+    *,
+    timeout_s: float,
+    processes: dict[str, ManagedProcess],
+) -> None:
+    def model_is_registered() -> bool:
+        response = _http_json(f"http://127.0.0.1:{frontend_port}/v1/models")
+        models = response.get("data", [])
+        return any(entry.get("id") == model for entry in models)
+
+    _wait_until(
+        f"frontend model registration for {model}",
+        model_is_registered,
+        timeout_s=timeout_s,
+        processes=processes,
+    )
+
+
+def _post_chat(frontend_port: int, model: str, prompt: str, *, timeout_s: float):
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 128,
+    }
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{frontend_port}/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    deadline = time.monotonic() + timeout_s
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in (404, 503):
+                raise
+        except urllib.error.URLError as exc:
+            last_error = exc
+        time.sleep(2)
+
+    raise TimeoutError(f"chat request did not succeed: {last_error}")
+
+
+def _extract_message_text(response: dict[str, Any]) -> tuple[str, str, str | None]:
+    choices = response.get("choices") or []
+    assert choices, f"response did not include choices: {response}"
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    reasoning = message.get("reasoning_content") or ""
+    finish_reason = choices[0].get("finish_reason")
+    return content, reasoning, finish_reason
+
+
+def _assert_coherent_post_restore_response(response: dict[str, Any]) -> None:
+    content, reasoning, finish_reason = _extract_message_text(response)
+    normalized = " ".join(content.replace("\n", " ").split()).lower()
+    assert content.strip(), f"post-restore response content is empty: {response}"
+    assert finish_reason in {"stop", "length", None}, (
+        f"unexpected post-restore finish_reason={finish_reason!r}: {response}"
+    )
+    assert "12" in normalized or "twelve" in normalized, (
+        "post-restore response did not contain the expected arithmetic answer "
+        f"12/twelve. content={content!r} reasoning_len={len(reasoning)}"
+    )
+
+
+def _cuda_visible_devices(tp_size: int) -> str:
+    override = os.environ.get("DYN_TRTLLM_SHADOW_FAILOVER_CUDA_VISIBLE_DEVICES")
+    if override:
+        return override
+    current = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if current:
+        return current
+    return ",".join(str(index) for index in range(tp_size))
+
+
+def _visible_device_count(visible_devices: str) -> int:
+    return len([device for device in visible_devices.split(",") if device.strip()])
+
+
+def _assert_free_gpu_memory_fraction_is_not_cheating(
+    free_gpu_memory_fraction: float, engine_yaml: Path
+) -> None:
+    if free_gpu_memory_fraction < _MIN_FREE_GPU_MEMORY_FRACTION:
+        raise ValueError(
+            "DYN_TRTLLM_SHADOW_FAILOVER_FREE_GPU_MEMORY_FRACTION must be >= "
+            f"{_MIN_FREE_GPU_MEMORY_FRACTION}, got {free_gpu_memory_fraction}"
+        )
+
+    config = yaml.safe_load(engine_yaml.read_text(encoding="utf-8")) or {}
+    yaml_fraction = (config.get("kv_cache_config") or {}).get(
+        "free_gpu_memory_fraction"
+    )
+    if (
+        yaml_fraction is not None
+        and float(yaml_fraction) < _MIN_FREE_GPU_MEMORY_FRACTION
+    ):
+        raise ValueError(
+            f"{engine_yaml} sets kv_cache_config.free_gpu_memory_fraction="
+            f"{yaml_fraction}, below {_MIN_FREE_GPU_MEMORY_FRACTION}"
+        )
+
+
+def _write_default_engine_yaml(
+    tmp_path: Path, *, tp_size: int, free_gpu_memory_fraction: float
+) -> Path:
+    engine_yaml = tmp_path / "trtllm_shadow_failover_engine.yaml"
+    config = {
+        "backend": "pytorch",
+        "trust_remote_code": True,
+        "tensor_parallel_size": tp_size,
+        "max_num_tokens": _env_int(
+            "DYN_TRTLLM_SHADOW_FAILOVER_MAX_NUM_TOKENS", 2048
+        ),
+        "max_batch_size": _env_int("DYN_TRTLLM_SHADOW_FAILOVER_MAX_BATCH_SIZE", 1),
+        "disable_overlap_scheduler": True,
+        "cuda_graph_config": None,
+        "kv_cache_config": {
+            "enable_block_reuse": True,
+            "free_gpu_memory_fraction": free_gpu_memory_fraction,
+        },
+        "print_iter_log": True,
+        "stream_interval": 10,
+    }
+    engine_yaml.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return engine_yaml
+
+
+def _engine_yaml(
+    tmp_path: Path, *, tp_size: int, free_gpu_memory_fraction: float
+) -> Path:
+    override = os.environ.get("DYN_TRTLLM_SHADOW_FAILOVER_ENGINE_YAML")
+    if override:
+        engine_yaml = Path(override).expanduser()
+        if not engine_yaml.exists():
+            raise FileNotFoundError(
+                f"DYN_TRTLLM_SHADOW_FAILOVER_ENGINE_YAML does not exist: {engine_yaml}"
+            )
+    else:
+        engine_yaml = _write_default_engine_yaml(
+            tmp_path,
+            tp_size=tp_size,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+        )
+
+    _assert_free_gpu_memory_fraction_is_not_cheating(
+        free_gpu_memory_fraction, engine_yaml
+    )
+    return engine_yaml
+
+
+def _base_env(
+    *,
+    namespace: str,
+    etcd_endpoint: str,
+    gms_socket_dir: Path,
+    failover_lock_path: Path,
+    cuda_visible_devices: str,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "CUDA_VISIBLE_DEVICES": cuda_visible_devices,
+            "DYN_DISCOVERY_BACKEND": "etcd",
+            "DYN_EVENT_PLANE": "zmq",
+            "DYN_LOG": os.environ.get("DYN_LOG", "debug"),
+            "DYN_NAMESPACE": namespace,
+            "DYN_REQUEST_PLANE": "tcp",
+            "ETCD_ENDPOINTS": etcd_endpoint,
+            "FAILOVER_LOCK_PATH": str(failover_lock_path),
+            "GMS_SOCKET_DIR": str(gms_socket_dir),
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    env.setdefault("MPI4PY_MPIABI", "openmpi")
+    env.setdefault("NCCL_DEBUG", "WARN")
+    env.setdefault("OMPI_MCA_btl", "self,tcp")
+    env.setdefault("OMPI_MCA_coll_hcoll_enable", "0")
+    env.setdefault("OMPI_MCA_coll_ucc_enable", "0")
+    env.setdefault("OMPI_MCA_pml", "ob1")
+    env.setdefault("UCX_TLS", "tcp,self")
+    return env
+
+
+def _engine_command(
+    *,
+    namespace: str,
+    model: str,
+    served_model_name: str,
+    engine_yaml: Path,
+    free_gpu_memory_fraction: float,
+    kv_block_size: int,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "dynamo.trtllm",
+        "--namespace",
+        namespace,
+        "--endpoint",
+        f"dyn://{namespace}.tensorrt_llm.generate",
+        "--model",
+        model,
+        "--served-model-name",
+        served_model_name,
+        "--modality",
+        "text",
+        "--extra-engine-args",
+        str(engine_yaml),
+        "--load-format",
+        "gms",
+        "--gms-shadow-mode",
+        "--free-gpu-memory-fraction",
+        str(free_gpu_memory_fraction),
+        "--publish-events-and-metrics",
+        "--kv-block-size",
+        str(kv_block_size),
+        "--discovery-backend",
+        "etcd",
+        "--request-plane",
+        "tcp",
+        "--event-plane",
+        "zmq",
+    ]
+    command.extend(
+        shlex.split(os.environ.get("DYN_TRTLLM_SHADOW_FAILOVER_EXTRA_ARGS", ""))
+    )
+    return command
+
+
+def _start_engine(
+    stack: ExitStack,
+    request,
+    *,
+    name: str,
+    engine_id: str,
+    system_port: int,
+    command: list[str],
+    env: dict[str, str],
+) -> ManagedProcess:
+    process = ManagedProcess(
+        command=command,
+        env={
+            **env,
+            "CONTAINER_NAME": name,
+            "DYN_SYSTEM_PORT": str(system_port),
+            "ENGINE_ID": engine_id,
+        },
+        timeout=1,
+        display_output=True,
+        log_dir=f"{request.node.name}_{name}",
+        display_name=name,
+        terminate_all_matching_process_names=False,
+    )
+    return stack.enter_context(process)
+
+
+def _kill_process_group(process: ManagedProcess) -> None:
+    pid = process.get_pid()
+    if pid is None:
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    if process.proc is not None:
+        process.proc.wait(timeout=60)
+
+
+def _gms_ready_file_exists(gms_socket_dir: Path) -> bool:
+    return (gms_socket_dir / "gms-ready").exists()
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(QWEN)
+@pytest.mark.timeout(3600)
+@pytest.mark.trtllm
+def test_gms_shadow_engine_failover_trtllm(
+    request, tmp_path, predownload_models
+):
+    model = os.environ.get("DYN_TRTLLM_SHADOW_FAILOVER_MODEL", QWEN)
+    served_model_name = os.environ.get(
+        "DYN_TRTLLM_SHADOW_FAILOVER_SERVED_MODEL_NAME", model
+    )
+    tp_size = _env_int("DYN_TRTLLM_SHADOW_FAILOVER_TP", 1)
+    free_gpu_memory_fraction = _env_float(
+        "DYN_TRTLLM_SHADOW_FAILOVER_FREE_GPU_MEMORY_FRACTION", 0.85
+    )
+    cuda_visible_devices = _cuda_visible_devices(tp_size)
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for TRTLLM shadow failover")
+    if _visible_device_count(cuda_visible_devices) < tp_size:
+        pytest.skip(
+            f"TRTLLM shadow failover needs at least {tp_size} visible GPU(s), "
+            f"got CUDA_VISIBLE_DEVICES={cuda_visible_devices!r}"
+        )
+
+    engine_yaml = _engine_yaml(
+        tmp_path,
+        tp_size=tp_size,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+    )
+    namespace = (
+        f"{request.node.name}-{os.getpid()}".replace("[", "-").replace("]", "")
+    )
+    socket_root = Path(
+        os.environ.get(
+            "DYN_TRTLLM_SHADOW_FAILOVER_SOCKET_ROOT", tempfile.gettempdir()
+        )
+    )
+    socket_root.mkdir(parents=True, exist_ok=True)
+    gms_socket_dir = Path(tempfile.mkdtemp(prefix="gms-", dir=socket_root))
+    failover_lock_path = gms_socket_dir / "failover.lock"
+    (
+        frontend_port,
+        primary_system_port,
+        standby_system_port,
+        etcd_client_port,
+        etcd_peer_port,
+    ) = allocate_ports(
+        count=5, start_port=10000
+    )
+    etcd_endpoint = f"http://127.0.0.1:{etcd_client_port}"
+    base_env = _base_env(
+        namespace=namespace,
+        etcd_endpoint=etcd_endpoint,
+        gms_socket_dir=gms_socket_dir,
+        failover_lock_path=failover_lock_path,
+        cuda_visible_devices=cuda_visible_devices,
+    )
+    engine_command = _engine_command(
+        namespace=namespace,
+        model=model,
+        served_model_name=served_model_name,
+        engine_yaml=engine_yaml,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        kv_block_size=_DEFAULT_KV_BLOCK_SIZE,
+    )
+
+    processes: dict[str, ManagedProcess] = {}
+    try:
+        with ExitStack() as stack:
+            etcd = stack.enter_context(
+                ManagedProcess(
+                    command=[
+                        "etcd",
+                        "--data-dir",
+                        str(tmp_path / "etcd-data"),
+                        "--listen-client-urls",
+                        etcd_endpoint,
+                        "--advertise-client-urls",
+                        etcd_endpoint,
+                        "--listen-peer-urls",
+                        f"http://127.0.0.1:{etcd_peer_port}",
+                        "--initial-advertise-peer-urls",
+                        f"http://127.0.0.1:{etcd_peer_port}",
+                        "--initial-cluster",
+                        f"default=http://127.0.0.1:{etcd_peer_port}",
+                        "--log-level",
+                        "info",
+                    ],
+                    env=base_env,
+                    health_check_urls=[f"{etcd_endpoint}/health"],
+                    timeout=60,
+                    display_output=True,
+                    log_dir=f"{request.node.name}_etcd",
+                    display_name="etcd",
+                    terminate_all_matching_process_names=False,
+                )
+            )
+            processes["etcd"] = etcd
+
+            gms = stack.enter_context(
+                ManagedProcess(
+                    command=[sys.executable, "-m", "gpu_memory_service.cli.server"],
+                    env=base_env,
+                    health_check_funcs=[
+                        lambda: _gms_ready_file_exists(gms_socket_dir)
+                    ],
+                    timeout=300,
+                    display_output=True,
+                    log_dir=f"{request.node.name}_gms",
+                    display_name="gms",
+                    terminate_all_matching_process_names=False,
+                )
+            )
+            processes["gms"] = gms
+
+            frontend = stack.enter_context(
+                DynamoFrontendProcess(
+                    request,
+                    frontend_port=frontend_port,
+                    router_mode="kv",
+                    extra_args=[
+                        "--namespace",
+                        namespace,
+                        "--model-name",
+                        served_model_name,
+                        "--kv-cache-block-size",
+                        str(_DEFAULT_KV_BLOCK_SIZE),
+                        "--discovery-backend",
+                        "etcd",
+                        "--request-plane",
+                        "tcp",
+                        "--event-plane",
+                        "zmq",
+                        "--router-min-initial-workers",
+                        "1",
+                    ],
+                    extra_env=base_env,
+                    display_name="frontend",
+                )
+            )
+            processes["frontend"] = frontend
+
+            primary = _start_engine(
+                stack,
+                request,
+                name="primary",
+                engine_id="0",
+                system_port=primary_system_port,
+                command=engine_command,
+                env=base_env,
+            )
+            processes["primary"] = primary
+            _wait_for_log(
+                "primary",
+                primary,
+                "[Shadow] Primary acquired startup lock",
+                timeout_s=300,
+                processes=processes,
+            )
+            _wait_for_http_json(
+                f"http://127.0.0.1:{primary_system_port}/health",
+                "primary health",
+                timeout_s=1800,
+                processes=processes,
+                process_to_check=("primary", primary),
+            )
+            _wait_for_model(
+                frontend_port,
+                served_model_name,
+                timeout_s=300,
+                processes=processes,
+            )
+
+            primary_response = _post_chat(
+                frontend_port,
+                served_model_name,
+                "What is two plus two? Answer in one short sentence.",
+                timeout_s=600,
+            )
+            primary_content, _, _ = _extract_message_text(primary_response)
+            assert primary_content.strip(), (
+                f"primary response was empty: {primary_response}"
+            )
+
+            standby = _start_engine(
+                stack,
+                request,
+                name="standby",
+                engine_id="1",
+                system_port=standby_system_port,
+                command=engine_command,
+                env=base_env,
+            )
+            processes["standby"] = standby
+            _wait_for_log(
+                "standby",
+                standby,
+                "[Shadow] MDC published; standby is now discoverable",
+                timeout_s=600,
+                processes=processes,
+            )
+            _wait_for_log(
+                "standby",
+                standby,
+                "[Shadow] Engine sleeping, startup probe now passing, waiting for lock",
+                timeout_s=600,
+                processes=processes,
+            )
+
+            _kill_process_group(primary)
+            processes.pop("primary", None)
+
+            _wait_for_log(
+                "standby",
+                standby,
+                "[Shadow] Lock acquired, starting engine init",
+                timeout_s=300,
+                processes=processes,
+            )
+            _wait_for_http_json(
+                f"http://127.0.0.1:{standby_system_port}/health",
+                "standby health after failover",
+                timeout_s=1800,
+                processes=processes,
+                process_to_check=("standby", standby),
+            )
+            restore_marker = _wait_for_any_log(
+                "standby",
+                standby,
+                (
+                    "GMS RO: materialized weights",
+                    "Created ro allocator for tag=weights",
+                    "Connected with ro lock (granted=ro), committed=True",
+                ),
+                timeout_s=900,
+                processes=processes,
+            )
+            logger.info("standby GMS RO restore marker: %s", restore_marker)
+
+            post_restore_response = _post_chat(
+                frontend_port,
+                served_model_name,
+                "What is seven plus five? Answer in one short sentence.",
+                timeout_s=900,
+            )
+            _assert_coherent_post_restore_response(post_restore_response)
+    finally:
+        deallocate_ports(
+            [
+                frontend_port,
+                primary_system_port,
+                standby_system_port,
+                etcd_client_port,
+                etcd_peer_port,
+            ]
+        )
+        shutil.rmtree(gms_socket_dir, ignore_errors=True)

@@ -23,6 +23,7 @@ from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 from dynamo.trtllm.workers.llm_worker import _StandbyGenerateProxy, init_llm_worker
+from tensorrt_llm.llmapi.llm_args import LoadFormat, SleepConfig
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -276,8 +277,55 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
 
 
 @pytest.mark.asyncio
+async def test_init_llm_worker_sets_gms_mode_rw_for_shadow_primary(monkeypatch):
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/tmp/test-gms")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/test-failover.lock")
+
+    config = parse_args(
+        ["--model", "fake-model", "--load-format", "gms", "--gms-shadow-mode"]
+    )
+    fake_lock = mock.AsyncMock()
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
+            return_value=fake_lock,
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert engine_args["load_format"] == LoadFormat.GMS
+        assert engine_args["gms_mode"] == "rw"
+        assert isinstance(engine_args["sleep_config"], SleepConfig)
+        assert engine_args["env_overrides"]["GMS_SOCKET_DIR"] == "/tmp/test-gms"
+        assert engine_args["env_overrides"]["ENGINE_ID"] == "0"
+        assert (
+            engine_args["env_overrides"]["FAILOVER_LOCK_PATH"]
+            == "/tmp/test-failover.lock"
+        )
+        fake_lock.acquire.assert_awaited_once_with(engine_id="engine-0")
+
+
+@pytest.mark.asyncio
 async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
     monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/tmp/test-gms")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/test-failover.lock")
 
     config = parse_args(
         ["--model", "fake-model", "--load-format", "gms", "--gms-shadow-mode"]
@@ -336,7 +384,16 @@ async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
                 shutdown_event=asyncio.Event(),
             )
 
-        assert exc_info.value.engine_args["gms_mode"] == "ro"
+        engine_args = exc_info.value.engine_args
+        assert engine_args["load_format"] == LoadFormat.GMS
+        assert engine_args["gms_mode"] == "ro"
+        assert isinstance(engine_args["sleep_config"], SleepConfig)
+        assert engine_args["env_overrides"]["GMS_SOCKET_DIR"] == "/tmp/test-gms"
+        assert engine_args["env_overrides"]["ENGINE_ID"] == "1"
+        assert (
+            engine_args["env_overrides"]["FAILOVER_LOCK_PATH"]
+            == "/tmp/test-failover.lock"
+        )
         assert event_log.index("register_model") < event_log.index(
             "lock.owner"
         ), f"Standby must publish MDC before polling lock owner; got {event_log}"
