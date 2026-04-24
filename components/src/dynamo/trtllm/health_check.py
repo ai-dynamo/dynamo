@@ -11,8 +11,12 @@ import logging
 from typing import Any
 
 from dynamo.health_check import HealthCheckPayload
+from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
+
+# Marker key set on health-check probe requests.
+HEALTH_CHECK_KEY = "_HEALTH_CHECK"
 
 
 def _get_bos_token_id_from_tokenizer(tokenizer) -> int:
@@ -54,24 +58,22 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
     TRT-LLM-specific health check payload.
 
     Provides TRT-LLM defaults and inherits environment override support from base class.
+    For PREFILL and DECODE workers, adds disaggregated_params so the handler runs
+    the probe as a local prefill+decode (no transceiver, no peer required).
     """
 
-    def __init__(self, tokenizer: Any = None) -> None:
-        """
-        Initialize TRT-LLM health check payload with TRT-LLM-specific defaults.
-
-        Args:
-            tokenizer: Optional TRT-LLM tokenizer to extract BOS token from.
-                       If provided, will attempt to use the model's actual BOS token.
-        """
+    def __init__(
+        self,
+        tokenizer: Any = None,
+        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+    ) -> None:
+        self._disaggregation_mode = disaggregation_mode
         bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
 
-        # Set TensorRT-LLM default payload - minimal request that completes quickly
-        # The handler expects token_ids, stop_conditions, and sampling_options
         self.default_payload = {
             "token_ids": [bos_token_id],
             "stop_conditions": {
-                "max_tokens": 1,  # Generate only 1 token
+                "max_tokens": 1,
                 "stop": None,
                 "stop_token_ids": None,
                 "include_stop_str_in_output": False,
@@ -89,3 +91,16 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             },
         }
         super().__init__()
+
+    def to_dict(self) -> dict:
+        # Layer the canary markers on top of whatever the base class returns
+        # (which may be DYN_HEALTH_CHECK_PAYLOAD-overridden), so the canary
+        # contract survives user payload overrides.
+        payload = dict(super().to_dict())
+        payload[HEALTH_CHECK_KEY] = True
+        if self._disaggregation_mode in (
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+        ):
+            payload["disaggregated_params"] = {"request_type": "context_and_generation"}
+        return payload

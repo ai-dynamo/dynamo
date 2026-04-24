@@ -19,10 +19,12 @@ import json
 import logging
 import os
 import shutil
+import signal
 import time
 from dataclasses import dataclass
 from typing import Any, Generator
 
+import psutil
 import pytest
 
 from tests.conftest import EtcdServer, NatsServer
@@ -68,26 +70,108 @@ def _prepare_log_dir(request, suffix: str) -> str:
     return log_dir
 
 
+# Command-line patterns used to identify processes this fixture spawned. Each
+# pattern is distinctive enough that a targeted sweep between topology
+# switches will not touch unrelated processes in the system.
+_SGLANG_PROCESS_PATTERNS: tuple[str, ...] = (
+    "-m dynamo.sglang",
+    "-m dynamo.frontend",
+    "SGLANG:EngineCore",
+    "sglang::scheduler",
+)
+
+
+def _cleanup_sglang_stragglers(timeout: float = 10.0) -> None:
+    """Force-kill any surviving SGLang / dynamo-frontend processes.
+
+    ``ManagedProcess`` is configured with ``terminate_all_matching_process_names
+    =False`` so its built-in straggler sweep is disabled (it does a system-wide
+    pkill, which is not xdist-safe). But SGLang's ``EngineCore`` child
+    processes can outlive the parent's SIGTERM and keep GPU memory pinned,
+    which would prevent the next topology's worker from initializing.
+
+    This helper performs a narrowly-scoped sweep using cmdline/name patterns
+    that only match processes spawned by this fixture, and waits for them to
+    exit before returning.
+    """
+    procs: list[psutil.Process] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            name = proc.info.get("name") or ""
+            if any(pat in cmdline or pat in name for pat in _SGLANG_PROCESS_PATTERNS):
+                procs.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    if not procs:
+        return
+
+    logger.info(
+        "Post-teardown straggler sweep: sending SIGKILL to %d process(es): %s",
+        len(procs),
+        [(p.pid, (p.info.get("name") or "")[:40]) for p in procs],
+    )
+    for proc in procs:
+        try:
+            proc.send_signal(signal.SIGKILL)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    # Wait for processes to actually exit before the next topology boots.
+    gone, alive = psutil.wait_procs(procs, timeout=timeout)
+    if alive:
+        logger.warning(
+            "Straggler(s) still alive after %ss: %s",
+            timeout,
+            [(p.pid, p.name()) for p in alive],
+        )
+
+
+# Topology identifiers. Both drive the exact same test bodies; they differ in
+# where the SGLang chat processor / tool-call parser / reasoning parser live:
+#
+#   * ``chat_processor_frontend`` — Python SGLang chat processor on the
+#     frontend (``--dyn-chat-processor sglang``) with parsers declared as
+#     frontend flags. Worker is a plain ``dynamo.sglang`` engine.
+#
+#   * ``rust_parsers`` — plain Rust frontend (``dynamo.frontend``) with no
+#     chat processor or parser flags. Parsers are declared on the worker
+#     (``--dyn-reasoning-parser`` / ``--dyn-tool-call-parser``) and
+#     propagated to the frontend via the model runtime config registered at
+#     discovery time.
+TOPOLOGIES = ("chat_processor_frontend", "rust_parsers")
+
+
 class WorkerProcess(ManagedProcess):
     """backend worker for the tool-calling tests."""
 
-    def __init__(self, request, *, system_port: int):
+    def __init__(self, request, *, system_port: int, topology: str):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env["DYN_SYSTEM_PORT"] = str(system_port)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
 
+        command = [
+            "python3",
+            "-m",
+            "dynamo.sglang",
+            "--model-path",
+            MODEL_NAME,
+            "--served-model-name",
+            MODEL_NAME,
+            "--trust-remote-code",
+        ]
+        if topology == "rust_parsers":
+            command += [
+                "--dyn-reasoning-parser",
+                "qwen3",
+                "--dyn-tool-call-parser",
+                "qwen25",
+            ]
+
         super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "dynamo.sglang",
-                "--model-path",
-                MODEL_NAME,
-                "--served-model-name",
-                MODEL_NAME,
-                "--trust-remote-code",
-            ],
+            command=command,
             env=env,
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready),
@@ -97,19 +181,20 @@ class WorkerProcess(ManagedProcess):
             terminate_all_matching_process_names=False,
             stragglers=["SGLANG:EngineCore"],
             straggler_commands=["-m dynamo.sglang"],
-            log_dir=_prepare_log_dir(request, "sglang-worker"),
+            log_dir=_prepare_log_dir(request, f"sglang-worker-{topology}"),
         )
 
 
 class ToolCallingFrontendProcess(ManagedProcess):
     """Frontend HTTP ingress.
 
-    SGLang-specific chat processor, tool-call parser, and reasoning parser
-    flags are only attached when ``sglang`` is importable in the current
-    environment (otherwise the frontend would fail to load them).
+    The chat processor + parser flags are attached only for the
+    ``chat_processor_frontend`` topology. The ``rust_parsers`` topology
+    uses a plain Rust frontend and relies on parsers declared on the worker
+    side.
     """
 
-    def __init__(self, request, *, frontend_port: int):
+    def __init__(self, request, *, frontend_port: int, topology: str):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env.pop("DYN_SYSTEM_PORT", None)
@@ -122,14 +207,17 @@ class ToolCallingFrontendProcess(ManagedProcess):
             str(frontend_port),
             "--router-mode",
             "round-robin",
-            "--dyn-chat-processor",
-            "sglang",
-            "--tool-call-parser",
-            "qwen25",
-            "--reasoning-parser",
-            "qwen3",
-            "--trust-remote-code",
         ]
+        if topology == "chat_processor_frontend":
+            command += [
+                "--dyn-chat-processor",
+                "sglang",
+                "--tool-call-parser",
+                "qwen25",
+                "--reasoning-parser",
+                "qwen3",
+                "--trust-remote-code",
+            ]
 
         super().__init__(
             command=command,
@@ -141,7 +229,7 @@ class ToolCallingFrontendProcess(ManagedProcess):
             display_output=True,
             terminate_all_matching_process_names=False,
             straggler_commands=["-m dynamo.frontend"],
-            log_dir=_prepare_log_dir(request, "frontend"),
+            log_dir=_prepare_log_dir(request, f"frontend-{topology}"),
         )
 
 
@@ -171,26 +259,44 @@ def runtime_services(request) -> Generator[None, None, None]:
                 os.environ.pop("ETCD_ENDPOINTS", None)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module", params=TOPOLOGIES)
 def tool_calling_services(
     request, runtime_services, predownload_models
 ) -> Generator[int, None, None]:
-    """Start the SGLang worker + tool-calling-aware frontend.
+    """Start the SGLang worker + frontend for the selected topology.
+
+    Parameterized so every test runs once per entry in :data:`TOPOLOGIES`,
+    giving side-by-side coverage of the Python chat-processor frontend and
+    the plain Rust frontend with worker-declared parsers.
 
     Yields the frontend HTTP port.
     """
+    topology: str = request.param
     frontend_port, system_port = allocate_ports(count=2, start_port=10000)
 
-    with WorkerProcess(request, system_port=system_port):
-        # Allow worker to register with discovery.
-        time.sleep(2)
-        with ToolCallingFrontendProcess(request, frontend_port=frontend_port):
-            logger.info(
-                "Tool calling stack ready (frontend=%d worker_system=%d)",
-                frontend_port,
-                system_port,
-            )
-            yield frontend_port
+    try:
+        with WorkerProcess(request, system_port=system_port, topology=topology):
+            # Allow worker to register with discovery.
+            time.sleep(2)
+            with ToolCallingFrontendProcess(
+                request, frontend_port=frontend_port, topology=topology
+            ):
+                logger.info(
+                    "Tool calling stack ready (topology=%s frontend=%d worker_system=%d)",
+                    topology,
+                    frontend_port,
+                    system_port,
+                )
+                yield frontend_port
+    finally:
+        # ManagedProcess.__exit__ has run for both context managers. Do a
+        # narrowly-scoped straggler sweep so any surviving EngineCore / worker
+        # / frontend process is gone before the next topology boots — otherwise
+        # the next worker would race against pinned GPU memory or a stale
+        # discovery registration. Followed by a brief settle delay so the OS
+        # reclaims bound ports and the GPU frees its VRAM.
+        _cleanup_sglang_stragglers()
+        time.sleep(3)
 
 
 @pytest.fixture(scope="module")

@@ -104,7 +104,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -118,7 +118,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.0.2`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.2`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -254,7 +254,7 @@ To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 - **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
 - **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
 - **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
-- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/dynamo-benchmarking)** — Compare deployment topologies with AIPerf
+- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design-docs/disagg-serving.md

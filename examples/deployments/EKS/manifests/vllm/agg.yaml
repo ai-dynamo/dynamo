@@ -11,7 +11,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -29,7 +29,7 @@ spec:
           operator: "Exists"
           effect: "NoSchedule"
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2-efa-amd64
           workingDir: /workspace/examples/backends/vllm
           command:
           - /bin/bash
