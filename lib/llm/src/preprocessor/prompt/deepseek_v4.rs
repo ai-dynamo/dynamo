@@ -30,10 +30,25 @@ pub mod tokens {
     pub const TASK_READ_URL: &str = "<｜read_url｜>";
 }
 
+/// DSML outer block name for tool-call groups: `<｜DSML｜tool_calls>...</｜DSML｜tool_calls>`.
 const TOOL_CALLS_BLOCK_NAME: &str = "tool_calls";
 
-const RESPONSE_FORMAT_TEMPLATE: &str =
-    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}";
+/// Roles whose messages are always kept by `drop_thinking_messages`. All other
+/// roles before the last user/developer message are dropped (assistant turns
+/// keep their non-`reasoning_content` fields; everything else is removed).
+const KEEP_ROLES: &[&str] = &[
+    "user",
+    "system",
+    "tool",
+    "latest_reminder",
+    "direct_search_results",
+];
+
+/// Placeholder the Python reference inserts when it can't render an
+/// unsupported content-block or tool-result item type. Rendered into the
+/// assistant-visible prompt so a human can tell something was skipped;
+/// dynamo additionally emits a `tracing::warn!` so ops see it too.
+const UNSUPPORTED_PLACEHOLDER_FMT: &str = "[Unsupported {}]";
 
 const REASONING_EFFORT_MAX: &str = "Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
 
@@ -63,7 +78,11 @@ pub enum ReasoningEffort {
 /// Serialize a JSON value to match Python's `json.dumps(ensure_ascii=False)` spacing.
 /// Python's default separators are `(', ', ': ')`; we use a custom `Formatter`
 /// so escape sequences inside strings can't confuse state tracking.
-fn to_json(value: &JsonValue) -> String {
+///
+/// Returns `Result` so serialization / UTF-8 errors propagate to the caller
+/// rather than silently collapsing to `"{}"` (the old error-swallow behavior
+/// dropped the entire request payload with no signal up the stack).
+fn to_json(value: &JsonValue) -> Result<String> {
     use serde::Serialize;
     use serde_json::ser::Formatter;
     use std::io;
@@ -105,14 +124,16 @@ fn to_json(value: &JsonValue) -> String {
     // which bounds the final length by ~1.125× the compact length. This keeps
     // small payloads cheap and avoids the 5–9 reallocations the prior fixed
     // 64-byte hint forced on KB-sized tool schemas and response formats.
-    let compact_len = serde_json::to_string(value).map(|s| s.len()).unwrap_or(256);
+    let compact_len = serde_json::to_string(value)
+        .context("to_json: compact pre-serialization failed")?
+        .len();
     let capacity = compact_len.saturating_add(compact_len / 8).max(256);
     let mut buf = Vec::with_capacity(capacity);
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonFormatter);
-    if value.serialize(&mut ser).is_err() {
-        return "{}".to_string();
-    }
-    String::from_utf8(buf).unwrap_or_else(|_| "{}".to_string())
+    value
+        .serialize(&mut ser)
+        .context("to_json: Python-formatter serialization failed")?;
+    String::from_utf8(buf).context("to_json: serialized output is not valid UTF-8")
 }
 
 /// Extract function definitions from OpenAI-format tool list.
@@ -130,14 +151,14 @@ fn tools_from_openai_format(tools: &[JsonValue]) -> Vec<JsonValue> {
 /// (schema-inlined, potentially kB-scale) string on each substitution. A
 /// single `format!` with named arguments collapses that to one allocation
 /// sized from the final length.
-fn render_tools(tools: &[JsonValue]) -> String {
+fn render_tools(tools: &[JsonValue]) -> Result<String> {
     let tools_json: Vec<String> = tools_from_openai_format(tools)
         .iter()
         .map(to_json)
-        .collect();
+        .collect::<Result<_>>()?;
     let schemas = tools_json.join("\n");
 
-    format!(
+    Ok(format!(
         r#"## Tools
 
 You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{dsml}tool_calls>" block like the following:
@@ -168,7 +189,7 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
         think_open = tokens::THINKING_START,
         think_close = tokens::THINKING_END,
         schemas = schemas,
-    )
+    ))
 }
 
 /// Find the index of the last user/developer message.
@@ -191,8 +212,11 @@ fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
 }
 
 /// Extract visible text from OpenAI-style message content.
-fn extract_visible_text(content: &JsonValue) -> String {
-    match content {
+///
+/// Returns `Result` because the `_ => to_json(content)` fallback can now fail
+/// (to_json itself returns `Result`). Callers already sit in `Result` context.
+fn extract_visible_text(content: &JsonValue) -> Result<String> {
+    Ok(match content {
         JsonValue::String(text) => text.clone(),
         JsonValue::Array(items) => items
             .iter()
@@ -214,12 +238,12 @@ fn extract_visible_text(content: &JsonValue) -> String {
                 None
             })
             .collect::<String>(),
-        _ => to_json(content),
-    }
+        _ => to_json(content)?,
+    })
 }
 
 /// Normalize message `content` fields for text-only DeepSeek V4 rendering.
-fn normalize_message_contents(messages: &mut [JsonValue]) {
+fn normalize_message_contents(messages: &mut [JsonValue]) -> Result<()> {
     for msg in messages {
         let Some(content) = msg.get("content") else {
             continue;
@@ -228,11 +252,12 @@ fn normalize_message_contents(messages: &mut [JsonValue]) {
         if !content.is_string() && !content.is_array() {
             continue;
         }
-        let normalized = extract_visible_text(content);
+        let normalized = extract_visible_text(content)?;
         if let Some(obj) = msg.as_object_mut() {
             obj.insert("content".to_string(), JsonValue::String(normalized));
         }
     }
+    Ok(())
 }
 
 /// Encode tool call arguments into DSML parameter format.
@@ -254,11 +279,12 @@ fn encode_arguments_to_dsml(tool_call: &JsonValue) -> Result<String> {
 
     let mut params = Vec::new();
     for (key, value) in arguments_obj {
-        let is_string = value.is_string();
-        let value_str = if is_string {
-            value.as_str().unwrap().to_string()
-        } else {
-            to_json(value)
+        // Dispatch on the concrete variant so we don't do the `is_string` / `as_str`
+        // / `unwrap` dance (unwrap is technically safe after is_string but fragile
+        // against future refactors).
+        let (is_string, value_str) = match value {
+            JsonValue::String(s) => (true, s.clone()),
+            _ => (false, to_json(value)?),
         };
         params.push(format!(
             "<{}parameter name=\"{}\" string=\"{}\">{}</{}parameter>",
@@ -318,13 +344,14 @@ fn render_message(
             prompt.push_str(content);
             if let Some(tools) = msg.get("tools").and_then(|t| t.as_array()) {
                 prompt.push_str("\n\n");
-                prompt.push_str(&render_tools(tools));
+                prompt.push_str(&render_tools(tools)?);
             }
             if let Some(response_format) = msg.get("response_format") {
                 prompt.push_str("\n\n");
-                prompt.push_str(
-                    &RESPONSE_FORMAT_TEMPLATE.replace("{schema}", &to_json(response_format)),
-                );
+                prompt.push_str(&format!(
+                    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{}",
+                    to_json(response_format)?,
+                ));
             }
         }
 
@@ -340,13 +367,14 @@ fn render_message(
 
             if let Some(tools) = msg.get("tools").and_then(|t| t.as_array()) {
                 content_developer.push_str("\n\n");
-                content_developer.push_str(&render_tools(tools));
+                content_developer.push_str(&render_tools(tools)?);
             }
             if let Some(response_format) = msg.get("response_format") {
                 content_developer.push_str("\n\n");
-                content_developer.push_str(
-                    &RESPONSE_FORMAT_TEMPLATE.replace("{schema}", &to_json(response_format)),
-                );
+                content_developer.push_str(&format!(
+                    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{}",
+                    to_json(response_format)?,
+                ));
             }
             prompt.push_str(&content_developer);
         }
@@ -365,11 +393,15 @@ fn render_message(
                         "tool_result" => {
                             let rendered = render_tool_result_content(
                                 block.get("content").unwrap_or(&JsonValue::Null),
-                            );
+                            )?;
                             parts.push(format!("<tool_result>{}</tool_result>", rendered));
                         }
                         other => {
-                            parts.push(format!("[Unsupported {}]", other));
+                            tracing::warn!(
+                                block_type = other,
+                                "DeepSeek V4 formatter emitted placeholder for unsupported user content block type",
+                            );
+                            parts.push(UNSUPPORTED_PLACEHOLDER_FMT.replace("{}", other));
                         }
                     }
                 }
@@ -500,8 +532,8 @@ fn render_message(
 }
 
 /// Render a tool_result `content` payload (string or content-block list).
-fn render_tool_result_content(content: &JsonValue) -> String {
-    match content {
+fn render_tool_result_content(content: &JsonValue) -> Result<String> {
+    Ok(match content {
         JsonValue::String(s) => s.clone(),
         JsonValue::Array(items) => {
             let mut parts: Vec<String> = Vec::with_capacity(items.len());
@@ -515,14 +547,18 @@ fn render_tool_result_content(content: &JsonValue) -> String {
                             .to_string(),
                     );
                 } else {
-                    parts.push(format!("[Unsupported {}]", item_type));
+                    tracing::warn!(
+                        item_type,
+                        "DeepSeek V4 formatter emitted placeholder for unsupported tool_result content item type",
+                    );
+                    parts.push(UNSUPPORTED_PLACEHOLDER_FMT.replace("{}", item_type));
                 }
             }
             parts.join("\n\n")
         }
         JsonValue::Null => String::new(),
-        _ => to_json(content),
-    }
+        _ => to_json(content)?,
+    })
 }
 
 /// Merge `tool` role messages into preceding user `content_blocks` and collapse
@@ -696,18 +732,10 @@ fn drop_thinking_messages(
     last_user_idx: Option<usize>,
 ) -> (Vec<JsonValue>, Option<usize>) {
     let mut out = Vec::with_capacity(messages.len());
-    const KEEP: &[&str] = &[
-        "user",
-        "system",
-        "tool",
-        "latest_reminder",
-        "direct_search_results",
-    ];
-
     let mut new_last_user_idx: Option<usize> = None;
     for (idx, mut msg) in messages.into_iter().enumerate() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if KEEP.contains(&role) || last_user_idx.is_none_or(|u| idx >= u) {
+        if KEEP_ROLES.contains(&role) || last_user_idx.is_none_or(|u| idx >= u) {
             if last_user_idx == Some(idx) {
                 new_last_user_idx = Some(out.len());
             }
@@ -857,7 +885,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
             .context("Messages is not an array")?
             .clone();
 
-        normalize_message_contents(&mut messages_array);
+        normalize_message_contents(&mut messages_array)?;
 
         let tools_json = req
             .tools()
@@ -1039,7 +1067,7 @@ mod tests {
     #[test]
     fn test_to_json_preserves_spacing_past_escaped_backslash() {
         let v = json!({"path": "\\", "count": 5});
-        let got = to_json(&v);
+        let got = to_json(&v).expect("to_json must succeed on well-formed input");
         assert_eq!(
             got, r#"{"path": "\\", "count": 5}"#,
             "to_json must match Python's json.dumps formatting past an escaped backslash"
@@ -1061,7 +1089,7 @@ mod tests {
             "required": ["items"],
         });
 
-        let got = to_json(&v);
+        let got = to_json(&v).expect("to_json must succeed on well-formed input");
         // Baseline: default serde_json::to_string round-trips.
         let parsed: serde_json::Value = serde_json::from_str(&got).expect("round-trip parse");
         assert_eq!(

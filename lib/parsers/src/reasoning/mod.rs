@@ -29,9 +29,22 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("basic", ReasoningParserType::Basic);
         map.insert("gpt_oss", ReasoningParserType::GptOss);
         map.insert("qwen3", ReasoningParserType::Qwen);
-        map.insert("deepseek_v4", ReasoningParserType::Qwen);
-        map.insert("deepseek-v4", ReasoningParserType::Qwen);
-        map.insert("deepseekv4", ReasoningParserType::Qwen);
+        // DeepSeek-V4 uses the same `<think>` / `</think>` delimiters as Qwen
+        // (confirmed against deepseek-ai/DeepSeek-V4-Pro's encoding_dsv4.py)
+        // so it delegates to the same `BasicReasoningParser` config today. We
+        // still route through a dedicated `DeepSeekV4` variant rather than
+        // hard-aliasing to `Qwen` so future divergence (different special
+        // tokens, max-thinking mode, etc.) has a place to land without rippling
+        // through Qwen's own config.
+        //
+        // The three name aliases exist because callers set this via
+        // `--dyn-reasoning-parser` / `--reasoning-parser` with whatever string
+        // the HF model / vLLM recipe / chat-template author picked. We accept
+        // all three separator conventions (snake / kebab / concat) rather than
+        // force a single canonical form on users.
+        map.insert("deepseek_v4", ReasoningParserType::DeepSeekV4);
+        map.insert("deepseek-v4", ReasoningParserType::DeepSeekV4);
+        map.insert("deepseekv4", ReasoningParserType::DeepSeekV4);
         map.insert("nemotron_deci", ReasoningParserType::NemotronDeci);
         map.insert("kimi", ReasoningParserType::Kimi);
         map.insert("kimi_k25", ReasoningParserType::KimiK25);
@@ -113,6 +126,14 @@ pub enum ReasoningParserType {
     Basic,
     GptOss,
     Qwen,
+    /// DeepSeek-V4-Pro / V4-Flash. Currently uses the same `<think>` /
+    /// `</think>` `BasicReasoningParser` config as Qwen (V4 never appends
+    /// `<think>` in the completion — the chat template always pre-injects it,
+    /// so the parser starts via `set_in_reasoning(true)` rather than
+    /// `force_reasoning`). A dedicated variant keeps future V4-specific
+    /// divergence (different delimiters, thinking-effort modes) from leaking
+    /// into Qwen's behavior.
+    DeepSeekV4,
     NemotronDeci,
     Kimi,
     KimiK25,
@@ -162,6 +183,12 @@ impl ReasoningParserType {
                 parser: Box::new(basic_parser),
             },
             ReasoningParserType::Qwen => ReasoningParserWrapper {
+                parser: Box::new(basic_parser),
+            },
+            // Same `<think>` / `</think>` config as Qwen today; kept as a
+            // distinct variant so V4-specific divergence has somewhere to land.
+            // See `ReasoningParserType::DeepSeekV4` docstring for rationale.
+            ReasoningParserType::DeepSeekV4 => ReasoningParserWrapper {
                 parser: Box::new(basic_parser),
             },
             ReasoningParserType::NemotronDeci => ReasoningParserWrapper {
