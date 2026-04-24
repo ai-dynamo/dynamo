@@ -35,33 +35,6 @@ const TOOL_CALLS_BLOCK_NAME: &str = "tool_calls";
 const RESPONSE_FORMAT_TEMPLATE: &str =
     "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}";
 
-const TOOLS_TEMPLATE: &str = r#"## Tools
-
-You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{dsml_token}tool_calls>" block like the following:
-
-<{dsml_token}tool_calls>
-<{dsml_token}invoke name="$TOOL_NAME">
-<{dsml_token}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml_token}parameter>
-...
-</{dsml_token}invoke>
-<{dsml_token}invoke name="$TOOL_NAME2">
-...
-</{dsml_token}invoke>
-</{dsml_token}tool_calls>
-
-String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
-
-If thinking_mode is enabled (triggered by {thinking_start_token}), you MUST output your complete reasoning inside {thinking_start_token}...{thinking_end_token} BEFORE any tool calls or final response.
-
-Otherwise, output directly after {thinking_end_token} with tool calls or final response.
-
-### Available Tool Schemas
-
-{tool_schemas}
-
-You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
-"#;
-
 const REASONING_EFFORT_MAX: &str = "Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
 
 /// Thinking mode for the model
@@ -151,17 +124,51 @@ fn tools_from_openai_format(tools: &[JsonValue]) -> Vec<JsonValue> {
 }
 
 /// Render tool schemas into the system prompt format.
+///
+/// Previously built via four sequential `String::replace` passes over a
+/// `{placeholder}`-based template, which allocated a fresh copy of the whole
+/// (schema-inlined, potentially kB-scale) string on each substitution. A
+/// single `format!` with named arguments collapses that to one allocation
+/// sized from the final length.
 fn render_tools(tools: &[JsonValue]) -> String {
     let tools_json: Vec<String> = tools_from_openai_format(tools)
         .iter()
         .map(to_json)
         .collect();
+    let schemas = tools_json.join("\n");
 
-    TOOLS_TEMPLATE
-        .replace("{tool_schemas}", &tools_json.join("\n"))
-        .replace("{dsml_token}", tokens::DSML_TOKEN)
-        .replace("{thinking_start_token}", tokens::THINKING_START)
-        .replace("{thinking_end_token}", tokens::THINKING_END)
+    format!(
+        r#"## Tools
+
+You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{dsml}tool_calls>" block like the following:
+
+<{dsml}tool_calls>
+<{dsml}invoke name="$TOOL_NAME">
+<{dsml}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml}parameter>
+...
+</{dsml}invoke>
+<{dsml}invoke name="$TOOL_NAME2">
+...
+</{dsml}invoke>
+</{dsml}tool_calls>
+
+String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
+
+If thinking_mode is enabled (triggered by {think_open}), you MUST output your complete reasoning inside {think_open}...{think_close} BEFORE any tool calls or final response.
+
+Otherwise, output directly after {think_close} with tool calls or final response.
+
+### Available Tool Schemas
+
+{schemas}
+
+You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
+"#,
+        dsml = tokens::DSML_TOKEN,
+        think_open = tokens::THINKING_START,
+        think_close = tokens::THINKING_END,
+        schemas = schemas,
+    )
 }
 
 /// Find the index of the last user/developer message.
