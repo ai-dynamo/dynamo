@@ -597,9 +597,9 @@ class ScaleRequestHandler:
                 # Track whether a paired partner is being applied and, if so,
                 # which DGD + pool it's in. Needed to decide atomic vs two-step
                 # execution.
-                partner_info: Optional[tuple[str, str, int, PoolSpec]] = (
-                    None  # (dgd_key, sub_type, desired, spec)
-                )
+                partner_info: Optional[
+                    tuple[str, str, int, PoolSpec]
+                ] = None  # (dgd_key, sub_type, desired, spec)
 
                 if self._budget_enforcement_enabled():
                     net_delta = self._request_net_delta_gpu(request, dgd_pools)
@@ -670,9 +670,12 @@ class ScaleRequestHandler:
                     # 3. Else deny.
                     if paired_ok:
                         partner_info = partner  # type: ignore[assignment]
-                        partner_dgd, partner_sub, partner_desired, _ = (
-                            partner  # type: ignore[misc]
-                        )
+                        (
+                            partner_dgd,
+                            partner_sub,
+                            partner_desired,
+                            _,
+                        ) = partner  # type: ignore[misc]
                         pair_scope = (
                             "intra-DGD" if partner_dgd == request_key else "cross-DGD"
                         )
