@@ -273,6 +273,20 @@ def test_dp_rank_default_zero():
     assert InstrumentedScheduler._resolve_dp_rank(pc) == 0
 
 
+def test_dp_rank_multi_node_start_offset():
+    """Multi-node: node 2 runs DP ranks 8..15 with ``--data-parallel-start-rank 8``.
+    vLLM spawns each child engine with ``dp_rank = start_rank + local_index``
+    (``vllm/v1/engine/utils.py``: ``global_index = start_index + index``) and
+    sets ``parallel_config.data_parallel_index = dp_rank`` (``vllm/v1/engine/
+    core.py``). The resolver must return the global rank so each child's ZMQ
+    port offset matches the parent-side FPM relay subscription, which iterates
+    the same global range.
+    """
+    for global_rank in (8, 9, 15):
+        pc = SimpleNamespace(data_parallel_index=global_rank, data_parallel_rank=0)
+        assert InstrumentedScheduler._resolve_dp_rank(pc) == global_rank
+
+
 def test_decode_variance_spans_both_queues():
     """Decode variance mixes local-preempted (``self.waiting``) and
     remote-KV-waiting (``self.skipped_waiting``) into one accumulator.
