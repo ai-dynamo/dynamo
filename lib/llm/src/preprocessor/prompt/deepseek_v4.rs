@@ -33,6 +33,16 @@ pub mod tokens {
 /// DSML outer block name for tool-call groups: `<｜DSML｜tool_calls>...</｜DSML｜tool_calls>`.
 const TOOL_CALLS_BLOCK_NAME: &str = "tool_calls";
 
+/// Wire-format tags that wrap a tool result inside a user content block.
+const TOOL_RESULT_OPEN: &str = "<tool_result>";
+const TOOL_RESULT_CLOSE: &str = "</tool_result>";
+
+/// Preamble line that introduces a response-format schema in both the
+/// system and developer roles. The `{}` placeholder is filled by the
+/// caller with the JSON-serialized schema.
+const RESPONSE_FORMAT_PREAMBLE: &str =
+    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{}";
+
 /// Roles whose messages are always kept by `drop_thinking_messages`. All other
 /// roles before the last user/developer message are dropped (assistant turns
 /// keep their non-`reasoning_content` fields; everything else is removed).
@@ -319,6 +329,177 @@ fn task_token(task: &str) -> Option<&'static str> {
     }
 }
 
+/// Append the "Response Format" schema block to `prompt` if the message has one.
+fn append_response_format(msg: &JsonValue, prompt: &mut String) -> Result<()> {
+    if let Some(response_format) = msg.get("response_format") {
+        prompt.push_str("\n\n");
+        prompt.push_str(&RESPONSE_FORMAT_PREAMBLE.replace("{}", &to_json(response_format)?));
+    }
+    Ok(())
+}
+
+/// Append the tools section to `prompt` if the message has a `tools` array.
+fn append_tools_section(msg: &JsonValue, prompt: &mut String) -> Result<()> {
+    if let Some(tools) = msg.get("tools").and_then(JsonValue::as_array) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&render_tools(tools)?);
+    }
+    Ok(())
+}
+
+/// Render the `system` role: raw content, then optional tools + response-format.
+fn render_system_role(msg: &JsonValue, prompt: &mut String) -> Result<()> {
+    let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
+    prompt.push_str(content);
+    append_tools_section(msg, prompt)?;
+    append_response_format(msg, prompt)?;
+    Ok(())
+}
+
+/// Render the `developer` role: wraps content in USER_START, then optional
+/// tools + response-format. Developer content is required (non-empty).
+fn render_developer_role(msg: &JsonValue, prompt: &mut String) -> Result<()> {
+    let content = msg
+        .get("content")
+        .and_then(JsonValue::as_str)
+        .filter(|s| !s.is_empty())
+        .context("Developer role requires content")?;
+
+    prompt.push_str(tokens::USER_START);
+    prompt.push_str(content);
+    append_tools_section(msg, prompt)?;
+    append_response_format(msg, prompt)?;
+    Ok(())
+}
+
+/// Render the `user` role: either content-blocks (with tool_result wrapping)
+/// or a plain string `content` field.
+fn render_user_role(msg: &JsonValue, prompt: &mut String) -> Result<()> {
+    prompt.push_str(tokens::USER_START);
+    if let Some(blocks) = msg.get("content_blocks").and_then(JsonValue::as_array) {
+        let mut parts: Vec<String> = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block_type = block.get("type").and_then(JsonValue::as_str).unwrap_or("");
+            match block_type {
+                "text" => {
+                    let text = block.get("text").and_then(JsonValue::as_str).unwrap_or("");
+                    parts.push(text.to_string());
+                }
+                "tool_result" => {
+                    let rendered = render_tool_result_content(
+                        block.get("content").unwrap_or(&JsonValue::Null),
+                    )?;
+                    parts.push(format!(
+                        "{}{}{}",
+                        TOOL_RESULT_OPEN, rendered, TOOL_RESULT_CLOSE
+                    ));
+                }
+                other => {
+                    tracing::warn!(
+                        block_type = other,
+                        "DeepSeek V4 formatter emitted placeholder for unsupported user content block type",
+                    );
+                    parts.push(UNSUPPORTED_PLACEHOLDER_FMT.replace("{}", other));
+                }
+            }
+        }
+        prompt.push_str(&parts.join("\n\n"));
+    } else {
+        let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
+        prompt.push_str(content);
+    }
+    Ok(())
+}
+
+/// Render the `latest_reminder` role: LATEST_REMINDER token + content.
+fn render_latest_reminder_role(msg: &JsonValue, prompt: &mut String) {
+    let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
+    prompt.push_str(tokens::LATEST_REMINDER);
+    prompt.push_str(content);
+}
+
+/// Render the `assistant` role: optional thinking prefix, content, optional
+/// `tool_calls` DSML block, optional EOS.
+///
+/// Needs `index` and `messages` to peek at the previous turn's `task` field
+/// (suppresses thinking prefix when the prior message was a task message).
+fn render_assistant_role(
+    msg: &JsonValue,
+    index: usize,
+    messages: &[JsonValue],
+    thinking_mode: ThinkingMode,
+    drop_thinking: bool,
+    last_user_idx: Option<usize>,
+    prompt: &mut String,
+) -> Result<()> {
+    let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
+    let reasoning = msg
+        .get("reasoning_content")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("");
+    let wo_eos = msg
+        .get("wo_eos")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+
+    let prev_has_task = index > 0
+        && messages[index - 1]
+            .get("task")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+
+    if thinking_mode == ThinkingMode::Thinking && !prev_has_task {
+        let render_thinking = !drop_thinking || last_user_idx.is_none_or(|u| index > u);
+        if render_thinking {
+            prompt.push_str(reasoning);
+            prompt.push_str(tokens::THINKING_END);
+        }
+    }
+
+    prompt.push_str(content);
+
+    if let Some(tool_calls) = msg.get("tool_calls").and_then(JsonValue::as_array)
+        && !tool_calls.is_empty()
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(&format!(
+            "<{}{}>\n",
+            tokens::DSML_TOKEN,
+            TOOL_CALLS_BLOCK_NAME
+        ));
+
+        let mut invocations = Vec::with_capacity(tool_calls.len());
+        for tc in tool_calls {
+            // Accept both OpenAI-format (nested `function`) and internal
+            // `{name, arguments}` shape, matching Python's `tool_calls_from_openai_format`.
+            let fn_obj = tc.get("function").unwrap_or(tc);
+            let name = fn_obj
+                .get("name")
+                .and_then(JsonValue::as_str)
+                .context("Missing tool call name")?;
+            let arguments = encode_arguments_to_dsml(fn_obj)?;
+            invocations.push(format!(
+                "<{}invoke name=\"{}\">\n{}\n</{}invoke>",
+                tokens::DSML_TOKEN,
+                name,
+                arguments,
+                tokens::DSML_TOKEN
+            ));
+        }
+        prompt.push_str(&invocations.join("\n"));
+        prompt.push_str(&format!(
+            "\n</{}{}>",
+            tokens::DSML_TOKEN,
+            TOOL_CALLS_BLOCK_NAME
+        ));
+    }
+
+    if !wo_eos {
+        prompt.push_str(tokens::EOS);
+    }
+    Ok(())
+}
+
 /// Render a single message at the given index.
 fn render_message(
     index: usize,
@@ -346,161 +527,22 @@ fn render_message(
     }
 
     match role {
-        "system" => {
-            let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
-            prompt.push_str(content);
-            if let Some(tools) = msg.get("tools").and_then(JsonValue::as_array) {
-                prompt.push_str("\n\n");
-                prompt.push_str(&render_tools(tools)?);
-            }
-            if let Some(response_format) = msg.get("response_format") {
-                prompt.push_str("\n\n");
-                prompt.push_str(&format!(
-                    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{}",
-                    to_json(response_format)?,
-                ));
-            }
-        }
-
-        "developer" => {
-            let content = msg
-                .get("content")
-                .and_then(JsonValue::as_str)
-                .filter(|s| !s.is_empty())
-                .context("Developer role requires content")?;
-
-            let mut content_developer = String::from(tokens::USER_START);
-            content_developer.push_str(content);
-
-            if let Some(tools) = msg.get("tools").and_then(JsonValue::as_array) {
-                content_developer.push_str("\n\n");
-                content_developer.push_str(&render_tools(tools)?);
-            }
-            if let Some(response_format) = msg.get("response_format") {
-                content_developer.push_str("\n\n");
-                content_developer.push_str(&format!(
-                    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{}",
-                    to_json(response_format)?,
-                ));
-            }
-            prompt.push_str(&content_developer);
-        }
-
-        "user" => {
-            prompt.push_str(tokens::USER_START);
-            if let Some(blocks) = msg.get("content_blocks").and_then(JsonValue::as_array) {
-                let mut parts: Vec<String> = Vec::with_capacity(blocks.len());
-                for block in blocks {
-                    let block_type = block.get("type").and_then(JsonValue::as_str).unwrap_or("");
-                    match block_type {
-                        "text" => {
-                            let text = block.get("text").and_then(JsonValue::as_str).unwrap_or("");
-                            parts.push(text.to_string());
-                        }
-                        "tool_result" => {
-                            let rendered = render_tool_result_content(
-                                block.get("content").unwrap_or(&JsonValue::Null),
-                            )?;
-                            parts.push(format!("<tool_result>{}</tool_result>", rendered));
-                        }
-                        other => {
-                            tracing::warn!(
-                                block_type = other,
-                                "DeepSeek V4 formatter emitted placeholder for unsupported user content block type",
-                            );
-                            parts.push(UNSUPPORTED_PLACEHOLDER_FMT.replace("{}", other));
-                        }
-                    }
-                }
-                prompt.push_str(&parts.join("\n\n"));
-            } else {
-                let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
-                prompt.push_str(content);
-            }
-        }
-
-        "latest_reminder" => {
-            let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
-            prompt.push_str(tokens::LATEST_REMINDER);
-            prompt.push_str(content);
-        }
-
-        "tool" => {
-            anyhow::bail!(
-                "deepseek_v4 merges tool messages into user; preprocess with merge_tool_messages()"
-            );
-        }
-
-        "assistant" => {
-            let content = msg.get("content").and_then(JsonValue::as_str).unwrap_or("");
-            let reasoning = msg
-                .get("reasoning_content")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("");
-            let wo_eos = msg
-                .get("wo_eos")
-                .and_then(JsonValue::as_bool)
-                .unwrap_or(false);
-
-            let prev_has_task = index > 0
-                && messages[index - 1]
-                    .get("task")
-                    .map(|v| !v.is_null())
-                    .unwrap_or(false);
-
-            let mut thinking_part = String::new();
-            if thinking_mode == ThinkingMode::Thinking && !prev_has_task {
-                let render_thinking = !drop_thinking || last_user_idx.is_none_or(|u| index > u);
-                if render_thinking {
-                    thinking_part.push_str(reasoning);
-                    thinking_part.push_str(tokens::THINKING_END);
-                }
-            }
-
-            prompt.push_str(&thinking_part);
-            prompt.push_str(content);
-
-            if let Some(tool_calls) = msg.get("tool_calls").and_then(JsonValue::as_array)
-                && !tool_calls.is_empty()
-            {
-                prompt.push_str("\n\n");
-                prompt.push_str(&format!(
-                    "<{}{}>\n",
-                    tokens::DSML_TOKEN,
-                    TOOL_CALLS_BLOCK_NAME
-                ));
-
-                let mut invocations = Vec::with_capacity(tool_calls.len());
-                for tc in tool_calls {
-                    // Accept both OpenAI-format (nested `function`) and internal
-                    // `{name, arguments}` shape, matching Python's `tool_calls_from_openai_format`.
-                    let fn_obj = tc.get("function").unwrap_or(tc);
-                    let name = fn_obj
-                        .get("name")
-                        .and_then(JsonValue::as_str)
-                        .context("Missing tool call name")?;
-                    let arguments = encode_arguments_to_dsml(fn_obj)?;
-                    invocations.push(format!(
-                        "<{}invoke name=\"{}\">\n{}\n</{}invoke>",
-                        tokens::DSML_TOKEN,
-                        name,
-                        arguments,
-                        tokens::DSML_TOKEN
-                    ));
-                }
-                prompt.push_str(&invocations.join("\n"));
-                prompt.push_str(&format!(
-                    "\n</{}{}>",
-                    tokens::DSML_TOKEN,
-                    TOOL_CALLS_BLOCK_NAME
-                ));
-            }
-
-            if !wo_eos {
-                prompt.push_str(tokens::EOS);
-            }
-        }
-
+        "system" => render_system_role(msg, &mut prompt)?,
+        "developer" => render_developer_role(msg, &mut prompt)?,
+        "user" => render_user_role(msg, &mut prompt)?,
+        "latest_reminder" => render_latest_reminder_role(msg, &mut prompt),
+        "tool" => anyhow::bail!(
+            "deepseek_v4 merges tool messages into user; preprocess with merge_tool_messages()"
+        ),
+        "assistant" => render_assistant_role(
+            msg,
+            index,
+            messages,
+            thinking_mode,
+            drop_thinking,
+            last_user_idx,
+            &mut prompt,
+        )?,
         other => anyhow::bail!("Unknown role: {other}"),
     }
 
