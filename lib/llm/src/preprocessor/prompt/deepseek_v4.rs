@@ -777,20 +777,36 @@ impl DeepSeekV4Formatter {
     fn resolve_reasoning_effort(
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> Option<ReasoningEffort> {
-        let value = args?.get("reasoning_effort")?.as_str()?;
-        match value {
-            "max" => Some(ReasoningEffort::Max),
-            "high" => Some(ReasoningEffort::High),
-            _ => None,
+        let args = args?;
+        let v = args.get("reasoning_effort")?;
+        match v.as_str() {
+            Some("max") => Some(ReasoningEffort::Max),
+            Some("high") => Some(ReasoningEffort::High),
+            _ => {
+                tracing::warn!(
+                    value = ?v,
+                    "chat_template_args.reasoning_effort must be a string of \"max\" or \"high\"; ignoring and using default (none)"
+                );
+                None
+            }
         }
     }
 
     fn resolve_drop_thinking(
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
-        args.and_then(|a| a.get("drop_thinking"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
+        let Some(args) = args else { return true };
+        let Some(v) = args.get("drop_thinking") else {
+            return true;
+        };
+        if let Some(b) = v.as_bool() {
+            return b;
+        }
+        tracing::warn!(
+            value = ?v,
+            "chat_template_args.drop_thinking must be a bool; ignoring and using default (true)"
+        );
+        true
     }
 
     fn resolve_thinking_mode(
@@ -1032,6 +1048,28 @@ mod tests {
         assert_eq!(
             got, r#"{"path": "\\", "count": 5}"#,
             "to_json must match Python's json.dumps formatting past an escaped backslash"
+        );
+    }
+
+    #[test]
+    fn test_resolve_drop_thinking_warns_on_malformed_value() {
+        use std::collections::HashMap;
+        // String "false" where a bool is expected → fall back to default (true) and warn.
+        let mut args = HashMap::new();
+        args.insert(
+            "drop_thinking".to_string(),
+            serde_json::Value::String("false".to_string()),
+        );
+        assert!(DeepSeekV4Formatter::resolve_drop_thinking(Some(&args)));
+        // Malformed reasoning_effort falls back to None.
+        let mut args2 = HashMap::new();
+        args2.insert(
+            "reasoning_effort".to_string(),
+            serde_json::Value::String("HIGH".to_string()),
+        );
+        assert_eq!(
+            DeepSeekV4Formatter::resolve_reasoning_effort(Some(&args2)),
+            None
         );
     }
 
