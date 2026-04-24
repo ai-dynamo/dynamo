@@ -19,6 +19,7 @@ package validation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -129,12 +130,12 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
-	// Validate GPU memory service configuration
+	// Validate GPU memory service configuration (intra-pod GMS)
 	if err := v.validateGPUMemoryService(); err != nil {
 		return nil, err
 	}
 
-	// Validate failover configuration
+	// Validate GMS failover constraints
 	if err := v.validateFailover(); err != nil {
 		return nil, err
 	}
@@ -266,48 +267,126 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 	return nil
 }
 
-// validateFailover validates the failover configuration for a service.
-// Structural checks only — DRA/DeviceClass availability is checked by the controller
-// at reconcile time (same pattern as Grove orchestrator availability).
+// parseGPUCount extracts the GPU count from a Resources block, preferring
+// Limits then Requests. Returns (0, nil) when no GPU is requested, or an
+// error if the value is non-numeric.
+func parseGPUCount(r *nvidiacomv1alpha1.Resources) (int, error) {
+	gpuStr := ""
+	switch {
+	case r != nil && r.Limits != nil && r.Limits.GPU != "":
+		gpuStr = r.Limits.GPU
+	case r != nil && r.Requests != nil && r.Requests.GPU != "":
+		gpuStr = r.Requests.GPU
+	}
+	if gpuStr == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(gpuStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid value %q: %w", gpuStr, err)
+	}
+	return n, nil
+}
+
+// validateFailover validates GMS failover configuration constraints.
+//
+// The layout (intra-pod sidecar vs. inter-pod weight-server pod) is declared
+// by gpuMemoryService.mode. failover is an independent toggle: when enabled,
+// failover.mode MUST match gpuMemoryService.mode so the two knobs describe a
+// consistent topology. It is also valid to configure gpuMemoryService without
+// failover (no shadows; a single engine + GMS server pair) — see
+// validateGPUMemoryService below.
 func (v *SharedSpecValidator) validateFailover() error {
 	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
+		// When failover.enabled is false the sub-fields (mode, numShadows)
+		// are dormant configuration and the render path ignores them
+		// (GetNumShadows returns 0). We deliberately do not validate them
+		// here so users can stage a failover config before flipping
+		// enabled=true — matching the K8s convention that fields on a
+		// disabled feature are not constrained.
 		return nil
 	}
 
-	// Failover requires GPU memory service
-	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
-		return fmt.Errorf(
-			"%s.failover: failover requires gpuMemoryService.enabled to be true",
-			v.fieldPath)
+	var errs []error
+
+	// For intra-pod mode: require gpuMemoryService.enabled and validate mode matching.
+	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod {
+		if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover: intraPod failover requires gpuMemoryService.enabled to be true",
+				v.fieldPath))
+		} else if v.spec.GPUMemoryService.Mode != "" &&
+			v.spec.GPUMemoryService.Mode != nvidiacomv1alpha1.GMSModeIntraPod {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover: failover.mode %q must match gpuMemoryService.mode %q",
+				v.fieldPath, v.spec.Failover.Mode, v.spec.GPUMemoryService.Mode))
+		}
+
+		// intraPod is a fixed 1 primary + 1 shadow sidecar layout; numShadows
+		// is meaningless here and any value other than the implicit 1 is
+		// almost certainly a configuration error (user probably wanted
+		// mode=interPod).
+		if v.spec.Failover.NumShadows != 0 && v.spec.Failover.NumShadows != 1 {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover.numShadows=%d is invalid for mode=%q: intraPod uses a fixed 1 primary + 1 shadow sidecar; "+
+					"use failover.mode=%q to configure numShadows",
+				v.fieldPath, v.spec.Failover.NumShadows, nvidiacomv1alpha1.GMSModeIntraPod, nvidiacomv1alpha1.GMSModeInterPod))
+		}
 	}
 
-	// Failover mode must match GMS mode when both are set
-	if v.spec.Failover.Mode != "" && v.spec.GPUMemoryService.Mode != "" &&
-		v.spec.Failover.Mode != v.spec.GPUMemoryService.Mode {
-		return fmt.Errorf(
-			"%s.failover: failover.mode %q must match gpuMemoryService.mode %q",
-			v.fieldPath, v.spec.Failover.Mode, v.spec.GPUMemoryService.Mode)
-	}
-
-	// interPod failover is not yet supported
+	// For inter-pod mode: require the inter-pod GMS layout (gpuMemoryService
+	// with mode=interPod) so failover hot-spares are added on top of an
+	// already-declared weight-server pod layout.
 	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeInterPod {
-		return fmt.Errorf(
-			"%s.failover: mode \"interPod\" is not yet supported",
-			v.fieldPath)
+		if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover: interPod failover requires gpuMemoryService.enabled=true and gpuMemoryService.mode=%q",
+				v.fieldPath, nvidiacomv1alpha1.GMSModeInterPod))
+		} else if v.spec.GPUMemoryService.Mode != nvidiacomv1alpha1.GMSModeInterPod {
+			// An unset gpuMemoryService.mode defaults to the intra-pod sidecar
+			// layout, which is incompatible with inter-pod failover; the user
+			// must set gpuMemoryService.mode=interPod explicitly.
+			detected := string(v.spec.GPUMemoryService.Mode)
+			if detected == "" {
+				detected = "<unset>"
+			}
+			errs = append(errs, fmt.Errorf(
+				"%s.failover: interPod failover requires gpuMemoryService.mode=%q (got %q)",
+				v.fieldPath, nvidiacomv1alpha1.GMSModeInterPod, detected))
+		}
+
+		if v.spec.Failover.NumShadows < 1 {
+			errs = append(errs, fmt.Errorf("%s.failover.numShadows must be >= 1", v.fieldPath))
+		}
+
+		gpuCount, err := parseGPUCount(v.spec.Resources)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s.resources.limits.gpu: %w", v.fieldPath, err))
+		} else if gpuCount < 1 {
+			errs = append(errs, fmt.Errorf("%s: GMS failover requires at least 1 GPU in resources.limits.gpu", v.fieldPath))
+		}
+
+		switch v.spec.ComponentType {
+		case consts.ComponentTypeEPP, consts.ComponentTypeFrontend, consts.ComponentTypePlanner:
+			errs = append(errs, fmt.Errorf("%s: GMS failover is not supported for componentType %q", v.fieldPath, v.spec.ComponentType))
+		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
+// validateGPUMemoryService validates gpuMemoryService constraints.
+//
+// gpuMemoryService declares the GMS layout (intra-pod sidecar vs. inter-pod
+// dedicated weight-server pod) and may be enabled independently of failover:
+// the intra-pod layout gives the engine a GMS sidecar in the same pod, and
+// the inter-pod layout gives it a dedicated weight-server pod paired with one
+// engine pod. Failover adds shadow engine pods on top of the declared layout
+// (see validateFailover); it is not the sole way to request the inter-pod
+// layout.
 func (v *SharedSpecValidator) validateGPUMemoryService() error {
 	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
 		return nil
-	}
-
-	if v.spec.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: mode \"interPod\" is not yet supported",
-			v.fieldPath)
 	}
 
 	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
@@ -319,27 +398,7 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 			v.fieldPath)
 	}
 
-	if v.spec.Resources == nil {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
-			v.fieldPath)
-	}
-
-	gpuStr := ""
-	switch {
-	case v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "":
-		gpuStr = v.spec.Resources.Limits.GPU
-	case v.spec.Resources.Requests != nil && v.spec.Resources.Requests.GPU != "":
-		gpuStr = v.spec.Resources.Requests.GPU
-	}
-
-	if gpuStr == "" {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
-			v.fieldPath)
-	}
-
-	gpuCount, err := strconv.Atoi(gpuStr)
+	gpuCount, err := parseGPUCount(v.spec.Resources)
 	if err != nil || gpuCount < 1 {
 		return fmt.Errorf(
 			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
