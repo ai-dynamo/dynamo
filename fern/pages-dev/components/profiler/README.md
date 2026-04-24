@@ -37,7 +37,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
 
   workload:
     isl: 3000      # Average input sequence length
