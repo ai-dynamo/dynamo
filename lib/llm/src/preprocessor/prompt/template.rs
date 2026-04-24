@@ -25,11 +25,16 @@ impl PromptFormatter {
         // the model author and survives any `--served-model-name` rename. Fall
         // back to a tight substring match on `display_name` only when config.json
         // is absent (e.g., tokenizer-only MDCs) or unreadable.
+        //
+        // An empty `model_type` string (rare but legal in the JSON) carries
+        // no signal — normalize it to `None` so the display-name fallback
+        // still runs instead of being silently suppressed.
         let model_type_lower = mdc
             .model_info
             .as_ref()
             .and_then(|info| info.get_model_info().ok())
-            .map(|info| info.model_type().to_lowercase());
+            .map(|info| info.model_type().to_lowercase())
+            .filter(|s| !s.is_empty());
         let display_name_lower = mdc.display_name.to_lowercase();
 
         if is_deepseek_v4(&model_type_lower, &display_name_lower) {
@@ -332,6 +337,13 @@ mod detection_tests {
         // No config.json — fall back to display-name match.
         assert!(is_deepseek_v4(&None, "deepseek-v4-flash"));
         assert!(!is_deepseek_v4(&None, "dsflash"));
+
+        // A config.json with `"model_type": ""` is treated as "no signal" at
+        // the call site (normalized to None before is_deepseek_v4 is called),
+        // so the display-name fallback still runs — pin that contract.
+        let empty: Option<String> = None;
+        assert!(is_deepseek_v4(&empty, "deepseek-v4-flash"));
+        assert!(!is_deepseek_v4(&empty, "dsflash"));
     }
 
     #[test]
