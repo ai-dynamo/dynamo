@@ -347,6 +347,23 @@ impl std::fmt::Display for PositionalLineageHash {
     }
 }
 
+impl std::cmp::PartialOrd for PositionalLineageHash {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::cmp::Ord for PositionalLineageHash {
+    /// Lexicographic order: [`Self::position`], then [`Self::current_hash_fragment`],
+    /// then the full packed [`Self::as_u128`] so the order is total and consistent with [`Eq`].
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.position()
+            .cmp(&other.position())
+            .then_with(|| self.current_hash_fragment().cmp(&other.current_hash_fragment()))
+            .then_with(|| self.0.cmp(&other.0))
+    }
+}
+
 /// A collection of tokens, represented as a `Vec<Token>`.
 ///
 /// Provides convenience methods for conversion and manipulation.
@@ -2425,6 +2442,64 @@ mod tests {
         // Different params should give different hash
         let plh3 = PositionalLineageHash::new(0x1234, Some(0x5678), 11);
         assert_ne!(plh.as_u128(), plh3.as_u128());
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_ord_by_position_then_current_fragment() {
+        let at_5_low = PositionalLineageHash::new(0x10, Some(0x1111), 5);
+        let at_5_high = PositionalLineageHash::new(0x20, Some(0x1111), 5);
+        assert!(
+            at_5_low.current_hash_fragment() < at_5_high.current_hash_fragment(),
+            "test assumes distinct current fragments at the same position"
+        );
+        assert!(at_5_low < at_5_high);
+        assert!(at_5_high > at_5_low);
+
+        let at_3 = PositionalLineageHash::new(0x99, Some(0x2222), 3);
+        assert!(at_3 < at_5_low);
+        assert!(at_5_high < PositionalLineageHash::new(0x01, Some(0x3333), 6));
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_ord_tiebreak_parent_via_packed_u128() {
+        let same_pos_same_current = PositionalLineageHash::new(0x1234, Some(0x100), 10);
+        let same_pos_same_current_other_parent =
+            PositionalLineageHash::new(0x1234, Some(0x200), 10);
+        assert_eq!(same_pos_same_current.position(), 10);
+        assert_eq!(
+            same_pos_same_current.position(),
+            same_pos_same_current_other_parent.position()
+        );
+        assert_eq!(
+            same_pos_same_current.current_hash_fragment(),
+            same_pos_same_current_other_parent.current_hash_fragment()
+        );
+        assert_ne!(same_pos_same_current, same_pos_same_current_other_parent);
+        assert_ne!(
+            same_pos_same_current.cmp(&same_pos_same_current_other_parent),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_vec_sort_matches_ord() {
+        let a = PositionalLineageHash::new(0x30, None, 0);
+        let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
+        let c = PositionalLineageHash::new(0x20, Some(0x30), 2);
+        let mut v = vec![b, a, c];
+        v.sort();
+        assert_eq!(v, vec![a, b, c]);
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_itertools_sorted() {
+        use itertools::Itertools;
+
+        let a = PositionalLineageHash::new(0x30, None, 0);
+        let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
+        let c = PositionalLineageHash::new(0x20, Some(0x30), 2);
+        let sorted: Vec<_> = vec![b, a, c].into_iter().sorted().collect();
+        assert_eq!(sorted, vec![a, b, c]);
     }
 
     // === Tokens From Impls ===
