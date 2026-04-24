@@ -31,6 +31,7 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       frontend: ${{ steps.changes.outputs.frontend }}
+      benchmarks: ${{ steps.changes.outputs.benchmarks }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -396,7 +397,8 @@ jobs:
       needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
-      needs.changed-files.outputs.trtllm == 'true'
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.benchmarks == 'true'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
