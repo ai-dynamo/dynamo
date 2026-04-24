@@ -652,6 +652,34 @@ class TestDeferredAbort:
         engine_client.abort.assert_awaited_once_with("req-4")
 
     @pytest.mark.asyncio
+    async def test_close_without_pending_abort_is_noop(self):
+        """close() should not abort when no cancellation was requested."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-4b")
+
+        await guard.close()
+
+        engine_client.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_close_fires_abort_if_generation_ends_before_first_token(self):
+        """close() should fire the deferred abort if no engine output arrived."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-4c")
+
+        await guard.abort()
+
+        await asyncio.sleep(0)
+        engine_client.abort.assert_not_called()
+
+        await guard.close()
+
+        engine_client.abort.assert_awaited_once_with("req-4c")
+
+    @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_monitor_abort_routes_through_guard(self):
         """_monitor_abort should call guard.abort() instead of engine_client.abort()."""

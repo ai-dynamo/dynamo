@@ -135,6 +135,53 @@ class _DeferredAbort:
                 f"{self._request_id}: {e}"
             )
 
+    async def close(self) -> None:
+        """Finish any pending deferred-abort work when generation exits.
+
+        If cancellation was already requested but generation ended before any
+        engine output was yielded, the background task would otherwise wait
+        forever for signal_first_token(). Cancel that wait and issue the
+        real abort so engine-side request state still gets cleaned up.
+        """
+        if self._abort_task is None:
+            return
+
+        if self._abort_task.done():
+            try:
+                await self._abort_task
+            except asyncio.CancelledError:
+                pass
+            return
+
+        if self._first_token_received:
+            try:
+                await self._abort_task
+            except asyncio.CancelledError:
+                pass
+            return
+
+        logger.debug(
+            f"Deferred abort: generation ended before first token for request "
+            f"{self._request_id}, aborting request now"
+        )
+        self._abort_task.cancel()
+        try:
+            await self._abort_task
+        except asyncio.CancelledError:
+            pass
+
+        try:
+            await self._engine_client.abort(self._request_id)
+            logger.debug(
+                f"Deferred abort: close() fired abort for request "
+                f"{self._request_id}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Deferred abort: close() abort failed for request "
+                f"{self._request_id}: {e}"
+            )
+
 
 class VllmEngineQuiesceController:
     def __init__(self, engine_client: Any):
@@ -1979,6 +2026,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 logger.warning("Initiating Dynamo Runtime shutdown.")
                 self.runtime.shutdown()
                 os._exit(1)
+            finally:
+                if abort_guard is not None:
+                    await abort_guard.close()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
