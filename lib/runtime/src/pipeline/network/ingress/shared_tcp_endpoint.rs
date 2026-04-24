@@ -62,6 +62,27 @@ fn get_work_queue_size() -> usize {
         .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
 }
 
+/// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
+/// `Drop` decrements, so a single owner expresses the "task is active" interval.
+/// Constructed in the dispatcher *before* `tokio::spawn` and moved into the
+/// future, the gauge is incremented before any worker thread can poll the task,
+/// and the decrement runs on every exit path — normal return, panic, or
+/// cancellation.
+struct ActiveTaskGuard;
+
+impl ActiveTaskGuard {
+    fn new() -> Self {
+        WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
+        Self
+    }
+}
+
+impl Drop for ActiveTaskGuard {
+    fn drop(&mut self) {
+        WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
+    }
+}
+
 /// Work item for the worker pool
 struct WorkItem {
     service_handler: Arc<dyn PushWorkHandler>,
@@ -186,13 +207,16 @@ impl SharedTcpServer {
                         WORK_HANDLER_PERMIT_WAIT_SECONDS
                             .observe(permit_wait_start.elapsed().as_secs_f64());
 
-                        // Increment before spawn so the gauge is never observed negative
-                        // if the spawned task completes on another worker before we return.
-                        WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
+                        // Construct the guard before spawn (inc runs synchronously
+                        // here, so the gauge is never observed negative even if
+                        // the future completes on another worker first), then
+                        // move ownership into the future — Drop handles dec on
+                        // every exit path.
+                        let active_guard = ActiveTaskGuard::new();
                         tokio::spawn(async move {
+                            let _active_guard = active_guard;
                             Self::handle_work_item(work_item).await;
                             drop(permit);
-                            WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
                         });
                     }
                 }
@@ -528,13 +552,19 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Send to worker pool with backpressure - BEFORE sending ACK.
-            // Increment the queue-depth gauge BEFORE send so a concurrent dispatcher
-            // pickup on another thread cannot observe depth < 0. On send failure we
-            // decrement below.
-            WORK_HANDLER_QUEUE_DEPTH.inc();
-            match work_tx.send(work_item).await {
-                Ok(_) => {
+            // Reserve a slot in the bounded channel BEFORE incrementing the
+            // queue-depth gauge. Senders parked in `send().await` waiting for
+            // capacity would otherwise count as queue occupancy, letting the
+            // gauge exceed `queue_capacity` under saturation — exactly the
+            // regime this metric exists to surface. `reserve()` waits for
+            // capacity, then `Permit::send` is non-blocking and infallible,
+            // providing the same happens-before edge to the dispatcher's
+            // `recv()` as `send().await` did.
+            match work_tx.reserve().await {
+                Ok(permit) => {
+                    WORK_HANDLER_QUEUE_DEPTH.inc();
+                    permit.send(work_item);
+
                     // Send acknowledgment ONLY after successful queuing
                     let ack_response = TcpResponseMessage::empty();
                     if let Ok(encoded_ack) = ack_response.encode()
@@ -554,13 +584,15 @@ impl SharedTcpServer {
                     );
                 }
                 Err(e) => {
-                    WORK_HANDLER_QUEUE_DEPTH.dec();
+                    // `reserve()` only errors when the receiver has been
+                    // dropped (channel closed) — the dispatcher is gone, so
+                    // the read loop must terminate.
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
                         error = %e,
-                        "Failed to queue work to worker pool, sending error response"
+                        "Failed to reserve worker pool slot, sending error response"
                     );
 
                     // Send error response to client instead of ACK
@@ -574,11 +606,8 @@ impl SharedTcpServer {
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
 
-                    // If channel is closed, break the loop
-                    if matches!(e, tokio::sync::mpsc::error::SendError(_)) {
-                        tracing::error!("Worker pool channel closed, shutting down read loop");
-                        break;
-                    }
+                    tracing::error!("Worker pool channel closed, shutting down read loop");
+                    break;
                 }
             }
         }
