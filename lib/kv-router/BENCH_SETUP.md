@@ -168,7 +168,7 @@ Trace: `conversation_trace.jsonl` (Mooncake FAST25). Config: 2 shards × 4 worke
 Branch-sharded depth=2 p99 is **4.2× lower** than CRTC; depth=4 is **7.9× lower**. The deeper key resolves more unique branches (1,038 vs 831), raising the early-exit rate slightly and reducing average shard traversal time.
 
 Shard block distribution:
-```
+```text
 depth=2:  shard 0: 1,061,550 blocks (91.1%), 3,556 workers  shard 1: 104,300 blocks  (8.9%), 3,444 workers
           branches: shard[0]=415, shard[1]=416  ← balanced branch count, 10:1 block skew
 
@@ -192,6 +192,7 @@ CRTC saturates at ~18k ops/s with p99 exceeding 10,000 µs at all higher offered
 Full sweep data:
 
 **CRTC baseline:**
+
 | Benchmark window | Offered ops/s | Achieved ops/s | p99 |
 |-----------------|--------------|----------------|-----|
 | 30,000 ms | 11,861 | 11,532 | 7,536 µs |
@@ -204,6 +205,7 @@ Full sweep data:
 | 1,000 ms ⚠ | 355,824 | 25,249 | 12,388 µs |
 
 **Branch-sharded depth=2:**
+
 | Benchmark window | Offered ops/s | Achieved ops/s | p99 |
 |-----------------|--------------|----------------|-----|
 | 30,000 ms | 11,861 | 11,770 | 885 µs |
