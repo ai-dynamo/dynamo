@@ -43,6 +43,9 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("deepseek_v3", ToolCallConfig::deepseek_v3());
         map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
         map.insert("deepseek_v3_2", ToolCallConfig::deepseek_v3_2());
+        map.insert("deepseek_v4", ToolCallConfig::deepseek_v4());
+        map.insert("deepseek-v4", ToolCallConfig::deepseek_v4());
+        map.insert("deepseekv4", ToolCallConfig::deepseek_v4());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
@@ -241,6 +244,9 @@ mod tests {
             "deepseek_v3",
             "deepseek_v3_1",
             "deepseek_v3_2",
+            "deepseek_v4",
+            "deepseek-v4",
+            "deepseekv4",
             "qwen3_coder",
             "jamba",
             "nemotron_nano",
@@ -1700,6 +1706,56 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(args["query"], "search agent benchmark 2024");
         assert_eq!(args["topn"], 10); // Should be number, not string
         assert_eq!(args["source"], "web");
+    }
+    /// `CASE.1` — single-call happy path (V4).
+
+    #[tokio::test]
+    async fn test_deepseek_v4_single_tool_call() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_datetime">
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        let (tool_calls, normal_text) =
+            detect_and_parse_tool_call(input, Some("deepseek_v4"), None)
+                .await
+                .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
+        assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a CASE.*; covers registry plumbing.
+
+    #[tokio::test]
+    async fn test_deepseek_v4_compatibility_aliases() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="search">
+<｜DSML｜parameter name="query" string="true">search agent benchmark 2024</｜DSML｜parameter>
+<｜DSML｜parameter name="topn" string="false">10</｜DSML｜parameter>
+<｜DSML｜parameter name="source" string="true">web</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            let (tool_calls, _) = detect_and_parse_tool_call(input, Some(parser_name), None)
+                .await
+                .expect("Failed to parse");
+
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(tool_calls[0].function.name, "search");
+
+            let args: serde_json::Value =
+                serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+            assert_eq!(args["query"], "search agent benchmark 2024");
+            assert_eq!(args["topn"], 10);
+            assert_eq!(args["source"], "web");
+        }
     }
 
     #[tokio::test]
