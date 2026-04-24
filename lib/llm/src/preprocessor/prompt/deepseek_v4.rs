@@ -686,8 +686,15 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
 }
 
 /// Drop reasoning and non-essential messages before the last user message.
-fn drop_thinking_messages(messages: Vec<JsonValue>) -> Vec<JsonValue> {
-    let last_user_idx = find_last_user_index(&messages);
+///
+/// Takes `last_user_idx` (the pre-drop position of the last user/developer
+/// message, as returned by [`find_last_user_index`]) from the caller so we
+/// don't rescan the vector; returns the post-drop position of the same
+/// message so the caller doesn't have to rescan either.
+fn drop_thinking_messages(
+    messages: Vec<JsonValue>,
+    last_user_idx: Option<usize>,
+) -> (Vec<JsonValue>, Option<usize>) {
     let mut out = Vec::with_capacity(messages.len());
     const KEEP: &[&str] = &[
         "user",
@@ -697,9 +704,13 @@ fn drop_thinking_messages(messages: Vec<JsonValue>) -> Vec<JsonValue> {
         "direct_search_results",
     ];
 
+    let mut new_last_user_idx: Option<usize> = None;
     for (idx, mut msg) in messages.into_iter().enumerate() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         if KEEP.contains(&role) || last_user_idx.is_none_or(|u| idx >= u) {
+            if last_user_idx == Some(idx) {
+                new_last_user_idx = Some(out.len());
+            }
             out.push(msg);
         } else if role == "assistant" {
             if let Some(obj) = msg.as_object_mut() {
@@ -709,7 +720,7 @@ fn drop_thinking_messages(messages: Vec<JsonValue>) -> Vec<JsonValue> {
         }
         // developer and other roles before last_user_idx are dropped.
     }
-    out
+    (out, new_last_user_idx)
 }
 
 /// Encode messages to prompt string with default options.
@@ -758,11 +769,17 @@ pub fn encode_messages_with_options(
     });
     let effective_drop_thinking = drop_thinking && !has_tools;
 
+    // Locate the last user/developer message once. `drop_thinking_messages`
+    // both consumes this (to know what to keep) and returns the new index
+    // (to avoid a second full scan over its output list).
+    let mut last_user_idx = find_last_user_index(&full);
+
     if thinking_mode == ThinkingMode::Thinking && effective_drop_thinking {
-        full = drop_thinking_messages(full);
+        let (dropped, new_last_user) = drop_thinking_messages(full, last_user_idx);
+        full = dropped;
+        last_user_idx = new_last_user;
     }
 
-    let last_user_idx = find_last_user_index(&full);
     for idx in 0..full.len() {
         let part = render_message(
             idx,
@@ -1068,5 +1085,102 @@ mod tests {
             "test payload is too small: {}",
             got.len()
         );
+    }
+
+    /// `drop_thinking_messages` now takes the pre-drop last-user index and
+    /// returns the post-drop index instead of forcing the caller to rescan
+    /// the output list. This test pins that the returned index is
+    /// equivalent to a full `find_last_user_index` rescan, for the shape
+    /// that actually shifts indices (non-KEEP role dropped before the
+    /// final user/developer).
+    #[test]
+    fn test_drop_thinking_messages_returns_post_drop_last_user_idx() {
+        // A `developer` message before the last user triggers an index
+        // shift: it's not in KEEP and is at idx < last_user_idx, so it
+        // gets dropped and every surviving message's index decreases by 1.
+        let messages = vec![
+            json!({"role": "developer", "content": "dev1"}),
+            json!({"role": "assistant", "reasoning_content": "r", "content": "a1"}),
+            json!({"role": "user", "content": "u1"}),
+            json!({"role": "developer", "content": "dev2"}),
+        ];
+        let pre_drop_idx = find_last_user_index(&messages);
+        // The last user-like message is the trailing developer at idx 3.
+        assert_eq!(pre_drop_idx, Some(3));
+
+        let (dropped, new_idx) = drop_thinking_messages(messages, pre_drop_idx);
+
+        // developer at idx 0: dropped (not KEEP, before last_user_idx).
+        // assistant at idx 1: kept with reasoning stripped.
+        // user at idx 2: kept.
+        // developer at idx 3: kept (is last_user_idx).
+        assert_eq!(dropped.len(), 3, "expected 3 messages after drop");
+        assert!(
+            dropped[0].get("reasoning_content").is_none(),
+            "assistant reasoning_content must be stripped",
+        );
+        assert_eq!(
+            dropped[0].get("role").and_then(|v| v.as_str()),
+            Some("assistant"),
+        );
+        assert_eq!(
+            dropped[1].get("role").and_then(|v| v.as_str()),
+            Some("user")
+        );
+        assert_eq!(
+            dropped[2].get("role").and_then(|v| v.as_str()),
+            Some("developer"),
+        );
+
+        // The core invariant: the returned post-drop index is identical to
+        // what a full `find_last_user_index` rescan would produce. This
+        // is what allows `encode_messages_with_options` to skip the
+        // previously-redundant second scan.
+        let rescan_idx = find_last_user_index(&dropped);
+        assert_eq!(
+            new_idx, rescan_idx,
+            "drop_thinking_messages must return the same index find_last_user_index would compute on its output",
+        );
+        assert_eq!(new_idx, Some(2), "developer shifted from idx 3 to idx 2");
+    }
+
+    /// Sanity check for the no-shift case: when nothing before the last
+    /// user/developer is droppable, the index returned by
+    /// `drop_thinking_messages` must equal the input index.
+    #[test]
+    fn test_drop_thinking_messages_preserves_idx_when_nothing_dropped() {
+        let messages = vec![
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "user", "content": "u1"}),
+            json!({"role": "assistant", "reasoning_content": "r", "content": "a"}),
+            json!({"role": "user", "content": "u2"}),
+        ];
+        let pre_drop_idx = find_last_user_index(&messages);
+        assert_eq!(pre_drop_idx, Some(3));
+
+        let (dropped, new_idx) = drop_thinking_messages(messages, pre_drop_idx);
+        assert_eq!(dropped.len(), 4, "nothing should be dropped here");
+        // No shift: last user still at the same index.
+        assert_eq!(new_idx, Some(3));
+        assert_eq!(new_idx, find_last_user_index(&dropped));
+    }
+
+    /// Edge case: no user/developer anywhere in the history. Both the
+    /// pre-drop and post-drop indices must be `None` so the render loop
+    /// treats every message as "after last user" (Python `-1` sentinel).
+    #[test]
+    fn test_drop_thinking_messages_no_user_in_history() {
+        let messages = vec![
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "assistant", "reasoning_content": "r", "content": "a"}),
+        ];
+        let pre_drop_idx = find_last_user_index(&messages);
+        assert_eq!(pre_drop_idx, None);
+
+        let (dropped, new_idx) = drop_thinking_messages(messages, pre_drop_idx);
+        // With `last_user_idx == None`, the `idx >= u` guard is vacuously
+        // true for every index, so the assistant is kept (with reasoning).
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(new_idx, None);
     }
 }
