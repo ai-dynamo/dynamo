@@ -1,0 +1,201 @@
+{
+  "request_id": "deepseek-v4-special-chars-test",
+  "expected_output": {
+    "normal_content": "",
+    "reasoning_content": "The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note.",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "save_note",
+          "arguments": "{\"note\": \"He said \\\"hello\\\".\\n\\t'world' `backtick` — 中文测试 — 🚀✨ <not_a_sentinel> & </not_a_sentinel>.\"}"
+        }
+      }
+    ],
+    "finish_reason": "tool_calls"
+  },
+  "input_stream": [
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<think>The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note.</think>",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": "The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜tool_calls>\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜invoke name=\"save_note\">\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜parameter name=\"note\" string=\"true\">",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "He said \"hello\".\n\t'world' `backtick` ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "— 中文测试 — 🚀✨ ",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<not_a_sentinel> & </not_a_sentinel>.</｜DSML｜parameter>\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</｜DSML｜invoke>\n",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</｜DSML｜tool_calls>",
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-special",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "role": "assistant",
+              "refusal": null,
+              "reasoning_content": null
+            },
+            "finish_reason": "tool_calls"
+          }
+        ]
+      }
+    }
+  ]
+}
