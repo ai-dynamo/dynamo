@@ -289,6 +289,58 @@ mod tests {
         assert!(!detect_tool_call_start_dsml("no tool call here", &config));
     }
 
+    // -------------------------------------------------------------------
+    // DeepSeek V4 coverage (see lib/parsers/TESTING.md for CASE.* taxonomy).
+    //
+    // Covered by the V4 tests below (or by a shared DSML generic test):
+    //   - CASE.1   single-call            (parsers.rs :: test_deepseek_v4_single_tool_call)
+    //   - CASE.2   multi-calls            (test_parse_deepseek_v4_multiple_tool_calls)
+    //   - CASE.3   no-call                (shared: test_parse_no_tool_calls)
+    //   - CASE.4   malformed-args         (test_parse_deepseek_v4_malformed_json_value_falls_back_to_string,
+    //                                      test_parse_deepseek_v4_missing_invoke_close_drops_call)
+    //   - CASE.5   missing-end-token      (test_parse_deepseek_v4_missing_end_token{,_multiple_calls})
+    //                                      — PINNED AS BROKEN: parser drops the call. See TODO below.
+    //   - CASE.6   empty-args             (test_parse_deepseek_v4_no_parameters)
+    //   - CASE.7   complex-args           (shared: test_parse_mixed_types_realistic, test_parse_nested_object_parameter,
+    //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._mixed_param_types_vllm,
+    //                                      ..._special_chars_vllm)
+    //   - CASE.8   streaming              (test_detect_tool_call_start_v4, test_find_tool_call_end_position_v4,
+    //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._fragmented_tokens_vllm)
+    //   - CASE.9   reasoning-plus-tool    (lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm
+    //                                      — fixtures include <think>...</think> alongside DSML)
+    //   - CASE.10  reasoning-only         (reasoning/mod.rs :: test_deepseek_v4_detect_and_parse etc.)
+    //   - CASE.12  finish-reason          (lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm →
+    //                                      FinishReason::ToolCalls; ..._with_no_tools_vllm → FinishReason::Stop
+    //                                      — Length variant NOT covered, see TODO)
+    //   - CASE.13  interleaved-text       (test_parse_deepseek_v4_multiple_tool_calls prefix text;
+    //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._content_before_tool_vllm)
+    //
+    //   - CASE.xml.*  N/A — DSML carries per-parameter string="true|false" type hints,
+    //                  so XML entity decoding (CASE.xml.entities) and schema-aware
+    //                  coercion (CASE.xml.schema-coercion) don't apply.
+    //   - CASE.harmony.* N/A — Harmony-only.
+    //
+    // TODO — not yet covered for V4:
+    //   - CASE.5  Fix mid-stream truncation: parser currently drops all calls when
+    //             </｜DSML｜tool_calls> is absent (max_tokens / EOS before close).
+    //             Same class as Kimi K2 pre-DIS-1765. Recovery pattern: scan for
+    //             complete <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without
+    //             the outer close fence (see kimi_k2_parser.rs for precedent).
+    //             Pinning tests below capture the current silent-drop behavior;
+    //             flip them when recovery lands.
+    //   - CASE.4  Variants not pinned: missing </｜DSML｜parameter> close tag,
+    //             middle-invoke truncation corrupting subsequent invokes (non-greedy
+    //             regex bleed-through). Same structural class as CASE.5.
+    //   - CASE.11 tool_choice auto/required/named/none — cross-parser suites at
+    //             lib/llm/tests/tool_choice.rs run hermes only; V4 not exercised.
+    //   - CASE.12 FinishReason::Length — current E2E fixtures only cover Stop and
+    //             ToolCalls finish reasons. No truncation-forcing fixture.
+    //   - CASE.14 empty-content / null response at the e2e layer.
+    //   - CASE.15 duplicate-calls (same name twice) — universal gap across all parsers.
+    //   - CASE.16 regression — V4 is hours old (2026-04-24); no customer bugs filed yet.
+    // -------------------------------------------------------------------
+
+    /// `CASE.8` — streaming start-token detection (V4 variant).
     #[test]
     fn test_detect_tool_call_start_v4() {
         let config = get_v4_test_config();
@@ -313,6 +365,7 @@ mod tests {
         assert_eq!(&text[pos..], "more");
     }
 
+    /// `CASE.8` — streaming end-position lookup (V4 variant).
     #[test]
     fn test_find_tool_call_end_position_v4() {
         let config = get_v4_test_config();
@@ -394,6 +447,7 @@ mod tests {
         assert_eq!(args2["location"], "Hangzhou");
     }
 
+    /// `CASE.2` multi-calls + `CASE.13` interleaved-text (prefix text before the block).
     #[test]
     fn test_parse_deepseek_v4_multiple_tool_calls() {
         let input = r#"Let's check this. <｜DSML｜tool_calls>
@@ -423,6 +477,7 @@ mod tests {
         assert_eq!(args2["source"], "web");
     }
 
+    /// `CASE.6` — empty args (no-parameter invoke).
     #[test]
     fn test_parse_deepseek_v4_no_parameters() {
         let input = r#"<｜DSML｜tool_calls>
@@ -609,5 +664,117 @@ mod tests {
 
         let (_, args) = extract_name_and_args(calls[0].clone());
         assert!(args["value"].is_null());
+    }
+
+    // Corner-case pinning tests. See the V4 coverage manifest above for the
+    // full mapping from CASE.* → test. Each test's doc-comment names the
+    // specific CASE it pins.
+
+    /// `CASE.5` — missing end-token recovery.
+    /// **Pinned as broken** — parser drops the call; see the TODO block above.
+    ///
+    /// If a DeepSeek V4 stream is truncated before `</｜DSML｜tool_calls>`
+    /// arrives (max_tokens cut-off, EOS mid-generation, connection drop),
+    /// the block regex requires both fences and matches zero times. The
+    /// entire DSML-looking payload falls through as raw `normal_text`; no
+    /// tool calls are recovered.
+    ///
+    /// This is the same structural failure mode Kimi K2 had before its
+    /// parser gained end-token recovery; see
+    /// `kimi_k2_parser.rs::test_parse_malformed_no_section_end` for the
+    /// post-fix recovery pattern.
+    #[test]
+    fn test_parse_deepseek_v4_missing_end_token() {
+        // Start fence + complete invoke, but no </｜DSML｜tool_calls>.
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
+
+        let config = get_v4_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert!(
+            calls.is_empty(),
+            "V4 DSML parser currently drops tool calls when \
+             </｜DSML｜tool_calls> is missing. \
+             If recovery is added, flip this assertion."
+        );
+        assert_eq!(
+            normal_text.as_deref(),
+            Some(input),
+            "Unrecovered payload should fall through to normal_text verbatim."
+        );
+    }
+
+    /// `CASE.5` — multiple complete invokes, missing end fence.
+    ///
+    /// Even with multiple fully-formed invokes inside the start fence, the
+    /// absence of the closing fence prevents the block regex from matching.
+    /// All calls are dropped. If the parser ever gains partial-block
+    /// recovery, this test will fail and force an intentional update.
+    #[test]
+    fn test_parse_deepseek_v4_missing_end_token_multiple_calls() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"a\">\n\
+<｜DSML｜parameter name=\"x\" string=\"true\">1</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜invoke name=\"b\">\n\
+<｜DSML｜parameter name=\"y\" string=\"true\">2</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
+
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+
+        assert!(
+            calls.is_empty(),
+            "Even two fully-formed invokes are dropped when the outer \
+             </｜DSML｜tool_calls> is missing."
+        );
+    }
+
+    /// `CASE.4` — malformed JSON in a `string="false"` parameter value falls back
+    /// to a string. `parse_parameters` explicitly swallows the serde error
+    /// (unwrap_or_else → Value::String). Pin the fallback so removing it
+    /// (which would cause the whole call to 500 on ragged-edge JSON) is a
+    /// deliberate change.
+    #[test]
+    fn test_parse_deepseek_v4_malformed_json_value_falls_back_to_string() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"test\">\n\
+<｜DSML｜parameter name=\"payload\" string=\"false\">{this is not valid json</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "test");
+        assert_eq!(
+            args["payload"], "{this is not valid json",
+            "Malformed JSON should fall back to the raw string, not drop \
+             the parameter or the call."
+        );
+    }
+
+    /// `CASE.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
+    /// intact). The invoke regex requires its own close tag, so the call is
+    /// silently dropped. Pin the behavior.
+    #[test]
+    fn test_parse_deepseek_v4_missing_invoke_close_drops_call() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"test\">\n\
+<｜DSML｜parameter name=\"x\" string=\"true\">value</｜DSML｜parameter>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert!(
+            calls.is_empty(),
+            "Malformed invoke (missing </｜DSML｜invoke>) is dropped today. \
+             If recovery is added, flip this assertion."
+        );
     }
 }
