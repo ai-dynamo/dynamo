@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -14,6 +13,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = logging.getLogger(__name__)
+logger = init_logger("vllm.dynamo_ec_connector")
 
 
 @dataclass
@@ -108,6 +108,14 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._saves_this_step: set[str] = set()
         self._evicts_this_step: set[str] = set()
 
+        # --- Scheduler-side cumulative counters (for periodic logging) ---
+        self._total_hits: int = 0
+        self._total_misses: int = 0
+        self._total_evictions: int = 0
+        self._total_loads: int = 0
+        self._total_saves: int = 0
+        self._log_step: int = 0
+
         # --- Worker-side: async DtoH/HtoD state ---
         self._pin_memory: bool = bool(extra_config.get("pin_memory", True))
         self._pinned_overhead_pct: float = float(
@@ -131,8 +139,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
-            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d, "
+            "role=%s, capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d, "
             "pin_memory=%s, pinned_cap_bytes=%d",
+            role.name,
             capacity_gb,
             self._capacity_bytes,
             self._bytes_per_embed,
@@ -167,7 +176,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         """
         if identifier in self._cache_order:
             self._cache_order.move_to_end(identifier)
+            self._total_hits += 1
             return True
+        self._total_misses += 1
         return False
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
@@ -202,6 +213,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
             self._num_used_bytes -= evicted_bytes
             self._evicts_this_step.add(evicted_hash)
+            self._total_evictions += 1
 
         self._cache_order[mm_hash] = size_bytes
         self._num_used_bytes += size_bytes
@@ -216,9 +228,35 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicts=list(self._evicts_this_step),
         )
 
+        self._total_loads += len(self._loads_this_step)
+        self._total_saves += len(self._saves_this_step)
+
         self._loads_this_step.clear()
         self._saves_this_step.clear()
         self._evicts_this_step.clear()
+
+        self._log_step += 1
+        if self._log_step % self._log_every_n_steps == 0:
+            total_lookups = self._total_hits + self._total_misses
+            hit_rate = (
+                100.0 * self._total_hits / total_lookups if total_lookups else 0.0
+            )
+            used_gb = self._num_used_bytes / 1024**3
+            cap_gb = self._capacity_bytes / 1024**3
+            logger.info(
+                "ec_connector stats: hits=%d misses=%d hit_rate=%.1f%% "
+                "loads=%d saves=%d evicts=%d entries=%d used=%.2f/%.2f GB",
+                self._total_hits,
+                self._total_misses,
+                hit_rate,
+                self._total_loads,
+                self._total_saves,
+                self._total_evictions,
+                len(self._cache_order),
+                used_gb,
+                cap_gb,
+            )
+
         return meta
 
     # ==============================

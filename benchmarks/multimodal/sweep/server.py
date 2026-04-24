@@ -75,10 +75,11 @@ class ServerManager:
         )
 
         while time.monotonic() < deadline:
-            if not self.is_running:
+            rc = self._process.poll() if self._process is not None else None
+            if rc is not None:
                 raise RuntimeError(
-                    "Server process exited unexpectedly during startup "
-                    f"(exit code {self._process.returncode})."
+                    f"Workflow script exited with code {rc} before server ready; "
+                    "see stderr above."
                 )
             try:
                 req = urllib.request.Request(url)
