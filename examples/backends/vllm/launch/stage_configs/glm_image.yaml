@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stage config for running GLM-Image with 2-stage architecture
+# Stage 0: AR Model (vLLM implementation) - generates prior_token_ids
+# Stage 1: Diffusion (DiT + VAE) - denoising and image decoding
+
+stage_args:
+  # Stage 0: AR Model (GlmImageForConditionalGeneration)
+  # This stage uses the vLLM-optimized AR model to generate prior tokens
+  # for conditioning the diffusion process.
+  - stage_id: 0
+    stage_type: llm
+    runtime:
+      process: true
+      devices: "0"
+      requires_multimodal_data: true # Required for i2i mode to receive source images
+    engine_args:
+      model_stage: ar
+      max_num_seqs: 1
+      model_arch: GlmImageForConditionalGeneration
+      model_subdir: vision_language_encoder # AR model config.json is in this subdirectory
+      tokenizer_subdir: processor # Use processor's tokenizer (not ByT5 from tokenizer/)
+      worker_cls: vllm_omni.worker.gpu_ar_worker.GPUARWorker
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      gpu_memory_utilization: 0.6
+      enforce_eager: false
+      trust_remote_code: true
+      engine_output_type: token_ids # Output prior_token_ids for diffusion stage
+      distributed_executor_backend: "mp"
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+    final_output: false # AR is not the final output
+    is_comprehension: true
+    default_sampling_params:
+      temperature: 0.9 # From model's generation_config.json
+      top_p: 0.75 # From model's generation_config.json
+      top_k: 16512 # vision_vocab_size from generation_config.json
+      max_tokens: 1281 # For 1024x1024: small(16x16=256) + large(32x32=1024) + EOS(1)
+      stop_token_ids: [16385] # eos_token_id from generation_config.json
+      seed: 42
+      detokenize: false
+
+  # Stage 1: Diffusion (DiT + VAE)
+  # This stage receives prior_token_ids from AR and performs denoising + VAE decode
+  - stage_id: 1
+    stage_type: diffusion
+    runtime:
+      process: true
+      devices: "1" # Can use different GPU, or same GPU if memory allows
+      requires_multimodal_data: true # Required for i2i mode to pass condition images
+    engine_args:
+      model_stage: dit
+      max_num_seqs: 1
+      model_arch: GlmImagePipeline # Required for diffusion model class resolution
+      # Diffusion-specific parameters
+      num_gpus: 1
+      enforce_eager: true
+      trust_remote_code: true
+      distributed_executor_backend: "mp"
+    engine_input_source: [0] # Input from AR stage
+    custom_process_input_func: vllm_omni.model_executor.stage_input_processors.glm_image.ar2diffusion
+    final_output: true
+    final_output_type: image
+    default_sampling_params:
+      # Diffusion-specific parameters only (no LLM params like temperature/top_p/top_k)
+      seed: 42
+      num_inference_steps: 50
+      guidance_scale: 1.5
+      height: 1024
+      width: 1024
+
+# Top-level runtime config
+runtime:
+  enabled: true
+  defaults:
+    window_size: -1 # Trigger downstream only after full upstream completion
+    max_inflight: 1 # Process serially within each stage
+
+  edges:
+    - from: 0 # AR → Diffusion: trigger after AR completes
+      to: 1
+      window_size: -1
