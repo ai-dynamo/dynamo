@@ -179,6 +179,26 @@ class _DeferredAbort:
             )
 
 
+@asynccontextmanager
+async def _deferred_abort_guard(
+    engine_client: Any, request_id: str, is_decode_only: bool
+) -> AsyncIterator[Optional[_DeferredAbort]]:
+    """Own the _DeferredAbort lifecycle for a single request.
+
+    Yields a _DeferredAbort in disaggregated-decode mode, otherwise yields
+    None. On exit, awaits guard.close() so the background waiter cannot leak
+    when generation finishes without producing output (case 1b). close() is
+    specifically designed not to call engine_client.abort() in the unsafe
+    pre-first-token window.
+    """
+    guard = _DeferredAbort(engine_client, request_id) if is_decode_only else None
+    try:
+        yield guard
+    finally:
+        if guard is not None:
+            await guard.close()
+
+
 class VllmEngineQuiesceController:
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
@@ -2191,12 +2211,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
-        # on the decode worker (which can crash EngineCore).
-        abort_guard = (
-            _DeferredAbort(self.engine_client, request_id) if is_decode_only else None
-        )
-
-        try:
+        # on the decode worker (which can crash EngineCore). The guard's
+        # cleanup runs after _abort_monitor tears down its monitor task, so
+        # any deferred-abort waiter spawned by the monitor is in a stable
+        # state when close() is awaited.
+        async with _deferred_abort_guard(
+            self.engine_client, request_id, is_decode_only
+        ) as abort_guard:
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard
             ):
@@ -2223,15 +2244,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.warning("Initiating Dynamo Runtime shutdown.")
                     self.runtime.shutdown()
                     os._exit(1)
-        finally:
-            # Runs after the monitor task has been torn down by the
-            # _abort_monitor context manager, so any deferred-abort task the
-            # monitor may have spawned is in its final, stable state here.
-            # close() cancels the waiter when no first token ever arrived
-            # (case 1b) WITHOUT firing engine_client.abort in the unsafe
-            # pre-first-token window.
-            if abort_guard is not None:
-                await abort_guard.close()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
