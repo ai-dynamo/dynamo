@@ -252,10 +252,11 @@ pub struct ModelDeploymentCard {
     /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
-    /// Compatibility contract per `docs/proposals/health-disagg-readiness.md`:
-    /// a card with no `worker_type` field (old worker, or new worker running
-    /// without disagg flags) deserializes to `WorkerType::empty()` and is
-    /// interpreted by readers as `WorkerType::Aggregated` with no `needs`.
+    /// Every worker is expected to set this explicitly; empty means
+    /// misconfiguration (namespace not ready). A temporary shim in
+    /// `Model::ws_topology` softens this while backends are being migrated
+    /// — see `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]`
+    /// is kept so pre-field cards still deserialize.
     #[serde(default)]
     pub worker_type: crate::worker_type::WorkerType,
 
@@ -1281,9 +1282,8 @@ mod tests {
 
 #[cfg(test)]
 mod worker_type_tests {
-    //! Tests for the `worker_type` / `needs` fields added by the DGH-706
-    //! Disaggregated Topology Readiness DEP. See
-    //! `docs/proposals/health-disagg-readiness.md`.
+    //! Tests for the `worker_type` / `needs` fields on `ModelDeploymentCard`.
+    //! See `docs/proposals/health-disagg-readiness.md`.
 
     use super::*;
     use crate::worker_type::WorkerType;
@@ -1341,10 +1341,11 @@ mod worker_type_tests {
         assert_eq!(back.needs & WorkerType::Aggregated, back.needs);
     }
 
-    /// Compatibility contract: an old-format card (no `worker_type` / `needs`
+    /// Serde back-compat: an old-format card (no `worker_type` / `needs`
     /// keys in the JSON payload) must deserialize with both fields defaulted
-    /// to `WorkerType::empty()`. Readers interpret empty as `Aggregated` with
-    /// no needs. Construction of the test payload strips the new keys from a
+    /// to `WorkerType::empty()` — this is an attribute of the `#[serde(default)]`
+    /// contract and is independent of how readers subsequently interpret the
+    /// empty value. Construction of the test payload strips the new keys from a
     /// fresh serialization so the test tracks schema drift rather than a
     /// hand-rolled JSON literal.
     #[test]

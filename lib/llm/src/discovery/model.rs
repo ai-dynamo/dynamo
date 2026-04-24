@@ -157,21 +157,9 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
-    // -- Topology readiness (DGH-706, live-computed, no cache) --
-    //
-    // See `docs/proposals/health-disagg-readiness.md`. Readiness is a pure
-    // function of current WorkerSet state: iterate the WorkerSets in a
-    // namespace, OR their `worker_type` (where `worker_count() > 0`) into
-    // `present`, OR `worker_type | needs` into `required`, ready iff
-    // `required & present == required`.
-    //
-    // Per the compatibility contract, a WorkerSet whose card carries an empty
-    // `worker_type` is interpreted as `WorkerType::Aggregated` with no `needs`.
-    // This preserves current behaviour for old workers and for new workers
-    // running without disagg flags.
-
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
-    /// Public so the `/v1/models/{model}/readiness` handler can enumerate.
+    /// Used by the topology readiness consumers (request gating, `/v1/models`
+    /// filtering) to iterate per-namespace state.
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
         let mut ns: Vec<String> = self
             .worker_sets
@@ -183,9 +171,14 @@ impl Model {
         ns
     }
 
-    /// Return `(required, present)` bitflags for the given namespace, applying
-    /// the missing-field compatibility contract. Public so the readiness
-    /// handler can report the same numbers `is_namespace_ready` uses.
+    /// Return `(required, present)` bitflags for the given namespace.
+    ///
+    /// The design target is that every worker registers an explicit
+    /// `worker_type` and `needs`. A temporary shim in [`ws_topology`] reads
+    /// empty `worker_type` as `Aggregated` with no `needs` so that the
+    /// frontend can keep serving existing deployments while backends are
+    /// being updated. The shim is removed once backend-side registration is
+    /// strict; see `docs/proposals/health-disagg-readiness.md` (Phase 3).
     pub fn namespace_topology(
         &self,
         namespace: &str,
@@ -209,8 +202,10 @@ impl Model {
         (required, present)
     }
 
-    /// Return `(worker_type, needs)` for this WorkerSet, applying the
-    /// missing-field compatibility contract.
+    /// Return `(worker_type, needs)` for this WorkerSet.
+    ///
+    /// TEMPORARY: contains a shim for empty `worker_type`, removed once every
+    /// backend registers explicit values (see `namespace_topology` docs).
     fn ws_topology(
         ws: &WorkerSet,
     ) -> (
@@ -221,7 +216,8 @@ impl Model {
         let mut wt = card.worker_type;
         let mut needs = card.needs;
         if wt.is_empty() {
-            // Missing-field contract: treat as Aggregated with no needs.
+            // TEMPORARY shim: empty worker_type → Aggregated. Removed when
+            // backend-side registration is strict and empty means "misconfigured".
             wt = crate::worker_type::WorkerType::Aggregated;
             needs = crate::worker_type::WorkerType::empty();
         }
@@ -822,13 +818,13 @@ mod tests {
         );
     }
 
-    // -- Topology readiness (DGH-706 PR 1) --
+    // -- Topology readiness --
     //
-    // These tests exercise the live-compute readiness methods added by PR 1.
+    // These tests exercise the live-compute readiness methods on `Model`.
     // They construct WorkerSets with specific `worker_type` / `needs` values
     // on their cards and verify the bitflag math, including the
-    // `Aggregated = Prefill | Decode` alias and the missing-field compat
-    // contract.
+    // `Aggregated = Prefill | Decode` alias and the temporary empty-field
+    // shim in `ws_topology`.
 
     use crate::worker_type::WorkerType;
 
@@ -1009,9 +1005,10 @@ mod tests {
 
     #[test]
     fn readiness_missing_worker_type_field_treated_as_aggregated() {
-        // Compatibility contract: cards without a worker_type field (i.e. old
-        // workers, or new workers registered before PR 2 sets the fields) are
-        // interpreted as Aggregated with no needs and are trivially ready.
+        // TEMPORARY: verifies the shim in `ws_topology` that maps empty
+        // worker_type to Aggregated while backends are being updated to
+        // populate the field. This test (and the shim itself) are removed
+        // once every worker registers an explicit worker_type.
         let model = Model::new("llama".to_string());
         // Default card → worker_type is empty.
         let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-agg", vec![1]);
