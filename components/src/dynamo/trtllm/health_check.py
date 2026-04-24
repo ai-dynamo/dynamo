@@ -10,13 +10,14 @@ This module defines the default health check payload for TRT-LLM backends.
 import logging
 from typing import Any
 
-from dynamo.health_check import HealthCheckPayload
+from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
 from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
-# Marker key set on health-check probe requests.
-HEALTH_CHECK_KEY = "_HEALTH_CHECK"
+# Re-exported from dynamo.health_check so existing callers (handler_base) still
+# work without churn. The canonical definition lives in dynamo.health_check.
+__all__ = ["HEALTH_CHECK_KEY", "TrtllmHealthCheckPayload"]
 
 
 def _get_bos_token_id_from_tokenizer(tokenizer) -> int:

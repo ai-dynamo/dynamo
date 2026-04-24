@@ -8,11 +8,25 @@ This module defines the default health check payload for vLLM backends.
 """
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from dynamo.health_check import HealthCheckPayload
+from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
 
 logger = logging.getLogger(__name__)
+
+
+def _layer_probe_marker(payload: dict[str, Any]) -> dict[str, Any]:
+    """Layer HEALTH_CHECK_KEY onto a payload dict without mutating the source.
+
+    Used by each VllmHealthCheck*Payload's to_dict() override so the marker
+    survives DYN_HEALTH_CHECK_PAYLOAD env overrides. The vllm handlers don't
+    branch on the marker today — this keeps the probe wire-format consistent
+    with trtllm/sglang for any future marker-gated behavior.
+    """
+    payload = dict(payload)
+    payload[HEALTH_CHECK_KEY] = True
+    return payload
+
 
 if TYPE_CHECKING:
     from vllm.v1.engine.async_llm import AsyncLLM
@@ -101,6 +115,9 @@ class VllmHealthCheckPayload(HealthCheckPayload):
         self.default_payload = _make_default_payload(engine_client, use_text_input)
         super().__init__()
 
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
+
 
 class VllmPrefillHealthCheckPayload(HealthCheckPayload):
     """
@@ -119,6 +136,9 @@ class VllmPrefillHealthCheckPayload(HealthCheckPayload):
         """
         self.default_payload = _make_default_payload(engine_client, use_text_input)
         super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
 
 
 async def get_bos_token_from_omni(async_omni: "AsyncOmni") -> int:
@@ -180,6 +200,9 @@ class VllmOmniHealthCheckPayload(HealthCheckPayload):
             },
         }
         super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
 
     @classmethod
     async def create(cls, async_omni: "AsyncOmni") -> "VllmOmniHealthCheckPayload":
