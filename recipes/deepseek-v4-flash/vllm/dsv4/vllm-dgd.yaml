@@ -3,7 +3,7 @@
 #
 # DynamoGraphDeployment for deepseek-ai/DeepSeek-V4-Flash on vLLM PR #40760.
 #
-# Image:   nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-7d4572f9aa
+# Image:   nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-6a159fedd8
 #          (dynamo runtime layered on vllm/vllm-openai:deepseekv4-cu130)
 # Cluster: dynamo-nscale-dev-cluster, 1x NVIDIA-B200 node (4 of 8 GPUs used)
 # Model:   loaded from the shared-model-cache PVC
@@ -36,7 +36,7 @@ spec:
           mountPoint: /models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-7d4572f9aa
+          image: nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-6a159fedd8
           env:
             # Use the shared cache and skip any HF re-download on the frontend
             # so our injected chat_template (in tokenizer_config.json) persists.
@@ -73,7 +73,7 @@ spec:
             value: "true"
             effect: NoSchedule
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-7d4572f9aa
+          image: nvcr.io/nvidian/dynamo-dev/biswa:vllm-dsv4-6a159fedd8
           workingDir: /workspace
           startupProbe:
             httpGet:
