@@ -892,61 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn test_thinking_with_tools() {
-        let raw = std::fs::read_to_string("../../DeepSeek-V4-Pro/encoding/tests/test_input_1.json")
-            .or_else(|_| {
-                std::fs::read_to_string(
-                    "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_input_1.json",
-                )
-            });
-        let Ok(data) = raw else { return };
-        let parsed: JsonValue = serde_json::from_str(&data).unwrap();
-        let mut messages = parsed.get("messages").unwrap().as_array().unwrap().clone();
-        // Inject tools onto the system message (as the request layer would).
-        let tools = parsed.get("tools").unwrap().clone();
-        messages[0]
-            .as_object_mut()
-            .unwrap()
-            .insert("tools".to_string(), tools);
-        let out = encode_messages(&messages, ThinkingMode::Thinking, true).unwrap();
-        let expected = std::fs::read_to_string(
-            "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_output_1.txt",
-        )
-        .unwrap();
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn test_latest_reminder_multi_turn() {
-        let data = std::fs::read_to_string(
-            "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_input_3.json",
-        );
-        let Ok(data) = data else { return };
-        let messages: Vec<JsonValue> = serde_json::from_str(&data).unwrap();
-        let out = encode_messages(&messages, ThinkingMode::Thinking, true).unwrap();
-        let expected = std::fs::read_to_string(
-            "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_output_3.txt",
-        )
-        .unwrap();
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn test_chat_mode_with_action_task() {
-        let data = std::fs::read_to_string(
-            "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_input_4.json",
-        );
-        let Ok(data) = data else { return };
-        let messages: Vec<JsonValue> = serde_json::from_str(&data).unwrap();
-        let out = encode_messages(&messages, ThinkingMode::Chat, true).unwrap();
-        let expected = std::fs::read_to_string(
-            "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_output_4.txt",
-        )
-        .unwrap();
-        assert_eq!(out, expected);
-    }
-
-    #[test]
     fn test_reasoning_effort_max_prefix() {
         let messages = json!([
             {"role": "system", "content": "hi"},
@@ -979,15 +924,26 @@ mod tests {
 
     #[test]
     fn test_content_blocks_with_tool_result() {
+        // `merge_tool_messages` turns a `tool` role followed by a plain user text
+        // into a single user turn whose `content_blocks` interleave the tool result
+        // with the text, joined by "\n\n" at render time. Users don't construct
+        // `content_blocks` directly — both the Python reference and this port
+        // overwrite any user-supplied `content_blocks` with a single text block.
         let messages = json!([
-            {"role": "user", "content_blocks": [
-                {"type": "text", "text": "prefix"},
-                {"type": "tool_result", "tool_use_id": "c1", "content": "RESULT"},
-                {"type": "text", "text": "suffix"}
-            ]}
+            {"role": "user", "content": "call tool"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "f", "arguments": "{}"}
+            }]},
+            {"role": "tool", "tool_call_id": "c1", "content": "RESULT"},
+            {"role": "user", "content": "thanks"}
         ]);
-        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Chat, false).unwrap();
-        assert!(out.contains("prefix\n\n<tool_result>RESULT</tool_result>\n\nsuffix"));
+        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Chat, true).unwrap();
+        assert!(
+            out.contains("<tool_result>RESULT</tool_result>\n\nthanks"),
+            "expected tool_result block followed by 'thanks' in the merged user turn, got:\n{}",
+            out
+        );
     }
 
     #[test]
