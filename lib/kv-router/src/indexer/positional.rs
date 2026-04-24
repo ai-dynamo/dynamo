@@ -190,6 +190,17 @@ impl SyncIndexer for PositionalIndexer {
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.jump_search_matches(sequence, early_exit)
     }
+
+    fn worker_count(&self) -> usize {
+        self.tree_sizes.len()
+    }
+
+    fn block_count(&self) -> usize {
+        self.tree_sizes
+            .iter()
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .sum()
+    }
 }
 
 // ============================================================================

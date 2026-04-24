@@ -76,6 +76,7 @@ python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # run prefill worker
@@ -91,6 +92,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
@@ -106,6 +108,7 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
@@ -121,6 +124,7 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # Wait for any worker to exit (keeps script running)

@@ -195,7 +195,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-> **Learn more:** See the [SGLang HiCache Integration Guide](../../integrations/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
+> **Learn more:** See the [SGLang HiCache Integration Guide](../../backends/sglang/sglang-hicache.md) for detailed configuration, deployment examples, and troubleshooting.
 
 ## Disaggregated Serving with KVBM
 
@@ -476,4 +476,4 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
-- [SGLang HiCache](../../integrations/sglang-hicache.md)
+- [SGLang HiCache](../../backends/sglang/sglang-hicache.md)
