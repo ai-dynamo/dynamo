@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-hub"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Central coordination hub for KVBM velo clients (connector/engine) — HTTP PeerDiscovery + control plane"
 authors.workspace = true
@@ -13,6 +13,11 @@ repository.workspace = true
 keywords.workspace = true
 
 [dependencies]
+figment     = { version = "0.10", features = ["env", "toml", "json"] }
+clap        = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { workspace = true }
+
+
 # Velo (discovery trait, Velo facade, handlers)
 velo        = { workspace = true }
 velo-common = { workspace = true }
@@ -43,3 +48,4 @@ reqwest = { workspace = true }
 [dev-dependencies]
 tokio              = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true }
+velo-transports    = { version = "0.1.0" }

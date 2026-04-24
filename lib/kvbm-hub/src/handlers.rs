@@ -9,6 +9,8 @@
 //! velo is used once both sides know about each other.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use velo::Handler;
@@ -16,7 +18,7 @@ use velo::Handler;
 use crate::client::HubClient;
 
 /// Velo handler name for the hub → client heartbeat probe.
-pub const HEARTBEAT_HANDLER: &str = "_kvbm_hub_heartbeat";
+pub const HEARTBEAT_HANDLER: &str = "kvbm_hub_heartbeat";
 
 /// Payload sent by the hub on each heartbeat.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -34,19 +36,35 @@ pub struct HeartbeatAck {
     pub ok: bool,
 }
 
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Build the heartbeat velo handler for this client.
 ///
 /// Installed by [`HubClient::register_handlers`](crate::HubClient::register_handlers).
-/// Stub: always acks. Real implementations will consult local state
-/// (connector health, engine readiness, ...) via the captured [`HubClient`].
-pub fn create_heartbeat_handler(_client: Arc<HubClient>) -> Handler {
+/// Records the latest hub-heartbeat `seq` and wall-clock arrival time on the
+/// captured [`HubClient`] so downstream consumers can observe liveness.
+pub fn create_heartbeat_handler(client: Arc<HubClient>) -> Handler {
     Handler::typed_unary_async::<HeartbeatRequest, HeartbeatAck, _, _>(
         HEARTBEAT_HANDLER,
-        |ctx| async move {
-            Ok(HeartbeatAck {
-                seq: ctx.input.seq,
-                ok: true,
-            })
+        move |ctx| {
+            let client = Arc::clone(&client);
+            async move {
+                client
+                    .last_heartbeat_seq
+                    .store(ctx.input.seq, Ordering::Relaxed);
+                client
+                    .last_heartbeat_at_ms
+                    .store(now_unix_ms(), Ordering::Relaxed);
+                Ok(HeartbeatAck {
+                    seq: ctx.input.seq,
+                    ok: true,
+                })
+            }
         },
     )
     .build()

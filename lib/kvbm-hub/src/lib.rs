@@ -48,13 +48,17 @@
 //! removed from discovery.
 
 pub mod client;
+pub mod config;
 pub mod handlers;
 pub mod protocol;
+pub mod registry;
 pub mod server;
 
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
+pub use config::HubConfig;
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
-pub use protocol::{DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT};
+pub use protocol::{DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, ProbeResponse};
+pub use registry::{InMemoryRegistry, PeerRegistry, RegistryError};
 pub use server::{HubServer, HubServerBuilder, HubServerState};
 
 /// Shorthand for [`HubClientBuilder::new`].

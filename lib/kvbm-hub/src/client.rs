@@ -10,6 +10,7 @@
 //! - **Discovery port** (default `1337`) — peer lookups.
 //! - **Control port** (default `8337`) — registration, heartbeat.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
@@ -40,6 +41,12 @@ pub struct HubClient {
     config: HubClientConfig,
     http: reqwest::Client,
     guard: OnceLock<HubRegistrationGuard>,
+    /// Last hub-heartbeat sequence observed via the velo handler. `0` when
+    /// no heartbeat has been received.
+    pub(crate) last_heartbeat_seq: AtomicU64,
+    /// Last hub-heartbeat arrival time (Unix ms). `0` when no heartbeat has
+    /// been received.
+    pub(crate) last_heartbeat_at_ms: AtomicU64,
 }
 
 impl std::fmt::Debug for HubClient {
@@ -156,6 +163,8 @@ impl HubClientBuilder {
             },
             http,
             guard: OnceLock::new(),
+            last_heartbeat_seq: AtomicU64::new(0),
+            last_heartbeat_at_ms: AtomicU64::new(0),
         }))
     }
 }
@@ -183,7 +192,13 @@ impl HubClient {
     /// Stores the returned RAII guard in an inner `OnceLock`. Subsequent calls
     /// return an error. Dropping the `HubClient` issues an HTTP `DELETE`
     /// against the control-plane port.
-    pub async fn register_instance(&self, peer_info: PeerInfo) -> Result<()> {
+    ///
+    /// Returns the hub's own velo `InstanceId` when the hub runs with a velo
+    /// participant, or `None` when the hub is discovery-only. Callers can use
+    /// the returned id to look up the hub's `PeerInfo` via
+    /// [`discover_by_instance_id`](velo::discovery::PeerDiscovery::discover_by_instance_id)
+    /// and wire it into their own Velo for bidirectional messaging.
+    pub async fn register_instance(&self, peer_info: PeerInfo) -> Result<Option<InstanceId>> {
         if self.guard.get().is_some() {
             anyhow::bail!("HubClient: instance already registered");
         }
@@ -197,7 +212,7 @@ impl HubClient {
             .send()
             .await
             .context("POST /v1/instances")?;
-        let _: RegisterResponse = parse_json(resp).await?;
+        let parsed: RegisterResponse = parse_json(resp).await?;
 
         let guard = HubRegistrationGuard::new(
             self.http.clone(),
@@ -207,7 +222,7 @@ impl HubClient {
         self.guard
             .set(guard)
             .map_err(|_| anyhow!("HubClient: instance already registered (race)"))?;
-        Ok(())
+        Ok(parsed.hub_instance_id)
     }
 
     /// Explicitly unregister the current instance (if any).
