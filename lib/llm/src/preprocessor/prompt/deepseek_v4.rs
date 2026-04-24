@@ -779,12 +779,15 @@ impl DeepSeekV4Formatter {
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> ThinkingMode {
         if let Some(args) = args {
-            if let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool()) {
-                return if thinking {
-                    ThinkingMode::Thinking
-                } else {
-                    ThinkingMode::Chat
-                };
+            // `thinking` and `enable_thinking` (vLLM's canonical kwarg) are equivalent.
+            for key in ["thinking", "enable_thinking"] {
+                if let Some(enabled) = args.get(key).and_then(|v| v.as_bool()) {
+                    return if enabled {
+                        ThinkingMode::Thinking
+                    } else {
+                        ThinkingMode::Chat
+                    };
+                }
             }
             if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
                 match mode {
@@ -1002,5 +1005,19 @@ mod tests {
             got, r#"{"path": "\\", "count": 5}"#,
             "to_json must match Python's json.dumps formatting past an escaped backslash"
         );
+    }
+
+    #[test]
+    fn test_resolve_thinking_mode_honors_enable_thinking() {
+        use std::collections::HashMap;
+        let f = DeepSeekV4Formatter::new_thinking();
+        let mut args = HashMap::new();
+        args.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert_eq!(f.resolve_thinking_mode(Some(&args)), ThinkingMode::Chat);
+        args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+        assert_eq!(f.resolve_thinking_mode(Some(&args)), ThinkingMode::Thinking);
     }
 }

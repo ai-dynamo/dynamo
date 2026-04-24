@@ -1261,8 +1261,11 @@ impl OpenAIPreprocessor {
             Some("deepseek_r1") | Some("deepseek_v4") | Some("deepseek-v4")
             | Some("deepseekv4") => {
                 if let Some(args) = chat_template_args {
-                    if let Some(thinking) = args.get("thinking") {
-                        return thinking == &serde_json::Value::Bool(false);
+                    // `thinking` and `enable_thinking` (vLLM's canonical kwarg) are equivalent.
+                    for key in ["thinking", "enable_thinking"] {
+                        if let Some(v) = args.get(key) {
+                            return v == &serde_json::Value::Bool(false);
+                        }
                     }
                     if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
                         return mode == "chat";
@@ -1874,6 +1877,18 @@ mod tests {
                 Some(&thinking_mode_chat),
                 true,
                 "deepseekv4 (joined alias) + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&enable_thinking_false),
+                true,
+                "deepseek_v4 + enable_thinking=false → disabled (vLLM alias)",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&enable_thinking_true),
+                false,
+                "deepseek_v4 + enable_thinking=true → enabled (vLLM alias)",
             ),
         ];
 
