@@ -113,18 +113,15 @@ class GMSShadowModelRunner(GPUModelRunner):
 
         # Re-register with KV transfer group (skipped at init since kv_caches was {}).
         # Mirrors GPUModelRunner.initialize_kv_cache() — update if upstream changes.
-        try:
-            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                get_kv_transfer_group,
-                has_kv_transfer_group,
-            )
+        from vllm.distributed.kv_transfer import (
+            get_kv_transfer_group,
+            has_kv_transfer_group,
+        )
 
-            if has_kv_transfer_group() and kv_caches:
-                kv_transfer_group = get_kv_transfer_group()
-                kv_transfer_group.register_kv_caches(kv_caches)
-                logger.debug("[Shadow] Registered KV caches with transfer group")
-        except ImportError:
-            logger.debug("[Shadow] KV transfer group not available")
+        if has_kv_transfer_group() and kv_caches:
+            kv_transfer_group = get_kv_transfer_group()
+            kv_transfer_group.register_kv_caches(kv_caches)
+            logger.info("[Shadow] Registered KV caches with transfer group")
 
         total_bytes = sum(t.numel() * t.element_size() for t in kv_caches.values())
         msg = "[Shadow] Allocated KV cache on wake: %.2f GiB (%d tensors)" % (

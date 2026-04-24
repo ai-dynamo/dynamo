@@ -10,6 +10,12 @@ to output function arguments for the relevant function(s) which you can execute 
 
 Tool calling (AKA function calling) is controlled using the `tool_choice` and `tools` request parameters.
 
+> [!TIP]
+> This page covers parser names for the default Dynamo-native path. For a
+> comparison of all preprocessing options (including vLLM/SGLang chat-processor
+> swap and tokenizer delegation) and routing
+> compatibility, see [Chat Processor Options](chat-processor-options.md).
+
 ## Prerequisites
 
 To enable this feature, you should set the following flag while launching the backend worker
@@ -33,27 +39,32 @@ python -m dynamo.<backend> --help
 
 ## Supported Tool Call Parsers
 
-The tool call parser names currently supported in the codebase are:
+The table below lists the currently supported tool call parsers in Dynamo's registry. The
+**Upstream name** column shows where the vLLM or SGLang parser name differs
+from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
+(see [Chat Processor Options](chat-processor-options.md)). A blank upstream
+column means the same name works everywhere. `Dynamo-only` means no upstream
+parser exists for this format.
 
-| Parser Name | Typical Models / Format |
-|-------------|-------------------------|
-| `deepseek_v3` | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-R1-0528` |
-| `deepseek_v3_1` | `deepseek-ai/DeepSeek-V3.1` |
-| `deepseek_v3_2` | DeepSeek V3.2 DSML tool calling (`<｜DSML｜function_calls>...`) |
-| `default` | Dynamo's fallback parser for &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags when no explicit parser is configured |
-| `glm47` | `zai-org/GLM-4.7` |
-| `harmony` | `openai/gpt-oss-*` |
-| `hermes` | `Qwen/Qwen2.5-*`, `Qwen/QwQ-32B`, `NousResearch/Hermes-2-Pro-*`, `NousResearch/Hermes-2-Theta-*`, `NousResearch/Hermes-3-*` |
-| `jamba` | `ai21labs/AI21-Jamba-*-1.5`, `ai21labs/AI21-Jamba-*-1.6`, `ai21labs/AI21-Jamba-*-1.7` |
-| `kimi_k2` | `moonshotai/Kimi-K2-Thinking*`, `moonshotai/Kimi-K2-Instruct*`, `moonshotai/Kimi-K2.5*`; currently requires converting `tiktoken.model` to `tokenizers.json` |
-| `llama3_json` | `meta-llama/Llama-3.1-*`, `meta-llama/Llama-3.2-*` |
-| `minimax_m2` | MiniMax M2.1 XML-style tool calling (`<minimax:tool_call>...`) |
-| `mistral` | `mistralai/Mistral-7B-Instruct-v0.3` and other Mistral models that emit `[TOOL_CALLS]...[/TOOL_CALLS]` |
-| `nemotron_deci` | `nvidia/nemotron-*` |
-| `nemotron_nano` | `nvidia/NVIDIA-Nemotron-3-Nano-*`; uses the same tool-call format as `qwen3_coder` |
-| `phi4` | `Phi-4-*` |
-| `pythonic` | `meta-llama/Llama-4-*` |
-| `qwen3_coder` | XML-style tool calling such as `<tool_call><function=...>` |
+| Parser Name | Models | Upstream name | Notes |
+|---|---|---|---|
+| `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | Special Unicode markers |
+| `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON separators |
+| `deepseek_v3_2` | DeepSeek V3.2+ | Dynamo-only | DSML tags (`<｜DSML｜function_calls>...`) |
+| `default` | *(fallback)* | Dynamo-only | Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use. |
+| `glm47` | GLM-4.5, GLM-4.7 | Dynamo-only | XML `<arg_key>/<arg_value>` |
+| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel format |
+| `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models) | `<tool_call>` JSON |
+| `jamba` | Jamba 1.5 / 1.6 / 1.7 | Dynamo-only | `<tool_calls>` JSON |
+| `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | Pair with `--dyn-reasoning-parser kimi` or `kimi_k25` |
+| `llama3_json` | Llama 3 / 3.1 / 3.2 / 3.3 Instruct | | `<\|python_tag\|>` tool syntax |
+| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
+| `mistral` | Mistral / Mixtral / Mistral-Nemo, Magistral | | `[TOOL_CALLS]...[/TOOL_CALLS]` |
+| `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron-Ultra / -Super | Dynamo-only | `<TOOLCALL>` JSON |
+| `nemotron_nano` | Nemotron-Nano | Dynamo-only | Alias for `qwen3_coder` |
+| `phi4` | Phi-4, Phi-4-mini, Phi-4-mini-reasoning | vLLM: `phi4_mini_json` | `functools[...]` JSON |
+| `pythonic` | Llama 4 (Scout / Maverick) | | Python-list tool syntax |
+| `qwen3_coder` | Qwen3-Coder | | XML `<tool_call><function=...>` |
 
 > [!TIP]
 > For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with

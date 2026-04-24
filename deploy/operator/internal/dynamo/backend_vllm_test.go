@@ -417,6 +417,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		annotations       map[string]string // nil = legacy (no annotations)
 		expectedArgs      []string
 		expectNotModified bool
+		description       string
 	}{
 		{
 			name:              "leader uses ray (nil annotations = legacy)",
@@ -554,6 +555,85 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:          0,
 			annotations:       nil,
 			expectNotModified: true,
+		},
+		// Elastic EP tests: --enable-elastic-ep must use Ray cluster path,
+		// never the --data-parallel-hybrid-lb RPC path.
+		//
+		// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>  (no --data-parallel-size-local injected)
+		// Worker: health-gate on DynamoSystemPort (9090) && ray start --address=<leader> --block
+		//
+		// The health-gate ensures the worker only joins Ray after dynamo.vllm is fully
+		// serving, so create_dp_placement_groups sees only the leader node and places all
+		// initial DP workers there (warm standby).
+		{
+			name:              "elastic EP leader Grove: ray head start + vllm serve",
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+			},
+			gpuCount:    2,
+			annotations: nil,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s`,
+				VLLMPort, VLLMPort, dataParallelSizeFlag, enableElasticEPFlag,
+			)},
+			description: "Operator prepends ray head start and TCP readiness poll; --data-parallel-hybrid-lb and --data-parallel-size-local are NOT injected (elastic EP uses Ray for GPU assignment, not the RPC path)",
+		},
+		{
+			name:              "elastic EP worker Grove: health-gate then ray join",
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+			},
+			gpuCount:    2,
+			annotations: nil,
+			expectedArgs: []string{fmt.Sprintf(
+				`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
+				"$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				commonconsts.DynamoSystemPort,
+				"$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				VLLMPort,
+			)},
+			description: "Operator replaces the entire command with a /live HTTP health-gate then ray join; vllm does NOT run on the worker (worker provides idle GPUs for warm standby, claimed on scale-up)",
+		},
+		{
+			name:              "elastic EP leader Grove: user-specified --data-parallel-size-local preserved",
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag, dataParallelSizeLocalFlag, "2"},
+			},
+			gpuCount:    2,
+			annotations: nil,
+			expectedArgs: []string{fmt.Sprintf(
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s %s 2`,
+				VLLMPort, VLLMPort, dataParallelSizeFlag, enableElasticEPFlag, dataParallelSizeLocalFlag,
+			)},
+			description: "Operator prepends ray head start but does not override a user-specified --data-parallel-size-local",
+		},
+		{
+			name:              "elastic EP worker LWS: health-gate then ray join",
+			role:              RoleWorker,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+			},
+			gpuCount:    2,
+			annotations: nil,
+			expectedArgs: []string{fmt.Sprintf(
+				`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
+				"$(LWS_LEADER_ADDRESS)",
+				commonconsts.DynamoSystemPort,
+				"$(LWS_LEADER_ADDRESS)",
+				VLLMPort,
+			)},
+			description: "Same as Grove worker but uses $(LWS_LEADER_ADDRESS) (kubelet-expanded) instead of the Grove-specific DNS address",
 		},
 	}
 
@@ -708,6 +788,56 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
+		// Elastic EP regression: UpdatePodSpec must NOT inject the MP init container
+		// when --enable-elastic-ep is present in ExtraPodSpec.MainContainer. The elastic
+		// EP path uses a Ray cluster, not the MP coordinator; the MP init container waits
+		// on VLLMMpMasterPort (29500) which never opens in the elastic EP path.
+		{
+			name:          "elastic EP worker Grove: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+					},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "elastic EP worker LWS: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+					},
+				},
+			},
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:v2"},
+				},
+			},
+			expectInitContainer: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -848,5 +978,75 @@ func TestShouldUseMpBackend(t *testing.T) {
 				t.Errorf("shouldUseMpBackend() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that when the inter-pod
+// GMS layout is enabled (gpuMemoryService.mode=interPod, with or without
+// failover), the vLLM backend is the one responsible for injecting both the
+// --load-format=gms flag and the DYN_VLLM_GMS_SHADOW_MODE env var. These are
+// vLLM-runtime switches and must live in the backend adapter, not in the
+// backend-agnostic GMS helpers (see gmsEngineEnvVars).
+func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
+	backend := &VLLMBackend{}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+		Failover: &v1alpha1.FailoverSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+	}
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	// --load-format gms flag must be injected into the container args.
+	joined := ""
+	for _, a := range container.Args {
+		joined += " " + a
+	}
+	if !reflect.DeepEqual(containerHasArg(container, "--load-format", "gms"), true) {
+		t.Errorf("expected --load-format gms to be injected; got args=%q", joined)
+	}
+
+	// DYN_VLLM_GMS_SHADOW_MODE must be set exactly once.
+	count := 0
+	for _, e := range container.Env {
+		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+			count++
+			if e.Value != "true" {
+				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("DYN_VLLM_GMS_SHADOW_MODE env var count = %d, want 1", count)
+	}
+}
+
+// TestVLLMBackend_UpdateContainer_NoInterPodGMS asserts the complementary
+// invariant: when inter-pod GMS failover is NOT enabled, the vLLM backend
+// must not inject the GMS-specific env var (it is meaningless outside the
+// inter-pod layout).
+func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
+	backend := &VLLMBackend{}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	for _, e := range container.Env {
+		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+			t.Errorf("DYN_VLLM_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")
+		}
 	}
 }

@@ -1078,7 +1078,6 @@ impl KvRouter {
                     lora_name.clone(),
                     0.0,
                     None,
-                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )
                 .await

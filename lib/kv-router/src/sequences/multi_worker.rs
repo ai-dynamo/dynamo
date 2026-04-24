@@ -11,7 +11,7 @@
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -26,8 +26,7 @@ use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::WorkerTable;
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, PrefillLoadHint,
-    WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -90,6 +89,9 @@ pub enum SequenceError {
 
     #[error("Request {request_id} not found")]
     RequestNotFound { request_id: String },
+
+    #[error("Failed to publish replica-sync event: {0}")]
+    ReplicaSyncPublishFailed(String),
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
@@ -587,8 +589,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlaps: OverlapScores,
-        decay_now: Instant,
+        cached_tokens: HashMap<WorkerWithDpRank, usize>,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
@@ -596,9 +597,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.potential_blocks_and_tokens_with_prefill_tracking(
             token_sequence,
             isl,
-            overlaps,
+            cached_tokens,
             true,
-            decay_now,
+            Instant::now(),
         )
     }
 
@@ -606,22 +607,54 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlaps: OverlapScores,
+        cached_tokens: HashMap<WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
         decay_now: Instant,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
     ) {
-        self.prompt_registry
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                token_sequence,
-                isl,
-                &overlaps,
-                track_prefill_tokens,
-                self.block_size,
-                decay_now,
-            )
+        #[cfg(feature = "bench")]
+        let start = tokio::time::Instant::now();
+
+        let table = self.workers.read();
+
+        #[cfg(feature = "bench")]
+        let num_workers = table.slots.len();
+
+        let mut potential_blocks =
+            FxHashMap::with_capacity_and_hasher(table.slots.len(), FxBuildHasher);
+        let mut potential_tokens =
+            FxHashMap::with_capacity_and_hasher(table.slots.len(), FxBuildHasher);
+
+        for slot in &table.slots {
+            let worker_cached_tokens = cached_tokens.get(&slot.worker).copied().unwrap_or(0);
+
+            let (blocks, tokens) = slot
+                .sequences
+                .read()
+                .potential_blocks_and_tokens_with_prefill_tracking(
+                    token_sequence,
+                    isl,
+                    worker_cached_tokens,
+                    track_prefill_tokens,
+                    decay_now,
+                );
+            potential_blocks.insert(slot.worker, blocks);
+            potential_tokens.insert(slot.worker, tokens);
+        }
+
+        #[cfg(feature = "bench")]
+        {
+            let total_elapsed = start.elapsed();
+            tracing::info!(
+                num_workers,
+                total_us = total_elapsed.as_micros() as u64,
+                "potential_blocks_and_tokens completed"
+            );
+        }
+
+        (potential_blocks, potential_tokens)
     }
 
     /// Query all workers for their current number of active blocks.
@@ -945,7 +978,6 @@ mod tests {
 
     use rustc_hash::FxHashMap;
 
-    use super::super::prefill_tracker::added_prefill_tokens;
     use super::*;
     use crate::protocols::{
         ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, OverlapScores,
@@ -999,6 +1031,7 @@ mod tests {
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
     ) {
+        let cached_tokens = cached_tokens_from_overlap_scores(overlaps, sequences.block_size);
         let table = sequences.workers.read();
         let mut potential_blocks = FxHashMap::default();
         let mut potential_tokens = FxHashMap::default();
@@ -1013,9 +1046,9 @@ mod tests {
             });
             let new_blocks =
                 token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
-            let overlap = *overlaps.scores.get(&slot.worker).unwrap_or(&0);
+            let worker_cached_tokens = *cached_tokens.get(&slot.worker).unwrap_or(&0);
             let added_tokens = if track_prefill_tokens {
-                added_prefill_tokens(sequences.block_size, isl, overlap)
+                seq.new_tokens(isl, worker_cached_tokens)
             } else {
                 0
             };
@@ -1023,6 +1056,17 @@ mod tests {
             potential_tokens.insert(slot.worker, seq.active_tokens(decay_now) + added_tokens);
         }
         (potential_blocks, potential_tokens)
+    }
+
+    fn cached_tokens_from_overlap_scores(
+        overlaps: &OverlapScores,
+        block_size: usize,
+    ) -> HashMap<WorkerWithDpRank, usize> {
+        overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap_blocks)| (*worker, (*overlap_blocks as usize) * block_size))
+            .collect()
     }
 
     fn seq_hashes_for_tokens(tokens: &[u32], lora_name: Option<&str>) -> Vec<SequenceHash> {
@@ -1153,7 +1197,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&prompt),
             16,
-            actual_overlaps,
+            cached_tokens_from_overlap_scores(&actual_overlaps, sequences.block_size),
             true,
             decay_now,
         );
@@ -1214,7 +1258,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&base_prompt),
             8,
-            OverlapScores::default(),
+            HashMap::new(),
             false,
             decay_now,
         );
@@ -1278,7 +1322,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&prompt_b),
             3,
-            OverlapScores::default(),
+            cached_tokens_from_overlap_scores(&OverlapScores::default(), sequences.block_size),
             false,
             decay_now,
         );
@@ -1299,7 +1343,7 @@ mod tests {
         let actual_after_free = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&prompt_b),
             3,
-            OverlapScores::default(),
+            cached_tokens_from_overlap_scores(&OverlapScores::default(), sequences.block_size),
             false,
             decay_now,
         );
@@ -1390,7 +1434,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&[1, 2, 3]),
             12,
-            OverlapScores::default(),
+            HashMap::new(),
             false,
             Instant::now(),
         );
@@ -1595,7 +1639,7 @@ mod tests {
         let (_, potential_tokens) = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             None,
             0,
-            OverlapScores::default(),
+            HashMap::new(),
             false,
             decay_now,
         );

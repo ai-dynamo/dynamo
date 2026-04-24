@@ -31,6 +31,8 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+mod branch_sharded;
+
 fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
     if kv_block_size == 1 {
         tracing::warn!(
@@ -40,9 +42,9 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
         );
     }
 }
-
 mod kv_indexer;
 mod local;
+mod lower_tier;
 mod metrics;
 mod thread_pool;
 mod traits;
@@ -58,8 +60,10 @@ pub mod radix_tree;
 mod tests;
 
 // Re-export everything that was public in the old single-file module.
+pub use branch_sharded::*;
 pub use kv_indexer::*;
 pub use local::*;
+pub use lower_tier::*;
 pub use metrics::*;
 pub use thread_pool::*;
 pub use traits::*;

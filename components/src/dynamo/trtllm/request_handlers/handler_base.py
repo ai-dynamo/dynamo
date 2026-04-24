@@ -41,6 +41,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.health_check import HEALTH_CHECK_KEY
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -107,13 +108,8 @@ class TRTLLMEngineQuiesceController:
                 "TRT-LLM does not expose _collective_rpc; skipping %s", method
             )
             return
-        try:
-            rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
-        except Exception:
-            if method != "wakeup":
-                raise
-            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
-            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+
+        rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
 
     @staticmethod
     def _release_gms_weights() -> None:
@@ -221,7 +217,6 @@ class RequestHandlerConfig:
     shutdown_event: Optional[asyncio.Event] = None
     generate_endpoint: Optional[Any] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
-    disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
@@ -254,7 +249,6 @@ class HandlerBase(BaseGenerativeHandler):
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
         self.generate_endpoint = config.generate_endpoint
-        self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
@@ -469,15 +463,8 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation unless disabled
-            if self.disable_request_abort:
-                logging.debug(
-                    f"Request ID {context.id()} cancelled but abort() skipped "
-                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
-                )
-            else:
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
+            generation_result.abort()
+            logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -710,6 +697,11 @@ class HandlerBase(BaseGenerativeHandler):
         """
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
+
+        # Canary probe: use its pre-built disagg params (skip prefill_result decode
+        # and skip the mode-specific request_type overrides).
+        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
+            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
