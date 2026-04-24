@@ -42,9 +42,19 @@ export VLLM_MM_CACHE_PROBE=1
 # Both finalize in parallel → total wall time = max(fe, be), fits in the
 # orchestrator's 180 s SIGKILL budget. Mirrors vllm_serve.sh's proven pattern.
 NSYS_BIN="${DYN_NSYS_BIN:-/opt/nvidia/nsight-systems-cli/2026.2.1/bin/nsys}"
-NSYS_DIR="${DYN_NSYS_DIR:-/dynamo-tmp/logs/sweep_nsys_dynamo}"
-NSYS_DELAY_S="${DYN_NSYS_DELAY_S:-60}"      # skip only nsys-agent startup noise
-NSYS_DURATION_S="${DYN_NSYS_DURATION_S:-1500}"  # covers 2B smoke + 397B runs
+# Default groups reps by day under /dynamo-tmp/MM-DD/nsys/ to match the
+# sweep yaml's `output_dir: /dynamo-tmp/MM-DD/<slug>` pattern. Override with
+# DYN_NSYS_DIR (e.g. yaml env) if you want them alongside aiperf outputs.
+NSYS_DIR="${DYN_NSYS_DIR:-/dynamo-tmp/$(date +%m-%d)/nsys}"
+# Default: nsys captures the full process lifetime. delay=0 starts tracing
+# immediately; duration=86400 (24 h) means --duration never fires, so
+# nsys only stops when the orchestrator sends SIGINT (see --kill=sigterm
+# below) and finalizes cleanly. Keeps model load in the trace and avoids
+# the windowed-capture footgun where --duration expires mid-load and kills
+# the engine core. Override via DYN_NSYS_DELAY_S / DYN_NSYS_DURATION_S only
+# when you specifically need a shorter window.
+NSYS_DELAY_S="${DYN_NSYS_DELAY_S:-0}"
+NSYS_DURATION_S="${DYN_NSYS_DURATION_S:-86400}"
 
 # Redirect nsys's intermediate staging (.qdstrm) from /tmp/nsys-<uid>/ to
 # scratch. Container /tmp is a Pyxis overlay and evaporates when the SLURM
@@ -95,9 +105,8 @@ if [[ "$DISABLE_NSYS" == "1" ]]; then
     FE_PREFIX=()
     BE_PREFIX=()
 else
-    NSYS_COMMON=(
+    NSYS_BASE=(
         "$NSYS_BIN" profile
-        --trace=nvtx,cuda
         --sample=none
         --cpuctxsw=none
         --delay="$NSYS_DELAY_S"
@@ -108,10 +117,21 @@ else
         --kill=sigterm
         --force-overwrite=true
     )
-    echo "[nsys] frontend -> $FRONTEND_OUT" >&2
-    echo "[nsys] backend  -> $BACKEND_OUT" >&2
-    FE_PREFIX=("${NSYS_COMMON[@]}" -o "$FRONTEND_OUT")
-    BE_PREFIX=("${NSYS_COMMON[@]}" -o "$BACKEND_OUT")
+    # Frontend is pure Rust-over-TCP with no CUDA activity. nsys drops NVTX
+    # events from processes that issue zero CUDA API calls — adding `cuda`
+    # to the trace list keeps the NVTX channel alive even when no CUDA
+    # events are recorded. See research/profiling.md.
+    NSYS_FE_TRACE=(--trace=nvtx,cuda)
+    # Backend (vLLM workers) issues CUDA every step → NVTX channel stays
+    # alive without `cuda` in the trace list. Dropping `cuda` collapses the
+    # qdstrm size by orders of magnitude, which keeps nsys finalize inside
+    # the 150 s cleanup() budget on 397B / 8 TP runs (otherwise the .qdstrm
+    # gets killed mid-merge and is unrecoverable). See research/profiling.md.
+    NSYS_BE_TRACE=(--trace=nvtx)
+    echo "[nsys] frontend -> $FRONTEND_OUT (trace=nvtx,cuda)" >&2
+    echo "[nsys] backend  -> $BACKEND_OUT (trace=nvtx)" >&2
+    FE_PREFIX=("${NSYS_BASE[@]}" "${NSYS_FE_TRACE[@]}" -o "$FRONTEND_OUT")
+    BE_PREFIX=("${NSYS_BASE[@]}" "${NSYS_BE_TRACE[@]}" -o "$BACKEND_OUT")
 fi
 
 # Infra (etcd + nats) is expected to be already running on the allocation
