@@ -158,8 +158,13 @@ fn extract_invokes(
             // Create tool call response
             let arguments_json = serde_json::to_string(&parameters)?;
 
+            // OpenAI-style id: "call_" + 24 lowercase hex chars.
+            // Take the simple (32-hex, no hyphens) form of a v4 UUID and truncate.
+            let uuid_simple = Uuid::new_v4().simple().to_string();
+            let id = format!("call_{}", &uuid_simple[..24]);
+
             invokes.push(ToolCallResponse {
-                id: format!("call-{}", Uuid::new_v4()),
+                id,
                 tp: ToolCallType::Function,
                 function: CalledFunction {
                     name: function_name,
@@ -579,7 +584,6 @@ mod tests {
         assert_eq!(args["empty"], "");
     }
 
-    #[test]
     fn test_empty_invokes_does_not_leak_dsml_markup() {
         // Valid block-start + mangled content (invoke tag but no closing/params)
         // followed by block-end. extract_tool_calls returns empty; we must not
@@ -642,6 +646,35 @@ mod tests {
 
         let (_, args) = extract_name_and_args(calls[0].clone());
         assert_eq!(args["mode"], "quickly");
+    }
+
+    #[test]
+    fn test_tool_call_id_format_openai_style() {
+        let input = r#"<｜DSML｜function_calls>
+<｜DSML｜invoke name="get_weather">
+<｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜function_calls>"#;
+
+        let config = get_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let id = &calls[0].id;
+        assert!(
+            id.starts_with("call_"),
+            "id should start with call_: {}",
+            id
+        );
+        let suffix = &id["call_".len()..];
+        assert_eq!(suffix.len(), 24, "hex suffix must be 24 chars: {}", suffix);
+        assert!(
+            suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "hex suffix must match [0-9a-f]{{24}}: {}",
+            suffix
+        );
     }
 
     #[test]
