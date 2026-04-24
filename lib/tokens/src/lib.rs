@@ -50,7 +50,7 @@ pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
 /// `u128` derive does not roundtrip reliably. Encoding as raw bytes is supported
 /// uniformly across msgpack, JSON, CBOR, etc.
 mod serde_bytes_u128 {
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S>(val: &u128, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -63,11 +63,43 @@ mod serde_bytes_u128 {
     where
         D: Deserializer<'de>,
     {
-        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
-        let array: [u8; 16] = bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("expected 16 bytes"))?;
-        Ok(u128::from_be_bytes(array))
+        use serde::de::{self, SeqAccess, Visitor};
+        use std::fmt;
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = [u8; 16];
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("16 bytes (msgpack bin) or a sequence of 16 u8 values")
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<[u8; 16], E> {
+                v.try_into()
+                    .map_err(|_| E::invalid_length(v.len(), &"16 bytes"))
+            }
+
+            fn visit_borrowed_bytes<E: de::Error>(self, v: &'de [u8]) -> Result<[u8; 16], E> {
+                self.visit_bytes(v)
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<[u8; 16], E> {
+                self.visit_bytes(&v)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u8; 16], A::Error> {
+                let mut arr = [0u8; 16];
+                for (i, slot) in arr.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(i, &"16 u8 elements"))?;
+                }
+                Ok(arr)
+            }
+        }
+
+        let arr = deserializer.deserialize_bytes(V)?;
+        Ok(u128::from_be_bytes(arr))
     }
 }
 
