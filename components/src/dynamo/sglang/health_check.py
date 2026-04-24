@@ -14,12 +14,9 @@ from typing import Any, Optional
 
 import sglang as sgl
 
-from dynamo.health_check import HealthCheckPayload
+from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
 
 logger = logging.getLogger(__name__)
-
-# Marker key set on health-check probe requests.
-HEALTH_CHECK_KEY = "_HEALTH_CHECK"
 
 
 def _get_bos_token_id_from_engine(engine: Optional[sgl.Engine]) -> int:

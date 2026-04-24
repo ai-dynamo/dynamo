@@ -9,8 +9,8 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.args import Config
-from dynamo.sglang.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -162,6 +162,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
+            # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
             async for res in results:
                 yield res
             return
