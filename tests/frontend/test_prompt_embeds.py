@@ -40,13 +40,10 @@ logger = logging.getLogger(__name__)
 # Test model - small and fast for CI
 TEST_MODEL = "Qwen/Qwen3-0.6B"
 
-# TODO: revert back to pytest.mark.nightly once this PR's pre-merge run
-# confirms the DYN_EVENT_PLANE auto-detect fix lets these tests initialize
-# the file-backed runtime without trying to connect to NATS.
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.vllm,
-    pytest.mark.pre_merge,
+    pytest.mark.nightly,
     pytest.mark.gpu_1,
     pytest.mark.model(TEST_MODEL),
 ]
