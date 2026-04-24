@@ -388,19 +388,38 @@ class KubernetesConnector(PlannerConnector):
     ) -> tuple[Optional[str], str]:
         """Return (dgd_service_name, component_name_for_filter).
 
-        Uses the DGD when available; otherwise falls back to backend defaults
-        so that stale/missing DGD state still lets us filter out LoRA cards
-        by their expected component name.
+        ``dgd_service_name`` is the DGD ``spec.services`` dict key (typically
+        PascalCase, e.g. ``"VllmPrefillWorker"``) and is used for Kubernetes
+        operations like patching replica counts.
+
+        ``component_name_for_filter`` is the component name that the Rust
+        runtime registers via ``Endpoint`` and writes into the MDC
+        ``component`` field. Source of truth, in priority order:
+
+        1. The user's ``--endpoint <ns>.<component>.<ep>`` override in the
+           worker's container args (supported by all backends --
+           see vllm/args.py:171-176, sglang/args.py:428, trtllm/args.py:137).
+        2. The backend-specific default from
+           :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
+           ``"backend"`` / ``"tensorrt_llm"``).
+
+        Note: the DGD services dict key (``service.name``) must NOT be used
+        here -- it is typically PascalCase (``"VllmPrefillWorker"``) and
+        would never match the lowercase value the worker writes to MDC.
         """
+        defaults = build_worker_info_from_defaults(backend, sub_component_type)
+        expected_component = defaults.component_name or ""
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_service_from_sub_component_type_or_name(
                 deployment, sub_component_type
             )
-            return service.name, service.name
+            user_component = service.get_component_name_from_endpoint_arg()
+            if user_component:
+                expected_component = user_component
+            return service.name, expected_component
         except PlannerError:
-            defaults = build_worker_info_from_defaults(backend, sub_component_type)
-            return None, defaults.component_name or ""
+            return None, expected_component
 
     def get_worker_info(
         self,

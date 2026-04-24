@@ -107,6 +107,8 @@ navigation:
         path: benchmarks/benchmarking.md
       - page: Mocker Offline Trace Replay
         path: benchmarks/mocker-trace-replay.md
+      - page: Planner Replay Benchmarking
+        path: benchmarks/planner-replay-benchmarking.md
       - section: Testing
         contents:
           - page: Mocker
@@ -132,7 +134,9 @@ navigation:
           - page: SGLang Diffusion
             path: backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
-            path: backends/trtllm/trtllm-video-diffusion.md
+            path: backends/trtllm/trtllm-diffusion.md
+      - page: Chat Processor Options
+        path: agents/chat-processor-options.md
       - page: Tool Calling
         path: agents/tool-calling.md
       - page: Reasoning
@@ -196,6 +200,8 @@ navigation:
             path: backends/sglang/sglang-observability.md
           - page: Agentic Workloads
             path: backends/sglang/agents.md
+          - page: HiCache
+            path: backends/sglang/sglang-hicache.md
       - section: TensorRT-LLM
         path: backends/trtllm/README.md
         contents:
@@ -205,8 +211,8 @@ navigation:
             path: backends/trtllm/trtllm-examples.md
           - page: Observability
             path: backends/trtllm/trtllm-observability.md
-          - page: Video Diffusion (Experimental)
-            path: backends/trtllm/trtllm-video-diffusion.md
+          - page: Diffusion (Experimental)
+            path: backends/trtllm/trtllm-diffusion.md
           - page: Known Issues and Mitigations
             path: backends/trtllm/trtllm-known-issues.md
       - page: vLLM
@@ -266,8 +272,6 @@ navigation:
     contents:
       - page: LMCache
         path: integrations/lmcache-integration.md
-      - page: SGLang HiCache
-        path: integrations/sglang-hicache.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
       - page: KV Events for Custom Engines

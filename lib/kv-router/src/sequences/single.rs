@@ -109,8 +109,6 @@ pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
-    #[cfg(test)]
-    block_size: usize,
     last_expiry_check_time: Instant,
 }
 
@@ -123,8 +121,6 @@ impl ActiveSequences {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
-            #[cfg(test)]
-            block_size,
             last_expiry_check_time: Instant::now(),
         }
     }
@@ -157,14 +153,12 @@ impl ActiveSequences {
         self.blocks.active_blocks()
     }
 
-    #[cfg(test)]
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
         self.prefill.snapshot().active_tokens_at(decay_now)
     }
 
     /// Add a new request with optional prompt-token load accounting.
     /// Returns block membership transitions plus any expired request IDs removed during cleanup.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
@@ -299,6 +293,31 @@ impl ActiveSequences {
         membership_delta
     }
 
+    pub fn new_tokens(&self, isl: usize, cached_tokens: usize) -> usize {
+        isl.checked_sub(cached_tokens).unwrap_or_else(|| {
+            tracing::error!(
+                "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens}, returning 0"
+            );
+            0
+        })
+    }
+
+    pub fn potential_blocks_and_tokens(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        isl: usize,
+        cached_tokens: usize,
+        decay_now: Instant,
+    ) -> (usize, usize) {
+        self.potential_blocks_and_tokens_with_prefill_tracking(
+            token_sequence,
+            isl,
+            cached_tokens,
+            true,
+            decay_now,
+        )
+    }
+
     /// Add an output block with a random hash and optional fractional decay weight.
     ///
     /// This is used during generation to track output blocks as they are created.
@@ -330,12 +349,11 @@ impl ActiveSequences {
         acquire.became_present_on_worker.then_some(random_hash)
     }
 
-    #[cfg(test)]
-    fn potential_blocks_and_tokens_with_prefill_tracking(
+    pub fn potential_blocks_and_tokens_with_prefill_tracking(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         isl: usize,
-        overlap: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
         decay_now: Instant,
     ) -> (usize, usize) {
@@ -346,7 +364,7 @@ impl ActiveSequences {
         };
         let active_tokens = self.active_tokens(decay_now);
         let potential_tokens = if track_prefill_tokens {
-            added_prefill_tokens(self.block_size, isl, overlap) + active_tokens
+            self.new_tokens(isl, cached_tokens) + active_tokens
         } else {
             active_tokens
         };

@@ -823,7 +823,7 @@ impl Drop for SlowQueryGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::Indexer;
+    use crate::kv_router::{Indexer, indexer::LowerTierIndexers};
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -923,7 +923,13 @@ mod tests {
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
         let kv_indexer = KvIndexer::new(token, 4, metrics);
-        (kv_indexer.clone(), Indexer::KvIndexer(kv_indexer))
+        (
+            kv_indexer.clone(),
+            Indexer::KvIndexer {
+                primary: kv_indexer,
+                lower_tier: LowerTierIndexers::new(1, 4),
+            },
+        )
     }
 
     async fn make_test_client(

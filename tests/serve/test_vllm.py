@@ -371,7 +371,7 @@ vllm_configs = {
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        # post_merge because needs real NIXL not stub
+        # TODO(DYN-2863): revert to post_merge once pre-merge validates the fix.
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
@@ -379,10 +379,10 @@ vllm_configs = {
                 1_710_490_000
             ),  # KV cache cap (2x safety over min=855_244_800)
             pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
-        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         script_args=[
             "--model",
             "Qwen/Qwen2-VL-2B-Instruct",

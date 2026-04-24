@@ -593,7 +593,6 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-            disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
@@ -612,7 +611,9 @@ async def init_llm_worker(
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
             media_fetcher = MediaFetcher()
             media_fetcher.timeout_ms(30000)
-            media_fetcher.allow_direct_port(False)
+            allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+            media_fetcher.allow_direct_ip(allow_internal)
+            media_fetcher.allow_direct_port(allow_internal)
 
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only
@@ -661,6 +662,7 @@ async def init_llm_worker(
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
+                    enable_local_indexer=config.enable_local_indexer,
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

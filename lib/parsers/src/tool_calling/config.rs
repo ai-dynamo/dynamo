@@ -25,6 +25,13 @@ pub struct JsonParserConfig {
     /// The type of JSON parser to use
     #[serde(default)]
     pub parser_type: JsonParserType,
+
+    /// Parse input as bare JSON (a `{...}` object or `[...]` array) with no
+    /// wrapping markers. Intended for guided-decoding paths where the backend
+    /// emits a raw JSON shape. When true, `tool_call_start_tokens` /
+    /// `tool_call_end_tokens` are ignored.
+    #[serde(default)]
+    pub bare_json_mode: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -36,6 +43,7 @@ impl Default for JsonParserConfig {
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
+            bare_json_mode: false,
         }
     }
 }
