@@ -110,16 +110,19 @@ navigation:
       - section: Cloud Provider Guides
         contents:
           - section: Amazon EKS
-            path: kubernetes/cloud-providers/eks.md
+            path: kubernetes/cloud-providers/eks/eks.md
             contents:
               - page: EFS Setup
-                path: kubernetes/cloud-providers/efs.md
-          - page: Azure AKS
-            path: kubernetes/cloud-providers/aks.md
+                path: kubernetes/cloud-providers/eks/efs.md
+          - section: Azure AKS
+            path: kubernetes/cloud-providers/aks/aks.md
+            contents:
+              - page: Azure Lustre CSI Driver
+                path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
           - page: Google GKE
-            path: kubernetes/cloud-providers/gke.md
+            path: kubernetes/cloud-providers/gke/gke.md
           - page: Amazon ECS
-            path: kubernetes/cloud-providers/ecs.md
+            path: kubernetes/cloud-providers/ecs/ecs.md
 
   # ==================== User Guides ====================
   - section: User Guides
