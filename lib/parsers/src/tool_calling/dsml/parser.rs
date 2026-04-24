@@ -177,31 +177,27 @@ fn parse_parameters(
     let prefix_escaped = regex::escape(&config.parameter_prefix);
     let end_escaped = regex::escape(&config.parameter_end);
 
+    // The `string="true|false"` attribute is optional: some model outputs omit it.
+    // When absent we best-effort parse the value (JSON → String fallback).
     let param_pattern = format!(
-        r#"(?s){}\"([^"]+)\"\s+string=\"(true|false)\"\s*>(.*?){}"#,
+        r#"(?s){}\"([^"]+)\"(?:\s+string=\"(true|false)\")?\s*>(.*?){}"#,
         prefix_escaped, end_escaped
     );
 
     let param_regex = Regex::new(&param_pattern)?;
 
     for param_match in param_regex.captures_iter(content) {
-        if let (Some(name_match), Some(string_match), Some(value_match)) =
-            (param_match.get(1), param_match.get(2), param_match.get(3))
-        {
+        if let (Some(name_match), Some(value_match)) = (param_match.get(1), param_match.get(3)) {
             let param_name = name_match.as_str().trim();
-            let is_string = string_match.as_str() == "true";
             let param_value = value_match.as_str().trim();
 
-            // Parse value based on string attribute
-            let value = if is_string {
-                // String type - use as-is
-                serde_json::Value::String(param_value.to_string())
-            } else {
-                // Non-string type - parse as JSON
-                serde_json::from_str(param_value).unwrap_or_else(|_| {
-                    // Fallback to string if JSON parsing fails
-                    serde_json::Value::String(param_value.to_string())
-                })
+            // Parse value based on string attribute (if present)
+            let value = match param_match.get(2).map(|m| m.as_str()) {
+                Some("true") => serde_json::Value::String(param_value.to_string()),
+                Some(_) => serde_json::from_str(param_value)
+                    .unwrap_or_else(|_| serde_json::Value::String(param_value.to_string())),
+                None => serde_json::from_str(param_value)
+                    .unwrap_or_else(|_| serde_json::Value::String(param_value.to_string())),
             };
 
             parameters.insert(param_name.to_string(), value);
@@ -551,6 +547,43 @@ mod tests {
 
         let (_, args) = extract_name_and_args(calls[0].clone());
         assert_eq!(args["empty"], "");
+    }
+
+    #[test]
+    fn test_parse_parameter_missing_string_attribute() {
+        // Model emits a parameter without the `string="..."` attribute.
+        // The parser should best-effort parse: JSON first, then fall back to string.
+        let input = r#"<｜DSML｜function_calls>
+<｜DSML｜invoke name="greet">
+<｜DSML｜parameter name="name">Alice</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜function_calls>"#;
+
+        let config = get_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "greet");
+        assert_eq!(args["name"], "Alice");
+    }
+
+    #[test]
+    fn test_parse_string_false_with_bare_word_value() {
+        // `string="false"` with a non-JSON bare word should still appear
+        // in the arguments (as the string fallback).
+        let input = r#"<｜DSML｜function_calls>
+<｜DSML｜invoke name="run">
+<｜DSML｜parameter name="mode" string="false">quickly</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜function_calls>"#;
+
+        let config = get_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let (_, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(args["mode"], "quickly");
     }
 
     #[test]
