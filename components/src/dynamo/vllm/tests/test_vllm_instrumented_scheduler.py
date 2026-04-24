@@ -249,6 +249,30 @@ def test_variance_spans_both_queues():
     assert q.var_prefill_length == pytest.approx(10000.0)
 
 
+def test_dp_rank_prefers_data_parallel_index():
+    """External DP + dense model: vLLM resets ``data_parallel_rank`` to 0 in
+    every child but keeps ``data_parallel_index`` as the true global rank.
+    The resolver must prefer the index so each DP child gets its own port.
+    """
+    pc = SimpleNamespace(data_parallel_index=1, data_parallel_rank=0)
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 1
+
+
+def test_dp_rank_falls_back_to_rank_when_index_absent():
+    pc = SimpleNamespace(data_parallel_rank=2)
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 2
+
+
+def test_dp_rank_handles_none_rank():
+    pc = SimpleNamespace(data_parallel_index=None, data_parallel_rank=None)
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 0
+
+
+def test_dp_rank_default_zero():
+    pc = SimpleNamespace()
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 0
+
+
 def test_decode_variance_spans_both_queues():
     """Decode variance mixes local-preempted (``self.waiting``) and
     remote-KV-waiting (``self.skipped_waiting``) into one accumulator.
