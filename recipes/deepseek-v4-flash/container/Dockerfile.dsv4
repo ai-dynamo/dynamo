@@ -8,8 +8,9 @@
 # parsers, hybrid CSA+HCA attention, MTP speculative decoding, and FP4 indexer.
 #
 # We take pre-built dynamo artifacts (wheels, nats, etcd, NIXL, UCX, dynamo.vllm
-# python worker) from a published nvcr.io/nvidia/ai-dynamo/vllm-runtime image and
-# layer them on top of the dsv4 vLLM image without touching the vLLM install.
+# python worker) from a locally-built Dynamo vLLM runtime image (produced via
+# <repo_root>/container/README.md) and layer them on top of the dsv4 vLLM image
+# without touching the vLLM install.
 #
 # Build (run from the repo root):
 #   docker build -f recipes/deepseek-v4-flash/container/Dockerfile.dsv4 \
@@ -20,7 +21,10 @@
 #
 # Both base images must be Python 3.12 (verified).
 
-ARG DYNAMO_SRC_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+# Default to the local tag produced by `container/render.py --framework vllm
+# --target runtime` + `docker build -t dynamo:latest-vllm-runtime ...`. Override
+# with --build-arg DYNAMO_SRC_IMAGE=... to use a published release tag instead.
+ARG DYNAMO_SRC_IMAGE=dynamo:latest-vllm-runtime
 ARG DSV4_BASE_IMAGE=vllm/vllm-openai:deepseekv4-cu130
 
 FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src

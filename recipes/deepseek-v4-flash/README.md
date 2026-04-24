@@ -13,14 +13,17 @@ Aggregated, single-replica: 1 decode pod running DP=4 + Expert Parallel on 4 B20
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
 2. **GPU cluster** with at least 4 B200 GPUs available on one node.
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.
-4. **Dynamo + vLLM image with the DeepSeek-V4 stack.** DeepSeek-V4-Flash is not in a stock vLLM release yet. Build the reference image using the Dockerfile at [`container/Dockerfile.dsv4`](container/Dockerfile.dsv4) — see [`container/README.md`](container/README.md) for build args and troubleshooting. Quick version, from the repo root:
+4. **Dynamo + vLLM image with the DeepSeek-V4 stack.** DeepSeek-V4-Flash is not in a stock vLLM release yet. It is built in two steps:
 
-   ```bash
-   docker build -f recipes/deepseek-v4-flash/container/Dockerfile.dsv4 \
-     -t <your-registry>/vllm-dsv4:<tag> .
-   ```
+   1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
+   2. Build the DeepSeek-V4-Flash overlay on top of it using [`container/Dockerfile.dsv4`](container/Dockerfile.dsv4). See [`container/README.md`](container/README.md) for build args and troubleshooting. From the repo root:
 
-   Then set `image:` in `vllm/agg/vllm-dgd.yaml` (both the frontend and decode workers) to `<your-registry>/vllm-dsv4:<tag>`.
+      ```bash
+      docker build -f recipes/deepseek-v4-flash/container/Dockerfile.dsv4 \
+        -t <your-registry>/vllm-dsv4:<tag> .
+      ```
+
+   Then set the `image:` fields in `vllm/agg/vllm-dgd.yaml` (both the frontend and decode workers) to `<your-registry>/vllm-dsv4:<tag>`.
 
 ## Quick Start
 
