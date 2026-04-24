@@ -148,49 +148,33 @@ class _DeferredAbort:
             )
 
     async def close(self) -> None:
-        """Finish any pending deferred-abort work when generation exits.
+        """Clean up the deferred-abort waiter when generation exits.
 
-        If cancellation was already requested but generation ended before any
-        engine output was yielded, the background task would otherwise wait
-        forever for signal_first_token(). Cancel that wait and issue the
-        real abort so engine-side request state still gets cleaned up.
+        Handles case 1b: if abort() was requested before the first token
+        arrived AND the generation loop exits without ever producing output,
+        the background _wait_and_abort task would otherwise remain parked on
+        first_token_event.wait() forever. Cancel it so it does not leak.
+
+        Safety invariant: this method must NOT call engine_client.abort() in
+        the pre-first-token window. Issuing abort before the engine has
+        produced output is exactly what this guard exists to avoid (it can
+        crash EngineCore while a NIXL KV transfer is still in flight on the
+        decode worker).
         """
         if self._abort_task is None:
             return
 
-        if self._abort_task.done():
-            try:
-                await self._abort_task
-            except asyncio.CancelledError:
-                pass
-            return
+        if not self._first_token_received:
+            # Case 1b: cancel the local waiter without firing the real abort.
+            self._abort_task.cancel()
 
-        if self._first_token_received:
-            try:
-                await self._abort_task
-            except asyncio.CancelledError:
-                pass
-            return
-
-        logger.debug(
-            f"Deferred abort: generation ended before first token for request "
-            f"{self._request_id}, aborting request now"
-        )
-        self._abort_task.cancel()
         try:
             await self._abort_task
         except asyncio.CancelledError:
             pass
-
-        try:
-            await self._engine_client.abort(self._request_id)
-            logger.debug(
-                f"Deferred abort: close() fired abort for request "
-                f"{self._request_id}"
-            )
         except Exception as e:
             logger.warning(
-                f"Deferred abort: close() abort failed for request "
+                f"Deferred abort: cleanup observed error for request "
                 f"{self._request_id}: {e}"
             )
 
@@ -2212,33 +2196,42 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             _DeferredAbort(self.engine_client, request_id) if is_decode_only else None
         )
 
-        async with self._abort_monitor(context, request_id, abort_guard=abort_guard):
-            try:
-                async for tok in self.generate_tokens(
-                    prompt,
-                    sampling_params,
-                    request_id,
-                    data_parallel_rank=dp_rank,
-                    lora_request=lora_request,
-                    embedding_sequence_length=embedding_sequence_length,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                ):
-                    if abort_guard is not None:
-                        abort_guard.signal_first_token()
-                    if prefill_result is not None and "completion_usage" in tok:
-                        tok["completion_usage"][
-                            "prompt_tokens_details"
-                        ] = prefill_prompt_tokens_details
-                    yield tok
-            except EngineDeadError as e:
-                logger.error(f"vLLM EngineDeadError: {e}")
-                logger.warning("Initiating Dynamo Runtime shutdown.")
-                self.runtime.shutdown()
-                os._exit(1)
-            finally:
-                if abort_guard is not None:
-                    await abort_guard.close()
+        try:
+            async with self._abort_monitor(
+                context, request_id, abort_guard=abort_guard
+            ):
+                try:
+                    async for tok in self.generate_tokens(
+                        prompt,
+                        sampling_params,
+                        request_id,
+                        data_parallel_rank=dp_rank,
+                        lora_request=lora_request,
+                        embedding_sequence_length=embedding_sequence_length,
+                        trace_headers=trace_headers,
+                        priority=priority,
+                    ):
+                        if abort_guard is not None:
+                            abort_guard.signal_first_token()
+                        if prefill_result is not None and "completion_usage" in tok:
+                            tok["completion_usage"][
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
+                        yield tok
+                except EngineDeadError as e:
+                    logger.error(f"vLLM EngineDeadError: {e}")
+                    logger.warning("Initiating Dynamo Runtime shutdown.")
+                    self.runtime.shutdown()
+                    os._exit(1)
+        finally:
+            # Runs after the monitor task has been torn down by the
+            # _abort_monitor context manager, so any deferred-abort task the
+            # monitor may have spawned is in its final, stable state here.
+            # close() cancels the waiter when no first token ever arrived
+            # (case 1b) WITHOUT firing engine_client.abort in the unsafe
+            # pre-first-token window.
+            if abort_guard is not None:
+                await abort_guard.close()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
