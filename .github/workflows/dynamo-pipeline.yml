@@ -1,0 +1,228 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dynamo Pipeline — single entry point for building the dynamo runtime image
+# and running all of its associated checks (rust, mypy, pytest parallel/
+# sequential/GPU).
+
+name: Dynamo Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      builder_name:
+        description: 'BuildKit builder name'
+        required: true
+        type: string
+      cuda_version:
+        description: 'CUDA version for the runtime image (e.g. 12.9)'
+        required: false
+        type: string
+        default: '12.9'
+      fresh_builder:
+        description: 'Always create a fresh K8s BuildKit builder (for nightly)'
+        required: false
+        type: boolean
+        default: false
+      build_timeout_minutes:
+        required: false
+        type: number
+        default: 30
+      no_cache:
+        description: 'Disable BuildKit cache-from/to. Nightly sets true for regression detection.'
+        required: false
+        type: boolean
+        default: false
+      cpu_parallel_test_markers:
+        required: true
+        type: string
+      cpu_sequential_test_markers:
+        required: true
+        type: string
+      gpu_test_markers:
+        required: true
+        type: string
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      SCCACHE_S3_BUCKET:
+        required: false
+      HF_TOKEN:
+        required: false
+
+jobs:
+  image:
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: runtime
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ inputs.builder_name }}
+      fresh_builder: ${{ inputs.fresh_builder }}
+      no_cache: ${{ inputs.no_cache }}
+      build_timeout_minutes: ${{ inputs.build_timeout_minutes }}
+    secrets: inherit
+
+  # rust-gpu-checks + mypy run inside the built images because they depend on
+  # native libs (NIXL, ffmpeg, CUDA) and pinned Python package versions that
+  # aren't reproducible on plain ubuntu-latest runners.
+  rust-gpu:
+    needs: image
+    runs-on: prod-tester-amd-gpu-v1
+    timeout-minutes: 30
+    env:
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Calculate runtime image tag
+        id: image
+        shell: bash
+        env:
+          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
+        run: |
+          CUDA_VERSION="${{ inputs.cuda_version }}"
+          CUDA_MAJOR=${CUDA_VERSION%%.*}
+          IMAGE_TAG=${{ github.sha }}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}
+          echo "runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull runtime image
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ steps.image.outputs.runtime_image }}
+      - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
+        env:
+          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          docker run --rm --runtime=nvidia --gpus all --user root -w /workspace/lib/llm \
+            --name ${{ env.CONTAINER_ID }}_rust_checks \
+            -e SCCACHE_BUCKET="${SCCACHE_S3_BUCKET}" \
+            -e SCCACHE_REGION="${AWS_DEFAULT_REGION}" \
+            -e AWS_ROLE_ARN \
+            -e AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token \
+            -v "${AWS_WEB_IDENTITY_TOKEN_FILE}:/run/secrets/aws-token:ro" \
+            ${{ steps.image.outputs.runtime_image }} \
+            bash -ec 'ARCH_ALT=x86_64 /workspace/container/use-sccache.sh install && \
+                      eval $(/workspace/container/use-sccache.sh setup-env) && \
+                      rustup component add rustfmt clippy && \
+                      cargo fmt -- --check && \
+                      cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture && \
+                      cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4 && \
+                      /workspace/container/use-sccache.sh show-stats "Rust Checks"'
+
+  mypy:
+    needs: image
+    runs-on: prod-tester-amd-v1
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Calculate test image tag
+        id: image
+        shell: bash
+        env:
+          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
+        run: |
+          CUDA_VERSION="${{ inputs.cuda_version }}"
+          CUDA_MAJOR=${CUDA_VERSION%%.*}
+          IMAGE_TAG=${{ github.sha }}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}-test
+          echo "test_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull test image
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          retry_pull ${{ steps.image.outputs.test_image }}
+      - name: Run mypy (components)
+        run: |
+          docker run --rm -w /workspace \
+            --name mypy_${{ github.run_id }}_${{ github.run_attempt }} \
+            ${{ steps.image.outputs.test_image }} \
+            bash -c '
+              MYPYPATH=components/src:lib/bindings/python/src
+              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
+              MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
+            '
+      - name: Run mypy (bindings)
+        run: |
+          docker run --rm -w /workspace \
+            --name mypy_bindings_${{ github.run_id }}_${{ github.run_attempt }} \
+            ${{ steps.image.outputs.test_image }} \
+            bash -c 'MYPYPATH=lib/bindings/python/src mypy -p dynamo'
+
+  # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
+  # below runs -n 0, so this job is NOT actually parallel right now.
+  parallel:
+    name: test
+    needs: image
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: parallel
+      amd_runner: prod-tester-amd-v1
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64", "arm64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
+      cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  sequential:
+    name: test
+    needs: image
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: sequential
+      amd_runner: prod-tester-amd-v1
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64", "arm64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
+      cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  gpu:
+    name: test
+    needs: image
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: gpu
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      gpu_test_markers: ${{ inputs.gpu_test_markers }}
+      gpu_test_timeout_minutes: 30
+    secrets: inherit

@@ -26,7 +26,9 @@ pytestmark = [
 
 
 class _MockEngine:
-    """Satisfies StageEngine Protocol — matches AsyncOmni.generate() signature."""
+    """Satisfies StageEngine Protocol — matches AsyncOmni interface."""
+
+    engine = None  # satisfies StageEngine.engine
 
     def __init__(self, output=None):
         self.received_prompt = None
@@ -43,6 +45,9 @@ class _MockEngine:
             yield self._output
 
         return _gen()
+
+    async def get_tokenizer(self):
+        return None
 
 
 class _ErrorEngine:
@@ -126,6 +131,50 @@ async def test_stage_connector_refs_input_path():
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1", "size": 10}
     assert chunks[0]["stage_connector_refs"]["0"] == {"name": "ref0", "size": 5}
     assert chunks[0]["original_prompt"] == {"prompt": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_stage_connector_refs_builds_engine_core_request():
+    """Stage N>0 without processor: upstream with .outputs builds OmniEngineCoreRequest."""
+    engine = _MockEngine()
+
+    # Mock upstream output that looks like a real RequestOutput (has .outputs[0].token_ids)
+    mock_output = SimpleNamespace(
+        outputs=[SimpleNamespace(token_ids=[100, 200, 300])],
+        prompt_token_ids=[1, 2],
+    )
+
+    in_connector = MagicMock()
+    in_connector.get.return_value = (
+        mock_output  # raw object, not {"engine_inputs": ...}
+    )
+
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): in_connector, ("1", "2"): out_connector},
+        stage_id=1,
+        stage_config=_make_stage_config(
+            default_sampling_params={"temperature": 0.9, "max_tokens": 100},
+        ),
+    )
+    # Mock the engine's output_processors for registration
+    engine.engine = MagicMock()
+    request = {
+        "request_id": "req-ecr",
+        "original_prompt": {"prompt": "hello"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+    }
+
+    _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    # The engine should receive an OmniEngineCoreRequest (not the raw dict)
+    assert hasattr(engine.received_prompt, "prompt_token_ids")
+    assert engine.received_prompt.prompt_token_ids == [100, 200, 300]
+    # Output processor should have been registered
+    engine.engine.output_processors[0].add_request.assert_called_once()
 
 
 @pytest.mark.asyncio

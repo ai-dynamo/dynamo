@@ -9,14 +9,15 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use rmp_serde::Deserializer;
 use serde::Deserialize;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::zmq_wire::RawKvEvent;
 
-use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
+use super::SharedCacheStatusTracker;
+use super::tracker::{
+    CacheStatusTracker, EventSource, RemoveEventInput, StorageTier, StoreEventInput,
+};
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 /// Event batch received from vLLM/TensorRT-LLM (array format)
@@ -48,7 +49,7 @@ impl VllmEventBatch {
 /// Start ZMQ listener and process events into tracker
 pub async fn start_simple_zmq_listener(
     endpoint: String,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     cancellation_token: CancellationToken,
     engine_source: EventSource,
 ) -> Result<JoinHandle<()>> {
@@ -65,7 +66,7 @@ pub async fn start_simple_zmq_listener(
 
 async fn run_listener_loop(
     endpoint: String,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     cancellation_token: CancellationToken,
     engine_source: EventSource,
 ) -> Result<()> {
@@ -136,7 +137,7 @@ async fn run_listener_loop(
                 // Process events
                 let mut tracker_guard = tracker.write().await;
                 for event in batch.events() {
-                    process_event(&mut tracker_guard, event.clone(), dp_rank, engine_source);
+                    process_event(&mut **tracker_guard, event.clone(), dp_rank, engine_source);
                 }
             }
         }
@@ -146,7 +147,7 @@ async fn run_listener_loop(
 }
 
 fn process_event(
-    tracker: &mut CacheStatusTracker,
+    tracker: &mut dyn CacheStatusTracker,
     event: RawKvEvent,
     data_parallel_rank: Option<i32>,
     engine_source: EventSource,
@@ -204,16 +205,16 @@ fn process_event(
                 let block_tokens = token_chunks[i].clone();
                 let block_hash_u64 = block_hash.into_u64();
 
-                tracker.handle_store(
-                    block_hash_u64.to_string(),
-                    engine_source,
-                    block_tokens,
-                    current_parent.clone(),
+                tracker.handle_store(StoreEventInput {
+                    block_hash: block_hash_u64.to_string(),
+                    source: engine_source,
+                    token_ids: block_tokens,
+                    parent_hash: current_parent.clone(),
                     block_size,
-                    lora_name.clone(),
-                    Some(storage_tier),
+                    lora_name: lora_name.clone(),
+                    tier: Some(storage_tier),
                     data_parallel_rank,
-                );
+                });
 
                 // Next block's parent is this block (only if hash was valid)
                 current_parent = Some(block_hash_u64.to_string());
@@ -233,7 +234,11 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(&block_hash.into_u64().to_string(), engine_source);
+                tracker.handle_remove(RemoveEventInput {
+                    block_hash: block_hash.into_u64().to_string(),
+                    source: engine_source,
+                    tier: Some(storage_tier),
+                });
             }
         }
 
