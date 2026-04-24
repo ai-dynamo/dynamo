@@ -28,7 +28,7 @@ use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use std::time::{Duration, Instant};
 
-use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::{dynamo_nvtx_range, dynamo_nvtx_range_async};
 use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
@@ -486,8 +486,15 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Execute all fetch tasks
+        // Execute all fetch tasks. Uses the handle-based NVTX guard
+        // (dynamo_nvtx_range_async!) — the stack-based dynamo_nvtx_range! is
+        // unsafe across the .await below: when the tokio runtime parks this
+        // task, its push/pop depth gets entangled with other concurrent
+        // tasks that land on the same worker, producing spurious nested
+        // ranges in the nsys trace. The handle-based range uses a stored
+        // nvtxRangeId_t so the end call is not thread-local.
         if !fetch_tasks.is_empty() {
+            let _nvtx_batch = dynamo_nvtx_range_async!("mm:frontend:decode:batch");
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
             let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
