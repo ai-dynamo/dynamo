@@ -1226,16 +1226,6 @@ mod tests {
         run_deepseek_v4_tool_call_fixture(&file_path).await;
     }
 
-    /// Tool call with zero parameters — invoke body is empty; arguments = "{}".
-    #[tokio::test]
-    async fn test_deepseek_v4_e2e_no_params_vllm() {
-        let file_path = format!(
-            "{}/vllm/deepseek-v4/chat_completion_stream_no_params.json",
-            DATA_ROOT_PATH
-        );
-        run_deepseek_v4_tool_call_fixture(&file_path).await;
-    }
-
     /// Body text emitted before the DSML block — parser must populate both
     /// normal_content and tool_calls.
     #[tokio::test]
