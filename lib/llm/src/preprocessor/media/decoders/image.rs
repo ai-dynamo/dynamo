@@ -4,6 +4,7 @@
 use std::io::Cursor;
 
 use anyhow::Result;
+use dynamo_runtime::dynamo_nvtx_range;
 use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
@@ -71,7 +72,12 @@ impl Decoder for ImageDecoder {
     }
 
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
-        let bytes = data.into_bytes()?;
+        let _nvtx_image = dynamo_nvtx_range!("mm:frontend:decode:image");
+
+        let bytes = {
+            let _nvtx_b64 = dynamo_nvtx_range!("mm:frontend:decode:b64");
+            data.into_bytes()?
+        };
 
         let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
         let mut limits = image::Limits::no_limits();
@@ -82,7 +88,10 @@ impl Decoder for ImageDecoder {
 
         let format = reader.format();
 
-        let img = reader.decode()?;
+        let img = {
+            let _nvtx_px = dynamo_nvtx_range!("mm:frontend:decode:pixels");
+            reader.decode()?
+        };
         let n_channels = img.color().channel_count();
 
         let (data, color_type) = match n_channels {
