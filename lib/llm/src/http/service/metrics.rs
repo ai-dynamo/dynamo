@@ -1614,7 +1614,12 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
             {
                 dynamo_err.message().to_string()
             } else if let Some(ref comments) = annotated.comment {
-                comments.join(" -- ")
+                let joined = comments.join(" -- ");
+                if joined.trim().is_empty() {
+                    "unspecified error".to_string()
+                } else {
+                    joined
+                }
             } else {
                 "unspecified error".to_string()
             };
@@ -1626,7 +1631,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     if let Some(comments) = annotated.comment {
         for comment in comments {
             // Axum's Event::comment() panics on \n / \r
-            event = event.comment(comment.replace('\n', " ").replace('\r', ""));
+            event = event.comment(comment.replace(['\n', '\r'], " "));
         }
     }
 
@@ -2573,5 +2578,100 @@ mod tests {
             ])
             .get();
         assert_eq!(success_count, 1);
+    }
+
+    /// Helper: run EventConverter through the metrics function and return the result.
+    fn run_event_converter(
+        annotated: crate::types::Annotated<String>,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    #[test]
+    fn test_error_event_uses_dynamo_error_message() {
+        use dynamo_runtime::error::DynamoError;
+        let annotated = crate::types::Annotated::<String> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(DynamoError::msg("image load failed: 403 Forbidden")),
+        };
+        let result = run_event_converter(annotated);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("403 Forbidden"),
+            "Expected DynamoError message, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_error_event_falls_back_to_comment() {
+        let annotated = crate::types::Annotated::<String> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["connection lost".to_string()]),
+            error: None,
+        };
+        let result = run_event_converter(annotated);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("connection lost"),
+            "Expected comment fallback, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_error_event_unspecified_when_no_message() {
+        let annotated = crate::types::Annotated::<String> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: None,
+        };
+        let result = run_event_converter(annotated);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert_eq!(err_msg, "unspecified error");
+    }
+
+    #[test]
+    fn test_error_event_empty_comment_falls_through() {
+        let annotated = crate::types::Annotated::<String> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["".to_string()]),
+            error: None,
+        };
+        let result = run_event_converter(annotated);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert_eq!(err_msg, "unspecified error");
+    }
+
+    #[test]
+    fn test_comment_newlines_sanitized() {
+        let annotated = crate::types::Annotated::<String> {
+            data: Some("test".to_string()),
+            id: None,
+            event: Some("metrics".to_string()),
+            comment: Some(vec!["line1\nline2\r\nline3".to_string()]),
+            error: None,
+        };
+        // Should not panic — axum's Event::comment() panics on \n/\r
+        let result = run_event_converter(annotated);
+        assert!(result.is_ok());
     }
 }

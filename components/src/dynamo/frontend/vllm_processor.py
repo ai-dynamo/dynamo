@@ -539,30 +539,20 @@ class VllmProcessor:
                         isinstance(engine_response, dict)
                         and engine_response.get("status") == "error"
                     ):
-                        backend_msg = engine_response.get(
-                            "message", "unknown backend error"
-                        )
+                        err = make_backend_error(engine_response, request_id)
                         logger.error(
-                            "Backend error for request %s: %s", request_id, backend_msg
+                            "Backend error for request %s: %s",
+                            request_id,
+                            err["error"]["message"],
                         )
-                        yield {
-                            "error": {
-                                "message": backend_msg,
-                                "type": "backend_error",
-                            }
-                        }
+                        yield err
                     else:
                         logger.error(
                             "No outputs from engine for request %s: %s",
                             request_id,
                             engine_response,
                         )
-                        yield {
-                            "error": {
-                                "message": f"Invalid engine response for request {request_id}",
-                                "type": "internal_error",
-                            }
-                        }
+                        yield make_internal_error(request_id)
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")

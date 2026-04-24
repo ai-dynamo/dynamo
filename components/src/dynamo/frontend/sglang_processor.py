@@ -38,7 +38,14 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    make_backend_error,
+    make_internal_error,
+    random_uuid,
+    worker_warmup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -481,30 +488,20 @@ class SglangProcessor:
                         isinstance(engine_response, dict)
                         and engine_response.get("status") == "error"
                     ):
-                        backend_msg = engine_response.get(
-                            "message", "unknown backend error"
-                        )
+                        err = make_backend_error(engine_response, request_id)
                         logger.error(
-                            "Backend error for request %s: %s", request_id, backend_msg
+                            "Backend error for request %s: %s",
+                            request_id,
+                            err["error"]["message"],
                         )
-                        yield {
-                            "error": {
-                                "message": backend_msg,
-                                "type": "backend_error",
-                            }
-                        }
+                        yield err
                     else:
                         logger.error(
                             "No outputs from engine for request %s: %s",
                             request_id,
                             engine_response,
                         )
-                        yield {
-                            "error": {
-                                "message": f"Invalid engine response for request {request_id}",
-                                "type": "internal_error",
-                            }
-                        }
+                        yield make_internal_error(request_id)
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -552,18 +549,8 @@ class SglangProcessor:
                     pending_usage = None
                     first_chunk = False
         except Exception as e:
-            logger.error(
-                "Error generating response for request %s: %s",
-                request_id,
-                e,
-                exc_info=True,
-            )
-            yield {
-                "error": {
-                    "message": str(e),
-                    "type": "internal_error",
-                }
-            }
+            logger.exception("Error generating response for request %s", request_id)
+            yield make_internal_error(request_id, str(e))
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(
