@@ -196,6 +196,7 @@ mod tests {
         .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let decay_now = Instant::now();
 
         seq_manager_1.add_request(
             SequenceRequest {
@@ -207,7 +208,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_1.add_request(
@@ -220,7 +221,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 1),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_2.add_request(
@@ -233,7 +234,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(1, 0),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -349,6 +350,7 @@ mod tests {
         .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let decay_now = Instant::now();
 
         seq_manager_1.add_request(
             SequenceRequest {
@@ -360,7 +362,7 @@ mod tests {
                 worker: WorkerWithDpRank::from_worker_id(0),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_1.add_request(
@@ -373,7 +375,7 @@ mod tests {
                 worker: WorkerWithDpRank::from_worker_id(1),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_2.add_request(
@@ -386,7 +388,7 @@ mod tests {
                 worker: WorkerWithDpRank::from_worker_id(2),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;

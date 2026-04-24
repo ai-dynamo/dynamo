@@ -712,6 +712,17 @@ impl SyncIndexer for ConcurrentRadixTree {
         cleanup_guard.mark_completed();
     }
 
+    fn worker_count(&self) -> usize {
+        self.tree_sizes.len()
+    }
+
+    fn block_count(&self) -> usize {
+        self.tree_sizes
+            .iter()
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .sum()
+    }
+
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         Some(self.dump_tree_as_events())
     }
