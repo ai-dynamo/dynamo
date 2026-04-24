@@ -70,8 +70,16 @@ async def parse_omni_request(
                 fps=nvext.get("fps"),
                 default_fps=default_video_fps,
             )
+        # Attach target h/w as mm_processor_kwargs so the HF processor
+        # routes through the multimodal path. AR-based image-gen models
+        # (e.g. GLM-Image) need their processor to emit the image-gen
+        # scaffold; without mm_processor_kwargs the preprocessor falls
+        # back to plain tokenization and the AR stage produces noise.
         return {
-            "engine_inputs": OmniTextPrompt(prompt=request.get("prompt", "")),
+            "engine_inputs": OmniTextPrompt(
+                prompt=request.get("prompt", ""),
+                mm_processor_kwargs={"target_h": height, "target_w": width},
+            ),
             "original_prompt": build_original_prompt(request, nvext, height, width),
             "sampling_params_list": sp,
         }
