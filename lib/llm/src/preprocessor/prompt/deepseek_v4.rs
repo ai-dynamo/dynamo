@@ -785,6 +785,14 @@ impl DeepSeekV4Formatter {
         }
     }
 
+    fn resolve_drop_thinking(
+        args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        args.and_then(|a| a.get("drop_thinking"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
     fn resolve_thinking_mode(
         &self,
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -821,6 +829,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
         let args = req.chat_template_args();
         let thinking_mode = self.resolve_thinking_mode(args);
         let reasoning_effort = Self::resolve_reasoning_effort(args);
+        let drop_thinking = Self::resolve_drop_thinking(args);
 
         let messages_value = req.messages();
         let messages_json =
@@ -878,7 +887,13 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
             }
         }
 
-        encode_messages_with_options(&messages_array, thinking_mode, true, true, reasoning_effort)
+        encode_messages_with_options(
+            &messages_array,
+            thinking_mode,
+            true,
+            drop_thinking,
+            reasoning_effort,
+        )
     }
 }
 
@@ -1099,6 +1114,39 @@ mod tests {
             after_bos.starts_with("Reasoning Effort:"),
             "REASONING_EFFORT_MAX preamble should appear at start (after BOS), got:\n{}",
             out
+        );
+    }
+
+    #[test]
+    fn test_render_drop_thinking_override_from_chat_template_args() {
+        use super::super::OAIPromptFormatter;
+        use std::collections::HashMap;
+
+        let messages = json!([
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "reasoning_content": "PRIOR", "content": "reply"},
+            {"role": "user", "content": "again"}
+        ]);
+
+        // Default (drop_thinking=true): prior reasoning stripped.
+        let req_default = MockRequest::new(messages.clone());
+        let formatter = DeepSeekV4Formatter::new_thinking();
+        let out_default = formatter.render(&req_default).unwrap();
+        assert!(
+            !out_default.contains("PRIOR"),
+            "default drop_thinking=true should strip prior reasoning, got:\n{}",
+            out_default
+        );
+
+        // drop_thinking=false override: prior reasoning survives.
+        let mut args = HashMap::new();
+        args.insert("drop_thinking".to_string(), json!(false));
+        let req_keep = MockRequest::new(messages).with_chat_template_args(args);
+        let out_keep = formatter.render(&req_keep).unwrap();
+        assert!(
+            out_keep.contains("PRIOR"),
+            "drop_thinking=false override should preserve prior reasoning, got:\n{}",
+            out_keep
         );
     }
 }
