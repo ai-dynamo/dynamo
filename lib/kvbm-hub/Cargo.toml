@@ -18,8 +18,8 @@ clap        = { version = "4", features = ["derive", "env"] }
 tracing-subscriber = { workspace = true }
 
 
-# Velo (discovery trait, Velo facade, handlers)
-velo        = { workspace = true }
+# Velo (discovery trait, Velo facade, handlers, messenger-backed work queues)
+velo        = { workspace = true, features = ["queue-messenger"] }
 velo-common = { workspace = true }
 
 # Async / core

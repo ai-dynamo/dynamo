@@ -61,8 +61,9 @@ pub use features::conditional_disagg::{ConditionalDisaggClient, ConditionalDisag
 pub use features::{FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 pub use protocol::{
-    ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, Feature, FeatureKey, ProbeResponse,
+    CD_PREFILL_QUEUE, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse,
+    ConditionalDisaggRole, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, Feature, FeatureKey,
+    PrefillRequest, ProbeResponse,
 };
 pub use registry::{EvictionCallback, InMemoryRegistry, PeerRegistry, RegistryError};
 pub use server::{HubServer, HubServerBuilder, HubServerState};

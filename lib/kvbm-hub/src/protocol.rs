@@ -64,6 +64,12 @@ pub mod paths {
     pub const CD_INSTANCES: &str = "/v1/features/conditional-disagg/instances";
 }
 
+/// Velo-queue name used by the ConditionalDisagg feature to move prefill
+/// requests from Decode workers to Prefill workers. The hub owns the queue;
+/// Decode clients enqueue and Prefill clients dequeue via velo active
+/// messaging (the queue is backed by [`velo::queue`]).
+pub const CD_PREFILL_QUEUE: &str = "kvbm.cd.prefill_requests";
+
 /// Request body for `POST /v1/instances`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
@@ -132,6 +138,21 @@ pub struct ConditionalDisaggInstancesResponse {
     pub prefill: Vec<InstanceId>,
     /// Instance ids currently registered in the Decode role.
     pub decode: Vec<InstanceId>,
+}
+
+/// A prefill request enqueued by a Decode worker and consumed by a Prefill
+/// worker via the hub's CD queue.
+///
+/// v1 is intentionally minimal — it carries enough to let the Prefill
+/// worker route a response back. Future fields (token ids, sampling
+/// parameters, block hashes) are additive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrefillRequest {
+    /// Caller-chosen id, stable across the request lifecycle.
+    pub request_id: String,
+    /// Instance id of the Decode worker that issued the request, so the
+    /// Prefill worker knows where to send results.
+    pub decode_instance_id: InstanceId,
 }
 
 /// Response body for `POST /v1/instances`.
@@ -319,6 +340,22 @@ mod tests {
         let json = serde_json::to_string(&orig).unwrap();
         let back: ConditionalDisaggInstancesResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back, orig);
+    }
+
+    #[test]
+    fn prefill_request_serde_round_trip() {
+        let orig = PrefillRequest {
+            request_id: "req-123".to_string(),
+            decode_instance_id: InstanceId::new_v4(),
+        };
+        let json = serde_json::to_string(&orig).unwrap();
+        let back: PrefillRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, orig);
+    }
+
+    #[test]
+    fn cd_prefill_queue_name_is_stable() {
+        assert_eq!(CD_PREFILL_QUEUE, "kvbm.cd.prefill_requests");
     }
 
     #[test]

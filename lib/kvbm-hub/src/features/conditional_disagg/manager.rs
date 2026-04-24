@@ -9,11 +9,13 @@ use std::sync::{Arc, OnceLock};
 use axum::{Json, Router, extract::State, routing::get};
 use futures::future::BoxFuture;
 use parking_lot::RwLock;
+use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
 use velo_common::InstanceId;
 
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{
     self, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, Feature, FeatureKey,
+    PrefillRequest,
 };
 
 /// Tracks which instances participate in ConditionalDisagg and under what role.
@@ -23,6 +25,12 @@ use crate::protocol::{
 pub struct ConditionalDisaggManager {
     inner: RwLock<CdInner>,
     velo: OnceLock<Arc<velo::Velo>>,
+    /// Hub-local queue backend owning the CD prefill queue. Lazily created
+    /// during [`FeatureManager::attach`] when the hub has a Velo instance —
+    /// `None` when the hub is discovery-only.
+    queue_backend: OnceLock<Arc<MessengerQueueBackend>>,
+    /// Optional bound on the prefill queue depth. `None` = unbounded.
+    queue_capacity: Option<usize>,
 }
 
 struct CdInner {
@@ -49,8 +57,14 @@ impl Default for ConditionalDisaggManager {
 }
 
 impl ConditionalDisaggManager {
-    /// Create an empty manager with no attached Velo.
+    /// Create an empty manager with no attached Velo and an unbounded
+    /// prefill queue.
     pub fn new() -> Self {
+        Self::with_queue_capacity(None)
+    }
+
+    /// Create a manager with an explicit capacity bound on the prefill queue.
+    pub fn with_queue_capacity(capacity: Option<usize>) -> Self {
         Self {
             inner: RwLock::new(CdInner {
                 prefill: HashSet::new(),
@@ -58,6 +72,8 @@ impl ConditionalDisaggManager {
                 by_instance: HashMap::new(),
             }),
             velo: OnceLock::new(),
+            queue_backend: OnceLock::new(),
+            queue_capacity: capacity,
         }
     }
 
@@ -71,10 +87,14 @@ impl ConditionalDisaggManager {
     }
 
     /// Hub Velo handle stashed during [`FeatureManager::attach`], if any.
-    ///
-    /// Reserved for future use when the manager begins owning Velo queues.
     pub fn velo_handle(&self) -> Option<&Arc<velo::Velo>> {
         self.velo.get()
+    }
+
+    /// Hub-local queue backend for the CD prefill queue, if the hub was
+    /// configured with a Velo instance.
+    pub fn queue_backend(&self) -> Option<&Arc<MessengerQueueBackend>> {
+        self.queue_backend.get()
     }
 }
 
@@ -105,11 +125,38 @@ impl FeatureManager for ConditionalDisaggManager {
         FeatureKey::ConditionalDisagg
     }
 
-    fn attach(&self, ctx: HubContext) -> Result<(), FeatureError> {
-        if let Some(velo) = ctx.velo {
+    fn attach<'a>(&'a self, ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>> {
+        Box::pin(async move {
+            let Some(velo) = ctx.velo else {
+                // Discovery-only hub: no Velo, so no queue surface. The CD
+                // list endpoints still work — only the queue handlers are
+                // skipped.
+                return Ok(());
+            };
+
+            let backend = Arc::new(MessengerQueueBackend::new(
+                velo.messenger().clone(),
+                velo.instance_id(),
+                MessengerQueueConfig {
+                    capacity: self.queue_capacity,
+                },
+            ));
+
+            // Eagerly instantiate a local receiver. The first `.receiver()`
+            // / `.sender()` call is what registers the `velo.queue.rpc`
+            // handler on the hub's Velo, so without this the handler is
+            // absent and remote clients get a "handler not found" error on
+            // their first enqueue. Dropping the receiver is fine — the
+            // underlying queue service stays alive as long as the backend
+            // is held.
+            velo::queue::receiver::<PrefillRequest>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
+                .await
+                .map_err(|e| FeatureError::Other(anyhow::anyhow!("CD queue init: {e}")))?;
+
+            let _ = self.queue_backend.set(backend);
             let _ = self.velo.set(velo);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn on_register<'a>(

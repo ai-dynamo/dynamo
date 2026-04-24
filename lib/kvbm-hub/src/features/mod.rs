@@ -69,8 +69,9 @@ pub trait FeatureManager: Send + Sync + 'static {
 
     /// Called exactly once during [`HubServerBuilder::serve`](crate::HubServerBuilder::serve)
     /// after the registry and (optional) hub Velo are built. Implementations
-    /// may stash references from the context for later use.
-    fn attach(&self, ctx: HubContext) -> Result<(), FeatureError>;
+    /// may stash references from the context and perform any async
+    /// initialization (e.g. registering velo handlers).
+    fn attach<'a>(&'a self, ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>>;
 
     /// Called after base registration succeeds, for every [`Feature`] in the
     /// [`RegisterRequest`](crate::protocol::RegisterRequest) that matches

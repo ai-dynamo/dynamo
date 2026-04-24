@@ -277,6 +277,7 @@ impl HubServerBuilder {
         };
         for (key, mgr) in &managers {
             mgr.attach(ctx.clone())
+                .await
                 .map_err(|e| anyhow::anyhow!("FeatureManager({key:?}) attach: {e}"))?;
         }
 

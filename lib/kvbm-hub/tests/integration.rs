@@ -10,8 +10,8 @@ use kvbm_hub::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use kvbm_hub::protocol::{
     ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, ErrorBody,
     ErrorCode, Feature, HeartbeatResponse, ListInstancesResponse, PeerLookupResponse,
-    ProbeResponse, RegisterRequest, RegisterResponse, instance_by_id, instance_heartbeat,
-    instance_probe, paths, peers_by_instance, peers_by_worker,
+    PrefillRequest, ProbeResponse, RegisterRequest, RegisterResponse, instance_by_id,
+    instance_heartbeat, instance_probe, paths, peers_by_instance, peers_by_worker,
 };
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
 use velo::discovery::PeerDiscovery;
@@ -980,8 +980,16 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
     p_hub.register_handlers(&p_velo).unwrap();
     d_hub.register_handlers(&d_velo).unwrap();
 
-    let p_cd = ConditionalDisaggClient::new(Arc::clone(&p_hub), ConditionalDisaggRole::Prefill);
-    let d_cd = ConditionalDisaggClient::new(Arc::clone(&d_hub), ConditionalDisaggRole::Decode);
+    let p_cd = ConditionalDisaggClient::new(
+        Arc::clone(&p_hub),
+        Arc::clone(&p_velo),
+        ConditionalDisaggRole::Prefill,
+    );
+    let d_cd = ConditionalDisaggClient::new(
+        Arc::clone(&d_hub),
+        Arc::clone(&d_velo),
+        ConditionalDisaggRole::Decode,
+    );
 
     let p_hub_id = p_cd
         .register(p_velo.peer_info())
@@ -1053,4 +1061,53 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
         let body: ProbeResponse = resp.json().await.unwrap();
         assert!(body.ok, "probe returned not-ok for {id}");
     }
+
+    // ---- Prefill queue handshake -------------------------------------------
+    //
+    // Decode pushes a PrefillRequest to the hub's CD queue; Prefill pulls
+    // it back via a timed dequeue. Empty-queue pulls return None.
+
+    // First: Prefill waits on an empty queue and observes the timeout path.
+    let empty = p_cd
+        .pull_prefill_request(Duration::from_millis(150))
+        .await
+        .unwrap();
+    assert!(
+        empty.is_none(),
+        "pull on empty queue should return None, got {empty:?}"
+    );
+
+    // Decode pushes a request.
+    let req = PrefillRequest {
+        request_id: "req-golden-1".to_string(),
+        decode_instance_id: d_id,
+    };
+    d_cd.push_prefill_request(&req).await.unwrap();
+
+    // Prefill pulls and receives it.
+    let pulled = p_cd
+        .pull_prefill_request(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .expect("prefill should dequeue the request Decode just pushed");
+    assert_eq!(pulled, req);
+
+    // Queue is drained — another pull returns None within the timeout window.
+    let empty_again = p_cd
+        .pull_prefill_request(Duration::from_millis(150))
+        .await
+        .unwrap();
+    assert!(empty_again.is_none());
+
+    // Role guard: Prefill cannot push, Decode cannot pull.
+    assert!(
+        p_cd.push_prefill_request(&req).await.is_err(),
+        "prefill must not be allowed to push"
+    );
+    assert!(
+        d_cd.pull_prefill_request(Duration::from_millis(10))
+            .await
+            .is_err(),
+        "decode must not be allowed to pull"
+    );
 }
