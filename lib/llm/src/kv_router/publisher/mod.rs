@@ -88,7 +88,7 @@ impl KvPublisherMetrics {
                         Arc::new(Self { engines_dropped_events_total })
                     }
                     Err(e) => {
-                        tracing::error!("Failed to register kv_publisher metrics with component: {}. Dropped-event counts will not be observable on /metrics.", e);
+                        tracing::warn!("Failed to create kv_publisher metrics from component: {}. Using unregistered metrics as fallback.", e);
                         Arc::new(Self::new_unregistered())
                     }
                 }
