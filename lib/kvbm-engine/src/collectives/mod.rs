@@ -9,6 +9,7 @@
 //!
 //! - [`StubCollectiveOps`]: No-op implementation for testing and single-worker scenarios
 //! - [`NcclCollectives`]: NCCL-based implementation for GPU collective operations (requires `nccl` feature)
+//! - [`OneCclCollectives`]: oneCCL-based implementation for XPU collective operations (requires `oneccl` feature)
 //!
 //! # Architecture
 //!
@@ -46,12 +47,22 @@ mod bootstrap;
 #[cfg(feature = "nccl")]
 mod nccl;
 
+#[cfg(feature = "oneccl")]
+mod oneccl_bootstrap;
+#[cfg(feature = "oneccl")]
+mod oneccl;
+
 pub use stub::StubCollectiveOps;
 
 #[cfg(feature = "nccl")]
 pub use bootstrap::NcclBootstrap;
 #[cfg(feature = "nccl")]
-pub use nccl::{CudaEventRegistrar, LayoutResolver, NcclCollectives};
+pub use nccl::{CudaEventRegistrar, NcclCollectives};
+
+#[cfg(feature = "oneccl")]
+pub use oneccl_bootstrap::OneCclBootstrap;
+#[cfg(feature = "oneccl")]
+pub use oneccl::OneCclCollectives;
 
 use std::ops::Range;
 
@@ -59,19 +70,28 @@ use anyhow::Result;
 
 use crate::BlockId;
 use kvbm_common::LogicalLayoutHandle;
+use kvbm_physical::layout::PhysicalLayout;
 use kvbm_physical::transfer::TransferCompleteNotification;
+
+/// Trait for resolving logical layout handles to physical layouts.
+///
+/// This trait decouples collective implementations from [`PhysicalWorker`],
+/// allowing collective operations to work with any layout resolution strategy.
+/// Shared by both NCCL and oneCCL backends.
+pub trait LayoutResolver: Send + Sync {
+    /// Resolve a logical layout handle to a physical layout.
+    fn resolve_layout(&self, logical: LogicalLayoutHandle) -> Result<PhysicalLayout>;
+}
 
 /// Collective communication operations for distributed workers.
 ///
 /// This trait defines the collective operations needed by replicated data workers
-/// to broadcast data across ranks. Implementations may use NCCL, NIXL, or other
+/// to broadcast data across ranks. Implementations may use NCCL, oneCCL, or other
 /// collective communication libraries.
 ///
 /// # Thread Safety
 ///
 /// Implementations must be `Send + Sync` to allow sharing across threads.
-/// NCCL operations are inherently thread-safe when used correctly (one stream
-/// per communicator per thread).
 pub trait CollectiveOps: Send + Sync {
     /// Broadcast blocks from rank 0 to all other ranks.
     ///

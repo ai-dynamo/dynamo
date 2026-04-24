@@ -1318,6 +1318,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccl-bindings"
+version = "2021.15.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4708,6 +4715,7 @@ dependencies = [
  "kvbm-physical",
  "libc",
  "nvtx",
+ "oneapi-rs",
  "oneshot",
  "parking_lot",
  "rayon",
@@ -6019,6 +6027,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "oneapi-rs"
 version = "0.1.0"
 dependencies = [
+ "ccl-bindings",
  "sycl-bindings",
 ]
 

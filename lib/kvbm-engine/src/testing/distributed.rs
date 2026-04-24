@@ -543,7 +543,7 @@ pub fn create_direct_worker(
     let manager = TransferManager::builder()
         .event_system(Arc::new(event_system))
         .nixl_agent(agent.clone())
-        .cuda_device_id(0)
+        .device_id(0)
         .build()?;
 
     // Create and register G2 physical layout
