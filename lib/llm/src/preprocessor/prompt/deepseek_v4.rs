@@ -88,29 +88,51 @@ pub enum ReasoningEffort {
 }
 
 /// Serialize a JSON value to match Python's `json.dumps(ensure_ascii=False)` spacing.
-/// Python inserts a space after every `:` and `,` outside of strings.
+/// Python's default separators are `(', ', ': ')`; we use a custom `Formatter`
+/// so escape sequences inside strings can't confuse state tracking.
 fn to_json(value: &JsonValue) -> String {
-    let compact = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    use serde::Serialize;
+    use serde_json::ser::Formatter;
+    use std::io;
 
-    let mut result = String::with_capacity(compact.len() + compact.len() / 4);
-    let mut in_string = false;
-    let mut prev_char = '\0';
+    struct PythonFormatter;
 
-    for ch in compact.chars() {
-        if ch == '"' && prev_char != '\\' {
-            in_string = !in_string;
+    impl Formatter for PythonFormatter {
+        fn begin_array_value<W: ?Sized + io::Write>(
+            &mut self,
+            writer: &mut W,
+            first: bool,
+        ) -> io::Result<()> {
+            if first {
+                Ok(())
+            } else {
+                writer.write_all(b", ")
+            }
         }
 
-        result.push(ch);
-
-        if !in_string && (ch == ':' || ch == ',') {
-            result.push(' ');
+        fn begin_object_key<W: ?Sized + io::Write>(
+            &mut self,
+            writer: &mut W,
+            first: bool,
+        ) -> io::Result<()> {
+            if first {
+                Ok(())
+            } else {
+                writer.write_all(b", ")
+            }
         }
 
-        prev_char = ch;
+        fn begin_object_value<W: ?Sized + io::Write>(&mut self, writer: &mut W) -> io::Result<()> {
+            writer.write_all(b": ")
+        }
     }
 
-    result
+    let mut buf = Vec::with_capacity(64);
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonFormatter);
+    if value.serialize(&mut ser).is_err() {
+        return "{}".to_string();
+    }
+    String::from_utf8(buf).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Extract function definitions from OpenAI-format tool list.
@@ -136,6 +158,10 @@ fn render_tools(tools: &[JsonValue]) -> String {
 }
 
 /// Find the index of the last user/developer message.
+///
+/// Returns `None` when no such message exists. Callers should treat `None`
+/// as Python's `-1` sentinel: `idx >= -1` is always true in Python, so use
+/// `Option::is_none_or(|u| idx >= u)` (or `>`) to match the reference encoder.
 fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
     messages
         .iter()
@@ -253,9 +279,9 @@ fn render_message(
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
     reasoning_effort: Option<ReasoningEffort>,
+    last_user_idx: Option<usize>,
 ) -> Result<String> {
     let msg = &messages[index];
-    let last_user_idx = find_last_user_index(messages);
 
     let role = msg
         .get("role")
@@ -358,10 +384,7 @@ fn render_message(
                 .get("reasoning_content")
                 .and_then(|c| c.as_str())
                 .unwrap_or("");
-            let wo_eos = msg
-                .get("wo_eos")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let wo_eos = msg.get("wo_eos").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let prev_has_task = index > 0
                 && messages[index - 1]
@@ -371,8 +394,7 @@ fn render_message(
 
             let mut thinking_part = String::new();
             if thinking_mode == ThinkingMode::Thinking && !prev_has_task {
-                let render_thinking = !drop_thinking
-                    || last_user_idx.is_some_and(|u| index > u);
+                let render_thinking = !drop_thinking || last_user_idx.is_none_or(|u| index > u);
                 if render_thinking {
                     thinking_part.push_str(reasoning);
                     thinking_part.push_str(tokens::THINKING_END);
@@ -437,8 +459,7 @@ fn render_message(
     // Transition tokens based on task field and role.
     let task = msg.get("task").and_then(|v| v.as_str());
     if let Some(task) = task {
-        let sp = task_token(task)
-            .with_context(|| format!("Invalid task: '{}'", task))?;
+        let sp = task_token(task).with_context(|| format!("Invalid task: '{}'", task))?;
         if task != "action" {
             prompt.push_str(sp);
         } else {
@@ -453,7 +474,7 @@ fn render_message(
     } else if matches!(role, "user" | "developer") {
         prompt.push_str(tokens::ASSISTANT_START);
         let seed_thinking = thinking_mode == ThinkingMode::Thinking
-            && (!drop_thinking || last_user_idx.is_some_and(|u| index >= u));
+            && (!drop_thinking || last_user_idx.is_none_or(|u| index >= u));
         prompt.push_str(if seed_thinking {
             tokens::THINKING_START
         } else {
@@ -623,10 +644,8 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
                 .collect();
 
             if tool_positions.len() > 1 {
-                let mut tool_blocks: Vec<JsonValue> = tool_positions
-                    .iter()
-                    .map(|&i| blocks[i].clone())
-                    .collect();
+                let mut tool_blocks: Vec<JsonValue> =
+                    tool_positions.iter().map(|&i| blocks[i].clone()).collect();
                 tool_blocks.sort_by_key(|b| {
                     let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
                     *last_order.get(id).unwrap_or(&0)
@@ -643,7 +662,7 @@ pub fn sort_tool_results_by_call_order(mut messages: Vec<JsonValue>) -> Vec<Json
 
 /// Drop reasoning and non-essential messages before the last user message.
 fn drop_thinking_messages(messages: Vec<JsonValue>) -> Vec<JsonValue> {
-    let last_user_idx = find_last_user_index(&messages).unwrap_or(usize::MAX);
+    let last_user_idx = find_last_user_index(&messages);
     let mut out = Vec::with_capacity(messages.len());
     const KEEP: &[&str] = &[
         "user",
@@ -655,7 +674,7 @@ fn drop_thinking_messages(messages: Vec<JsonValue>) -> Vec<JsonValue> {
 
     for (idx, mut msg) in messages.into_iter().enumerate() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if KEEP.contains(&role) || idx >= last_user_idx {
+        if KEEP.contains(&role) || last_user_idx.is_none_or(|u| idx >= u) {
             out.push(msg);
         } else if role == "assistant" {
             if let Some(obj) = msg.as_object_mut() {
@@ -718,6 +737,7 @@ pub fn encode_messages_with_options(
         full = drop_thinking_messages(full);
     }
 
+    let last_user_idx = find_last_user_index(&full);
     for idx in 0..full.len() {
         let part = render_message(
             idx,
@@ -725,6 +745,7 @@ pub fn encode_messages_with_options(
             thinking_mode,
             effective_drop_thinking,
             reasoning_effort,
+            last_user_idx,
         )?;
         prompt.push_str(&part);
     }
@@ -858,24 +879,26 @@ mod tests {
             {"role": "assistant", "reasoning_content": "greet", "content": "Hi!"},
             {"role": "user", "content": "What is 2+2?"}
         ]);
-        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true)
-            .unwrap();
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
         assert!(out.starts_with(tokens::BOS));
-        assert!(out.ends_with(&format!("{}{}", tokens::ASSISTANT_START, tokens::THINKING_START)));
+        assert!(out.ends_with(&format!(
+            "{}{}",
+            tokens::ASSISTANT_START,
+            tokens::THINKING_START
+        )));
         // drop_thinking default true → earlier reasoning stripped
         assert!(!out.contains("greet"));
     }
 
     #[test]
     fn test_thinking_with_tools() {
-        let raw = std::fs::read_to_string(
-            "../../DeepSeek-V4-Pro/encoding/tests/test_input_1.json",
-        )
-        .or_else(|_| {
-            std::fs::read_to_string(
-                "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_input_1.json",
-            )
-        });
+        let raw = std::fs::read_to_string("../../DeepSeek-V4-Pro/encoding/tests/test_input_1.json")
+            .or_else(|_| {
+                std::fs::read_to_string(
+                    "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_input_1.json",
+                )
+            });
         let Ok(data) = raw else { return };
         let parsed: JsonValue = serde_json::from_str(&data).unwrap();
         let mut messages = parsed.get("messages").unwrap().as_array().unwrap().clone();
@@ -885,8 +908,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("tools".to_string(), tools);
-        let out =
-            encode_messages(&messages, ThinkingMode::Thinking, true).unwrap();
+        let out = encode_messages(&messages, ThinkingMode::Thinking, true).unwrap();
         let expected = std::fs::read_to_string(
             "/home/ayush-lab/Work/dynamo/DeepSeek-V4-Pro/encoding/tests/test_output_1.txt",
         )
@@ -964,8 +986,7 @@ mod tests {
                 {"type": "text", "text": "suffix"}
             ]}
         ]);
-        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Chat, false)
-            .unwrap();
+        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Chat, false).unwrap();
         assert!(out.contains("prefix\n\n<tool_result>RESULT</tool_result>\n\nsuffix"));
     }
 
@@ -980,9 +1001,50 @@ mod tests {
             {"role": "assistant", "reasoning_content": "PRIOR_REASONING", "content": "reply"},
             {"role": "user", "content": "again"}
         ]);
-        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true)
-            .unwrap();
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
         // Tools present → drop_thinking auto-disabled → earlier reasoning preserved.
         assert!(out.contains("PRIOR_REASONING"));
+    }
+
+    // ---- Regression tests for known divergences from the Python reference ----
+
+    /// Bug: `last_user_idx = None` (no user/developer in history) should behave
+    /// like Python's `-1` sentinel — `index >= -1` / `idx >= -1` always true, so
+    /// earlier reasoning is preserved and the assistant's reasoning block is
+    /// rendered. Rust defaulting `None` to `usize::MAX` / `is_some_and` silently
+    /// stripped reasoning instead.
+    ///
+    /// Byte-equivalent to Python reference with the same input:
+    /// `<BOS>sysREASONING_BLOCK</think>hello<EOS>`
+    #[test]
+    fn test_assistant_reasoning_preserved_when_no_user_in_history() {
+        let messages = json!([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "hello", "reasoning_content": "REASONING_BLOCK"}
+        ]);
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+        assert_eq!(
+            out, "<｜begin▁of▁sentence｜>sysREASONING_BLOCK</think>hello<｜end▁of▁sentence｜>",
+            "Output must match Python reference byte-for-byte when no user/developer in history"
+        );
+    }
+
+    /// Bug: `to_json` tracks in-string state via `prev_char != '\\'` which
+    /// mis-handles consecutive backslashes. A value containing `\\` (one literal
+    /// backslash in JSON) makes the helper think the closing `"` is escaped,
+    /// so it stops inserting Python-compatible spaces after subsequent `:`/`,`.
+    ///
+    /// Python `json.dumps({"path": "\\", "count": 5}, ensure_ascii=False)`
+    /// emits `{"path": "\\", "count": 5}` — space after every `:` and `,`.
+    #[test]
+    fn test_to_json_preserves_spacing_past_escaped_backslash() {
+        let v = json!({"path": "\\", "count": 5});
+        let got = to_json(&v);
+        assert_eq!(
+            got, r#"{"path": "\\", "count": 5}"#,
+            "to_json must match Python's json.dumps formatting past an escaped backslash"
+        );
     }
 }

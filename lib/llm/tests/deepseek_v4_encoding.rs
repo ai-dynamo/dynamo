@@ -78,19 +78,31 @@ fn run_official_test(input_file: &str, output_file: &str, thinking_mode: Thinkin
 /// Case 1 — thinking mode, single tool, tool result round-trip.
 #[test]
 fn test_official_thinking_with_tools() {
-    run_official_test("test_input_1.json", "test_output_1.txt", ThinkingMode::Thinking);
+    run_official_test(
+        "test_input_1.json",
+        "test_output_1.txt",
+        ThinkingMode::Thinking,
+    );
 }
 
 /// Case 2 — thinking mode, no tools, multi-turn (drop_thinking strips earlier reasoning).
 #[test]
 fn test_official_thinking_no_tools_multiturn() {
-    run_official_test("test_input_2.json", "test_output_2.txt", ThinkingMode::Thinking);
+    run_official_test(
+        "test_input_2.json",
+        "test_output_2.txt",
+        ThinkingMode::Thinking,
+    );
 }
 
 /// Case 3 — thinking mode, developer role with tools + latest_reminder + tool result.
 #[test]
 fn test_official_developer_with_tools_and_reminder() {
-    run_official_test("test_input_3.json", "test_output_3.txt", ThinkingMode::Thinking);
+    run_official_test(
+        "test_input_3.json",
+        "test_output_3.txt",
+        ThinkingMode::Thinking,
+    );
 }
 
 /// Case 4 — chat mode, latest_reminder + task="action" + mask preservation.
