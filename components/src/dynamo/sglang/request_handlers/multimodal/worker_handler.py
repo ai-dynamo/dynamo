@@ -121,16 +121,13 @@ class EmbeddingsProcessor:
         """Create processor_output mm_item for SGLang async_generate."""
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        if modality == "IMAGE":
-            grid_key = "image_grid_thw"
-            grid_payload = torch.tensor(grid_values)
-        elif modality == "VIDEO":
-            grid_key = "video_grid_thw"
-            grid_payload = torch.tensor(grid_values)
-        else:
+        GRID_KEYS = {"IMAGE": "image_grid_thw", "VIDEO": "video_grid_thw"}
+        if modality not in GRID_KEYS:
             raise ValueError(
                 f"Unsupported modality for precomputed mm_item: {modality}"
             )
+        grid_key = GRID_KEYS[modality]
+        grid_payload = torch.tensor(grid_values)
 
         mm_item: dict[str, Any] = {grid_key: grid_payload}
         mm_item.update(

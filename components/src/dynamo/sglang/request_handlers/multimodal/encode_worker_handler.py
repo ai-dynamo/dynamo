@@ -95,12 +95,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             self.model, trust_remote_code=True
         )
 
-        # Get image token string and handle it properly
-        image_token_str = (
-            chat_templates[getattr(config.server_args, "chat_template")]
-            .copy()
-            .image_token
-        )
+        # Get image/video token strings and resolve them to integer IDs
+        template = chat_templates[getattr(config.server_args, "chat_template")].copy()
+        image_token_str = template.image_token
 
         image_token_id = self._resolve_mm_token_id(
             image_token_str, preferred_token="<|image_pad|>"
@@ -109,7 +106,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             raise ValueError("image token is not defined in chat template")
         self.image_token_id = image_token_id
 
-        template = chat_templates[getattr(config.server_args, "chat_template")].copy()
         self.video_token_id: Optional[int] = self._resolve_mm_token_id(
             getattr(template, "video_token", None), preferred_token="<|video_pad|>"
         )
@@ -148,14 +144,15 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         if not token_str:
             return None
 
+        unk_token_id = getattr(self.tokenizer, "unk_token_id", None)
         token_id = self.tokenizer.convert_tokens_to_ids(token_str)
-        if isinstance(token_id, int) and token_id >= 0:
+        if isinstance(token_id, int) and token_id >= 0 and token_id != unk_token_id:
             return token_id
 
         # For templates like qwen2-vl, modality placeholders are composite
         # strings and need to be resolved to inner pad-token IDs.
         candidates: list[str] = []
-        if preferred_token:
+        if preferred_token and preferred_token in token_str:
             candidates.append(preferred_token)
 
         for marker in ("<|image_pad|>", "<|video_pad|>"):
@@ -171,11 +168,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
     @staticmethod
     def _grid_units(grid_item: Any, modality: str) -> int:
-        if modality in ("IMAGE", "VIDEO"):
-            if not isinstance(grid_item, list) or len(grid_item) != 3:
-                raise ValueError(f"Invalid {modality.lower()} grid: {grid_item}")
-            return int(grid_item[0] * grid_item[1] * grid_item[2])
-        raise ValueError(f"Unsupported modality for grid units: {modality}")
+        if modality not in ("IMAGE", "VIDEO"):
+            raise ValueError(f"Unsupported modality for grid units: {modality}")
+        if not isinstance(grid_item, list) or len(grid_item) != 3:
+            raise ValueError(f"Invalid {modality.lower()} grid: {grid_item}")
+        return int(grid_item[0] * grid_item[1] * grid_item[2])
 
     def _split_token_counts(
         self, grid_list: list, total_tokens: int, modality: str
