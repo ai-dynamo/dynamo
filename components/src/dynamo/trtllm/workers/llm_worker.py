@@ -211,10 +211,11 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
+    trtllm_load_format = config.load_format
     if config.load_format == "gms":
         try:
-            LoadFormat(config.load_format)
-        except (ValueError, KeyError) as exc:
+            trtllm_load_format = LoadFormat.GMS
+        except AttributeError as exc:
             raise RuntimeError(
                 "TensorRT-LLM load_format='gms' requires a TRT-LLM build with "
                 "the GMS load-format support landed."
@@ -246,13 +247,14 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
-    arg_map["load_format"] = config.load_format
+    arg_map["load_format"] = trtllm_load_format
     if config.load_format == "gms" and shadow_standby:
         arg_map["gms_mode"] = "ro"
+    elif config.load_format == "gms" and primary_shadow_owner:
+        arg_map["gms_mode"] = "rw"
 
-    # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
+    # Enable sleep_config when GMS manages weights. TRTLLM uses it to
+    # unmap/remap allocations during shadow failover.
     if config.load_format == "gms":
         from tensorrt_llm.llmapi.llm_args import SleepConfig
 
@@ -281,6 +283,15 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    if config.load_format == "gms":
+        env_overrides = dict(arg_map.get("env_overrides") or {})
+        for env_key in ("GMS_SOCKET_DIR", "ENGINE_ID", "FAILOVER_LOCK_PATH"):
+            env_value = os.environ.get(env_key)
+            if env_value is not None:
+                env_overrides.setdefault(env_key, env_value)
+        if env_overrides:
+            arg_map["env_overrides"] = env_overrides
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
@@ -544,18 +555,27 @@ async def init_llm_worker(
             # lock. Cross-check `data_parallel_size` against the live engine in
             # case extra-engine-args flipped `enable_attention_dp`.
             attention_dp_size = engine.get_attention_dp_size()
-            if runtime_config.data_parallel_size != attention_dp_size:
+            try:
+                runtime_dp_size = runtime_config.data_parallel_size
+            except AttributeError:
+                runtime_dp_size = (
+                    arg_map["tensor_parallel_size"]
+                    if arg_map.get("enable_attention_dp", False)
+                    else 1
+                )
+            if runtime_dp_size != attention_dp_size:
                 logging.warning(
                     "runtime_config.data_parallel_size=%s mismatches engine=%s; "
                     "applying engine value",
-                    runtime_config.data_parallel_size,
+                    runtime_dp_size,
                     attention_dp_size,
                 )
                 runtime_config.data_parallel_size = attention_dp_size
+                runtime_dp_size = attention_dp_size
             logging.info(
                 f"runtime config max_num_seqs={runtime_config.max_num_seqs} "
                 f"max_num_batched_tokens={runtime_config.max_num_batched_tokens} "
-                f"data_parallel_size={runtime_config.data_parallel_size}"
+                f"data_parallel_size={runtime_dp_size}"
             )
 
             # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
