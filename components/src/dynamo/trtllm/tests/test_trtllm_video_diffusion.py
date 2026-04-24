@@ -898,7 +898,7 @@ class TestVideoHandlerOutputFormat:
     """Tests for output_format field: validation, default, VideoData population."""
 
     def _make_handler(self):
-        from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
@@ -918,7 +918,7 @@ class TestVideoHandlerOutputFormat:
         )
 
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.get_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.get_fs",
             return_value=MagicMock(),
         ):
             return VideoGenerationHandler(engine=mock_engine, config=config)
@@ -934,10 +934,10 @@ class TestVideoHandlerOutputFormat:
         """Omitting output_format defaults to mp4."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
             return_value=b"bytes",
         ) as mock_enc, patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
             return_value="http://x/v.mp4",
         ):
             results = await self._run(handler, {"prompt": "p", "model": "m"})
@@ -963,10 +963,10 @@ class TestVideoHandlerOutputFormat:
         """URL-mode response includes output_format='mp4' in VideoData."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
             return_value=b"bytes",
         ), patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
             return_value="http://x/v.mp4",
         ):
             results = await self._run(
@@ -980,7 +980,7 @@ class TestVideoHandlerOutputFormat:
         """Base64-mode response includes output_format='mp4' in VideoData."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
             return_value=b"bytes",
         ):
             results = await self._run(
@@ -994,10 +994,10 @@ class TestVideoHandlerOutputFormat:
         """encode_to_video_bytes is always called with output_format='mp4'."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
             return_value=b"bytes",
         ) as mock_enc, patch(
-            "dynamo.trtllm.request_handlers.video_diffusion.video_handler.upload_to_fs",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
             return_value="http://x/v.mp4",
         ):
             await self._run(handler, {"prompt": "p", "model": "m"})
