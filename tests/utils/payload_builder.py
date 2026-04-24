@@ -10,6 +10,7 @@ from tests.utils.payloads import (
     AnthropicMessagesStreamPayload,
     CachedTokensChatPayload,
     ChatPayload,
+    ChatPayloadWithFinishReason,
     ChatPayloadWithLogprobs,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
@@ -64,6 +65,34 @@ def chat_payload_default(
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
     )
+
+
+def chat_payload_default_no_max_token(
+    repeat_count: int = 3,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_finish_reason: Optional[str] = None,
+    temperature: float = 0.0,
+    stream: bool = False,
+) -> ChatPayload:
+    payload = chat_payload_default(
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        expected_log=expected_log,
+        temperature=temperature,
+        stream=stream,
+    )
+    payload.body.pop("max_tokens", None)
+    if expected_finish_reason is not None:
+        return ChatPayloadWithFinishReason(
+            body=payload.body,
+            repeat_count=payload.repeat_count,
+            expected_log=payload.expected_log,
+            expected_response=payload.expected_response,
+            timeout=payload.timeout,
+            expected_finish_reason=expected_finish_reason,
+        )
+    return payload
 
 
 def cached_tokens_chat_payload(

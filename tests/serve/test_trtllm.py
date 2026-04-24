@@ -20,6 +20,7 @@ from tests.utils.payload_builder import (
     TEXT_PROMPT,
     chat_payload,
     chat_payload_default,
+    chat_payload_default_no_max_token,
     completion_payload,
     completion_payload_default,
     metric_payload_default,
@@ -89,6 +90,29 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+        ],
+    ),
+    "aggregated_no_max_tokens": TRTLLMConfig(
+        name="aggregated_no_max_tokens",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
+        request_payloads=[
+            chat_payload_default_no_max_token(
+                repeat_count=1,
+                expected_response=[],
+                expected_finish_reason="stop",
+            ),
         ],
     ),
     "disaggregated": TRTLLMConfig(

@@ -167,6 +167,23 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class ChatPayloadWithFinishReason(ChatPayload):
+    """Chat payload that validates the OpenAI choice finish_reason."""
+
+    expected_finish_reason: str = "stop"
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        result = response.json()
+        finish_reason = result["choices"][0].get("finish_reason")
+        assert finish_reason == self.expected_finish_reason, (
+            f"Expected finish_reason={self.expected_finish_reason!r}, "
+            f"got {finish_reason!r}"
+        )
+
+
+@dataclass
 class ChatPayloadWithLogprobs(ChatPayload):
     """Chat payload that validates logprobs in response."""
 

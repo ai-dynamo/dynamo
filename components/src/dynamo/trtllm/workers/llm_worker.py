@@ -465,6 +465,31 @@ async def init_llm_worker(
         if shutdown_endpoints is not None:
             shutdown_endpoints[:] = [endpoint]
 
+        resolved_max_seq_len = config.max_seq_len
+        if resolved_max_seq_len is None:
+            # If max_seq_len is not set, try to resolve it from the model config
+            model_config = AutoConfig.from_pretrained(
+                config.model, trust_remote_code=True
+            )
+            for field_name in (
+                "max_position_embeddings",
+                "max_sequence_length",
+                "max_seq_len",
+            ):
+                max_seq_len = getattr(model_config, field_name, None)
+                if max_seq_len is not None:
+                    resolved_max_seq_len = int(max_seq_len)
+                    logging.info(
+                        "Resolved TensorRT-LLM max_seq_len from model config: %s",
+                        resolved_max_seq_len,
+                    )
+                    break
+            if resolved_max_seq_len is None:
+                logging.warning(
+                    "Unable to resolve TensorRT-LLM max_seq_len from model config; "
+                    "using TensorRT-LLM default"
+                )
+
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
         # get total_kv_blocks from the engine yet without calling get_stats_async
@@ -594,7 +619,7 @@ async def init_llm_worker(
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             additional_metrics=additional_metrics,
-            max_seq_len=config.max_seq_len,
+            max_seq_len=resolved_max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
@@ -625,7 +650,7 @@ async def init_llm_worker(
                 endpoint,
                 config.model,
                 config.served_model_name,
-                context_length=config.max_seq_len,
+                context_length=resolved_max_seq_len,
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
