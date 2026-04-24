@@ -5,15 +5,15 @@
 
 use derive_builder::Builder;
 use dynamo_tokens::{Tokens, compute_hash_v2};
+use kvbm_disagg_protocol::{RemotePrefillParams, TransferParams};
 use serde::Serialize;
 
 /// Metadata for KVBM request integration.
 ///
 /// Holds optional data forwarded from the scheduler (e.g. a vLLM
 /// `Request`) into the connector layer. Today this carries the raw
-/// `kv_transfer_params` JSON as an opaque `serde_json::Value`; a
-/// follow-up change will introduce a typed `TransferParams` that
-/// parses this lazily on demand.
+/// `kv_transfer_params` JSON as an opaque `serde_json::Value`, with typed
+/// conditional-disaggregation parsing available lazily on demand.
 #[derive(Debug, Clone, Default)]
 pub struct RequestMetadata {
     /// Connector-specific KV transfer parameters, as received from the
@@ -28,6 +28,25 @@ impl RequestMetadata {
         Self {
             kv_transfer_params: Some(value),
         }
+    }
+
+    /// Parse raw `kv_transfer_params` as conditional-disaggregation transfer
+    /// parameters.
+    ///
+    /// This keeps the request metadata wire-compatible with current vLLM JSON
+    /// plumbing while giving Rust call sites a typed view when they need it.
+    pub fn disagg_transfer_params(&self) -> Result<Option<TransferParams>, serde_json::Error> {
+        self.kv_transfer_params
+            .as_ref()
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+    }
+
+    /// Parse and return only the remote-prefill parameters, if present.
+    pub fn remote_prefill_params(&self) -> Result<Option<RemotePrefillParams>, serde_json::Error> {
+        Ok(self
+            .disagg_transfer_params()?
+            .and_then(|params| params.remote_prefill))
     }
 }
 
@@ -283,6 +302,25 @@ impl Request {
             .as_ref()
             .and_then(|m| m.kv_transfer_params.as_ref())
     }
+
+    /// Parse raw `kv_transfer_params` as conditional-disaggregation transfer
+    /// parameters, if present.
+    pub fn disagg_transfer_params(&self) -> Result<Option<TransferParams>, serde_json::Error> {
+        self.metadata
+            .as_ref()
+            .map(RequestMetadata::disagg_transfer_params)
+            .transpose()
+            .map(|params| params.flatten())
+    }
+
+    /// Parse and return only the remote-prefill parameters, if present.
+    pub fn remote_prefill_params(&self) -> Result<Option<RemotePrefillParams>, serde_json::Error> {
+        self.metadata
+            .as_ref()
+            .map(RequestMetadata::remote_prefill_params)
+            .transpose()
+            .map(|params| params.flatten())
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +346,44 @@ mod tests {
             Some(RequestMetadata::with_kv_transfer_params(params.clone())),
         );
         assert_eq!(request.kv_transfer_params(), Some(&params));
+    }
+
+    #[test]
+    fn disagg_transfer_params_parse_remote_prefill() {
+        let remote = RemotePrefillParams::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4().into());
+        let params = TransferParams::remote_prefill(remote.clone());
+        let raw = serde_json::to_value(&params).unwrap();
+        let request = Request::with_token_limits(
+            "req-disagg",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(128),
+            Some(RequestMetadata::with_kv_transfer_params(raw)),
+        );
+
+        assert_eq!(request.disagg_transfer_params().unwrap(), Some(params));
+        assert_eq!(request.remote_prefill_params().unwrap(), Some(remote));
+    }
+
+    #[test]
+    fn disagg_transfer_params_report_malformed_payload() {
+        let request = Request::with_token_limits(
+            "req-disagg-bad",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(128),
+            Some(RequestMetadata::with_kv_transfer_params(json!({
+                "remote_prefill": {
+                    "protocol_version": "not-a-number"
+                }
+            }))),
+        );
+
+        assert!(request.disagg_transfer_params().is_err());
     }
 
     #[test]

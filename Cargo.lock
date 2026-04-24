@@ -4497,6 +4497,7 @@ dependencies = [
  "insta",
  "kvbm-common",
  "kvbm-config",
+ "kvbm-disagg-protocol",
  "kvbm-engine",
  "kvbm-logical",
  "kvbm-observability",
@@ -4513,6 +4514,18 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "velo",
+]
+
+[[package]]
+name = "kvbm-disagg-protocol"
+version = "0.1.0"
+dependencies = [
+ "kvbm-common",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "velo-common",
 ]
 
 [[package]]

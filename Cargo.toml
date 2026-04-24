@@ -13,6 +13,7 @@ members = [
     "lib/kvbm-common",
     "lib/kvbm-config",
     "lib/kvbm-connector",
+    "lib/kvbm-disagg-protocol",
     "lib/kvbm-engine",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
@@ -53,6 +54,7 @@ fastokens = { version = "0.1.0" }
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "1.1.0" }
 kvbm-config = { path = "lib/kvbm-config", version = "1.1.0" }
+kvbm-disagg-protocol = { path = "lib/kvbm-disagg-protocol", version = "0.1.0" }
 kvbm-engine = { path = "lib/kvbm-engine", version = "1.1.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.1.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.1.0" }

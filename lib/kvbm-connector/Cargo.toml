@@ -16,6 +16,7 @@ keywords.workspace = true
 # Internal workspace crates
 kvbm-common   = { workspace = true }
 kvbm-config   = { workspace = true }
+kvbm-disagg-protocol = { workspace = true }
 kvbm-engine   = { workspace = true }
 kvbm-logical  = { workspace = true }
 kvbm-observability = { workspace = true }

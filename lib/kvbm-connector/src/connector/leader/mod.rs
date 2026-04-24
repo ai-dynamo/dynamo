@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod control;
+pub mod disagg;
 mod request;
 mod slot;
 
