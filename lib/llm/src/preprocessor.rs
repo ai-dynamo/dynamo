@@ -1260,16 +1260,15 @@ impl OpenAIPreprocessor {
             }
             Some("deepseek_r1") | Some("deepseek_v4") | Some("deepseek-v4")
             | Some("deepseekv4") => {
-                if let Some(args) = chat_template_args {
-                    // `thinking` and `enable_thinking` (vLLM's canonical kwarg) are equivalent.
-                    for key in ["thinking", "enable_thinking"] {
-                        if let Some(v) = args.get(key) {
-                            return v == &serde_json::Value::Bool(false);
-                        }
-                    }
-                    if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                        return mode == "chat";
-                    }
+                if let Some(enabled) =
+                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
+                {
+                    return !enabled;
+                }
+                if let Some(args) = chat_template_args
+                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+                {
+                    return mode == "chat";
                 }
                 false
             }

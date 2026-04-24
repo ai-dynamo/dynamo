@@ -813,23 +813,20 @@ impl DeepSeekV4Formatter {
         &self,
         args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> ThinkingMode {
-        if let Some(args) = args {
-            // `thinking` and `enable_thinking` (vLLM's canonical kwarg) are equivalent.
-            for key in ["thinking", "enable_thinking"] {
-                if let Some(enabled) = args.get(key).and_then(|v| v.as_bool()) {
-                    return if enabled {
-                        ThinkingMode::Thinking
-                    } else {
-                        ThinkingMode::Chat
-                    };
-                }
-            }
-            if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                match mode {
-                    "chat" => return ThinkingMode::Chat,
-                    "thinking" => return ThinkingMode::Thinking,
-                    _ => {}
-                }
+        if let Some(enabled) = super::thinking_bool_from_args(args) {
+            return if enabled {
+                ThinkingMode::Thinking
+            } else {
+                ThinkingMode::Chat
+            };
+        }
+        if let Some(args) = args
+            && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+        {
+            match mode {
+                "chat" => return ThinkingMode::Chat,
+                "thinking" => return ThinkingMode::Thinking,
+                _ => {}
             }
         }
         self.thinking_mode
