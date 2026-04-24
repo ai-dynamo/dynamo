@@ -145,8 +145,12 @@ async def test_deployment(
     framework = deployment_target.framework
     profile = deployment_target.profile
 
+    # For XPU validation, only run aggregated profile (single-card).
+    if framework == "vllm" and profile == "disagg_xpu_dra":
+        pytest.skip("XPU CI validates agg profile only; disagg_xpu_dra is skipped")
+
     # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
-    # transfer.  Prefill workers crash in NixlWrapper.create_backend.
+    # transfer. Prefill workers crash in NixlWrapper.create_backend.
     if framework == "vllm" and profile in ("disagg", "disagg_router"):
         pytest.skip(
             "NIXL_ERR_BACKEND: CI cluster lacks RDMA/UCX for inter-pod KV transfer"

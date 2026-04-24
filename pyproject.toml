@@ -214,6 +214,8 @@ filterwarnings = [
     "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
     # Triton CPU fallback warning on CPU-only runners
     "ignore:Triton is not supported on current platform.*:UserWarning",
+    # kr8s warns when cluster version is outside its tested range; treat as non-fatal in CI.
+    'ignore:Kubernetes version .* is not supported\..*:UserWarning',
     # torch.jit.script_method deprecation from torch.utils.mkldnn
     "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
     # torch.jit.script deprecation from modelopt.torch.quantization

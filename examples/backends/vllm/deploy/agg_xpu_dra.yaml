@@ -9,10 +9,10 @@ spec:
   spec:
     devices:
       requests:
-        - name: gpu
-          exactly:
-            deviceClassName: gpu.intel.com
-            count: 1
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.intel.com
+          count: 1
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -27,6 +27,10 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          env:
+          - name: DYN_NAMESPACE_PREFIX
+            value: default-vllm-agg-xpu-dra
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -34,27 +38,44 @@ spec:
       resources:
         requests:
           custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
+            ephemeral-storage: 2Gi
       extraPodSpec:
+        securityContext:
+          supplementalGroups:
+          - 991
+        volumes:
+        - name: dev-dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
         resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: gpu-template
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+          volumeMounts:
+          - name: dev-dri
+            mountPath: /dev/dri
           resources:
             claims:
-              - name: gpu
+            - name: gpu
           env:
-            - name: VLLM_TARGET_DEVICE
-              value: xpu
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
           workingDir: /workspace/examples/backends/vllm
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --block-size
-            - "64"
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --enforce-eager
+          - --block-size
+          - '64'
