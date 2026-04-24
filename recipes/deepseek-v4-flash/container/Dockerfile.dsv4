@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- patch vLLM: drop unsupported topk=1024 from sparse attn indexer ---
 # from https://github.com/vllm-project/vllm/pull/40760/changes/3602f14f0e146b234be911d916e381b4e6a4dc0c
 # TODO: remove once https://github.com/vllm-project/vllm/pull/40760 lands in the base image.
-RUN sed -i 's/(512, 1024, 2048)/(512, 2048)/' \                                                                                                                           
+RUN sed -i 's/(512, 1024, 2048)/(512, 2048)/' \
       /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer.py
 
 # --- static binaries ---
