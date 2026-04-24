@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Reference implementation:
-// https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding/encoding_dsv32.py
+// Reference implementations:
+// V3.2: https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding/encoding_dsv32.py
+// V4:   https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/encoding/encoding_dsv4.py
+//
+// V4 reuses this same DSML engine; only the outer block name changes from
+// `function_calls` to `tool_calls` (configured via DsmlParserConfig).
 
 use regex::Regex;
 use uuid::Uuid;
@@ -10,7 +14,9 @@ use uuid::Uuid;
 use super::super::config::DsmlParserConfig;
 use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
-/// DeepSeek V3.2 uses DSML (DeepSeek Markup Language) format for tool calls:
+/// DeepSeek V3.2 / V4 use DSML (DeepSeek Markup Language) format for tool calls.
+/// V3.2 wraps calls in `<｜DSML｜function_calls>`; V4 wraps them in
+/// `<｜DSML｜tool_calls>`. The inner invoke / parameter grammar is identical:
 ///
 /// <｜DSML｜function_calls>
 /// <｜DSML｜invoke name="function_name">
@@ -584,6 +590,7 @@ mod tests {
         assert_eq!(args["empty"], "");
     }
 
+    #[test]
     fn test_empty_invokes_does_not_leak_dsml_markup() {
         // Valid block-start + mangled content (invoke tag but no closing/params)
         // followed by block-end. extract_tool_calls returns empty; we must not
