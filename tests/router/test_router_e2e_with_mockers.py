@@ -52,7 +52,7 @@ from tests.utils.port_utils import (
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
-_COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "_counter_worker.py")
+COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -697,7 +697,7 @@ class DisaggMockerProcess:
 
 
 class CounterWorkerProcess:
-    """Manages CPU and GPU _counter_worker.py subprocesses for device-aware routing tests.
+    """Manages CPU and GPU counter_worker.py subprocesses for device-aware routing tests.
 
     Launches one worker with CUDA_VISIBLE_DEVICES="" (CPU) and one with "0" (GPU).
     Both register using RouterConfig(RouterMode.DeviceAwareWeighted) so the frontend's
@@ -740,7 +740,7 @@ class CounterWorkerProcess:
         self._cpu_proc = ManagedProcess(
             command=[
                 sys.executable,
-                _COUNTER_WORKER_SCRIPT,
+                COUNTER_WORKER_SCRIPT,
                 self._cpu_count_file,
                 "cpu",
                 self.endpoint_path,
@@ -748,6 +748,8 @@ class CounterWorkerProcess:
                 self._store_backend,
                 "--request-plane",
                 self._request_plane,
+                "--router-mode",
+                "device-aware-weighted",
             ],
             env=env,
             timeout=60,
@@ -761,7 +763,7 @@ class CounterWorkerProcess:
         self._gpu_proc = ManagedProcess(
             command=[
                 sys.executable,
-                _COUNTER_WORKER_SCRIPT,
+                COUNTER_WORKER_SCRIPT,
                 self._gpu_count_file,
                 "gpu",
                 self.endpoint_path,
@@ -769,6 +771,8 @@ class CounterWorkerProcess:
                 self._store_backend,
                 "--request-plane",
                 self._request_plane,
+                "--router-mode",
+                "device-aware-weighted",
             ],
             env=env,
             timeout=60,

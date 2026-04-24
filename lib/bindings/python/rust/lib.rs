@@ -408,7 +408,6 @@ fn register_model<'p>(
             .media_fetcher(media_fetcher.map(|m| m.inner));
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        local_model.set_card_router_config(explicit_router_config);
 
         // Convert lora_identifier (Option<String>) to Option<LoraInfo>
         let lora_info = lora_identifier

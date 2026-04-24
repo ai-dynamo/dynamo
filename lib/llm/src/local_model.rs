@@ -251,6 +251,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.router_config = self.router_config.clone();
 
             return Ok(LocalModel {
                 card,
@@ -305,6 +306,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.router_config = self.router_config.clone();
 
         Ok(LocalModel {
             card,
@@ -400,10 +402,6 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
-    }
-
-    pub fn set_card_router_config(&mut self, router_config: Option<RouterConfig>) {
-        self.card.router_config = router_config;
     }
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {

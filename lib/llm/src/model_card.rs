@@ -384,8 +384,16 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
-                // TODO: Do we want any of router_config, user_data or runtime_config?
-                // need to cascade down checksum calculation if we want them
+                if let Some(router_config) = self.router_config.as_ref() {
+                    if let Ok(bytes) = serde_json::to_vec(router_config) {
+                        // Hash router_config separately so we extend bytes_to_hash with a
+                        // fixed-size digest (32 bytes) rather than the full JSON payload.
+                        // [gluo TODO] take checksum() approach that is the same as above,
+                        // along with this effort, we should reorganize where RouterConfig
+                        // should be defined.
+                        bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
+                    }
+                }
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
