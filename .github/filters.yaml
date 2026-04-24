@@ -9,6 +9,7 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
+#   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -32,7 +33,6 @@ docs:
 examples:
   - 'recipes/**'
   - 'examples/**'
-  - 'benchmarks/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
@@ -173,3 +173,8 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+
+benchmarks:
+  - 'benchmarks/**'
+  - '!**/*.md'
+  - '!**/*.rst'

@@ -254,7 +254,7 @@ To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 - **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
 - **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
 - **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
-- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/dynamo-benchmarking)** — Compare deployment topologies with AIPerf
+- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design-docs/disagg-serving.md

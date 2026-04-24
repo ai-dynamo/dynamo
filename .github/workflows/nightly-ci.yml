@@ -42,6 +42,28 @@ jobs:
           suppress_fallback_warning: 'true'
 
   # ============================================================================
+  # COMPUTE NIGHTLY DEV VERSION
+  # ============================================================================
+  # Emits a PEP 440 dev suffix (e.g. .dev20260423+g1234567) forwarded to every
+  # pipeline below. At the leaf, the suffix is stamped into pyproject / Cargo
+  # versions on the runner before docker build, so wheels produced by the
+  # wheel_builder stage carry the dev version.
+  compute-dev-version:
+    name: Compute dev version suffix
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    outputs:
+      dev_suffix: ${{ steps.compute.outputs.dev_suffix }}
+    steps:
+      - id: compute
+        shell: bash
+        run: |
+          SHORT_SHA=${GITHUB_SHA:0:7}
+          DATE=$(date -u +%Y%m%d)
+          echo "dev_suffix=.dev${DATE}+g${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+  # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
   # ============================================================================
@@ -49,7 +71,7 @@ jobs:
   # ============================================================================
   vllm-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, compute-dev-version]
     with:
       framework: vllm
       target: runtime
@@ -66,6 +88,7 @@ jobs:
       single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   # ============================================================================
@@ -73,7 +96,7 @@ jobs:
   # ============================================================================
   sglang-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, compute-dev-version]
     with:
       framework: sglang
       target: runtime
@@ -93,6 +116,7 @@ jobs:
       single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   # ============================================================================
@@ -100,7 +124,7 @@ jobs:
   # ============================================================================
   trtllm-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, compute-dev-version]
     with:
       framework: trtllm
       target: runtime
@@ -117,6 +141,7 @@ jobs:
       single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   # ============================================================================
@@ -124,7 +149,7 @@ jobs:
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, compute-dev-version]
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -138,6 +163,7 @@ jobs:
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   # ============================================================================
