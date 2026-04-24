@@ -43,7 +43,12 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
-from .utils import extract_mm_urls, make_backend_error, make_internal_error, random_uuid
+from .utils import (
+    extract_mm_urls,
+    handle_engine_error,
+    make_internal_error,
+    random_uuid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -535,24 +540,7 @@ class VllmProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    if (
-                        isinstance(engine_response, dict)
-                        and engine_response.get("status") == "error"
-                    ):
-                        err = make_backend_error(engine_response)
-                        logger.error(
-                            "Backend error for request %s: %s",
-                            request_id,
-                            err["error"]["message"],
-                        )
-                        yield err
-                    else:
-                        logger.error(
-                            "No outputs from engine for request %s: %s",
-                            request_id,
-                            engine_response,
-                        )
-                        yield make_internal_error(request_id)
+                    yield handle_engine_error(engine_response, request_id, logger)
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")

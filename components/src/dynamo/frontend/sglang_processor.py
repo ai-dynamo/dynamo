@@ -41,7 +41,7 @@ from .sglang_prepost import (
 from .utils import (
     PreprocessError,
     extract_mm_urls,
-    make_backend_error,
+    handle_engine_error,
     make_internal_error,
     random_uuid,
     worker_warmup,
@@ -484,24 +484,7 @@ class SglangProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    if (
-                        isinstance(engine_response, dict)
-                        and engine_response.get("status") == "error"
-                    ):
-                        err = make_backend_error(engine_response)
-                        logger.error(
-                            "Backend error for request %s: %s",
-                            request_id,
-                            err["error"]["message"],
-                        )
-                        yield err
-                    else:
-                        logger.error(
-                            "No outputs from engine for request %s: %s",
-                            request_id,
-                            engine_response,
-                        )
-                        yield make_internal_error(request_id)
+                    yield handle_engine_error(engine_response, request_id, logger)
                     break
 
                 new_ids = engine_response["token_ids"]

@@ -2,7 +2,13 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 
-from dynamo.frontend.utils import make_backend_error, make_internal_error
+import logging
+
+from dynamo.frontend.utils import (
+    handle_engine_error,
+    make_backend_error,
+    make_internal_error,
+)
 
 
 class TestMakeBackendError:
@@ -41,3 +47,19 @@ class TestMakeInternalError:
     def test_none_detail_uses_default(self):
         err = make_internal_error("req-42", None)
         assert err["error"]["message"] == "Invalid engine response for request req-42"
+
+
+class TestHandleEngineError:
+    def test_backend_error_dict(self):
+        resp = {"status": "error", "message": "403 Forbidden"}
+        err = handle_engine_error(resp, "req-1", logging.getLogger("test"))
+        assert err["error"]["type"] == "backend_error"
+        assert err["error"]["message"] == "403 Forbidden"
+
+    def test_none_response(self):
+        err = handle_engine_error(None, "req-1", logging.getLogger("test"))
+        assert err["error"]["type"] == "internal_error"
+
+    def test_missing_token_ids(self):
+        err = handle_engine_error({"other": "data"}, "req-1", logging.getLogger("test"))
+        assert err["error"]["type"] == "internal_error"
