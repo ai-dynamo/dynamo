@@ -323,11 +323,37 @@ async def test_connector_unsupported_and_noop_operations(connector):
     with pytest.raises(NotImplementedError, match="batch operations"):
         await connector.remove_component(SubComponentType.DECODE)
 
-    # No-op operations
+    # validate_deployment remains a local no-op (GlobalPlanner validates).
     await connector.validate_deployment(
         prefill_component_name="p", decode_component_name="d"
     )
+
+    # wait_for_deployment_ready with no local k8s connector available must
+    # degrade to a no-op rather than raise, so out-of-cluster callers still
+    # work.
+    connector._local_k8s_connector = None
+    connector._local_k8s_init_attempted = True
     await connector.wait_for_deployment_ready()
+
+
+@pytest.mark.asyncio
+async def test_connector_wait_for_deployment_ready_delegates_to_local_k8s(
+    connector_runtime,
+):
+    """wait_for_deployment_ready must wait for the pool's own workers to be
+    ready before returning. Without this, _async_init returns within
+    milliseconds and get_worker_info races with MDC registration, caching a
+    fallback WorkerInfo (context_length/max_kv_tokens unset) for the pod's
+    lifetime and silently disabling load scaling.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.wait_for_deployment_ready = AsyncMock()
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    await c.wait_for_deployment_ready(include_planner=False)
+    fake_local.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
 
 
 def test_connector_model_name_and_predicted_load(connector_runtime):
