@@ -261,9 +261,6 @@ def run_aiperf(
         str(output_token_length),
         "--output-tokens-stddev",
         "0",  # Set to 0 for consistent token counts
-        # Skip warmup to avoid initial failures
-        "--warmup-request-count",
-        "0",
         # Output configuration
         "--artifact-dir",
         str(output_dir),
