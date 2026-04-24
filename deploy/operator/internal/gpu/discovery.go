@@ -715,15 +715,27 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 }
 
 // DiscoverGPUs queries Kubernetes nodes to determine GPU configuration.
+// It is a convenience wrapper around DiscoverGPUsFiltered with no SKU filter.
+// See DiscoverGPUsFiltered for full documentation.
+func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
+	return DiscoverGPUsFiltered(ctx, k8sClient, "")
+}
+
+// DiscoverGPUsFiltered queries Kubernetes nodes to determine GPU configuration.
 // It extracts GPU information from NVIDIA GPU Feature Discovery (GFD) labels
 // and returns aggregated GPU info, preferring nodes with higher GPU count,
 // then higher VRAM if counts are equal.
 //
+// When filterSKU is non-empty, only nodes whose inferred SKU matches are
+// considered for selection and counting. When empty, the best node is selected
+// first and then only nodes with the same SKU are counted.
+//
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
-func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
+func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Starting GPU discovery from cluster nodes")
+	logger.Info("Starting GPU discovery from cluster nodes", "filterSKU", filterSKU)
+
 	// List all nodes in the cluster
 	nodeList := &corev1.NodeList{}
 	if err := k8sClient.List(ctx, nodeList); err != nil {
@@ -733,48 +745,74 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 		return nil, fmt.Errorf("no nodes found in cluster")
 	}
 	logger.Info("Found cluster nodes", "count", len(nodeList.Items))
-	// Track the best GPU configuration found
-	var bestGPUInfo *GPUInfo
-	nodesWithGPUs := 0
+
+	// Collect per-node GPU info with inferred SKU.
+	type nodeInfo struct {
+		info *GPUInfo
+		sku  nvidiacomv1beta1.GPUSKUType
+	}
+	allNodes := make([]nodeInfo, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		gpuInfo, err := extractGPUInfoFromNode(node)
 		if err != nil {
-			// Node doesn't have GPU labels or has invalid labels, skip it
 			logger.V(1).Info("Skipping node without valid GPU info",
 				"node", node.Name,
 				"reason", err.Error())
 			continue
 		}
-		nodesWithGPUs++
+		gpuInfo.NodeName = node.Name
+		sku := InferHardwareSystem(gpuInfo.Model)
 		logger.Info("Found GPU node",
 			"node", node.Name,
 			"gpus", gpuInfo.GPUsPerNode,
 			"model", gpuInfo.Model,
-			"vram", gpuInfo.VRAMPerGPU)
-		// Select best configuration: prefer higher GPU count, then higher VRAM
-		if bestGPUInfo == nil ||
-			gpuInfo.GPUsPerNode > bestGPUInfo.GPUsPerNode ||
-			(gpuInfo.GPUsPerNode == bestGPUInfo.GPUsPerNode && gpuInfo.VRAMPerGPU > bestGPUInfo.VRAMPerGPU) {
-			bestGPUInfo = gpuInfo
+			"vram", gpuInfo.VRAMPerGPU,
+			"sku", sku)
+		allNodes = append(allNodes, nodeInfo{info: gpuInfo, sku: sku})
+	}
+
+	// Select best node (only from matching SKU when filtered).
+	var bestNode *GPUInfo
+	var bestSKU nvidiacomv1beta1.GPUSKUType
+	for _, n := range allNodes {
+		if filterSKU != "" && n.sku != filterSKU {
+			continue
+		}
+		if bestNode == nil ||
+			n.info.GPUsPerNode > bestNode.GPUsPerNode ||
+			(n.info.GPUsPerNode == bestNode.GPUsPerNode && n.info.VRAMPerGPU > bestNode.VRAMPerGPU) {
+			bestNode = n.info
+			bestSKU = n.sku
 		}
 	}
-	if bestGPUInfo == nil {
+	if bestNode == nil {
+		if filterSKU != "" {
+			return nil, fmt.Errorf("no nodes with NVIDIA GPU Feature Discovery labels matching SKU %q found (checked %d nodes)",
+				filterSKU, len(nodeList.Items))
+		}
 		return nil, fmt.Errorf("no nodes with NVIDIA GPU Feature Discovery labels found (checked %d nodes). "+
 			"Ensure GPU nodes have labels: %s, %s, %s",
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
-	// Infer hardware system from GPU model
-	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
-	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
+
+	// Count only nodes with the same SKU as the selected best node.
+	nodesWithGPUs := 0
+	for _, n := range allNodes {
+		if n.sku == bestSKU {
+			nodesWithGPUs++
+		}
+	}
+	bestNode.System = bestSKU
+	bestNode.NodesWithGPUs = nodesWithGPUs
 	logger.Info("GPU discovery completed",
-		"gpusPerNode", bestGPUInfo.GPUsPerNode,
-		"nodesWithGPUs", bestGPUInfo.NodesWithGPUs,
-		"totalGpus", bestGPUInfo.GPUsPerNode*bestGPUInfo.NodesWithGPUs,
-		"model", bestGPUInfo.Model,
-		"vram", bestGPUInfo.VRAMPerGPU,
-		"system", bestGPUInfo.System)
-	return bestGPUInfo, nil
+		"gpusPerNode", bestNode.GPUsPerNode,
+		"nodesWithGPUs", bestNode.NodesWithGPUs,
+		"totalGpus", bestNode.GPUsPerNode*bestNode.NodesWithGPUs,
+		"model", bestNode.Model,
+		"vram", bestNode.VRAMPerGPU,
+		"system", bestNode.System)
+	return bestNode, nil
 }
 
 // extractGPUInfoFromNode extracts GPU information from a single node's labels.

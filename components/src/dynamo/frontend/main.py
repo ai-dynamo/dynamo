@@ -231,12 +231,7 @@ async def async_main():
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
-        router_mode,
-        kv_router_config,
-        active_decode_blocks_threshold=config.active_decode_blocks_threshold,
-        active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
-        active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
+        router_mode, kv_router_config, **config.router_kwargs()
     )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,

@@ -53,9 +53,13 @@ def _run_replay_for_state(
             router_config=router_config,
             num_prefill_workers=state.prefill_workers,
             num_decode_workers=state.decode_workers,
+            replay_concurrency=workload.traceReplayConcurrency,
             replay_mode="offline",
             router_mode=state.router_mode,
             arrival_speedup_ratio=workload.arrivalSpeedupRatio,
+            trace_format=workload.traceFormat,
+            trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
+            trace_num_prefix_groups=workload.traceNumPrefixGroups,
         )
 
     return run_synthetic_trace_replay(
@@ -91,9 +95,13 @@ def _run_agg_replay_for_state(
             extra_engine_args=engine_args,
             router_config=router_config,
             num_workers=state.workers,
+            replay_concurrency=workload.traceReplayConcurrency,
             replay_mode="offline",
             router_mode=state.router_mode,
             arrival_speedup_ratio=workload.arrivalSpeedupRatio,
+            trace_format=workload.traceFormat,
+            trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
+            trace_num_prefix_groups=workload.traceNumPrefixGroups,
         )
 
     return run_synthetic_trace_replay(

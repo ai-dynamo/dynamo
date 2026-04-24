@@ -251,6 +251,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.router_config = self.router_config.clone();
 
             return Ok(LocalModel {
                 card,
@@ -305,6 +306,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.router_config = self.router_config.clone();
 
         Ok(LocalModel {
             card,
