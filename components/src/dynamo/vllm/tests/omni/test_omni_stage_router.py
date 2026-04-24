@@ -5,7 +5,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -297,3 +297,150 @@ async def test_generate_forwards_raw_request_to_stage0():
     assert stage0_received["prompt"] == "a dog"
     assert stage0_received["size"] == "832x480"
     assert stage0_received["nvext"] == {"num_inference_steps": 30}
+
+
+# ── Context normalization: audio data_source vs non-audio ─────────────────
+
+
+class TestStageRouterContextNormalization:
+    """generate() normalizes audio data_source/response_format before calling formatter."""
+
+    def _make_router_with_formatter(self, mock_formatter):
+        """One-stage router with a controllable formatter."""
+        return _make_router(
+            stage_configs=[_make_stage_cfg(0)],
+            stage_clients={},  # overridden per test
+            formatter=mock_formatter,
+        )
+
+    @pytest.mark.asyncio
+    async def test_audio_request_maps_data_source_to_response_format(self):
+        """data_source present: formatter sees response_format=data_source, output_format=response_format."""
+        formatter_calls: list = []
+
+        async def fake_format(result, req_id, *, request_type, **ctx):
+            formatter_calls.append(ctx)
+            return {"finished": True}
+
+        mock_formatter = MagicMock()
+        mock_formatter.format = fake_format
+
+        async def stage0_handler(request):
+            return {"shm_meta": {"x": 1}, "finished": True}
+
+        router = _make_router(
+            stage_configs=[_make_stage_cfg(0)],
+            stage_clients={"stage0": _StageClient(stage0_handler)},
+            formatter=mock_formatter,
+        )
+
+        request = {"prompt": "hi", "data_source": "url", "response_format": "mp3"}
+        p1, p2 = _patched_generate(router, request)
+        with p1, p2:
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+            ):
+                [c async for c in router.generate(request, None)]
+
+        assert len(formatter_calls) == 1
+        ctx = formatter_calls[0]
+        assert ctx["response_format"] == "url"  # data_source
+        assert ctx["output_format"] == "mp3"  # response_format (codec)
+
+    @pytest.mark.asyncio
+    async def test_audio_request_b64_json_maps_correctly(self):
+        formatter_calls: list = []
+
+        async def fake_format(result, req_id, *, request_type, **ctx):
+            formatter_calls.append(ctx)
+            return {"finished": True}
+
+        mock_formatter = MagicMock()
+        mock_formatter.format = fake_format
+
+        async def stage0_handler(request):
+            return {"shm_meta": {"x": 1}, "finished": True}
+
+        router = _make_router(
+            stage_configs=[_make_stage_cfg(0)],
+            stage_clients={"stage0": _StageClient(stage0_handler)},
+            formatter=mock_formatter,
+        )
+
+        request = {"prompt": "hi", "data_source": "b64_json", "response_format": "opus"}
+        p1, p2 = _patched_generate(router, request)
+        with p1, p2:
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+            ):
+                [c async for c in router.generate(request, None)]
+
+        ctx = formatter_calls[0]
+        assert ctx["response_format"] == "b64_json"
+        assert ctx["output_format"] == "opus"
+
+    @pytest.mark.asyncio
+    async def test_non_audio_request_passes_through_unchanged(self):
+        """No data_source: response_format and output_format passed as-is."""
+        formatter_calls: list = []
+
+        async def fake_format(result, req_id, *, request_type, **ctx):
+            formatter_calls.append(ctx)
+            return {"finished": True}
+
+        mock_formatter = MagicMock()
+        mock_formatter.format = fake_format
+
+        async def stage0_handler(request):
+            return {"shm_meta": {"x": 1}, "finished": True}
+
+        router = _make_router(
+            stage_configs=[_make_stage_cfg(0)],
+            stage_clients={"stage0": _StageClient(stage0_handler)},
+            formatter=mock_formatter,
+        )
+
+        request = {"prompt": "cat", "response_format": "url", "output_format": "mp4"}
+        p1, p2 = _patched_generate(router, request)
+        with p1, p2:
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+            ):
+                [c async for c in router.generate(request, None)]
+
+        ctx = formatter_calls[0]
+        assert ctx["response_format"] == "url"
+        assert ctx["output_format"] == "mp4"
+
+    @pytest.mark.asyncio
+    async def test_no_format_fields_omitted_from_context(self):
+        """Fields not present in request are not forwarded to formatter."""
+        formatter_calls: list = []
+
+        async def fake_format(result, req_id, *, request_type, **ctx):
+            formatter_calls.append(ctx)
+            return {"finished": True}
+
+        mock_formatter = MagicMock()
+        mock_formatter.format = fake_format
+
+        async def stage0_handler(request):
+            return {"shm_meta": {"x": 1}, "finished": True}
+
+        router = _make_router(
+            stage_configs=[_make_stage_cfg(0)],
+            stage_clients={"stage0": _StageClient(stage0_handler)},
+            formatter=mock_formatter,
+        )
+
+        request = {"prompt": "cat"}
+        p1, p2 = _patched_generate(router, request)
+        with p1, p2:
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+            ):
+                [c async for c in router.generate(request, None)]
+
+        ctx = formatter_calls[0]
+        assert "response_format" not in ctx
+        assert "output_format" not in ctx

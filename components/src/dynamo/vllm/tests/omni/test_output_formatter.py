@@ -3,7 +3,7 @@
 
 """Tests for output_formatter.py — modality-specific formatters."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -426,3 +426,105 @@ class TestOutputFormatter:
         stage.request_output = None
         result = await f.format(stage, "req-1")
         assert result is None
+
+
+# ── AudioFormatter — output_format field (new branch behavior) ──────────────
+
+
+class TestAudioFormatterOutputFormat:
+    """output_format context kwarg drives codec selection; AudioData carries it."""
+
+    def _make_formatter(self):
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        return AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+
+    def _make_mm_output(self):
+        import numpy as np
+
+        return {"audio": np.zeros(100, dtype=np.float32), "sr": 24000}
+
+    @pytest.mark.asyncio
+    async def test_output_format_mp3_passed_as_codec(self):
+        f = self._make_formatter()
+        mm = self._make_mm_output()
+        with patch.object(
+            f, "_encode_audio", return_value=(b"bytes", "audio/mpeg")
+        ) as mock_enc:
+            await f.format(mm, "r1", response_format="b64_json", output_format="mp3")
+        _, args, _ = mock_enc.mock_calls[0]
+        assert args[2] == "mp3"
+
+    @pytest.mark.asyncio
+    async def test_output_format_none_defaults_to_wav(self):
+        f = self._make_formatter()
+        mm = self._make_mm_output()
+        with patch.object(
+            f, "_encode_audio", return_value=(b"bytes", "audio/wav")
+        ) as mock_enc:
+            await f.format(mm, "r2", response_format="b64_json", output_format=None)
+        _, args, _ = mock_enc.mock_calls[0]
+        assert args[2] == "wav"
+
+    @pytest.mark.asyncio
+    async def test_audio_data_carries_output_format_b64_path(self):
+        f = self._make_formatter()
+        mm = self._make_mm_output()
+        with patch.object(f, "_encode_audio", return_value=(b"bytes", "audio/flac")):
+            result = await f.format(
+                mm, "r3", response_format="b64_json", output_format="flac"
+            )
+        assert result["data"][0]["output_format"] == "flac"
+
+    @pytest.mark.asyncio
+    async def test_audio_data_carries_output_format_url_path(self):
+        from unittest.mock import patch as _patch
+
+        f = self._make_formatter()
+        mm = self._make_mm_output()
+        with patch.object(
+            f, "_encode_audio", return_value=(b"bytes", "audio/ogg")
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="http://x/a.ogg",
+        ):
+            result = await f.format(
+                mm, "r4", response_format="url", output_format="opus"
+            )
+        assert result["data"][0]["output_format"] == "opus"
+        assert result["data"][0]["url"] is not None
+
+
+# ── DiffusionFormatter — VideoData.output_format (new branch behavior) ──────
+
+
+class TestDiffusionFormatterVideoOutputFormat:
+    """_encode_video always sets VideoData.output_format='mp4'."""
+
+    @pytest.mark.asyncio
+    async def test_video_response_has_output_format_mp4(self):
+        from unittest.mock import patch as _patch
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        f = DiffusionFormatter(model_name="test", media_fs=None, media_http_url=None)
+        stage = MagicMock()
+        stage.images = [MagicMock()]
+
+        with _patch(
+            "dynamo.vllm.omni.output_formatter.normalize_video_frames",
+            return_value=[MagicMock()],
+        ), _patch("dynamo.vllm.omni.output_formatter.export_to_video"), _patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="http://x/v.mp4",
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ):
+            result = await f.format(
+                stage, "r5", request_type=RequestType.VIDEO_GENERATION, fps=16
+            )
+
+        assert result is not None
+        assert result["data"][0]["output_format"] == "mp4"

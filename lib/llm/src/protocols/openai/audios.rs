@@ -180,3 +180,115 @@ impl AnnotationsProvider for NvCreateAudioSpeechRequest {
             .unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- NvCreateAudioSpeechRequest ---
+
+    #[test]
+    fn audio_request_data_source_optional_absent_is_none() {
+        let json = r#"{"input":"hello"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.data_source, None);
+    }
+
+    #[test]
+    fn audio_request_data_source_url_round_trips() {
+        let json = r#"{"input":"hello","data_source":"url"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.data_source.as_deref(), Some("url"));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"data_source\":\"url\""));
+    }
+
+    #[test]
+    fn audio_request_data_source_b64_json_round_trips() {
+        let json = r#"{"input":"hi","data_source":"b64_json"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.data_source.as_deref(), Some("b64_json"));
+    }
+
+    #[test]
+    fn audio_request_data_source_and_response_format_coexist() {
+        let json = r#"{"input":"hi","data_source":"url","response_format":"mp3"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.data_source.as_deref(), Some("url"));
+        assert_eq!(req.response_format.as_deref(), Some("mp3"));
+    }
+
+    #[test]
+    fn audio_request_data_source_none_omitted_from_serialization() {
+        let req = NvCreateAudioSpeechRequest {
+            input: "hi".into(),
+            model: None,
+            voice: None,
+            data_source: None,
+            response_format: None,
+            speed: None,
+            task_type: None,
+            language: None,
+            instructions: None,
+            ref_audio: None,
+            ref_text: None,
+            max_new_tokens: None,
+            user: None,
+            nvext: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("data_source"));
+    }
+
+    // --- AudioData ---
+
+    #[test]
+    fn audio_data_output_format_required_present() {
+        let json = r#"{"output_format":"mp3","b64_json":"abc=="}"#;
+        let d: AudioData = serde_json::from_str(json).unwrap();
+        assert_eq!(d.output_format, "mp3");
+        assert_eq!(d.b64_json.as_deref(), Some("abc=="));
+    }
+
+    #[test]
+    fn audio_data_output_format_required_missing_fails() {
+        let json = r#"{"b64_json":"abc=="}"#;
+        assert!(serde_json::from_str::<AudioData>(json).is_err());
+    }
+
+    #[test]
+    fn audio_data_url_omitted_when_none() {
+        let d = AudioData {
+            output_format: "wav".into(),
+            url: None,
+            b64_json: Some("xyz==".into()),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("\"url\""));
+        assert!(json.contains("b64_json"));
+    }
+
+    #[test]
+    fn audio_data_round_trip_url_path() {
+        let d = AudioData {
+            output_format: "opus".into(),
+            url: Some("http://x/a.ogg".into()),
+            b64_json: None,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: AudioData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2.output_format, "opus");
+        assert_eq!(d2.url.as_deref(), Some("http://x/a.ogg"));
+        assert!(d2.b64_json.is_none());
+    }
+
+    #[test]
+    fn audio_data_all_codec_values_deserialize() {
+        for fmt in ["wav", "mp3", "pcm", "flac", "aac", "opus"] {
+            let json = format!(r#"{{"output_format":"{}"}}"#, fmt);
+            let d: AudioData = serde_json::from_str(&json).unwrap();
+            assert_eq!(d.output_format, fmt);
+        }
+    }
+}
