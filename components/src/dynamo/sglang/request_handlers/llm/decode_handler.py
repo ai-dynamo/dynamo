@@ -272,9 +272,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        return_routed_experts = getattr(
-            self.config.server_args, "enable_return_routed_experts", False
-        )
+        # TODO: wire return_routed_experts into the generate call when needed.
+        # return_routed_experts = getattr(
+        #     self.config.server_args, "enable_return_routed_experts", False
+        # )
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
