@@ -255,6 +255,12 @@ COPY --from=dynamo_tools /etc/sudoers /etc/sudoers
 COPY --from=dynamo_tools /etc/sudoers.d/ /etc/sudoers.d/
 COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
 
+# Expose bundled nsys on PATH (apt-installed in dynamo_tools; /usr/local/ is
+# not copied across stages, so the apt post-install symlink is lost).
+RUN NSYS_BIN=$(find /opt/nvidia/nsight-systems -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
+    if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
+    else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-systems"; fi
+
 # Restore the pre-tools python3 (keeps SGLang system python intact and avoids venv symlink loops).
 RUN if [ -e /tmp/python3.pretools ]; then cp -af /tmp/python3.pretools /usr/bin/python3; fi
 
