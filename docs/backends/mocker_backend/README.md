@@ -102,7 +102,6 @@ lib/backend-common/examples/mocker/
 ├── Dockerfile              # builds the mocker backend binary
 ├── Dockerfile.frontend     # builds the Dynamo frontend from source
 ├── docker-compose.yml      # one-command infra + frontend + backend
-├── nats-server.conf
 └── src/
     ├── main.rs             # 3-line entry point
     └── engine.rs           # MockerBackend wrapping dynamo-mocker scheduler
