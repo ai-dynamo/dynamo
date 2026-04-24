@@ -44,27 +44,18 @@ spec:
         securityContext:
           supplementalGroups:
           - 991
-        volumes:
-        - name: dev-dri
-          hostPath:
-            path: /dev/dri
-            type: Directory
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
-          securityContext:
-            privileged: true
-            allowPrivilegeEscalation: true
-          volumeMounts:
-          - name: dev-dri
-            mountPath: /dev/dri
           resources:
             claims:
             - name: gpu
           env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
           - name: VLLM_TARGET_DEVICE
             value: xpu
           workingDir: /workspace/examples/backends/vllm
@@ -92,27 +83,18 @@ spec:
         securityContext:
           supplementalGroups:
           - 991
-        volumes:
-        - name: dev-dri
-          hostPath:
-            path: /dev/dri
-            type: Directory
         resourceClaims:
         - name: gpu
           resourceClaimTemplateName: gpu-template
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
-          securityContext:
-            privileged: true
-            allowPrivilegeEscalation: true
-          volumeMounts:
-          - name: dev-dri
-            mountPath: /dev/dri
           resources:
             claims:
             - name: gpu
           env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
           - name: VLLM_TARGET_DEVICE
             value: xpu
           workingDir: /workspace/examples/backends/vllm
