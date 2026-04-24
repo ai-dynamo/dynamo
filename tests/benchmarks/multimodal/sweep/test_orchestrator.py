@@ -44,7 +44,8 @@ def _make_config(
     input_files: List[str] = []
     for i in range(num_input_files):
         f = tmp_path / f"input_{i}.jsonl"
-        f.write_text("{}\n")
+        rows = (f'{{"session_id": "session-{j}"}}\n' for j in range(5))
+        f.write_text("".join(rows))
         input_files.append(str(f))
 
     return SweepConfig(
@@ -52,7 +53,7 @@ def _make_config(
         request_rates=request_rates,
         concurrencies=None,
         osl=10,
-        request_count=5,
+        conversation_num=5,
         warmup_count=1,
         port=8000,
         timeout=60,
