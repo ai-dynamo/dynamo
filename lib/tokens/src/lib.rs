@@ -359,7 +359,10 @@ impl std::cmp::Ord for PositionalLineageHash {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.position()
             .cmp(&other.position())
-            .then_with(|| self.current_hash_fragment().cmp(&other.current_hash_fragment()))
+            .then_with(|| {
+                self.current_hash_fragment()
+                    .cmp(&other.current_hash_fragment())
+            })
             .then_with(|| self.0.cmp(&other.0))
     }
 }
