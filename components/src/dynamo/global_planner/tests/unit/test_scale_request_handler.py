@@ -246,11 +246,12 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
         max_total_gpus=-1,  # Don't trigger discovery in __init__
     )
 
-    with patch(
-        "dynamo.global_planner.scale_handler.KubernetesAPI"
-    ) as mock_kube_cls, patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
-    ) as mock_connector_cls:
+    with (
+        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.scale_handler.KubernetesConnector"
+        ) as mock_connector_cls,
+    ):
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
         mock_kube.list_graph_deployments.return_value = [
@@ -279,11 +280,12 @@ async def test_populate_connectors_implicit_mode(mock_runtime):
         max_total_gpus=-1,  # Don't trigger discovery in __init__
     )
 
-    with patch(
-        "dynamo.global_planner.scale_handler.KubernetesAPI"
-    ) as mock_kube_cls, patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
-    ) as mock_connector_cls:
+    with (
+        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.scale_handler.KubernetesConnector"
+        ) as mock_connector_cls,
+    ):
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
         mock_kube.list_graph_deployments.return_value = [
@@ -457,7 +459,10 @@ async def test_scale_down_denied_when_breaches_floor_and_no_pair(mock_runtime):
     req = _scale_req(caller_ns="default-my-dgd", prefill=2)  # want to drop to 2
     results = await _run(handler, req)
     assert results[0]["status"] == "error"
-    assert "budget breach" in results[0]["message"].lower() or "below floor" in results[0]["message"].lower()
+    assert (
+        "budget breach" in results[0]["message"].lower()
+        or "below floor" in results[0]["message"].lower()
+    )
     connector.set_component_replicas.assert_not_called()
 
 
@@ -504,10 +509,16 @@ async def test_scale_down_paired_across_different_dgd(mock_runtime):
         max_total_gpus=12,
     )
     connector_a = _install_connector(
-        handler, "default/dgd-a", _dgd_spec(prefill_replicas=3, decode_replicas=3), parent_dgd_name="dgd-a"
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
     )
     connector_b = _install_connector(
-        handler, "default/dgd-b", _dgd_spec(prefill_replicas=3, decode_replicas=3), parent_dgd_name="dgd-b"
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-b",
     )
 
     # Decode in DGD-B wants to scale up — should pair across DGDs with DGD-A's scale-down
@@ -547,10 +558,16 @@ async def test_same_dgd_pair_preferred_over_cross_dgd(mock_runtime):
         max_total_gpus=12,
     )
     connector_a = _install_connector(
-        handler, "default/dgd-a", _dgd_spec(prefill_replicas=3, decode_replicas=3), parent_dgd_name="dgd-a"
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
     )
     connector_b = _install_connector(
-        handler, "default/dgd-b", _dgd_spec(prefill_replicas=3, decode_replicas=3), parent_dgd_name="dgd-b"
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-b",
     )
     # Both DGD-A's decode and DGD-B's decode have pending scale-up intents
     handler._intent_cache["default/dgd-a/decode"] = PoolIntent(
@@ -586,10 +603,16 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
         max_total_gpus=12,
     )
     connector_a = _install_connector(
-        handler, "default/dgd-a", _dgd_spec(prefill_replicas=3, decode_replicas=3), parent_dgd_name="dgd-a"
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
     )
     connector_b = _install_connector(
-        handler, "default/dgd-b", _dgd_spec(prefill_replicas=3, decode_replicas=3), parent_dgd_name="dgd-b"
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-b",
     )
     # DGD-B's decode is a pending partner
     handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
@@ -679,7 +702,9 @@ async def test_intent_cache_respects_ttl(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_scale_up_paired_with_pending_scale_down_when_ceiling_breached(mock_runtime):
+async def test_scale_up_paired_with_pending_scale_down_when_ceiling_breached(
+    mock_runtime,
+):
     """Ceiling case: scale-up paired with cached opposite scale-down."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
@@ -798,11 +823,12 @@ async def test_asymmetric_pair_denied_if_below_tolerance(mock_runtime):
 async def test_initial_below_floor_logs_warning_but_accepts_scale_ups(mock_runtime):
     """At startup, when discovered total < min_total_gpus, a warning is logged
     and scale-ups below ceiling still pass."""
-    with patch(
-        "dynamo.global_planner.scale_handler.KubernetesAPI"
-    ) as mock_kube_cls, patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
-    ) as mock_connector_cls:
+    with (
+        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.scale_handler.KubernetesConnector"
+        ) as mock_connector_cls,
+    ):
         mock_kube = MagicMock()
         mock_kube_cls.return_value = mock_kube
         mock_kube.list_graph_deployments.return_value = [
@@ -824,7 +850,8 @@ async def test_initial_below_floor_logs_warning_but_accepts_scale_ups(mock_runti
                 min_total_gpus=10,
             )
             warnings = [
-                call for call in mock_logger.warning.call_args_list
+                call
+                for call in mock_logger.warning.call_args_list
                 if call.args and "below min_total_gpus" in str(call.args[0])
             ]
             assert warnings, "Expected a warning about being below the floor"

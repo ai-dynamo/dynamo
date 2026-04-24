@@ -284,9 +284,7 @@ class ScaleRequestHandler:
                 total_gpus += replicas * spec.gpu_per_replica
         return total_gpus
 
-    def _total_gpus_with_overrides(
-        self, overrides: dict[tuple[str, str], int]
-    ) -> int:
+    def _total_gpus_with_overrides(self, overrides: dict[tuple[str, str], int]) -> int:
         """Compute total GPUs across all known DGDs (re-reads K8s).
 
         Kept for backward compatibility (startup warnings, legacy callers).
@@ -450,7 +448,9 @@ class ScaleRequestHandler:
             spec = dgd_pools.get(sub_type)
             if spec is None or spec.gpu_per_replica == 0:
                 continue
-            net += (target.desired_replicas - spec.current_replicas) * spec.gpu_per_replica
+            net += (
+                target.desired_replicas - spec.current_replicas
+            ) * spec.gpu_per_replica
         return net
 
     def _request_is_internally_paired(
@@ -597,9 +597,9 @@ class ScaleRequestHandler:
                 # Track whether a paired partner is being applied and, if so,
                 # which DGD + pool it's in. Needed to decide atomic vs two-step
                 # execution.
-                partner_info: Optional[
-                    tuple[str, str, int, PoolSpec]
-                ] = None  # (dgd_key, sub_type, desired, spec)
+                partner_info: Optional[tuple[str, str, int, PoolSpec]] = (
+                    None  # (dgd_key, sub_type, desired, spec)
+                )
 
                 if self._budget_enforcement_enabled():
                     net_delta = self._request_net_delta_gpu(request, dgd_pools)
@@ -674,9 +674,7 @@ class ScaleRequestHandler:
                             partner  # type: ignore[misc]
                         )
                         pair_scope = (
-                            "intra-DGD"
-                            if partner_dgd == request_key
-                            else "cross-DGD"
+                            "intra-DGD" if partner_dgd == request_key else "cross-DGD"
                         )
                         logger.info(
                             f"Paired transfer ({pair_scope}) for DGD "
@@ -756,6 +754,8 @@ class ScaleRequestHandler:
                     # construction of _find_pair_partner. If request is net
                     # scale-down (net_delta < 0), request is the down side;
                     # otherwise the partner is.
+                    first_connector: Optional[KubernetesConnector]
+                    second_connector: Optional[KubernetesConnector]
                     if net_delta < 0:
                         first_label = f"request side ({request_key})"
                         second_label = f"partner side ({partner_dgd}/{partner_sub})"
