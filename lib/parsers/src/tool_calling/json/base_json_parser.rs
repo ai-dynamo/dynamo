@@ -389,6 +389,10 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
 
 #[cfg(test)]
 mod detect_parser_tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
 
     #[test]

@@ -203,6 +203,11 @@ pub fn detect_tool_call_start_harmony(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of the single-call happy path also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Missing-end-token recovery
+    // is N/A for harmony (no section-end concept). Keep these inline tests
+    // as the parser-specific regression moat; trim duplicated coverage once
+    // the contract suite stabilizes.
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {

@@ -586,6 +586,10 @@ fn html_unescape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
     use rstest::rstest;
 
