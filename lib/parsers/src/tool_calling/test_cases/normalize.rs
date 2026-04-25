@@ -48,8 +48,19 @@ impl CanonicalCall {
 }
 
 /// Canonicalize a vector of parser-emitted calls. Order is preserved
-/// (callers compare ordered for single-call cases; CASE.2 parallel-calls
-/// in part2 will sort by name before comparison).
+/// (callers compare ordered for single-call cases; future parallel-call
+/// cases will sort by name before comparison).
 pub fn canonicalize(calls: &[ToolCallResponse]) -> Vec<CanonicalCall> {
     calls.iter().map(CanonicalCall::from_response).collect()
+}
+
+/// Returns true when the parser's `normal_text` output indicates "no text
+/// leaked alongside the tool call." Parsers vary: some return `None`, some
+/// `Some("")`, and some `Some("   ")` after a stripped trailing newline.
+/// All three mean the same thing — the tool call was the entire output.
+pub fn normal_text_is_empty(normal: &Option<String>) -> bool {
+    match normal {
+        None => true,
+        Some(s) => s.trim().is_empty(),
+    }
 }

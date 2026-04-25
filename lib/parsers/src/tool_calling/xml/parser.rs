@@ -689,26 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_simple_tool_call() {
-        let input = r#"<tool_call>
-<function=execute_bash>
-<parameter=command>
-pwd && ls
-</parameter>
-</function>
-</tool_call>"#;
-
-        let (calls, normal) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "execute_bash");
-        assert_eq!(normal, Some("".to_string()));
-
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["command"], "pwd && ls");
-    }
-
-    #[test]
     fn test_parse_multiple_parameters() {
         let input = r#"<tool_call>
 <function=get_weather>

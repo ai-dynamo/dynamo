@@ -15,7 +15,7 @@
 
 use super::FixtureCase;
 use super::fixtures::all_fixtures;
-use super::normalize::{CanonicalCall, canonicalize};
+use super::normalize::{CanonicalCall, canonicalize, normal_text_is_empty};
 use crate::tool_calling::parsers::{get_tool_parser_map, try_tool_call_parse};
 use serde_json::json;
 
@@ -44,17 +44,24 @@ async fn run_case(
         FixtureCase::Sample(input) => {
             let config = config_for(parser_name);
             match try_tool_call_parse(&input, config, None).await {
-                Ok((calls, _normal)) => {
+                Ok((calls, normal)) => {
                     let actual = canonicalize(&calls);
-                    if actual == expected {
-                        (format!("  ✓   {parser_name:<16} {case_label}"), None)
-                    } else {
+                    if actual != expected {
                         (
                             format!("  FAIL {parser_name:<16} {case_label}"),
                             Some(format!(
                                 "[{parser_name}] {case_label}: expected {expected:?}, got {actual:?}\n  input: {input:?}"
                             )),
                         )
+                    } else if !normal_text_is_empty(&normal) {
+                        (
+                            format!("  FAIL {parser_name:<16} {case_label}"),
+                            Some(format!(
+                                "[{parser_name}] {case_label}: tool call extracted but `normal_text` leaked: {normal:?}\n  input: {input:?}"
+                            )),
+                        )
+                    } else {
+                        (format!("  ✓   {parser_name:<16} {case_label}"), None)
                     }
                 }
                 Err(e) => (

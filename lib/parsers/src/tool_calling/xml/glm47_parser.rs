@@ -311,25 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_simple_tool_call() {
-        let config = get_test_config();
-        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
-
-        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
-
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "get_weather");
-
-        let args: HashMap<String, Value> =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(
-            args.get("location").unwrap().as_str().unwrap(),
-            "San Francisco"
-        );
-        assert_eq!(normal_text, Some("".to_string()));
-    }
-
-    #[test]
     fn test_parse_tool_call_with_multiple_args() {
         let config = get_test_config();
         let message = "<tool_call>book_flight<arg_key>from</arg_key><arg_value>NYC</arg_value><arg_key>to</arg_key><arg_value>LAX</arg_value><arg_key>date</arg_key><arg_value>2026-03-15</arg_value></tool_call>";

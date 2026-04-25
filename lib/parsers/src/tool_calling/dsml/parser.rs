@@ -379,34 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_single_tool_call_string_param() {
-        let input = r#"<｜DSML｜function_calls>
-<｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
-</｜DSML｜invoke>
-</｜DSML｜function_calls>"#;
-
-        let config = get_test_config();
-        let result = try_tool_call_parse_dsml(input, &config);
-        if let Err(e) = &result {
-            eprintln!("Parse error: {:?}", e);
-        }
-        let (calls, normal) = result.unwrap();
-
-        if calls.is_empty() {
-            eprintln!("Input: {}", input);
-            eprintln!("No calls parsed!");
-        }
-
-        assert_eq!(calls.len(), 1, "Expected 1 tool call, got {}", calls.len());
-        assert_eq!(normal, Some("".to_string()));
-
-        let (name, args) = extract_name_and_args(calls[0].clone());
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "San Francisco");
-    }
-
-    #[test]
     fn test_parse_single_tool_call_mixed_params() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="search">
