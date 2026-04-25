@@ -72,6 +72,9 @@ RUN pip install --no-cache-dir --force-reinstall --no-deps \
 # Dynamo Python components from V4 branch
 COPY --from=wheel_builder /workspace/components/src/dynamo /workspace/components/src/dynamo
 
+# Third-party attributions + license (from the cloned release/deepseekv4 source)
+COPY --from=wheel_builder --chmod=664 /workspace/ATTRIBUTION* /workspace/LICENSE /workspace/
+
 # Fix: sglang repo dir at /workspace/sglang shadows the Python package
 ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH}
 

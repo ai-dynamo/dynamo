@@ -79,6 +79,9 @@ RUN pip install --no-cache-dir \
 COPY --from=dynamo_src /workspace/components/src/dynamo /workspace/components/src/dynamo
 ENV PYTHONPATH=/workspace/components/src:${PYTHONPATH:-}
 
+# --- third-party attributions + license ---
+COPY --from=dynamo_src --chmod=664 /workspace/ATTRIBUTION* /workspace/LICENSE /workspace/
+
 WORKDIR /workspace
 
 # --- dynamo runtime env tweaks ---
