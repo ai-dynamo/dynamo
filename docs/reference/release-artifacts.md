@@ -99,7 +99,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.0.2
 ### Python Wheels (PyPI)
 
 > [!TIP]
-> For detailed installation instructions, see the [Local Quick Start](https://github.com/ai-dynamo/dynamo#local-quick-start) in the README.
+> For detailed installation instructions, see the [Quick Start](https://github.com/ai-dynamo/dynamo#quick-start) in the README.
 
 ```bash
 # Install Dynamo with a specific backend (Recommended)

@@ -179,7 +179,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.
 # Create venv and build
 uv venv dynamo && source dynamo/bin/activate
 uv pip install pip maturin
-cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
+cd lib/bindings/python && maturin develop --uv && cd "$(git rev-parse --show-toplevel)"
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .
 ```

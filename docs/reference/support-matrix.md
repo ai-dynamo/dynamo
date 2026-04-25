@@ -217,4 +217,4 @@ For version-specific artifact details, installation commands, and release histor
   - [dynamo-mocker](https://crates.io/crates/dynamo-mocker/) *(New in v1.0.0)*
   - [dynamo-kv-router](https://crates.io/crates/dynamo-kv-router/) *(New in v1.0.0)*
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#local-quick-start) in the README.
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#quick-start) in the README.
