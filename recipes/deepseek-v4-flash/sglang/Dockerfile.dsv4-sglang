@@ -50,7 +50,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Infra from dynamo sglang-runtime (etcd, nats, UCX, NIXL)
 COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
-ENV PATH=/usr/local/bin:${PATH}
+ENV PATH=/usr/local/bin/etcd:${PATH}
 
 # UCX libs
 COPY --from=dynamo_src /usr/lib/x86_64-linux-gnu/ucx /usr/lib/x86_64-linux-gnu/ucx
