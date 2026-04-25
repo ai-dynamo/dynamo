@@ -2716,3 +2716,313 @@ func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate
 	// Annotation should still have the correct hash
 	assert.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 }
+
+func TestBuildRollingUpdateContext(t *testing.T) {
+	makeOldDCD := func(dgdName, serviceName, componentType string, specReplicas, statusReplicas, availableReplicas int32) *nvidiacomv1alpha1.DynamoComponentDeployment {
+		return &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      dgdName + "-" + serviceName + "-" + testOldWorkerHash[:8],
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: componentType,
+					ServiceName:   serviceName,
+					Replicas:      ptr.To(specReplicas),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					Replicas:          statusReplicas,
+					AvailableReplicas: ptr.To(availableReplicas),
+				},
+			},
+		}
+	}
+
+	makeNewDCD := func(dgdName, serviceName, componentType, workerHash string, specReplicas, statusReplicas, availableReplicas int32) *nvidiacomv1alpha1.DynamoComponentDeployment {
+		return &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      dgdName + "-" + serviceName + "-" + workerHash[:8],
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					consts.KubeLabelDynamoWorkerHash:          workerHash,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: componentType,
+					ServiceName:   serviceName,
+					Replicas:      ptr.To(specReplicas),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					Replicas:          statusReplicas,
+					AvailableReplicas: ptr.To(availableReplicas),
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		services    map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		oldDCDs     func(newHash string) []runtime.Object
+		newDCDs     func(newHash string) []runtime.Object
+		expectedOld map[string]int32
+		expectedNew map[string]int32
+	}{
+		{
+			name: "normal rollout start - all old healthy, no new pods yet",
+			// desired=10, maxSurge=0, maxUnavailable=2 (20%)
+			// old: spec=10, available=10, actual=10 | new: spec=0, available=0, actual=0
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "2",
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 10, 10, 10),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 8},
+			expectedNew: map[string]int32{"worker": 0},
+		},
+		{
+			name: "old fleet degraded - should protect healthy old pods",
+			// desired=10, maxSurge=3, maxUnavailable=2
+			// old: spec=8, available=4, actual=8 | new: spec=3, available=3, actual=3
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+					// Default annotations: 25% surge, 25% unavailable
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 8, 8, 4),
+				}
+			},
+			newDCDs: func(newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 3, 3, 3),
+				}
+			},
+			expectedOld: map[string]int32{"worker": 5},
+			expectedNew: map[string]int32{"worker": 5},
+		},
+		{
+			name: "some unhealthy old pods - cleanup frees resources",
+			// desired=10, maxSurge=3, maxUnavailable=2
+			// old: spec=10, available=6, actual=10 | new: spec=0, available=0, actual=0
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 10, 10, 6),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 8},
+			expectedNew: map[string]int32{"worker": 3},
+		},
+		{
+			name: "terminating pods throttle new scale-up",
+			// desired=10, maxSurge=3, maxUnavailable=2
+			// old: spec=5, available=5, actual=8 (3 Terminating, still holding GPUs)
+			// new: spec=5, available=5, actual=5
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 5, 8, 5),
+				}
+			},
+			newDCDs: func(newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 5, 5, 5),
+				}
+			},
+			expectedOld: map[string]int32{"worker": 3},
+			expectedNew: map[string]int32{"worker": 5},
+		},
+		{
+			name: "maxSurge=0 bootstrapping - must drain old before scaling up new",
+			// desired=10, maxSurge=0, maxUnavailable=2
+			// old: spec=10, available=10, actual=10 | new: spec=0, available=0, actual=0
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "20%",
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 10, 10, 10),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 8},
+			expectedNew: map[string]int32{"worker": 0},
+		},
+		{
+			name: "maxSurge=0 second reconcile - old drained and terminated, now scale up",
+			// desired=10, maxSurge=0, maxUnavailable=2
+			// old: spec=8, available=8, actual=8 | new: spec=0, available=0, actual=0
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "20%",
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 8, 8, 8),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 8},
+			expectedNew: map[string]int32{"worker": 2},
+		},
+		{
+			name: "catastrophic wipe - old fleet destroyed, scale up new aggressively",
+			// desired=10, maxSurge=3, maxUnavailable=2
+			// old: spec=10, available=0, actual=0 (all wiped) | new: spec=0, available=0, actual=0
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 10, 0, 0),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 8},
+			expectedNew: map[string]int32{"worker": 10},
+		},
+		{
+			name: "rollout complete - new fully ready, old drained",
+			// desired=10, maxSurge=3, maxUnavailable=2
+			// old: spec=0, available=0, actual=0 | new: spec=10, available=10, actual=10
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(10)),
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, 0, 0, 0),
+				}
+			},
+			newDCDs: func(newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 10, 10, 10),
+				}
+			},
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 10},
+		},
+		{
+			name: "multi-service independence - prefill done, decode mid-rollout",
+			// prefill: desired=4, maxSurge=1, maxUnavailable=1
+			//   old: spec=0, available=0, actual=0 | new: spec=4, available=4, actual=4
+			// decode: desired=8, maxSurge=2, maxUnavailable=2
+			//   old: spec=6, available=6, actual=6 | new: spec=2, available=0, actual=2
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      ptr.To(int32(4)),
+				},
+				"decode": {
+					ComponentType: consts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(8)),
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "prefill", consts.ComponentTypePrefill, 0, 0, 0),
+					makeOldDCD("test-dgd", "decode", consts.ComponentTypeDecode, 6, 6, 6),
+				}
+			},
+			newDCDs: func(newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD("test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 4, 4, 4),
+					makeNewDCD("test-dgd", "decode", consts.ComponentTypeDecode, newHash, 2, 2, 0),
+				}
+			},
+			expectedOld: map[string]int32{"prefill": 0, "decode": 6},
+			expectedNew: map[string]int32{"prefill": 4, "decode": 4},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", tt.services)
+			dgd.Annotations = map[string]string{
+				consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
+			}
+
+			// Compute the actual new hash from the DGD spec (same as buildRollingUpdateContext does)
+			newHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NotEqual(t, testOldWorkerHash, newHash, "test setup: computed hash must differ from old hash")
+
+			// Collect all mock objects
+			var objs []runtime.Object
+			if tt.oldDCDs != nil {
+				objs = append(objs, tt.oldDCDs(newHash)...)
+			}
+			if tt.newDCDs != nil {
+				objs = append(objs, tt.newDCDs(newHash)...)
+			}
+
+			r := createTestReconcilerWithStatus(dgd, objs...)
+			ctx := context.Background()
+
+			result := r.buildRollingUpdateContext(ctx, dgd)
+
+			assert.Equal(t, newHash, result.NewWorkerHash)
+			for svc, expectedOld := range tt.expectedOld {
+				assert.Equal(t, expectedOld, result.OldWorkerReplicas[svc],
+					"old replicas for service %s", svc)
+			}
+			for svc, expectedNew := range tt.expectedNew {
+				assert.Equal(t, expectedNew, result.NewWorkerReplicas[svc],
+					"new replicas for service %s", svc)
+			}
+		})
+	}
+}
