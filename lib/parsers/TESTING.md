@@ -43,6 +43,14 @@ Per-model gap tracking lives elsewhere (not in this repo).
 
 - **`CASE.harmony1`** Channel / recipient parsing (analysis / commentary / final channels). Ex: `harmony_parser::test_parse_tool_calls_harmony_*`.
 
+### Parser-internal & format-variant categories
+
+- **`CASE.20`** Detection helpers — direct tests of `detect_tool_call_start_*` / `find_tool_call_end_position_*` (the streaming jail's entry points). Distinct from `CASE.8` which exercises the full streaming pipeline. Ex: `kimi_k2_parser::test_detect_tool_call_start`.
+- **`CASE.21`** Function-name conventions — allowed identifier chars (hyphens, underscores, dots), prefix variants (`functions.NAME` vs bare `NAME`), and rejection of malformed function IDs. Models differ on what they emit; parsers must take a position. Ex: `kimi_k2_parser::test_parse_names_with_hyphens`, `kimi_k2_parser::test_parse_invalid_function_id_rejected_by_regex`.
+- **`CASE.22`** Whitespace / formatting tolerance — whitespace inside or between tokens (newlines after `<|tool_call_begin|>`, spaces around the function ID, etc.). Parser must accept the same call regardless of formatting. Ex: `kimi_k2_parser::test_parse_with_whitespace`.
+- **`CASE.23`** Token format variants — multiple acceptable spellings for the same semantic (e.g., Kimi K2's singular `<|tool_call_section_*|>` vs plural `<|tool_calls_section_*|>` section tokens). Parser must accept all configured variants. Ex: `kimi_k2_parser::test_parse_with_singular_section_tokens`.
+- **`CASE.24`** Empty section / no-content wrappers — start+end fences with nothing between them (`<|tool_calls_section_begin|><|tool_calls_section_end|>`). Must produce zero calls and preserve any surrounding text. Ex: `kimi_k2_parser::test_parse_empty_tool_section`.
+
 ### Universal gaps (no test anywhere, not promoted to numbered categories)
 
 - Unicode in function names (non-ASCII tool names, emoji).
