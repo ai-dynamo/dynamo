@@ -69,6 +69,8 @@ These recipes are under active development and may require additional setup step
 |-------|-----------|------|------|------------|-------|
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill. Requires [custom container build](glm-5-nvfp4/). |
 | **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/trtllm/agg/nvidia/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling. Vision input not yet functional. |
+| **[DeepSeek-V4-Flash](deepseek-v4-flash/vllm/agg/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — MoE model (284B / 13B active), DP=4 + EP, FP8 KV cache, reasoning + tool calling. Requires [custom container build](deepseek-v4-flash/container/). |
+| **[DeepSeek-V4-Pro](deepseek-v4-pro/vllm/agg/)** | vLLM | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8 + EP, FP4+FP8 mixed checkpoint, FP8 KV cache, CSA+HCA attention, three reasoning effort modes, tool calling. Requires [custom container build](deepseek-v4-pro/container/). |
 
 ## Recipe Structure
 
