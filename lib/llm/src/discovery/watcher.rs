@@ -509,15 +509,7 @@ impl ModelWatcher {
             .registering_worker_sets
             .insert(registration_key.clone())
             && !self
-                .recover_concurrent_registration(
-                    mcid,
-                    card,
-                    priority,
-                    &model_name,
-                    &namespace,
-                    &ws_key,
-                    &registration_key,
-                )
+                .recover_concurrent_registration(mcid, card, priority)
                 .await?
         {
             return Ok(());
@@ -546,11 +538,12 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
         priority: u32,
-        model_name: &str,
-        namespace: &str,
-        ws_key: &str,
-        registration_key: &str,
     ) -> anyhow::Result<bool> {
+        let model_name = card.name().to_string();
+        let namespace = mcid.namespace.as_str();
+        let ws_key = worker_set_key(namespace, card.model_type, priority);
+        let registration_key = ModelManager::model_namespace_key(&model_name, &ws_key);
+
         // Wait for the in-flight registration to complete so we can validate
         // the new worker's checksum. Without this, a concurrent worker with a
         // mismatched checksum could sneak past the early check in `watch`.
