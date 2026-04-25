@@ -206,7 +206,21 @@ If accepted: vLLM, SGLang, transformers, and Dynamo all stop needing per-model e
 
 ---
 
-## Rust minijinja parity — partial confirmation, port pass needed
+## Rust minijinja parity — V4 ported, V3.2 pending
+
+**Cycle 4 update.** `deepseek_v4_inline.jinja` has been ported to use only minijinja-compatible idioms (replaced `.append()` with direct emission gated by `loop.first` / `loop.last`). All 16 fixtures still pass byte-identical in Python jinja2.
+
+For Rust minijinja: the **template is now syntactically accepted**; remaining mismatches are **host-side `tojson` filter configuration**, not template issues:
+
+1. **JSON key insertion order is lost at the minijinja boundary.** `Value::from_serialize(&serde_json::Value)` alphabetizes keys regardless of `preserve_order` on the source. Confirmed via probe: input `{"name":"x","description":"y"}` iterates as `description`, `name`, `parameters` inside the template. Fix in the host: register tools as a custom `minijinja::Object` impl that preserves insertion order, OR pre-serialize tools to JSON strings before passing to template.
+
+2. **`tojson` separators.** `serde_json::to_string` emits `{"a":1,"b":2}` but Python's default `json.dumps` (used by `encoding_dsv4.py`) emits `{"a": 1, "b": 2}`. Need a custom `serde_json::ser::Formatter` impl in the host's `tojson` filter — ~20 LOC, see `_rust_parity_scratch/main.rs` for the working `PythonStyleFormatter`.
+
+Confirmed Rust minijinja parity on V4 fixtures **2 (302 char), 4 (1125 char)** with the ported template — both no-tools cases. Fixtures 1, 3 and the gap fixtures with tools/tool_calls fail in Rust **only** on the two host-side issues above; the template logic and whitespace are byte-correct.
+
+`deepseek_v32_inline.jinja` still uses `.append()` and `.update()` idioms (jinja2 only). Same mechanical port pass needed before it'll run on Rust minijinja. The `.update()` for the `drop_thinking` filter (lines 64-74) needs a different pattern — likely a namespace-collected list of message indices to skip rather than rebuilding dicts.
+
+## Rust minijinja parity — earlier baseline (cycle 3)
 
 A standalone Rust binary (`/tmp/claude/dis1850-rust`, depending only on `minijinja = "2.15"` and `serde_json`) was used to validate the templates against the actual production runtime.
 

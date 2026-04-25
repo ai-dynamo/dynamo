@@ -1,12 +1,16 @@
 {#-
-  DeepSeek V4 chat template — DIS-1850 spike (single-file form, upstream-HF-PR ready).
+  DeepSeek V4 chat template — DIS-1850 spike (single-file form).
 
   Native Jinja port of `encoding_dsv4.py` (deepseek-ai/DeepSeek-V4-Pro).
-  This is the same logic as `deepseek_v4.jinja` but with the tools-system-block
-  inlined for upstream HuggingFace `tokenizer_config.json::chat_template` shape.
+  Validated byte-identical against test_input/test_output fixtures + 9
+  synthetic gap fixtures, in BOTH Python jinja2 and Rust minijinja.
 
-  Validated byte-identical against test_input/test_output fixtures + 7 synthetic
-  gap fixtures.
+  This file uses ONLY syntax common to jinja2 and minijinja:
+    - namespace() for stateful accumulation
+    - reverse-iteration loops, dict tests, filters
+    - `| items` filter (NOT `.items()`) for dict iteration
+    - direct emission with `loop.first` / `loop.last` (no list.append)
+    - attr access `m.tools` (NOT `m.get("tools")`) for optional fields
 
   Inputs (all optional except `messages`):
     - messages: list[dict]               — assumed pre-processed (merge_tool_messages
@@ -34,11 +38,6 @@
 {%- if reasoning_effort is not defined %}{% set reasoning_effort = none %}{% endif -%}
 
 {%- macro render_tools_block(tools) -%}
-{%- set schemas_list = [] -%}
-{%- for tool in tools -%}
-    {%- set fn = tool.function if tool.function is defined else tool -%}
-    {%- set _ = schemas_list.append(fn | tojson) -%}
-{%- endfor -%}
 ## Tools
 
 You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{{ DSML }}tool_calls>" block like the following:
@@ -61,9 +60,11 @@ Otherwise, output directly after {{ THINK_CLOSE }} with tool calls or final resp
 
 ### Available Tool Schemas
 
-{{ schemas_list | join("\n") }}
-
-You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
+{% for tool in tools -%}
+{%- set fn = tool.function if tool.function is defined else tool -%}
+{{ fn | tojson }}
+{% endfor %}
+{{ "\n" }}You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
 {%- endmacro -%}
 
 {%- set ns = namespace(has_tools=false, last_user_idx=-1) -%}
@@ -95,65 +96,59 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
     {%- elif message.role == "user" -%}
         {{ USER_TOK }}
         {%- if message.content_blocks -%}
-            {%- set parts = [] -%}
             {%- for block in message.content_blocks -%}
+                {%- if not loop.first %}{{ "\n\n" }}{%- endif -%}
                 {%- if block.type == "text" -%}
-                    {%- set _ = parts.append(block.text or "") -%}
+                    {{ block.text or "" }}
                 {%- elif block.type == "tool_result" -%}
                     {%- set tc = block.content -%}
                     {%- if tc is iterable and tc is not string -%}
-                        {%- set tparts = [] -%}
+                        {%- set ns_t = namespace(s="") -%}
                         {%- for b in tc -%}
-                            {%- if b.type == "text" -%}{%- set _ = tparts.append(b.text or "") -%}
-                            {%- else -%}{%- set _ = tparts.append("[Unsupported " ~ b.type ~ "]") -%}{%- endif -%}
+                            {%- if not loop.first %}{%- set ns_t.s = ns_t.s ~ "\n\n" -%}{%- endif -%}
+                            {%- if b.type == "text" -%}{%- set ns_t.s = ns_t.s ~ (b.text or "") -%}
+                            {%- else -%}{%- set ns_t.s = ns_t.s ~ "[Unsupported " ~ b.type ~ "]" -%}{%- endif -%}
                         {%- endfor -%}
-                        {%- set tc = tparts | join("\n\n") -%}
+                        {%- set tc = ns_t.s -%}
                     {%- endif -%}
-                    {%- set _ = parts.append("<tool_result>" ~ tc ~ "</tool_result>") -%}
+                    <tool_result>{{ tc }}</tool_result>
                 {%- else -%}
-                    {%- set _ = parts.append("[Unsupported " ~ block.type ~ "]") -%}
+                    [Unsupported {{ block.type }}]
                 {%- endif -%}
             {%- endfor -%}
-            {{ parts | join("\n\n") }}
         {%- else -%}
             {{ message.content or "" }}
         {%- endif -%}
     {%- elif message.role == "latest_reminder" -%}
         {{ REMINDER_TOK }}{{ message.content }}
     {%- elif message.role == "assistant" -%}
-        {%- set thinking_part = "" -%}
-        {%- set tc_content = "" -%}
+        {%- set rc = message.reasoning_content or "" -%}
+        {%- set prev_has_task = idx > 0 and (messages[idx-1].task is defined and messages[idx-1].task is not none) -%}
+        {%- if thinking_mode == "thinking" and not prev_has_task -%}
+            {%- if (not effective_drop_thinking) or idx > ns.last_user_idx -%}
+                {{ rc }}{{ THINK_CLOSE }}
+            {%- endif -%}
+        {%- endif -%}
+        {{ message.content or "" }}
         {%- if message.tool_calls -%}
-            {%- set tc_list = [] -%}
+            {{ "\n\n<" ~ DSML ~ "tool_calls>" }}
             {%- for tc in message.tool_calls -%}
                 {%- set tc_name = tc.function.name if tc.function is defined else tc.name -%}
                 {%- set tc_args_raw = tc.function.arguments if tc.function is defined else tc.arguments -%}
-                {%- set parsed_args = tc_args_raw -%}
-                {%- if tc_args_raw is string -%}
-                    {%- set parsed_args = tc_args_raw | fromjson -%}
-                {%- endif -%}
-                {%- set arg_lines = [] -%}
-                {%- for k, v in parsed_args.items() -%}
+                {%- set parsed_args = (tc_args_raw | fromjson) if tc_args_raw is string else tc_args_raw -%}
+                {{ "\n<" ~ DSML ~ "invoke name=\"" ~ tc_name ~ "\">\n" }}
+                {%- for k, v in parsed_args | items -%}
+                    {%- if not loop.first %}{{ "\n" }}{%- endif -%}
                     {%- if v is string -%}
-                        {%- set _ = arg_lines.append("<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"true\">" ~ v ~ "</" ~ DSML ~ "parameter>") -%}
+                        {{ "<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"true\">" ~ v ~ "</" ~ DSML ~ "parameter>" }}
                     {%- else -%}
-                        {%- set _ = arg_lines.append("<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"false\">" ~ (v | tojson) ~ "</" ~ DSML ~ "parameter>") -%}
+                        {{ "<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"false\">" ~ (v | tojson) ~ "</" ~ DSML ~ "parameter>" }}
                     {%- endif -%}
                 {%- endfor -%}
-                {%- set tc_block = "<" ~ DSML ~ "invoke name=\"" ~ tc_name ~ "\">\n" ~ (arg_lines | join("\n")) ~ "\n</" ~ DSML ~ "invoke>" -%}
-                {%- set _ = tc_list.append(tc_block) -%}
+                {{ "\n</" ~ DSML ~ "invoke>" }}
             {%- endfor -%}
-            {%- set tc_content = "\n\n<" ~ DSML ~ "tool_calls>\n" ~ (tc_list | join("\n")) ~ "\n</" ~ DSML ~ "tool_calls>" -%}
+            {{ "\n</" ~ DSML ~ "tool_calls>" }}
         {%- endif -%}
-        {%- set summary_content = message.content or "" -%}
-        {%- set rc = message.reasoning_content or "" -%}
-        {%- set prev_has_task = idx > 0 and (messages[idx-1].task is defined) -%}
-        {%- if thinking_mode == "thinking" and not prev_has_task -%}
-            {%- if (not effective_drop_thinking) or idx > ns.last_user_idx -%}
-                {%- set thinking_part = rc ~ THINK_CLOSE -%}
-            {%- endif -%}
-        {%- endif -%}
-        {{ thinking_part }}{{ summary_content }}{{ tc_content }}
         {%- if not message.wo_eos -%}{{ EOS }}{%- endif -%}
     {%- endif -%}
 
@@ -168,13 +163,9 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
             {%- endif -%}
         {%- elif message.role == "user" or message.role == "developer" -%}
             {{ ASSIST_TOK }}
-            {%- if (not effective_drop_thinking) and thinking_mode == "thinking" -%}
-                {{ THINK_OPEN }}
-            {%- elif effective_drop_thinking and thinking_mode == "thinking" and idx >= ns.last_user_idx -%}
-                {{ THINK_OPEN }}
-            {%- else -%}
-                {{ THINK_CLOSE }}
-            {%- endif -%}
+            {%- if (not effective_drop_thinking) and thinking_mode == "thinking" -%}{{ THINK_OPEN }}
+            {%- elif effective_drop_thinking and thinking_mode == "thinking" and idx >= ns.last_user_idx -%}{{ THINK_OPEN }}
+            {%- else -%}{{ THINK_CLOSE }}{%- endif -%}
         {%- endif -%}
     {%- endif -%}
 {%- endfor -%}
