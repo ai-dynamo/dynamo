@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # DeepSeek-V4-Flash SGLang DynamoGraphDeployment
 # Aggregated mode (no P/D disagg), B200x4 TP4, MXFP4 MoE, EAGLE MTP 3/4
 #
