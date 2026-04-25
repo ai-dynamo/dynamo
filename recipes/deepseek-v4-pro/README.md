@@ -8,6 +8,9 @@ Aggregated-serving recipe for **DeepSeek-V4-Pro** on vLLM with Dynamo.
 
 Aggregated, single-replica: 1 decode pod running TP=8 + Expert Parallel on all 8 GPUs of one node.
 
+> **⚠️ Known Day-0 issue: thinking modes produce corrupted output.**
+> Requests with `chat_template_kwargs: {"thinking": true, ...}` emit malformed tokens (numeric tokens spliced mid-word, occasional special-token leakage) on this engine. The bug is in the OSS port of DeepSeek-V4-Pro's sparse-attention path and does not affect DeepSeek-V4-Flash on the same stack. Until the upstream fix lands, send `chat_template_kwargs: {"thinking": false}` in chat completion requests. Tool calling, structured output, and non-thinking responses work normally.
+
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
@@ -68,7 +71,8 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "deepseek-ai/DeepSeek-V4-Pro",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100
+    "max_tokens": 100,
+    "chat_template_kwargs": {"thinking": false}
   }'
 ```
 
