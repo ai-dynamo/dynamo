@@ -202,9 +202,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
             num_new_tokens=num_new_tokens,
             num_new_computed_tokens=num_new_computed_tokens,
             new_computed_blocks=owned_blocks,
-            # TODO(ryan): add support for lookahead blocks
-            # comment out for now, otherwise would error out
-            # num_lookahead_blocks=num_lookahead_tokens,
+            num_lookahead_tokens=num_lookahead_tokens,
             delay_cache_blocks=delay_cache_blocks,
         )
 

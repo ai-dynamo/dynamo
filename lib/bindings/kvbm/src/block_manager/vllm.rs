@@ -295,8 +295,8 @@ pub struct GenericSlotUpdate<R> {
     /// The new computed blocks which advance the sequence state.
     pub new_computed_blocks: Option<KvbmBlockList>,
 
-    /// The number of lookahead blocks to cache.
-    pub num_lookahead_blocks: Option<usize>,
+    /// The number of lookahead tokens to cache.
+    pub num_lookahead_tokens: Option<usize>,
 
     /// Whether to delay caching the blocks.
     pub delay_cache_blocks: Option<bool>,
@@ -316,7 +316,7 @@ impl std::fmt::Debug for GenericSlotUpdate<String> {
 
         write!(
             f,
-            "GenericSlotUpdate(request_id: {}, request_num_tokens: {}, request_num_computed_tokens: {}, tokens_to_append: {}, num_new_tokens: {}, num_new_computed_tokens: {:?}, new_computed_blocks: {:?}, num_lookahead_blocks: {:?}, delay_cache_blocks: {:?})",
+            "GenericSlotUpdate(request_id: {}, request_num_tokens: {}, request_num_computed_tokens: {}, tokens_to_append: {}, num_new_tokens: {}, num_new_computed_tokens: {:?}, new_computed_blocks: {:?}, num_lookahead_tokens: {:?}, delay_cache_blocks: {:?})",
             self.request_id,
             self.request_num_tokens,
             self.request_num_computed_tokens,
@@ -324,7 +324,7 @@ impl std::fmt::Debug for GenericSlotUpdate<String> {
             self.num_new_tokens,
             self.num_new_computed_tokens,
             self.new_computed_blocks,
-            self.num_lookahead_blocks,
+            self.num_lookahead_tokens,
             self.delay_cache_blocks
         )
     }
@@ -337,7 +337,7 @@ pub struct SlotUpdate(pub GenericSlotUpdate<String>);
 #[pymethods]
 impl SlotUpdate {
     #[new]
-    #[pyo3(signature = (request_id, request_num_tokens, request_num_computed_tokens, tokens_to_append, num_new_tokens, num_new_computed_tokens=None, new_computed_blocks=None, num_lookahead_blocks=None, delay_cache_blocks=None))]
+    #[pyo3(signature = (request_id, request_num_tokens, request_num_computed_tokens, tokens_to_append, num_new_tokens, num_new_computed_tokens=None, new_computed_blocks=None, num_lookahead_tokens=None, delay_cache_blocks=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         request_id: String,
@@ -347,7 +347,7 @@ impl SlotUpdate {
         num_new_tokens: usize,
         num_new_computed_tokens: Option<usize>,
         new_computed_blocks: Option<KvbmBlockList>,
-        num_lookahead_blocks: Option<usize>,
+        num_lookahead_tokens: Option<usize>,
         delay_cache_blocks: Option<bool>,
     ) -> Self {
         let update = GenericSlotUpdate {
@@ -358,7 +358,7 @@ impl SlotUpdate {
             num_new_tokens,
             num_new_computed_tokens,
             new_computed_blocks,
-            num_lookahead_blocks,
+            num_lookahead_tokens,
             delay_cache_blocks,
         };
 
@@ -463,16 +463,9 @@ impl<R: RequestKey> SlotManager<R> {
             num_new_tokens,
             num_new_computed_tokens,
             new_computed_blocks,
-            num_lookahead_blocks,
+            num_lookahead_tokens,
             delay_cache_blocks,
         ) = update.dissolve();
-
-        // TODO(ryan): add support for lookahead blocks
-        if num_lookahead_blocks.is_some() {
-            return Err(SlotError::Error(
-                "num_lookahead_blocks is not supported".to_string(),
-            ));
-        }
 
         // TODO: add support for delay_cache_blocks
         if delay_cache_blocks.unwrap_or(false) {
@@ -517,8 +510,9 @@ impl<R: RequestKey> SlotManager<R> {
         );
 
         // 3. allocate new blocks if needed
+        let total_new_tokens = num_new_tokens + num_lookahead_tokens.unwrap_or(0);
         let new_blocks = slot
-            .allocate_blocks(num_new_tokens, bm.device().unwrap())
+            .allocate_blocks(total_new_tokens, bm.device().unwrap())
             .map(|new_block_ids| {
                 new_block_ids
                     .into_iter()
