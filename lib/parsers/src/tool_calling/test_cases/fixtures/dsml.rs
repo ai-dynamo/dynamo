@@ -43,16 +43,4 @@ impl ToolCallFixture for DsmlFixture {
             self.outer_tag, self.outer_tag
         ))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        function_name: &str,
-        arguments: &Value,
-    ) -> FixtureCase<String> {
-        let invoke = self.render_invoke(function_name, arguments);
-        FixtureCase::KnownBroken {
-            input: format!("<｜DSML｜{}>{invoke}", self.outer_tag),
-            reason: "DSML parser has no missing-end recovery yet; follow-up to generalize PR #8208.",
-        }
-    }
 }

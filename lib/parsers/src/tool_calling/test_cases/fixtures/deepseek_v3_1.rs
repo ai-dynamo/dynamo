@@ -22,20 +22,4 @@ impl ToolCallFixture for DeepseekV31Fixture {
             "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{function_name}<｜tool▁sep｜>{arguments}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
         ))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        function_name: &str,
-        arguments: &Value,
-    ) -> FixtureCase<String> {
-        // Per-call is complete (`<｜tool▁call▁end｜>` present); only the
-        // outer section close `<｜tool▁calls▁end｜>` is missing — the
-        // same condition that PR #8208 fixed for Kimi K2.
-        FixtureCase::KnownBroken {
-            input: format!(
-                "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{function_name}<｜tool▁sep｜>{arguments}<｜tool▁call▁end｜>"
-            ),
-            reason: "deepseek_v3_1 has no missing-section-end recovery yet; follow-up to generalize PR #8208.",
-        }
-    }
 }

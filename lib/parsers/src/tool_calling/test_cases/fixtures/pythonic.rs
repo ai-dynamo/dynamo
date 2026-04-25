@@ -31,16 +31,4 @@ impl ToolCallFixture for PythonicFixture {
     fn case_1_single_call(&self, function_name: &str, arguments: &Value) -> FixtureCase<String> {
         FixtureCase::Sample(format!("[{function_name}({})]", render_args(arguments)))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        _function_name: &str,
-        _arguments: &Value,
-    ) -> FixtureCase<String> {
-        FixtureCase::NotApplicable(
-            "Pythonic grammar has no separable section-end token. The closing `]` \
-             is integral to the call list itself; a truncated `]` is CASE.4 \
-             (malformed args), not section_end recovery.",
-        )
-    }
 }

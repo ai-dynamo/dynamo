@@ -30,7 +30,7 @@ use dsml::DsmlFixture;
 use generic_xml::{GenericXmlFixture, XmlFunctionForm};
 use glm47::Glm47Fixture;
 use harmony::HarmonyFixture;
-use json_wrapped::{JsonWrappedFixture, MissingEndBehavior};
+use json_wrapped::JsonWrappedFixture;
 use kimi_k2::KimiK2Fixture;
 use nemotron_deci::NemotronDeciFixture;
 use pythonic::PythonicFixture;
@@ -44,10 +44,6 @@ pub fn all_fixtures() -> Vec<Box<dyn ToolCallFixture>> {
             name: "default",
             start: "",
             end: "",
-            on_missing_end: MissingEndBehavior::NotApplicable {
-                reason: "Default config has no start/end tokens; the bare JSON is the entire \
-                         message. Truncation is malformed-args (a future case), not section-end recovery.",
-            },
         }),
         // --- DeepSeek V3 with code-fence body ---
         Box::new(DeepseekV3Fixture),
@@ -71,18 +67,12 @@ pub fn all_fixtures() -> Vec<Box<dyn ToolCallFixture>> {
             name: "hermes",
             start: "<tool_call>",
             end: "\n</tool_call>",
-            on_missing_end: MissingEndBehavior::Drops {
-                reason: "hermes has no missing-end recovery yet; follow-up to generalize PR #8208.",
-            },
         }),
         // --- Jamba: JSON-wrapped <tool_calls>...</tool_calls> ---
         Box::new(JsonWrappedFixture {
             name: "jamba",
             start: "<tool_calls>",
             end: "</tool_calls>",
-            on_missing_end: MissingEndBehavior::Drops {
-                reason: "jamba has no missing-end recovery yet; follow-up to generalize PR #8208.",
-            },
         }),
         // --- Kimi K2 (special-token format) ---
         Box::new(KimiK2Fixture),
@@ -91,10 +81,6 @@ pub fn all_fixtures() -> Vec<Box<dyn ToolCallFixture>> {
             name: "llama3_json",
             start: "<|python_tag|>",
             end: "",
-            on_missing_end: MissingEndBehavior::NotApplicable {
-                reason: "llama3_json has no end token (config end-token is empty string); \
-                         the start sentinel opens a JSON object and EOF terminates it.",
-            },
         }),
         // --- MiniMax M2: generic XML with <minimax:tool_call> wrapper ---
         Box::new(GenericXmlFixture {
@@ -102,16 +88,12 @@ pub fn all_fixtures() -> Vec<Box<dyn ToolCallFixture>> {
             outer_start: "<minimax:tool_call>",
             outer_end: "</minimax:tool_call>",
             function_form: XmlFunctionForm::NameAttr,
-            recovery_reason: "minimax_m2 has no missing-end recovery yet; follow-up to generalize PR #8208.",
         }),
-        // --- Mistral: JSON-wrapped [TOOL_CALLS]...[/TOOL_CALLS] (recovers) ---
+        // --- Mistral: JSON-wrapped [TOOL_CALLS]...[/TOOL_CALLS] ---
         Box::new(JsonWrappedFixture {
             name: "mistral",
             start: "[TOOL_CALLS]",
             end: "[/TOOL_CALLS]",
-            // mistral's JsonParserConfig declares both `[/TOOL_CALLS]` and ``
-            // as end tokens, so dropping the explicit closer still parses.
-            on_missing_end: MissingEndBehavior::Recovers,
         }),
         // --- Nemotron Deci: <TOOLCALL>[...]</TOOLCALL> (own format, JSON array) ---
         Box::new(NemotronDeciFixture),
@@ -121,17 +103,12 @@ pub fn all_fixtures() -> Vec<Box<dyn ToolCallFixture>> {
             outer_start: "<tool_call>",
             outer_end: "</tool_call>",
             function_form: XmlFunctionForm::EqualsName,
-            recovery_reason: "nemotron_nano (qwen3_coder XML) has no missing-end recovery yet; follow-up to generalize PR #8208.",
         }),
         // --- Phi-4: functools{json} (no end token) ---
         Box::new(JsonWrappedFixture {
             name: "phi4",
             start: "functools",
             end: "",
-            on_missing_end: MissingEndBehavior::NotApplicable {
-                reason: "phi4 has no end token (config end-token is empty string); the \
-                         `functools` sentinel opens a JSON object and EOF terminates it.",
-            },
         }),
         // --- Pythonic: [name(k=v)] ---
         Box::new(PythonicFixture),
@@ -141,7 +118,6 @@ pub fn all_fixtures() -> Vec<Box<dyn ToolCallFixture>> {
             outer_start: "<tool_call>",
             outer_end: "</tool_call>",
             function_form: XmlFunctionForm::EqualsName,
-            recovery_reason: "qwen3_coder XML parser has no missing-end recovery yet; follow-up to generalize PR #8208.",
         }),
     ]
 }

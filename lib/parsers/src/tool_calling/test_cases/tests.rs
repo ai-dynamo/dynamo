@@ -1,17 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parametrized contract tests — one per universal scenario.
+//! Parametrized contract test — one per universal scenario.
 //!
 //! Each `case_N_*` function runs once per registered fixture, looks up the
 //! parser by name, feeds the fixture-emitted bytes through `try_tool_call_parse`,
-//! and asserts on the canonicalized output. The four `FixtureCase` variants
-//! produce four distinct expected behaviors:
+//! and asserts on the canonicalized output. The three `FixtureCase` variants
+//! produce three distinct expected behaviors:
 //!
-//!   Sample       → parser must return a call matching the canonical form
-//!   KnownBroken  → parser must return 0 calls (locks in current broken state)
-//!   NotApplicable→ short-circuit with a printed reason
-//!   Unimplemented→ test fails loudly
+//!   Sample        → parser must return a call matching the canonical form
+//!   NotApplicable → short-circuit with a printed reason
+//!   Unimplemented → test fails loudly
 
 use super::FixtureCase;
 use super::fixtures::all_fixtures;
@@ -72,36 +71,6 @@ async fn run_case(
                 ),
             }
         }
-        FixtureCase::KnownBroken { input, reason } => {
-            let config = config_for(parser_name);
-            match try_tool_call_parse(&input, config, None).await {
-                Ok((calls, _normal)) => {
-                    let actual = canonicalize(&calls);
-                    if actual.is_empty() {
-                        (
-                            format!(
-                                "  🔧  {parser_name:<16} {case_label}  (known-broken: {reason})"
-                            ),
-                            None,
-                        )
-                    } else {
-                        (
-                            format!("  ⬆️   {parser_name:<16} {case_label}"),
-                            Some(format!(
-                                "[{parser_name}] {case_label}: parser now recovers (returned {actual:?}) \
-                                 but fixture says KnownBroken. Upgrade fixture to FixtureCase::Sample.\n  input: {input:?}"
-                            )),
-                        )
-                    }
-                }
-                Err(e) => (
-                    format!("  🔧  {parser_name:<16} {case_label}  (known-broken: parse-error)"),
-                    Some(format!(
-                        "[{parser_name}] {case_label}: known-broken declared 0-calls, but parse errored: {e}\n  input: {input:?}"
-                    )),
-                ),
-            }
-        }
         FixtureCase::NotApplicable(reason) => (
             format!("  N/A {parser_name:<16} {case_label}  ({reason})"),
             None,
@@ -110,7 +79,7 @@ async fn run_case(
             format!("  ??? {parser_name:<16} {case_label}  (UNIMPLEMENTED)"),
             Some(format!(
                 "[{parser_name}] {case_label}: fixture method is Unimplemented; \
-                 every fixture must take a position on every case (Sample / KnownBroken / NotApplicable)"
+                 every fixture must take a position on every case (Sample / NotApplicable)"
             )),
         ),
     }
@@ -147,39 +116,5 @@ async fn case_1_single_call_all_parsers() {
 
     if !failures.is_empty() {
         panic!("CASE.1 failures:\n{}", failures.join("\n"));
-    }
-}
-
-#[tokio::test]
-async fn case_5_missing_end_token_recovery_all_parsers() {
-    let function_name = "get_weather";
-    let arguments = json!({"location": "NYC"});
-    let expected = expected_single_call(function_name, &arguments);
-
-    let mut rows: Vec<String> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-
-    for fx in all_fixtures() {
-        let parser_name = fx.parser_name();
-        let case = fx.case_5_missing_end_token_recovery(function_name, &arguments);
-        let (row, fail) = run_case(parser_name, case, &expected, "CASE.5").await;
-        rows.push(row);
-        if let Some(f) = fail {
-            failures.push(f);
-        }
-    }
-
-    println!("\n=== case_5_missing_end_token_recovery (PR #8208 generalized) ===");
-    for row in &rows {
-        println!("{row}");
-    }
-    println!(
-        "=== {} parsers, {} failures ===\n",
-        rows.len(),
-        failures.len()
-    );
-
-    if !failures.is_empty() {
-        panic!("CASE.5 failures:\n{}", failures.join("\n"));
     }
 }

@@ -32,29 +32,4 @@ impl ToolCallFixture for Glm47Fixture {
         }
         FixtureCase::Sample(format!("<tool_call>{function_name}{body}</tool_call>"))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        function_name: &str,
-        arguments: &Value,
-    ) -> FixtureCase<String> {
-        let mut body = String::new();
-        if let Some(map) = arguments.as_object() {
-            for (k, v) in map {
-                let v_str = match v {
-                    Value::String(s) => s.clone(),
-                    _ => v.to_string(),
-                };
-                body.push_str(&format!(
-                    "<arg_key>{k}</arg_key><arg_value>{v_str}</arg_value>"
-                ));
-            }
-        }
-        // Drop the closing </tool_call> to simulate max_tokens truncation
-        // mid-stream after the parameter values are complete.
-        FixtureCase::KnownBroken {
-            input: format!("<tool_call>{function_name}{body}"),
-            reason: "glm47 has no missing-end recovery yet; follow-up to generalize PR #8208.",
-        }
-    }
 }

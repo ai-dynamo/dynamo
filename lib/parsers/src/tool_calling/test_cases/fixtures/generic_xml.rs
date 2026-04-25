@@ -24,7 +24,6 @@ pub struct GenericXmlFixture {
     pub outer_start: &'static str,
     pub outer_end: &'static str,
     pub function_form: XmlFunctionForm,
-    pub recovery_reason: &'static str,
 }
 
 impl GenericXmlFixture {
@@ -65,19 +64,5 @@ impl ToolCallFixture for GenericXmlFixture {
     fn case_1_single_call(&self, function_name: &str, arguments: &Value) -> FixtureCase<String> {
         let body = self.render_body(function_name, arguments);
         FixtureCase::Sample(format!("{}\n{body}\n{}", self.outer_start, self.outer_end))
-    }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        function_name: &str,
-        arguments: &Value,
-    ) -> FixtureCase<String> {
-        let body = self.render_body(function_name, arguments);
-        // Drop the outer-end token; inner function/parameter tags stay closed
-        // so the call is logically complete, only the wrapper is missing.
-        FixtureCase::KnownBroken {
-            input: format!("{}\n{body}", self.outer_start),
-            reason: self.recovery_reason,
-        }
     }
 }

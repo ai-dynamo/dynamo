@@ -17,15 +17,4 @@ impl ToolCallFixture for NemotronDeciFixture {
             "<TOOLCALL>[{{\"name\":\"{function_name}\",\"arguments\":{arguments}}}]</TOOLCALL>"
         ))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        _function_name: &str,
-        _arguments: &Value,
-    ) -> FixtureCase<String> {
-        FixtureCase::NotApplicable(
-            "Bare-JSON parser: `]` terminates the array. The `</TOOLCALL>` token \
-             is decorative; truncation of the JSON itself is CASE.4 (malformed args).",
-        )
-    }
 }

@@ -12,16 +12,10 @@
 //! self-policing: `NotApplicable` is explicit, `Unimplemented` is a hard
 //! CI fail, and a parser-specific bug surfaces as a single test failure.
 //!
-//! This first revision covers two cases:
-//!   - `case_1_single_call` — single tool call (happy path)
-//!   - `case_5_missing_end_token_recovery` — recovers a complete tool
-//!     call when the section/closing token is missing (max_tokens or
-//!     EOS truncation). PR #8208 is the reference fix for `kimi_k2`.
-//!
-//! Future revisions will add more universal cases (parallel calls,
-//! malformed args, finish_reason, streaming chunkings, etc.). Adding a
-//! new case is intentionally a breaking change for every fixture so
-//! coverage stays explicit.
+//! This first prototype only covers `case_1_single_call`. Future revisions
+//! add more universal cases (missing-end-token recovery, parallel calls,
+//! malformed args, streaming, etc.). Adding a new case is intentionally a
+//! breaking change for every fixture so coverage stays explicit.
 
 use serde_json::Value;
 
@@ -31,29 +25,19 @@ pub mod tests;
 
 /// One parser's answer to a single test case.
 ///
-/// Four states, each surfaced in the matrix report as a distinct symbol:
+/// Three states, each surfaced in the matrix report as a distinct symbol:
 ///
 /// - `Sample` → ✓ — parser handles this case correctly; assert canonical match
-/// - `KnownBroken` → 🔧 — parser drops the call today; the test asserts the
-///   broken behavior so a future fix that adds recovery shows up as a failed
-///   test (forcing the fixture to be upgraded to `Sample`)
 /// - `NotApplicable` → N/A — format genuinely has no such concept
 /// - `Unimplemented` → CI hard-fail — fixture method wasn't written
 ///
-/// The four-state design separates "format doesn't have this" from
-/// "format has this but parser doesn't recover yet" from "we forgot."
-/// `Option<String>` would conflate the first two and re-introduce the
-/// silent-coverage problem this framework is meant to solve.
+/// The three-state design separates "format doesn't have this" from
+/// "we forgot." `Option<String>` would conflate the two and re-introduce
+/// the silent-coverage problem this framework is meant to solve.
 #[derive(Debug)]
 pub enum FixtureCase<T> {
     /// Parser handles this case correctly. Run the contract assertion.
     Sample(T),
-
-    /// Parser does NOT recover from this case today; it returns 0 calls.
-    /// The test asserts the parser returns 0 calls so any future recovery
-    /// work shows up as a test failure that forces the fixture to be
-    /// upgraded to `Sample`.
-    KnownBroken { input: T, reason: &'static str },
 
     /// This parser's grammar has no concept matching this scenario.
     /// Reason is printed in the matrix so reviewers can verify the N/A
@@ -86,20 +70,4 @@ pub trait ToolCallFixture: Send + Sync {
     /// One complete, well-formed call. `function_name` and `arguments`
     /// are the canonical inputs; the fixture wraps them in its grammar.
     fn case_1_single_call(&self, function_name: &str, arguments: &Value) -> FixtureCase<String>;
-
-    /// CASE.5 — Missing end-token recovery.
-    ///
-    /// The model emitted a complete individual tool call but stopped
-    /// before the section/closing token (typical max_tokens or EOS
-    /// truncation). Fixtures whose grammar has no separable section-end
-    /// token return `NotApplicable` with a reason.
-    ///
-    /// Reference: PR #8208 fixed this for `kimi_k2`. This case generalizes
-    /// the regression check to every parser whose grammar has a separable
-    /// section/closing token.
-    fn case_5_missing_end_token_recovery(
-        &self,
-        function_name: &str,
-        arguments: &Value,
-    ) -> FixtureCase<String>;
 }

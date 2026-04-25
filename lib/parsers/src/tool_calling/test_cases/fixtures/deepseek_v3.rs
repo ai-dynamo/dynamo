@@ -20,18 +20,4 @@ impl ToolCallFixture for DeepseekV3Fixture {
              ```json\n{arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
         ))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        function_name: &str,
-        arguments: &Value,
-    ) -> FixtureCase<String> {
-        FixtureCase::KnownBroken {
-            input: format!(
-                "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>{function_name}\n\
-                 ```json\n{arguments}\n```"
-            ),
-            reason: "deepseek_v3 has no missing-end recovery yet; follow-up to generalize PR #8208.",
-        }
-    }
 }

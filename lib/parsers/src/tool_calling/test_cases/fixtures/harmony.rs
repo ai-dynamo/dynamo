@@ -21,16 +21,4 @@ impl ToolCallFixture for HarmonyFixture {
             "<|channel|>commentary to=functions.{function_name} <|constrain|>json<|message|>{arguments}<|call|>"
         ))
     }
-
-    fn case_5_missing_end_token_recovery(
-        &self,
-        _function_name: &str,
-        _arguments: &Value,
-    ) -> FixtureCase<String> {
-        FixtureCase::NotApplicable(
-            "Harmony has no section-end concept. `<|call|>` terminates each \
-             individual call, not a wrapping section. A truncated final `<|call|>` \
-             would manifest as CASE.4 (malformed args / partial state-machine).",
-        )
-    }
 }
