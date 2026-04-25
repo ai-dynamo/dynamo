@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeployment for deepseek-ai/DeepSeek-V4-Pro on vLLM,
+# aggregated serving (no prefill/decode disaggregation).
+#
+# Upstream reference command:
+#   docker run --gpus all ... vllm/vllm-openai:deepseekv4-cu130 \
+#     deepseek-ai/DeepSeek-V4-Pro \
+#     --trust-remote-code --kv-cache-dtype fp8 --block-size 256 \
+#     --enable-expert-parallel --tensor-parallel-size 8 \
+#     --compilation-config '{"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+#     --attention_config.use_fp4_indexer_cache=True \
+#     --tokenizer-mode deepseek_v4 \
+#     --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+#     --reasoning-parser deepseek_v4
+#
+# Shape: 1 replica x 8 GPUs, TP=8 + Expert Parallel. Fills a single 8-GPU node.
+#
+# Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
+#        includes the DeepSeek-V4 stack. See `../../container/README.md`
+#        for the reference build -- it overlays dynamo on
+#        vllm/vllm-openai:deepseekv4-cu130.
+#
+# Weights: served from the `model-cache` PVC populated by
+#          `../../model-cache/model-download.yaml`.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: HF_HOME
+              value: /opt/models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          # DeepSeek-V4-Pro (1.6T params) is large; first launch loads weights
+          # over TP=8 ranks plus FlashInfer autotune + cudagraph warmup. Allow
+          # ~90 min: periodSeconds * failureThreshold = 10 * 540 = 5400s.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 540
+          env:
+            - name: SERVED_MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4-Pro
+            - name: MODEL_PATH
+              value: deepseek-ai/DeepSeek-V4-Pro
+            - name: HF_HOME
+              value: /opt/models
+            # Read weights from the PVC only; do not hit the HF Hub at startup.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            # Give the engine room to finish first-launch init.
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "5400"
+            # Stabilize TP/EP all-reduces and skip the IPC P2P probe.
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --kv-cache-dtype fp8 \
+                --block-size 256 \
+                --tensor-parallel-size 8 \
+                --enable-expert-parallel \
+                --tokenizer-mode deepseek_v4 \
+                --dyn-reasoning-parser deepseek_v4 \
+                --dyn-tool-call-parser deepseek_v4 \
+                --attention-config '{"use_fp4_indexer_cache":true}' \
+                --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+                --max-num-seqs 256
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
