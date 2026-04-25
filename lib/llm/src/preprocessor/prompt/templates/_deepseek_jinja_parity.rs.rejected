@@ -1,0 +1,231 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! DIS-1850 — Rust minijinja parity test for the DeepSeek V4 / V3.2 chat templates.
+//!
+//! Validates that:
+//!   - rendering each fixture's input through `deepseek_v4.jinja` /
+//!     `deepseek_v32.jinja` via minijinja produces byte-identical output
+//!     to the saved `test_output_*.txt` files.
+//!
+//! These are the same fixtures already exercised by
+//! `deepseek_v4_encoding.rs` and `deepseek_v32_encoding.rs`, which validate
+//! the Rust port.  This test validates the proposed Jinja replacement.
+//!
+//! The Python jinja2 parity harness (`templates/_parity_check*.py`) also
+//! validates the same templates against the same fixtures; this Rust test is
+//! the production-runtime confirmation.
+
+use minijinja::{Environment, Value};
+use serde_json::Value as JsonValue;
+use std::fs;
+use std::path::PathBuf;
+
+const V4_TEMPLATE: &str = include_str!(
+    "../src/preprocessor/prompt/templates/deepseek_v4.jinja"
+);
+const V4_TOOLS_BLOCK: &str = include_str!(
+    "../src/preprocessor/prompt/templates/_v4_tools_block.jinja"
+);
+const V32_TEMPLATE: &str = include_str!(
+    "../src/preprocessor/prompt/templates/deepseek_v32.jinja"
+);
+const V32_TOOLS_BLOCK: &str = include_str!(
+    "../src/preprocessor/prompt/templates/_v32_tools_block.jinja"
+);
+
+fn build_env() -> Environment<'static> {
+    let mut env = Environment::new();
+    env.set_lstrip_blocks(true);
+    env.set_trim_blocks(true);
+    env.add_template("deepseek_v4.jinja", V4_TEMPLATE).unwrap();
+    env.add_template("_v4_tools_block.jinja", V4_TOOLS_BLOCK).unwrap();
+    env.add_template("deepseek_v32.jinja", V32_TEMPLATE).unwrap();
+    env.add_template("_v32_tools_block.jinja", V32_TOOLS_BLOCK).unwrap();
+
+    env.add_filter(
+        "fromjson",
+        |s: String| -> Result<Value, minijinja::Error> {
+            serde_json::from_str::<JsonValue>(&s)
+                .map(Value::from_serialize)
+                .map_err(|e| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("fromjson: {}", e),
+                    )
+                })
+        },
+    );
+    env
+}
+
+fn data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
+}
+
+/// Same shape-loader as `deepseek_v4_encoding.rs`.
+fn load_messages_v4(path: &PathBuf) -> Vec<JsonValue> {
+    let raw: JsonValue =
+        serde_json::from_str(&fs::read_to_string(path).expect("read fixture")).expect("parse");
+    if let Some(messages) = raw.get("messages").and_then(|m| m.as_array()) {
+        let mut messages = messages.clone();
+        if let Some(tools) = raw.get("tools")
+            && let Some(first) = messages.get_mut(0)
+            && let Some(obj) = first.as_object_mut()
+        {
+            obj.insert("tools".to_string(), tools.clone());
+        }
+        messages
+    } else if let Some(arr) = raw.as_array() {
+        arr.clone()
+    } else {
+        panic!("Unexpected input shape");
+    }
+}
+
+fn diff_position(a: &str, b: &str) -> Option<(usize, String, String)> {
+    let n = a.len().min(b.len());
+    let abytes = a.as_bytes();
+    let bbytes = b.as_bytes();
+    for i in 0..n {
+        if abytes[i] != bbytes[i] {
+            let lo = i.saturating_sub(60);
+            let hi_a = (i + 60).min(a.len());
+            let hi_b = (i + 60).min(b.len());
+            return Some((
+                i,
+                String::from_utf8_lossy(&abytes[lo..hi_a]).to_string(),
+                String::from_utf8_lossy(&bbytes[lo..hi_b]).to_string(),
+            ));
+        }
+    }
+    if a.len() != b.len() {
+        let lo = n.saturating_sub(60);
+        let hi_a = a.len();
+        let hi_b = b.len();
+        return Some((
+            n,
+            String::from_utf8_lossy(&abytes[lo..hi_a]).to_string(),
+            String::from_utf8_lossy(&bbytes[lo..hi_b]).to_string(),
+        ));
+    }
+    None
+}
+
+fn assert_byte_identical(label: &str, expected: &str, actual: &str) {
+    let exp = expected.trim_end_matches('\n');
+    let act = actual.trim_end_matches('\n');
+    if exp == act {
+        return;
+    }
+    if let Some((pos, e_ctx, a_ctx)) = diff_position(exp, act) {
+        panic!(
+            "{} byte_pos={} expected_len={} actual_len={}\n  expected: ...{:?}...\n  actual:   ...{:?}...",
+            label,
+            pos,
+            exp.len(),
+            act.len(),
+            e_ctx,
+            a_ctx
+        );
+    }
+    unreachable!()
+}
+
+// ============================================================================
+// V4 fixtures — must run through the same merge_tool_messages +
+// sort_tool_results_by_call_order pre-passes the existing Rust port uses.
+// We invoke them via the public API in `dynamo_llm::preprocessor::prompt::deepseek_v4`.
+// ============================================================================
+
+use dynamo_llm::preprocessor::prompt::deepseek_v4::{merge_tool_messages, sort_tool_results_by_call_order};
+
+fn render_v4(messages: Vec<JsonValue>, thinking_mode: &str, drop_thinking: bool) -> String {
+    let merged = merge_tool_messages(&messages);
+    let sorted = sort_tool_results_by_call_order(merged);
+    let env = build_env();
+    let tpl = env.get_template("deepseek_v4.jinja").unwrap();
+    tpl.render(minijinja::context! {
+        messages => sorted,
+        thinking_mode => thinking_mode,
+        drop_thinking => drop_thinking,
+        reasoning_effort => Value::from(()),
+        add_bos_token => true,
+    })
+    .unwrap()
+}
+
+fn render_v32(messages: Vec<JsonValue>, thinking_mode: &str, drop_thinking: bool) -> String {
+    let env = build_env();
+    let tpl = env.get_template("deepseek_v32.jinja").unwrap();
+    tpl.render(minijinja::context! {
+        messages => messages,
+        thinking_mode => thinking_mode,
+        drop_thinking => drop_thinking,
+        add_bos_token => true,
+    })
+    .unwrap()
+}
+
+#[test]
+fn v4_fixture_1_thinking_with_tools() {
+    let dir = data_dir().join("deepseek-v4");
+    let msgs = load_messages_v4(&dir.join("test_input_1.json"));
+    let expected = fs::read_to_string(dir.join("test_output_1.txt")).unwrap();
+    let actual = render_v4(msgs, "thinking", true);
+    assert_byte_identical("v4 fixture 1", &expected, &actual);
+}
+
+#[test]
+fn v4_fixture_2_thinking_no_tools_multiturn() {
+    let dir = data_dir().join("deepseek-v4");
+    let msgs = load_messages_v4(&dir.join("test_input_2.json"));
+    let expected = fs::read_to_string(dir.join("test_output_2.txt")).unwrap();
+    let actual = render_v4(msgs, "thinking", true);
+    assert_byte_identical("v4 fixture 2", &expected, &actual);
+}
+
+#[test]
+fn v4_fixture_3_developer_with_tools_and_reminder() {
+    let dir = data_dir().join("deepseek-v4");
+    let msgs = load_messages_v4(&dir.join("test_input_3.json"));
+    let expected = fs::read_to_string(dir.join("test_output_3.txt")).unwrap();
+    let actual = render_v4(msgs, "thinking", true);
+    assert_byte_identical("v4 fixture 3", &expected, &actual);
+}
+
+#[test]
+fn v4_fixture_4_chat_action_task() {
+    let dir = data_dir().join("deepseek-v4");
+    let msgs = load_messages_v4(&dir.join("test_input_4.json"));
+    let expected = fs::read_to_string(dir.join("test_output_4.txt")).unwrap();
+    let actual = render_v4(msgs, "chat", true);
+    assert_byte_identical("v4 fixture 4", &expected, &actual);
+}
+
+#[test]
+fn v32_fixture_base() {
+    let dir = data_dir().join("deepseek-v3.2");
+    let msgs = load_messages_v4(&dir.join("test_input.json")); // shape loader is same
+    let expected = fs::read_to_string(dir.join("test_output.txt")).unwrap();
+    let actual = render_v32(msgs, "thinking", true);
+    assert_byte_identical("v32 base", &expected, &actual);
+}
+
+#[test]
+fn v32_fixture_search_w_date() {
+    let dir = data_dir().join("deepseek-v3.2");
+    let msgs = load_messages_v4(&dir.join("test_input_search_w_date.json"));
+    let expected = fs::read_to_string(dir.join("test_output_search_w_date.txt")).unwrap();
+    let actual = render_v32(msgs, "thinking", true);
+    assert_byte_identical("v32 search w/date", &expected, &actual);
+}
+
+#[test]
+fn v32_fixture_search_wo_date() {
+    let dir = data_dir().join("deepseek-v3.2");
+    let msgs = load_messages_v4(&dir.join("test_input_search_wo_date.json"));
+    let expected = fs::read_to_string(dir.join("test_output_search_wo_date.txt")).unwrap();
+    let actual = render_v32(msgs, "thinking", true);
+    assert_byte_identical("v32 search wo/date", &expected, &actual);
+}
