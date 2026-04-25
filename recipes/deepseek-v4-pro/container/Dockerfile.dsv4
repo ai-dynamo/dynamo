@@ -52,7 +52,6 @@ RUN sed -i 's/(512, 1024, 2048)/(512, 2048)/' \
 # --- static binaries ---
 COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
-ENV PATH=/usr/local/bin/etcd:${PATH}
 
 # --- UCX ---
 COPY --from=dynamo_src /usr/local/ucx /usr/local/ucx
