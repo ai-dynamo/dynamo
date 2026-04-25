@@ -4,10 +4,10 @@
 """Apply a dev-version suffix to every Dynamo package version and cross-ref.
 
 Invoked by nightly CI on the runner, before `docker buildx build`. Takes one
-argument -- a suffix like '.dev20260423+g1234567' -- and rewrites, in place:
+argument -- a suffix like '.dev20260423' -- and rewrites, in place:
   - [project].version in every Dynamo pyproject.toml (PEP 440 form)
   - [package].version / [workspace.package].version in every Cargo.toml
-    (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev...+g...')
+    (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev20260423')
   - The `ai-dynamo-runtime==1.1.0` pin in the root pyproject
   - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
 
@@ -60,7 +60,7 @@ def pep440(suffix: str, base: str) -> str:
 
 
 def semver(suffix: str, base: str) -> str:
-    # Convert a PEP 440-style '.devN+g...' into SemVer '-devN+g...'.
+    # Convert a PEP 440-style '.devN' into SemVer '-devN'.
     if suffix.startswith("."):
         return base + "-" + suffix[1:]
     return base + suffix
@@ -150,7 +150,7 @@ def rewrite_root_cargo(root: Path, suffix: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("suffix", help="e.g. .dev20260423+g1234567 (empty = no-op)")
+    ap.add_argument("suffix", help="e.g. .dev20260423 (empty = no-op)")
     ap.add_argument("root", nargs="?", default=".", help="repo root")
     args = ap.parse_args()
 

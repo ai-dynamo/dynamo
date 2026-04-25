@@ -44,7 +44,7 @@ jobs:
   # ============================================================================
   # COMPUTE NIGHTLY DEV VERSION
   # ============================================================================
-  # Emits a PEP 440 dev suffix (e.g. .dev20260423+g1234567) forwarded to every
+  # Emits a PEP 440 dev suffix (e.g. .dev20260423) forwarded to every
   # pipeline below. At the leaf, the suffix is stamped into pyproject / Cargo
   # versions on the runner before docker build, so wheels produced by the
   # wheel_builder stage carry the dev version.
@@ -59,9 +59,8 @@ jobs:
       - id: compute
         shell: bash
         run: |
-          SHORT_SHA=${GITHUB_SHA:0:7}
           DATE=$(date -u +%Y%m%d)
-          echo "dev_suffix=.dev${DATE}+g${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "dev_suffix=.dev${DATE}" >> $GITHUB_OUTPUT
 
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
