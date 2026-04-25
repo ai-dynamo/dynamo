@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V4-Pro SGLang DynamoGraphDeployment
+# Aggregated mode, B200x8 TP8, MXFP4 MoE, EAGLE MTP 3/4
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-dsv4-pro
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:sglang-dsv4-v2
+          imagePullPolicy: Always
+          env:
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/kprashanth:sglang-dsv4-v2
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - deepseek-ai/DeepSeek-V4-Pro
+            - --served-model-name
+            - deepseek-ai/DeepSeek-V4-Pro
+            - --trust-remote-code
+            - --tp
+            - "8"
+            - --moe-runner-backend
+            - flashinfer_mxfp4
+            - --speculative-algo
+            - EAGLE
+            - --speculative-num-steps
+            - "3"
+            - --speculative-eagle-topk
+            - "1"
+            - --speculative-num-draft-tokens
+            - "4"
+            - --chunked-prefill-size
+            - "4096"
+            - --disable-flashinfer-autotune
+            - --dyn-tool-call-parser
+            - deepseek_v4
+            - --dyn-reasoning-parser
+            - deepseek_v4
+          env:
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3,4,5,6,7"
+            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+              value: "0"
+            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+  pvcs:
+    - name: shared-model-cache
+      create: false
