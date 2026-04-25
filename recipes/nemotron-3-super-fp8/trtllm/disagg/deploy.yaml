@@ -107,7 +107,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
     TrtllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
@@ -133,7 +133,7 @@ spec:
             timeoutSeconds: 10
             # TRT-LLM startup is slow (~7 min) due to CUDA graph compilation
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           env:
           - name: HF_HOME
             value: "/opt/models"
@@ -185,7 +185,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           env:
           - name: HF_HOME
             value: "/opt/models"

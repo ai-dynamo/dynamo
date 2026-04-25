@@ -27,7 +27,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           name: ""
           resources: {}
         # tolerations:     # uncomment to populate any tolerations for the gpu nodes
@@ -97,7 +97,7 @@ spec:
               value: "1"
             - name: TLLM_LOG_LEVEL
               value: "INFO"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           name: ""
           resources: {}
           securityContext:
