@@ -43,6 +43,17 @@ navigation:
         path: ../pages-dev/getting-started/examples.md
       - page: Glossary
         path: ../pages-dev/reference/glossary.md
+  # ==================== Blog ====================
+  - section: Blog
+    path: ../blogs/index.mdx
+    slug: blog
+    contents:
+      - page: "Full-Stack Optimizations for Agentic Inference"
+        path: ../blogs/agentic-inference/agentic-inference.md
+        slug: agentic-inference
+      - page: "Flash Indexer: Inter-Galactic KV Routing"
+        path: ../blogs/flash-indexer/flash-indexer.md
+        slug: flash-indexer
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
@@ -94,22 +105,12 @@ navigation:
   # ==================== User Guides ====================
   - section: User Guides
     contents:
-      - page: KV Cache Aware Routing
-        path: ../pages-dev/components/router/router-guide.md
       - page: Disaggregated Serving
         path: ../pages-dev/features/disaggregated-serving/README.md
+      - page: KV Cache Aware Routing
+        path: ../pages-dev/components/router/router-guide.md
       - page: KV Cache Offloading
         path: ../pages-dev/components/kvbm/kvbm-guide.md
-      - page: Dynamo Benchmarking
-        path: ../pages-dev/benchmarks/benchmarking.md
-      - page: Mocker Offline Trace Replay
-        path: ../pages-dev/benchmarks/mocker-trace-replay.md
-      - page: Planner Replay Benchmarking
-        path: ../pages-dev/benchmarks/planner-replay-benchmarking.md
-      - section: Testing
-        contents:
-          - page: Mocker
-            path: ../pages-dev/mocker/mocker.md
       - section: Multimodal
         path: ../pages-dev/features/multimodal/README.md
         contents:
@@ -119,7 +120,7 @@ navigation:
             path: ../pages-dev/features/multimodal/encoder-disaggregation.md
           - page: Multimodal KV Routing
             path: ../pages-dev/features/multimodal/multimodal-kv-routing.md
-      - section: Diffusion (Preview)
+      - section: Diffusion
         slug: diffusion
         path: ../pages-dev/features/diffusion/README.md
         contents:
@@ -132,12 +133,6 @@ navigation:
             path: ../pages-dev/backends/sglang/sglang-diffusion.md
           - page: TRT-LLM Diffusion
             path: ../pages-dev/backends/trtllm/trtllm-diffusion.md
-      - page: Chat Processor Options
-        path: ../pages-dev/agents/chat-processor-options.md
-      - page: Tool Calling
-        path: ../pages-dev/agents/tool-calling.md
-      - page: Reasoning
-        path: ../pages-dev/agents/reasoning.md
       - page: LoRA Adapters
         path: ../pages-dev/features/lora/README.md
       - section: Agents
@@ -146,6 +141,12 @@ navigation:
         contents:
           - page: SGLang for Agentic Workloads
             path: ../pages-dev/backends/sglang/agents.md
+      - page: Chat Processors
+        path: ../pages-dev/agents/chat-processor-options.md
+      - page: Tool Calling
+        path: ../pages-dev/agents/tool-calling.md
+      - page: Reasoning
+        path: ../pages-dev/agents/reasoning.md
       - section: Observability (Local)
         path: ../pages-dev/observability/README.md
         contents:
@@ -174,6 +175,14 @@ navigation:
             path: ../pages-dev/fault-tolerance/graceful-shutdown.md
           - page: Testing
             path: ../pages-dev/fault-tolerance/testing.md
+      - page: Benchmarking
+        path: ../pages-dev/benchmarks/benchmarking.md
+      - section: Mocker
+        contents:
+          - page: Testing with Mocker
+            path: ../pages-dev/mocker/mocker.md
+          - page: Mocker Offline Trace Replay
+            path: ../pages-dev/benchmarks/mocker-trace-replay.md
       - page: Writing Python Workers
         path: ../pages-dev/development/backend-guide.md
   # ==================== Backends ====================
@@ -196,8 +205,6 @@ navigation:
             path: ../pages-dev/backends/sglang/sglang-observability.md
           - page: Agentic Workloads
             path: ../pages-dev/backends/sglang/agents.md
-          - page: HiCache
-            path: ../pages-dev/backends/sglang/sglang-hicache.md
       - section: TensorRT-LLM
         path: ../pages-dev/backends/trtllm/README.md
         contents:
@@ -211,8 +218,19 @@ navigation:
             path: ../pages-dev/backends/trtllm/trtllm-diffusion.md
           - page: Known Issues and Mitigations
             path: ../pages-dev/backends/trtllm/trtllm-known-issues.md
-      - page: vLLM
+      - section: vLLM
         path: ../pages-dev/backends/vllm/README.md
+        contents:
+          - page: Reference Guide
+            path: ../pages-dev/backends/vllm/vllm-reference-guide.md
+          - page: Examples
+            path: ../pages-dev/backends/vllm/vllm-examples.md
+          - page: KV Cache Offloading
+            path: ../pages-dev/backends/vllm/vllm-kv-offloading.md
+          - page: Observability
+            path: ../pages-dev/backends/vllm/vllm-observability.md
+          - page: vLLM-Omni
+            path: ../pages-dev/backends/vllm/vllm-omni.md
   # ==================== Components ====================
   - section: Components
     contents:
@@ -266,6 +284,8 @@ navigation:
     contents:
       - page: LMCache
         path: ../pages-dev/integrations/lmcache-integration.md
+      - page: SGLang HiCache
+        path: ../pages-dev/backends/sglang/sglang-hicache.md
       - page: FlexKV
         path: ../pages-dev/integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
@@ -297,18 +317,6 @@ navigation:
             path: ../pages-dev/design-docs/kvbm-design.md
           - page: Planner Design
             path: ../pages-dev/design-docs/planner-design.md
-  # ==================== Blog ====================
-  - section: Blog
-    collapsed: true
-    path: ../blogs/index.mdx
-    slug: blog
-    contents:
-      - page: "Full-Stack Optimizations for Agentic Inference"
-        path: ../blogs/agentic-inference/agentic-inference.md
-        slug: agentic-inference
-      - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: ../blogs/flash-indexer/flash-indexer.md
-        slug: flash-indexer
   # ==================== Documentation ====================
   - section: Documentation
     contents:
@@ -366,18 +374,6 @@ navigation:
       - page: NVIDIA Request Extensions (nvext)
         path: ../pages-dev/components/frontend/nvext.md
       # -- Backend detail pages --
-      - section: vLLM Details
-        contents:
-          - page: Reference Guide
-            path: ../pages-dev/backends/vllm/vllm-reference-guide.md
-          - page: Examples
-            path: ../pages-dev/backends/vllm/vllm-examples.md
-          - page: KV Cache Offloading
-            path: ../pages-dev/backends/vllm/vllm-kv-offloading.md
-          - page: Observability
-            path: ../pages-dev/backends/vllm/vllm-observability.md
-          - page: vLLM-Omni
-            path: ../pages-dev/backends/vllm/vllm-omni.md
       - section: TensorRT-LLM Details
         contents:
           - page: Building a Custom Container
