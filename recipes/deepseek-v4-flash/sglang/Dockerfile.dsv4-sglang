@@ -26,14 +26,9 @@ ENV PATH=/root/.cargo/bin:/opt/python/cp312-cp312/bin:${PATH}
 
 RUN pip install maturin
 
-# Clone dynamo V4 parsers branch + cherry-pick routed_experts fix
-RUN git config --global user.email "build@nvidia.com" && \
-    git config --global user.name "build" && \
-    git clone -b codex/deepseek-v4-parsers \
-    https://github.com/ai-dynamo/dynamo.git /workspace && \
-    cd /workspace && \
-    git fetch origin ishan/investigate-tmrw && \
-    git cherry-pick 44fb33a5ad53caead03780b5a2a4593b5388c88f
+# Clone dynamo release branch (includes V4 parsers + sglang compat fixes)
+RUN git clone --depth 1 -b release/deepseekv4 \
+    https://github.com/ai-dynamo/dynamo.git /workspace
 
 # Build dynamo runtime wheel
 WORKDIR /workspace/lib/bindings/python
