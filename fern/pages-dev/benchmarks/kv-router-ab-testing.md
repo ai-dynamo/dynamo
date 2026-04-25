@@ -163,7 +163,7 @@ spec:
               --gpu-memory-utilization 0.90
               --block-size 64
               --async-scheduling
-              --disable-log-requests
+              --no-enable-log-requests
           env:
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
@@ -257,7 +257,7 @@ spec:
               --gpu-memory-utilization 0.90
               --block-size 64
               --async-scheduling
-              --disable-log-requests
+              --no-enable-log-requests
           env:
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
