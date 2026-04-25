@@ -107,18 +107,143 @@ def _shadow_prewarm_lock_path(failover_lock_path: str) -> str:
     return f"{failover_lock_path}.prewarm"
 
 
+def _fmt_gib(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{int(value) / (1024**3):.2f} GiB"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _log_trtllm_shadow_control_result(method: str, result) -> None:
+    if not result:
+        return
+
+    rank_results = []
+    pending_results = result if isinstance(result, list) else [result]
+    for entry in pending_results:
+        if isinstance(entry, list):
+            rank_results.extend(entry)
+        else:
+            rank_results.append(entry)
+
+    for rank_result in rank_results:
+        if not isinstance(rank_result, dict):
+            logging.info("[Shadow] TRTLLM %s control result: %r", method, rank_result)
+            continue
+
+        before = rank_result.get("before") or {}
+        after = rank_result.get("after") or {}
+        rank = after.get("rank", before.get("rank", "unknown"))
+        mode = after.get("gms_mode", before.get("gms_mode", "unknown"))
+        before_current = before.get("nvml_current_process")
+        after_current = after.get("nvml_current_process")
+        before_allocated = before.get("torch_allocated")
+        after_allocated = after.get("torch_allocated")
+        before_reserved = before.get("torch_reserved")
+        after_reserved = after.get("torch_reserved")
+        before_cached = before.get("torch_cached")
+        after_cached = after.get("torch_cached")
+        before_active = before.get("torch_active_bytes")
+        after_active = after.get("torch_active_bytes")
+        before_inactive = before.get("torch_inactive_split_bytes")
+        after_inactive = after.get("torch_inactive_split_bytes")
+        before_driver = before.get("driver_used")
+        after_driver = after.get("driver_used")
+        current_delta = (
+            after_current - before_current
+            if after_current is not None and before_current is not None
+            else None
+        )
+        reserved_delta = (
+            after_reserved - before_reserved
+            if after_reserved is not None and before_reserved is not None
+            else None
+        )
+        driver_delta = (
+            after_driver - before_driver
+            if after_driver is not None and before_driver is not None
+            else None
+        )
+
+        logging.info(
+            "[Shadow] TRTLLM %s memory rank=%s mode=%s "
+            "released_blobs=%s materialized_blobs=%s moe_release=%s moe_restore=%s "
+            "pools=%s graphs=%s cleared_buffers=%s cleared_buffer_bytes=%s "
+            "gms_mapping=%s "
+            "before(current=%s allocated=%s reserved=%s cached=%s active=%s "
+            "inactive=%s non_torch=%s driver=%s gms_weights=%s "
+            "moe_workspace=%s allreduce_workspace=%s buffers=%s "
+            "model_local_tensors=%s model_local_tensors_by_name=%s pools=%s) "
+            "after(current=%s allocated=%s reserved=%s cached=%s active=%s "
+            "inactive=%s non_torch=%s driver=%s gms_weights=%s "
+            "moe_workspace=%s allreduce_workspace=%s buffers=%s "
+            "model_local_tensors=%s model_local_tensors_by_name=%s pools=%s) "
+            "delta(current=%s reserved=%s driver=%s)",
+            method,
+            rank,
+            mode,
+            rank_result.get("released_blobs"),
+            rank_result.get("materialized_blobs"),
+            rank_result.get("released_moe_modules"),
+            rank_result.get("restored_moe_modules"),
+            rank_result.get("released_pools"),
+            rank_result.get("released_cuda_graphs"),
+            rank_result.get("cleared_memory_buffers"),
+            _fmt_gib(rank_result.get("cleared_memory_buffer_bytes")),
+            _fmt_gib(rank_result.get("gms_mapping_bytes")),
+            _fmt_gib(before_current),
+            _fmt_gib(before_allocated),
+            _fmt_gib(before_reserved),
+            _fmt_gib(before_cached),
+            _fmt_gib(before_active),
+            _fmt_gib(before_inactive),
+            _fmt_gib(before.get("non_torch_current_vs_reserved")),
+            _fmt_gib(before_driver),
+            _fmt_gib(before.get("gms_weight_bytes")),
+            _fmt_gib(before.get("moe_workspace")),
+            _fmt_gib(before.get("allreduce_workspace")),
+            _fmt_gib(before.get("memory_buffer_bytes")),
+            _fmt_gib(before.get("model_local_tensor_bytes")),
+            before.get("model_local_tensors"),
+            before.get("vmm_pools"),
+            _fmt_gib(after_current),
+            _fmt_gib(after_allocated),
+            _fmt_gib(after_reserved),
+            _fmt_gib(after_cached),
+            _fmt_gib(after_active),
+            _fmt_gib(after_inactive),
+            _fmt_gib(after.get("non_torch_current_vs_reserved")),
+            _fmt_gib(after_driver),
+            _fmt_gib(after.get("gms_weight_bytes")),
+            _fmt_gib(after.get("moe_workspace")),
+            _fmt_gib(after.get("allreduce_workspace")),
+            _fmt_gib(after.get("memory_buffer_bytes")),
+            _fmt_gib(after.get("model_local_tensor_bytes")),
+            after.get("model_local_tensors"),
+            after.get("vmm_pools"),
+            _fmt_gib(current_delta),
+            _fmt_gib(reserved_delta),
+            _fmt_gib(driver_delta),
+        )
+
+
 async def _run_trtllm_shadow_control(engine, method: str, tags: list[str]) -> None:
     if not tags:
         return
 
     start = time.monotonic()
-    await asyncio.to_thread(engine.llm._collective_rpc, method, args=(tags,))
+    result = await asyncio.to_thread(
+        engine.llm._collective_rpc, method, args=(tags,)
+    )
     logging.info(
         "[Shadow] TRTLLM %s completed for tags=%s in %.2fs",
         method,
         tags,
         time.monotonic() - start,
     )
+    _log_trtllm_shadow_control_result(method, result)
 
 
 def build_kv_connector_config(config: Config):

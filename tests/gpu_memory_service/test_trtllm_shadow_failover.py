@@ -43,6 +43,7 @@ _DEFAULT_COHERENCE_PROMPT = (
     "What is seven plus five? /no_think\n"
     "Reply with exactly the number 12 and no other words."
 )
+_DEFAULT_MAX_KV_BLOCK_DELTA_FRACTION = 0.05
 
 
 def _env_int(name: str, default: int) -> int:
@@ -365,6 +366,32 @@ def _assert_free_gpu_memory_fraction_is_not_cheating(
             f"{engine_yaml} sets kv_cache_config.free_gpu_memory_fraction="
             f"{yaml_fraction}, below {_MIN_FREE_GPU_MEMORY_FRACTION}"
         )
+
+
+def _latest_main_kv_blocks(process: ManagedProcess) -> int:
+    matches = re.findall(
+        r"num_blocks_per_cache_level': \[([0-9]+),\s*[0-9]+\]",
+        process.read_logs(),
+    )
+    assert matches, "process log did not include a KV cache creation event"
+    return int(matches[-1])
+
+
+def _assert_promoted_shadow_kv_capacity_matches_primary(
+    primary: ManagedProcess, promoted_shadow: ManagedProcess
+) -> None:
+    primary_blocks = _latest_main_kv_blocks(primary)
+    shadow_blocks = _latest_main_kv_blocks(promoted_shadow)
+    delta_fraction = abs(primary_blocks - shadow_blocks) / max(primary_blocks, 1)
+    max_delta_fraction = _env_float(
+        "DYN_TRTLLM_SHADOW_FAILOVER_MAX_KV_BLOCK_DELTA_FRACTION",
+        _DEFAULT_MAX_KV_BLOCK_DELTA_FRACTION,
+    )
+    assert delta_fraction <= max_delta_fraction, (
+        "promoted shadow KV cache capacity diverged from primary: "
+        f"primary={primary_blocks} blocks, shadow={shadow_blocks} blocks, "
+        f"delta={delta_fraction:.2%}, max={max_delta_fraction:.2%}"
+    )
 
 
 def _write_default_engine_yaml(
@@ -933,6 +960,7 @@ def test_gms_shadow_engine_failover_trtllm(
                 kill_to_coherent_s,
             )
             _assert_coherent_post_restore_response(post_restore_response)
+            _assert_promoted_shadow_kv_capacity_matches_primary(primary, winner)
     finally:
         deallocate_ports(allocated_ports)
         shutil.rmtree(gms_socket_dir, ignore_errors=True)
