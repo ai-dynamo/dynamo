@@ -562,7 +562,7 @@ impl ModelWatcher {
             // condition to avoid a race where the guard drops between
             // our check and the .await.
             notified.as_mut().enable();
-            if !self.registering_worker_sets.contains(registration_key) {
+            if !self.registering_worker_sets.contains(&registration_key) {
                 break;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -576,7 +576,7 @@ impl ModelWatcher {
 
         // If we timed out and the other task is still running, bail out rather
         // than proceeding with concurrent pipeline construction.
-        if self.registering_worker_sets.contains(registration_key) {
+        if self.registering_worker_sets.contains(&registration_key) {
             // Save the model card so handle_delete can find it for cleanup.
             self.manager
                 .save_model_card_with_priority(&mcid.to_path(), card.clone(), priority)?;
@@ -589,8 +589,8 @@ impl ModelWatcher {
         }
 
         // Validate checksum against the registered model
-        if let Some(model) = self.manager.get_model(model_name)
-            && !model.is_checksum_compatible(ws_key, card.mdcsum())
+        if let Some(model) = self.manager.get_model(&model_name)
+            && !model.is_checksum_compatible(&ws_key, card.mdcsum())
         {
             tracing::error!(
                 model_name = card.name(),
@@ -607,8 +607,8 @@ impl ModelWatcher {
         // worker (registered in cards but with no serving pipeline).
         if self
             .manager
-            .get_model(model_name)
-            .is_none_or(|m| !m.has_worker_set(ws_key))
+            .get_model(&model_name)
+            .is_none_or(|m| !m.has_worker_set(&ws_key))
         {
             // Only the first waiter to re-insert the key should proceed with
             // registration. Other waiters return false to avoid concurrent builds.
