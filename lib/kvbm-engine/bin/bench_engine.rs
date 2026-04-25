@@ -21,6 +21,12 @@
 //! # Multi-GPU:
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0,1 --page-sizes 128 --concurrency 1,2,4 --iterations 50
+//!
+//! # XPU (SYCL):
+//! KVBM_ENABLE_XPU_KERNELS=1 cargo run -p kvbm-engine \
+//!     --no-default-features --features bench,kvbm-physical/xpu-sycl --bin bench_engine -- \
+//!     --backend sycl --devices 0 --page-sizes 32,64 --concurrency 1,2 --iterations 10 \
+//!     --skip-disk --skip-gds --num-blocks 256
 //! ```
 
 use std::path::PathBuf;
@@ -45,6 +51,8 @@ use kvbm_engine::{
 };
 use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::{DeviceBackend, DeviceContext};
 use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
 use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 
@@ -56,6 +64,10 @@ use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
     about = "KVBM transfer bandwidth benchmark (leader+worker architecture)"
 )]
 struct Cli {
+    /// Device backend: cuda or sycl (default: auto-detect)
+    #[arg(long, default_value = "auto")]
+    backend: String,
+
     /// GPU device IDs (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = "0")]
     devices: Vec<u32>,
@@ -141,6 +153,7 @@ struct Cli {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchConfig {
+    backend: DeviceBackend,
     devices: Vec<u32>,
     page_sizes: Vec<usize>,
     concurrency: Vec<usize>,
@@ -164,7 +177,15 @@ struct BenchConfig {
 
 impl From<Cli> for BenchConfig {
     fn from(cli: Cli) -> Self {
+        let backend = if cli.backend == "auto" {
+            DeviceBackend::detect_backend()
+                .expect("No GPU backend detected. Use --backend cuda|sycl to specify.")
+        } else {
+            cli.backend.parse()
+                .expect("Unknown backend. Valid: cuda, sycl, xpu, nvidia")
+        };
         Self {
+            backend,
             devices: cli.devices,
             page_sizes: cli.page_sizes,
             concurrency: cli.concurrency,
@@ -325,6 +346,7 @@ fn spawn_worker_thread(
     device_id: u32,
     page_size: usize,
     config: &BenchConfig,
+    backend: DeviceBackend,
 ) -> Result<WorkerHandle> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -339,20 +361,22 @@ fn spawn_worker_thread(
     let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
         .spawn(move || {
-            // Pin to device's NUMA node
-            if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
-                eprintln!(
-                    "[GPU {device_id}] Worker pinned to CPUs: {}",
-                    format_cpu_set(&cpus)
-                );
-                pin_thread_to_cpus(&cpus);
-            } else {
-                if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
+            // Pin to device's NUMA node. CUDA only now. TODO: add XPU.
+            if matches!(backend, DeviceBackend::Cuda) {
+                if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
+                    eprintln!(
+                        "[GPU {device_id}] Worker pinned to CPUs: {}",
+                        format_cpu_set(&cpus)
+                    );
+                    pin_thread_to_cpus(&cpus);
+                } else if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
                     eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
                     let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
                 } else {
                     eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
                 }
+            } else {
+                eprintln!("[GPU {device_id}] NUMA pinning skipped (non-CUDA backend)");
             }
 
             // Build tokio runtime on this NUMA-pinned thread
@@ -377,11 +401,16 @@ fn spawn_worker_thread(
                     eprintln!("[GPU {device_id}] GDS_MT backend unavailable");
                 }
 
+                // Create device context for this GPU
+                let ctx: Arc<dyn DeviceAllocator> =
+                    Arc::new(DeviceContext::new(backend, device_id)?);
+
                 // Create TransferManager
                 let manager = TransferManager::builder()
                     .event_system(event_system)
                     .nixl_agent(agent.clone())
-                    .cuda_device_id(device_id as usize)
+                    .device_backend(backend)
+                    .device_id(device_id as usize)
                     .build()?;
 
                 // Build layout config
@@ -398,7 +427,7 @@ fn spawn_worker_thread(
                 let g1 = PhysicalLayout::builder(agent.clone())
                     .with_config(layout_config.clone())
                     .fully_contiguous()
-                    .allocate_device(device_id)
+                    .allocate_device(ctx.clone())
                     .build()?;
                 let g1_handle = manager.register_layout(g1)?;
 
@@ -406,7 +435,7 @@ fn spawn_worker_thread(
                 let g2 = PhysicalLayout::builder(agent.clone())
                     .with_config(layout_config.clone())
                     .fully_contiguous()
-                    .allocate_pinned(Some(device_id))
+                    .allocate_pinned(ctx.clone())
                     .build()?;
                 let g2_handle = manager.register_layout(g2)?;
 
@@ -488,7 +517,7 @@ impl BenchInstance {
         // Spawn worker threads (one per device)
         let mut worker_handles = Vec::with_capacity(num_devices);
         for &device_id in &config.devices {
-            let handle = spawn_worker_thread(device_id, page_size, &config)?;
+            let handle = spawn_worker_thread(device_id, page_size, &config, config.backend)?;
             eprintln!("[GPU {device_id}] Worker ready");
             worker_handles.push(handle);
         }
