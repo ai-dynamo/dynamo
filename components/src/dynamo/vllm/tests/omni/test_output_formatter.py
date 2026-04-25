@@ -501,9 +501,53 @@ class TestAudioFormatterOutputFormat:
 class TestDiffusionFormatterVideoOutputFormat:
     """_encode_video always sets VideoData.output_format='mp4'."""
 
-    @pytest.mark.asyncio
-    async def test_video_response_has_output_format_mp4(self):
+    def _patches(self):
         from unittest.mock import patch as _patch
+
+        return (
+            _patch(
+                "dynamo.vllm.omni.output_formatter.normalize_video_frames",
+                return_value=[MagicMock()],
+            ),
+            _patch("dynamo.vllm.omni.output_formatter.export_to_video"),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.upload_to_fs",
+                return_value="http://x/v.mp4",
+            ),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
+                side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_video_url_response_format(self):
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        f = DiffusionFormatter(model_name="test", media_fs=None, media_http_url=None)
+        stage = MagicMock()
+        stage.images = [MagicMock()]
+
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
+            result = await f.format(
+                stage,
+                "r5",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="url",
+            )
+
+        assert result is not None
+        assert result["data"][0]["output_format"] == "mp4"
+        assert result["data"][0]["url"] == "http://x/v.mp4"
+        assert result["data"][0].get("b64_json") is None
+        mock_upload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_video_b64_response_format(self):
+        import base64
 
         from dynamo.common.utils.output_modalities import RequestType
         from dynamo.vllm.omni.output_formatter import DiffusionFormatter
@@ -512,19 +556,39 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        with _patch(
-            "dynamo.vllm.omni.output_formatter.normalize_video_frames",
-            return_value=[MagicMock()],
-        ), _patch("dynamo.vllm.omni.output_formatter.export_to_video"), _patch(
-            "dynamo.vllm.omni.output_formatter.upload_to_fs",
-            return_value="http://x/v.mp4",
-        ), _patch(
-            "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
-            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
-        ):
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
-                stage, "r5", request_type=RequestType.VIDEO_GENERATION, fps=16
+                stage,
+                "r6",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="b64_json",
             )
 
         assert result is not None
         assert result["data"][0]["output_format"] == "mp4"
+        assert result["data"][0].get("url") is None
+        assert result["data"][0]["b64_json"] is not None
+        base64.b64decode(result["data"][0]["b64_json"])  # must be valid base64
+        mock_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_video_default_response_format_is_url(self):
+        """Omitting response_format defaults to url."""
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        f = DiffusionFormatter(model_name="test", media_fs=None, media_http_url=None)
+        stage = MagicMock()
+        stage.images = [MagicMock()]
+
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
+            result = await f.format(
+                stage, "r7", request_type=RequestType.VIDEO_GENERATION, fps=16
+            )
+
+        assert result is not None
+        assert result["data"][0]["url"] == "http://x/v.mp4"
+        mock_upload.assert_called_once()

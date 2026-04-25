@@ -40,9 +40,13 @@ class TestNvCreateVideoRequest:
         req = NvCreateVideoRequest(prompt="p", model="m", output_format="mp4")
         assert req.output_format == "mp4"
 
-    def test_output_format_webm(self):
-        req = NvCreateVideoRequest(prompt="p", model="m", output_format="webm")
-        assert req.output_format == "webm"
+    def test_output_format_mjpeg(self):
+        req = NvCreateVideoRequest(prompt="p", model="m", output_format="mjpeg")
+        assert req.output_format == "mjpeg"
+
+    def test_output_format_invalid_raises(self):
+        with pytest.raises(ValidationError):
+            NvCreateVideoRequest(prompt="p", model="m", output_format="webm")
 
     def test_response_format_optional(self):
         req = NvCreateVideoRequest(prompt="p", model="m")
@@ -70,16 +74,30 @@ class TestNvCreateVideoRequest:
         assert req.nvext.guidance_scale == 7.5
         assert req.nvext.seed == 42
 
+    def test_stream_defaults_none(self):
+        req = NvCreateVideoRequest(prompt="p", model="m")
+        assert req.stream is None
+
+    def test_stream_true(self):
+        req = NvCreateVideoRequest(prompt="p", model="m", stream=True)
+        assert req.stream is True
+
+    def test_stream_false(self):
+        req = NvCreateVideoRequest(prompt="p", model="m", stream=False)
+        assert req.stream is False
+
     def test_json_round_trip(self):
         req = NvCreateVideoRequest(
             prompt="cat",
             model="wan",
             output_format="mp4",
             response_format="url",
+            stream=True,
             nvext=VideoNvExt(boundary_ratio=0.3, guidance_scale_2=1.0),
         )
         restored = NvCreateVideoRequest.model_validate_json(req.model_dump_json())
         assert restored.output_format == "mp4"
+        assert restored.stream is True
         assert restored.nvext.boundary_ratio == 0.3
 
 
@@ -108,9 +126,9 @@ class TestVideoData:
         assert d.url == "http://example.com/v.mp4"
 
     def test_with_b64_json(self):
-        d = VideoData(output_format="webm", b64_json="abc123==")
+        d = VideoData(output_format="mp4", b64_json="abc123==")
         assert d.b64_json == "abc123=="
-        assert d.output_format == "webm"
+        assert d.output_format == "mp4"
 
     def test_json_round_trip(self):
         d = VideoData(output_format="mp4", url="http://example.com/v.mp4")

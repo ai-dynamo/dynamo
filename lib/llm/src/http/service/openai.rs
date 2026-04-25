@@ -2262,6 +2262,19 @@ async fn videos(
     let mut http_queue_guard = Some(http_queue_guard);
 
     if streaming {
+        // [gluo TODO] revisit the cancellation handling here,
+        // should be unified with chat_completions.
+        let ctx = stream.context();
+        let (mut connection_handle, stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Videos.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
         let stream = stream.flat_map(move |response| {
             let sse_result = process_response_using_event_converter_and_observe_metrics(
                 EventConverter::from(response),
@@ -2274,12 +2287,18 @@ async fn videos(
                 Err(e) => stream::iter(vec![Err(e)]),
             }
         });
+        // monitor_for_disconnects: arms stream_handle, pre-marks inflight Cancelled,
+        // emits data:[DONE] on natural end, demotes to Internal on mid-stream Err,
+        // and kills the engine context when the client disconnects.
+        let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
-        inflight.mark_ok();
+        // Disarm immediately: we return the body directly, so disconnect detection
+        // transfers to stream_handle (armed inside monitor_for_disconnects).
+        connection_handle.disarm();
         Ok(sse_stream.into_response())
     } else {
         let stream = stream.inspect(move |response| {

@@ -235,9 +235,15 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Determine output format
             response_format = req.response_format or "url"
+            if response_format not in ("url", "b64_json"):
+                raise ValueError(
+                    f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
+                )
             output_format = req.output_format or "mp4"
             if output_format != "mp4":
-                raise ValueError(f"Unsupported response format: {output_format}")
+                raise ValueError(
+                    f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
+                )
             fps = nvext.fps or self.config.default_fps
 
             # Encode media based on what the pipeline returned

@@ -8,7 +8,7 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -73,14 +73,16 @@ class NvCreateVideoRequest(BaseModel):
     user: Optional[str] = None
     """Optional user identifier."""
 
-    response_format: Optional[str] = None
-    """Data source: 'url' or 'b64_json' (default: 'url')."""
+    response_format: Optional[Literal["url", "b64_json"]] = None
+    """How the generated data should be returned: 'url' or 'b64_json'.
+    If unset, handlers default to 'url'."""
 
-    output_format: Optional[str] = None
-    """Output container format: 'mp4', "mjpeg", etc.
-    This field is used as model hint and the model may not
-    return the requested format, should check with output_format
-    field in the response data."""
+    output_format: Optional[Literal["mp4", "mjpeg"]] = None
+    """Requested container format. Only 'mp4' and 'mjpeg' are currently supported.
+    This is a hint; check output_format in the response data for the actual format."""
+
+    stream: Optional[bool] = None
+    """Whether to stream the video generation (default: false)."""
 
     nvext: Optional[VideoNvExt] = None
     """NVIDIA extensions."""
@@ -92,8 +94,8 @@ class VideoData(BaseModel):
     Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
     """
 
-    output_format: str
-    """Actual container format of this video: 'mp4', 'webm', 'gif'."""
+    output_format: Literal["mp4", "mjpeg"]
+    """Actual container format of this video."""
 
     url: Optional[str] = None
     """URL of the generated video (if response_format is 'url')."""
