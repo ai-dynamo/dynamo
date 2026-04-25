@@ -1,0 +1,8 @@
+[package]
+name = "dis1850-rust"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+minijinja = { version = "2.15", features = ["loader", "loop_controls"] }
+serde_json = "1"

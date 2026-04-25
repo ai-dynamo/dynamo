@@ -68,7 +68,7 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 
 {%- set ns = namespace(has_tools=false, last_user_idx=-1) -%}
 {%- for m in messages -%}
-    {%- if m.get("tools") %}{%- set ns.has_tools = true -%}{%- endif -%}
+    {%- if m.tools %}{%- set ns.has_tools = true -%}{%- endif -%}
     {%- if m.role == "user" or m.role == "developer" %}{%- set ns.last_user_idx = loop.index0 -%}{%- endif -%}
 {%- endfor -%}
 {%- set effective_drop_thinking = drop_thinking and (not ns.has_tools) -%}

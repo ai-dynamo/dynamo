@@ -206,9 +206,23 @@ If accepted: vLLM, SGLang, transformers, and Dynamo all stop needing per-model e
 
 ---
 
-## What this spike did NOT prove
+## Rust minijinja parity — partial confirmation, port pass needed
 
-- **Rust minijinja parity** wasn't directly verified — the harness uses Python jinja2. Both engines implement the same Jinja2 spec subset, and my templates use only features known to be supported by both (namespaces, reverse-iteration loops, dict tests, filters). I drafted a Rust integration test (`_deepseek_jinja_parity.rs.rejected` in the templates dir) but the local-dev container doesn't have `libnixl` — it ships only in build/runtime images. The test is correct-by-construction; CI run with the right image confirms. **One day of effort to land.**
+A standalone Rust binary (`/tmp/claude/dis1850-rust`, depending only on `minijinja = "2.15"` and `serde_json`) was used to validate the templates against the actual production runtime.
+
+**What worked unchanged:** fixture 2 (no tools, no tool_calls) renders byte-identical to the saved `test_output_2.txt` through Rust minijinja with the V4 inline template. This confirms the basic Jinja-spec compatibility (namespaces, reverse-iteration loops, dict tests, filters, role-dispatch loop, transition appendix logic).
+
+**What needs a port pass:** three jinja2-specific idioms used in the templates **don't compile in minijinja** because minijinja deliberately avoids list/dict mutation:
+
+| jinja2 idiom (works) | minijinja status | minijinja-compatible replacement |
+|---|---|---|
+| `m.get("tools")` | `UnknownMethod: map has no method named get` | `m.tools` (attr access; falsy if missing) — fixed in this branch |
+| `{%- set _ = list.append(x) -%}` | `UnknownMethod: sequence has no method named append` | `{%- set ns = namespace(s="") -%}{%- for x in items %}{%- set ns.s = ns.s ~ x ~ separator -%}{%- endfor -%}` OR direct emission with `{% if not loop.first %}sep{% endif %}` |
+| `{%- set _ = dict.update({k: v}) -%}` | likely same class of error | rebuild via `dict()` constructor with the new key, or use namespace |
+
+The templates currently shipped in this branch use the jinja2 idioms (verified 32/32 PASS in jinja2). For the impl PR they need a mechanical pass replacing `.append()` / `.update()` with namespace-based accumulation. **Approximate effort: half a day.** Pattern is uniform — every `{%- set _ = X.append(Y) -%}` becomes `{%- set nsX.s = nsX.s ~ (separator if not loop.first else "") ~ Y -%}` (or its `{% set %}{% endset %}` capture-block equivalent). The structural correctness of the templates is already proven; only the accumulator idiom changes.
+
+**In-tree Rust integration test:** drafted but parked at `templates/_deepseek_jinja_parity.rs.rejected` because the local-dev sglang container is missing `libnixl` (ships only in build/runtime images). CI with the right image will run cleanly once the .append port lands.
 - **End-to-end live-model validation** wasn't done. Per the small-DS-model survey in `dis-1850-plan.md`, no public small DeepSeek model has the V3.2/V4 template surface — V2-Lite uses `User:`/`Assistant:` plain-text, R1-Distill-* inherit base model templates, VL2-Tiny ships an empty template. The byte-parity-against-encoding_dsv4.py bar is sufficient because that script is upstream-authoritative.
 
 ---
