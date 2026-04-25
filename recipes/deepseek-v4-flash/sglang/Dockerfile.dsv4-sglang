@@ -1,0 +1,85 @@
+# DeepSeek-V4-Flash SGLang + Dynamo runtime image
+#
+# Two-step build:
+#   1. Build dynamo:latest-sglang-runtime locally per container/README.md:
+#        python3 container/render.py --framework sglang --target runtime
+#        docker build -f container/sglang-runtime-*.Dockerfile -t dynamo:latest-sglang-runtime .
+#   2. Build this overlay (adds V4 parsers + routed_experts fix):
+#        docker build -f recipes/deepseek-v4-flash/sglang/Dockerfile.dsv4-sglang \
+#          -t <your-registry>/sglang-dsv4:<tag> .
+
+ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime
+ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-blackwell
+
+# ---------- Stage 1: Build dynamo wheels with V4 parsers ----------
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder
+
+RUN yum install -y openssl-devel clang-devel && yum clean all
+
+# Modern protoc
+RUN curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip \
+    -o /tmp/protoc.zip && unzip -o /tmp/protoc.zip -d /usr/local && rm /tmp/protoc.zip
+
+# Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH=/root/.cargo/bin:/opt/python/cp312-cp312/bin:${PATH}
+
+RUN pip install maturin
+
+# Clone dynamo release branch (includes V4 parsers + sglang compat fixes)
+RUN git clone --depth 1 -b release/deepseekv4 \
+    https://github.com/ai-dynamo/dynamo.git /workspace
+
+# Build dynamo runtime wheel
+WORKDIR /workspace/lib/bindings/python
+RUN maturin build --release --interpreter /opt/python/cp312-cp312/bin/python3 \
+    -o /opt/dynamo/wheelhouse
+
+# Build ai-dynamo pure-python wheel
+WORKDIR /workspace
+RUN pip wheel --no-deps -w /opt/dynamo/wheelhouse .
+
+# ---------- Stage 2: Dynamo sglang-runtime donor ----------
+FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
+
+# ---------- Stage 3: Final image ----------
+FROM ${DSV4_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Infra from dynamo sglang-runtime (etcd, nats, UCX, NIXL)
+COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
+ENV PATH=/usr/local/bin/etcd:${PATH}
+
+# UCX libs
+COPY --from=dynamo_src /usr/lib/x86_64-linux-gnu/ucx /usr/lib/x86_64-linux-gnu/ucx
+COPY --from=dynamo_src /usr/lib/x86_64-linux-gnu/libuc*.so* /usr/lib/x86_64-linux-gnu/
+
+# NIXL + deps (pip packages with native libs)
+COPY --from=dynamo_src /usr/local/lib/python3.12/dist-packages/nixl* /usr/local/lib/python3.12/dist-packages/
+COPY --from=dynamo_src /usr/local/lib/python3.12/dist-packages/nixl_cu12* /usr/local/lib/python3.12/dist-packages/
+
+# Dynamo wheels with V4 parsers (overrides the base dynamo from donor)
+COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl /opt/dynamo/wheelhouse/
+COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo-*.whl /opt/dynamo/wheelhouse/
+
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo-*.whl && \
+    python3 -c "from dynamo._core import get_tool_parser_names; assert 'deepseek_v4' in get_tool_parser_names(), 'V4 parser missing!'; print('V4 parser verified')"
+
+# Dynamo Python components from V4 branch
+COPY --from=wheel_builder /workspace/components/src/dynamo /workspace/components/src/dynamo
+
+# Fix: sglang repo dir at /workspace/sglang shadows the Python package
+ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH}
+
+# DeepGEMM JIT env vars
+ENV SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
+    SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1
+
+WORKDIR /workspace
+
+ENTRYPOINT []
+CMD ["bash"]

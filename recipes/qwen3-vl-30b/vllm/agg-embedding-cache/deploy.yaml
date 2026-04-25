@@ -20,7 +20,7 @@ spec:
           value: tcp
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
       replicas: 1
@@ -51,7 +51,7 @@ spec:
                 --disable-log-requests \
                 --enable-prefix-caching \
                 --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           imagePullPolicy: IfNotPresent
           env:
             - name: HF_HOME

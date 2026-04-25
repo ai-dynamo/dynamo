@@ -10,14 +10,23 @@ Parallels test_vllm_unit.py for the vLLM backend.
 """
 
 
+import json
+import sys
+import types
+
 import pytest
+from sglang.srt.function_call.function_call_parser import FunctionCallParser
+from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _normalize_prompt_token_ids,
+    _parse_json_array_buffer,
+    build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
     preprocess_chat_request,
@@ -118,6 +127,18 @@ class TestBuildDynamoPreproc:
         assert sampling["frequency_penalty"] == 0.2
         assert sampling["repetition_penalty"] == 1.1
         assert sampling["seed"] == 42
+
+    def test_guided_decoding_passthrough(self):
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            prompt_token_ids=[1, 2, 3],
+            model_name="test",
+            eos_token_id=None,
+            guided_decoding={"json": {"type": "object"}},
+        )
+        assert result["sampling_options"]["guided_decoding"] == {
+            "json": {"type": "object"}
+        }
 
     def test_stop_conditions_string(self):
         """Single stop string is wrapped in a list."""
@@ -368,6 +389,171 @@ class TestCreateParsers:
         assert tcp is None
         assert rp is not None
 
+
+class TestBuildToolCallGuidedDecoding:
+    def test_none_when_no_tools(self):
+        assert (
+            build_tool_call_guided_decoding(
+                {"tool_choice": "auto"},
+                tool_call_parser_name="hermes",
+                sglang_tools=None,
+            )
+            is None
+        )
+
+    def test_none_when_tool_choice_none(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        )
+        assert (
+            build_tool_call_guided_decoding(
+                {"tool_choice": "none"},
+                tool_call_parser_name="hermes",
+                sglang_tools=tools,
+            )
+            is None
+        )
+
+    def test_required_tool_choice_builds_json_schema_guidance(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ]
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required"},
+            tool_call_parser_name="hermes",
+            sglang_tools=tools,
+        )
+
+        assert isinstance(guided, dict)
+        assert "json" in guided
+
+    def test_required_tool_choice_supports_older_sglang_constraint_signature(
+        self, monkeypatch
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        def old_get_json_schema_constraint(sglang_tools, tool_choice):
+            assert sglang_tools == tools
+            assert tool_choice == "required"
+            return {"type": "array", "items": {"type": "object"}}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "get_json_schema_constraint",
+            old_get_json_schema_constraint,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "parallel_tool_calls": False},
+            tool_call_parser_name=None,
+            sglang_tools=tools,
+        )
+
+        assert guided == {"json": {"type": "array", "items": {"type": "object"}}}
+
+    def test_auto_tool_choice_supports_older_structure_constraint_signature(
+        self, monkeypatch
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        class OldFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                self.tools = tools
+                self.tool_call_parser = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice):
+                assert tool_choice == "auto"
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            OldFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "parallel_tool_calls": False},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=tools,
+        )
+
+        assert guided == {"structural_tag": {"type": "object"}}
+
+    def test_auto_strict_tools_can_build_structural_tag_guidance(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ]
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto"},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=tools,
+        )
+
+        assert isinstance(guided, dict)
+        assert "structural_tag" in guided
+
     def test_tool_parser_requires_tools(self):
         """Tool parser is not created if no tools in request."""
         tcp, rp = create_parsers(
@@ -436,6 +622,170 @@ class TestCreateParsers:
         )
         assert tcp is not None
         assert rp is not None
+
+    def test_required_creates_json_array_parser(self):
+        """tool_choice='required' creates JsonArrayParser, not FunctionCallParser."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": "d",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        assert isinstance(tcp, JsonArrayParser)
+
+    def test_named_tool_choice_creates_json_array_parser(self):
+        """Named tool_choice creates JsonArrayParser."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        assert isinstance(tcp, JsonArrayParser)
+
+    def test_auto_creates_function_call_parser(self):
+        """tool_choice='auto' creates FunctionCallParser."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": "d",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        assert isinstance(tcp, FunctionCallParser)
+
+    def test_required_without_parser_name_still_creates_json_array_parser(self):
+        """tool_choice='required' doesn't need tool_call_parser_name."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": "d",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name=None, reasoning_parser_name=None
+        )
+        assert isinstance(tcp, JsonArrayParser)
+
+
+# ---------------------------------------------------------------------------
+# _parse_json_array_buffer
+# ---------------------------------------------------------------------------
+
+
+class TestParseJsonArrayBuffer:
+    """Test JSON array fallback parser for constrained decoding output."""
+
+    def test_single_tool_call(self):
+        buffer = json.dumps([{"name": "get_weather", "parameters": {"city": "NYC"}}])
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert calls[0].tool_index == 0
+        assert json.loads(calls[0].parameters) == {"city": "NYC"}
+
+    def test_multiple_tool_calls(self):
+        buffer = json.dumps(
+            [
+                {"name": "get_weather", "parameters": {"city": "NYC"}},
+                {"name": "search", "parameters": {"q": "hello"}},
+            ]
+        )
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 2
+        assert calls[0].name == "get_weather"
+        assert calls[0].tool_index == 0
+        assert calls[1].name == "search"
+        assert calls[1].tool_index == 1
+
+    def test_arguments_key_also_accepted(self):
+        """Some formats use 'arguments' instead of 'parameters'."""
+        buffer = json.dumps([{"name": "f", "arguments": {"x": 1}}])
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert json.loads(calls[0].parameters) == {"x": 1}
+
+    def test_string_parameters_preserved(self):
+        buffer = json.dumps([{"name": "f", "parameters": "already_a_string"}])
+        calls = _parse_json_array_buffer(buffer)
+        assert calls[0].parameters == "already_a_string"
+
+    def test_invalid_json_returns_empty(self):
+        assert _parse_json_array_buffer("not json") == []
+
+    def test_non_array_returns_empty(self):
+        assert _parse_json_array_buffer('{"name": "f"}') == []
+
+    def test_empty_buffer_returns_empty(self):
+        assert _parse_json_array_buffer("") == []
+
+    def test_non_dict_items_skipped(self):
+        buffer = json.dumps(["not_a_dict", {"name": "f", "parameters": {}}])
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "f"
+        assert calls[0].tool_index == 1
+
+    def test_trailing_special_token(self):
+        """Trailing EOS/special tokens should not break parsing."""
+        buffer = '[{"name": "f", "parameters": {"x": 1}}]<|endoftext|>'
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "f"
+        assert json.loads(calls[0].parameters) == {"x": 1}
+
+    def test_leading_text_with_array(self):
+        """Leading non-JSON text before the array should be tolerated."""
+        buffer = 'some preamble [{"name": "f", "parameters": {"x": 1}}]'
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "f"
+
+    def test_trailing_and_leading_noise(self):
+        """Both leading and trailing noise."""
+        buffer = 'text [{"name": "g", "parameters": {"y": 2}}] <|end|>'
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "g"
 
 
 class TestNormalizePromptTokenIds:
@@ -641,6 +991,37 @@ class TestPreprocessChatRequest:
             with_auto.prompt_token_ids
         ), "tool_choice=none with flag off should keep tools in template"
 
+    def test_named_tool_choice_missing_function_raises(self, tokenizer):
+        """Named tool_choice referencing a function absent from tools raises ValueError."""
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "does_not_exist"},
+            },
+        }
+        with pytest.raises(ValueError, match="does_not_exist"):
+            preprocess_chat_request(
+                request,
+                tokenizer=tokenizer,
+                tool_call_parser_name="hermes",
+                reasoning_parser_name=None,
+            )
+
     def test_init_worker_propagates_exclude_flag_true(self):
         """_init_worker sets the worker-global exclude_tools flag to True."""
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
@@ -690,6 +1071,240 @@ class TestPreprocessChatRequest:
             reasoning_parser_name=None,
         )
         assert len(with_system.prompt_token_ids) > len(without_system.prompt_token_ids)
+
+    def test_deepseek_v4_uses_sglang_encoder_when_chat_template_missing(
+        self, monkeypatch
+    ):
+        """DeepSeek-V4 uses SGLang's encoder instead of HF chat_template."""
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            captured["thinking_mode"] = thinking_mode
+            captured["reasoning_effort"] = reasoning_effort
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                assert prompt == "<dsv4-prompt>"
+                return [1, 2, 3]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {
+                "thinking": True,
+                "reasoning_effort": "max",
+            },
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek_v4",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["thinking_mode"] == "thinking"
+        assert captured["reasoning_effort"] == "max"
+        assert captured["messages"][0]["role"] == "system"
+        assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
+        assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [1]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather", "parameters": {}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "get_time", "parameters": {}},
+                },
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_time"},
+            },
+        }
+
+        preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek_v4",
+        )
+
+        tools = captured["messages"][0]["tools"]
+        assert [tool["function"]["name"] for tool in tools] == ["get_time"]
+
+    def test_deepseek_v4_respects_existing_chat_template(self, monkeypatch):
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            raise AssertionError("encoding_dsv4 should not be called")
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class TemplateTokenizer:
+            chat_template = (
+                "{% for message in messages %}{{ message.content }}{% endfor %}"
+            )
+
+            def apply_chat_template(self, messages, **kwargs):
+                assert kwargs["add_generation_prompt"] is True
+                assert kwargs["tokenize"] is True
+                return [4, 5, 6]
+
+            def encode(self, prompt):
+                raise AssertionError("encode should not be called")
+
+        result = preprocess_chat_request(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            tokenizer=TemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [4, 5, 6]
+
+    def test_deepseek_v4_normalizes_none_content_without_mutating_request(
+        self, monkeypatch
+    ):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [7]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "assistant", "content": None}],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [7]
+        assert captured["messages"] == [{"role": "assistant", "content": ""}]
+        assert request["messages"] == [{"role": "assistant", "content": None}]
+
+    def test_deepseek_v4_tool_choice_none_strips_encoder_tools(self, monkeypatch):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [8]
+
+        preprocess_chat_request(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "system", "content": "Stay terse."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "parameters": {}},
+                    }
+                ],
+                "tool_choice": "none",
+            },
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=True,
+        )
+
+        assert "tools" not in captured["messages"][0]
 
 
 # ---------------------------------------------------------------------------

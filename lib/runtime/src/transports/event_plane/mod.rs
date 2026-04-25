@@ -292,9 +292,15 @@ pub struct EventPublisher {
 
 impl EventPublisher {
     /// Create a publisher for a component-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
+    /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
-        Self::for_component_with_transport(comp, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = comp.drt().default_event_transport_kind();
+        Self::for_component_with_transport(comp, topic, transport_kind).await
     }
 
     /// Create a publisher with explicit transport.
@@ -312,9 +318,15 @@ impl EventPublisher {
     }
 
     /// Create a publisher for a namespace-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
+    /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
-        Self::for_namespace_with_transport(ns, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = ns.drt().default_event_transport_kind();
+        Self::for_namespace_with_transport(ns, topic, transport_kind).await
     }
 
     /// Create a namespace publisher with explicit transport.
@@ -567,9 +579,15 @@ pub struct EventSubscriber {
 
 impl EventSubscriber {
     /// Create a subscriber for a component-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
+    /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
-        Self::for_component_with_transport(comp, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = comp.drt().default_event_transport_kind();
+        Self::for_component_with_transport(comp, topic, transport_kind).await
     }
 
     /// Create a subscriber with explicit transport.
@@ -587,9 +605,15 @@ impl EventSubscriber {
     }
 
     /// Create a subscriber for a namespace-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
+    /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
-        Self::for_namespace_with_transport(ns, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = ns.drt().default_event_transport_kind();
+        Self::for_namespace_with_transport(ns, topic, transport_kind).await
     }
 
     /// Create a namespace subscriber with explicit transport.

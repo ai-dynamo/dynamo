@@ -65,7 +65,7 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 /// hierarchy labels for free.
 pub(super) struct KvPublisherMetrics {
     /// Total number of raw events dropped by engines before reaching publisher
-    pub engines_dropped_events_total: prometheus::IntCounterVec,
+    pub engines_dropped_events_total: prometheus::IntCounter,
 }
 
 static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
@@ -73,15 +73,15 @@ static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new()
 impl KvPublisherMetrics {
     /// Create from a Component, memoized in a static OnceLock.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
-    /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
+    /// injects hierarchy labels (including `worker_id`), and registers with the
+    /// DRT `MetricsRegistry`.
     pub fn from_component(component: &Component) -> Arc<Self> {
         KV_PUBLISHER_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
-                match metrics.create_intcountervec(
+                match metrics.create_intcounter(
                     kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
                     "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                    &["worker_id"],
                     &[],
                 ) {
                     Ok(engines_dropped_events_total) => {
@@ -96,26 +96,23 @@ impl KvPublisherMetrics {
             .clone()
     }
 
-    /// Creates unregistered metrics for use when the MetricsRegistry is not available.
-    /// This is used as a fallback when metric creation fails.
+    /// Creates unregistered metrics for use when registration fails.
+    /// Increments still work in-process but are not exposed on `/metrics`.
     pub fn new_unregistered() -> Self {
         Self {
-            engines_dropped_events_total: prometheus::IntCounterVec::new(
+            engines_dropped_events_total: prometheus::IntCounter::with_opts(
                 prometheus::Opts::new(
                     kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
                     "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
                 ),
-                &["worker_id"],
             )
             .expect("failed to create engines_dropped_events_total counter"),
         }
     }
 
     /// Increment the engines dropped events counter by the given amount.
-    pub fn increment_engines_dropped_events(&self, worker_id: u64, count: u64) {
-        self.engines_dropped_events_total
-            .with_label_values(&[&worker_id.to_string()])
-            .inc_by(count);
+    pub fn increment_engines_dropped_events(&self, count: u64) {
+        self.engines_dropped_events_total.inc_by(count);
     }
 }
 

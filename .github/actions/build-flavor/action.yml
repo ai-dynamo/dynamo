@@ -44,14 +44,6 @@ inputs:
     description: 'SCCache S3 Bucket'
     required: false
     default: ''
-  aws_access_key_id:
-    description: 'AWS Access Key ID'
-    required: false
-    default: ''
-  aws_secret_access_key:
-    description: 'AWS Secret Access Key'
-    required: false
-    default: ''
   hf_token:
     description: 'HuggingFace token'
     required: false
@@ -86,6 +78,10 @@ inputs:
     default: 'false'
   extra_build_args:
     description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) forwarded to docker-remote-build'
+    required: false
+    default: ''
+  dev_version_suffix:
+    description: 'PEP 440 dev suffix (e.g. .dev20260423+g1234567). Empty = stable build.'
     required: false
     default: ''
   fresh_builder:
@@ -227,6 +223,10 @@ runs:
             ${MAKE_EFA_FLAG} \
             --show-result \
             --output-short-filename
+    - name: Apply nightly dev version
+      if: inputs.dev_version_suffix != ''
+      shell: bash
+      run: python3 .github/scripts/apply_dev_version.py "${{ inputs.dev_version_suffix }}" .
     - name: Build and Push Image
       id: build-image
       uses: ./.github/actions/docker-remote-build
@@ -239,8 +239,6 @@ runs:
         aws_default_region: ${{ inputs.aws_default_region }}
         sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
         aws_account_id: ${{ inputs.aws_account_id }}
-        aws_access_key_id: ${{ inputs.aws_access_key_id }}
-        aws_secret_access_key: ${{ inputs.aws_secret_access_key }}
         no_cache: ${{ inputs.no_cache }}
         extra_tags: ${{ steps.extra-tags.outputs.tags }}
         push_image: ${{ inputs.push_image }}
