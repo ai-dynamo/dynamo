@@ -14,7 +14,7 @@
 - **Rust to delete: 2624 lines** (`deepseek_v4.rs:1271` + `deepseek_v32.rs:1353`) plus the special-case branch in `template.rs::from_mdc`.
 - **Rust pre-pass to keep: ~150 lines** for `merge_tool_messages` and `sort_tool_results_by_call_order` (V4-only).
 - **Net reduction: ~2100 lines (~80%).** Pure win.
-- **Performance:** jinja2 (Python) is 2-4x slower than the Python encoding script. Rust minijinja typically benchmarks 2-5x faster than Python jinja2 for similar templates → expected to land roughly on par with the Python script and ~2-3x slower than the existing Rust port. Worst-case p99 absolute overhead: <1ms even on the 150 KB search-w-date fixture. Fine at request scale.
+- **Performance (measured head-to-head in Rust):** Rust minijinja (with the same pre-pass) is **3–7× slower** than the existing Rust port, but in absolute terms still **sub-50 µs p99** on every fixture. The slowest fixture (3313 bytes, developer + tools + tool_calls) is 48 µs p99 — that's 0.005% of a 1-second LLM response. Throughput floor of ~23K renders/sec on a single thread. Trivial at request scale; the 2100-LOC delete + upstream-HF-PR leverage clears the cost easily. Numbers in the **Rust head-to-head bench** section below.
 - **One Rust pre-pass needed** (~150 LOC): `merge_tool_messages` and `sort_tool_results_by_call_order` are O(n) message-list mutations that are clean in Rust but ugly in Jinja. Keeping them as a thin Rust pre-pass is the right tradeoff.
 
 **Recommendation:** delete `deepseek_v4.rs` + `deepseek_v32.rs`, ship the Jinja templates with a thin Rust pre-pass, and propose the templates upstream to `deepseek-ai/DeepSeek-V4-Pro` and `DeepSeek-V3.2` on HuggingFace.
@@ -44,7 +44,35 @@
 | `response_format` on system | ✅ PASS | 295 |
 | Non-action task token (`query`) | ✅ PASS | 74 |
 
-### Performance (jinja2, Python harness — upper bound on Rust minijinja overhead)
+### Rust head-to-head bench — minijinja vs raw Rust port (the real comparison)
+
+5000 iterations + 100 warmup, `cargo build --release` (opt-level=3, codegen-units=1, lto=thin), cargo 1.93.1 in the dynamo3-sglang devcontainer. Both paths use the **same** Rust pre-pass (`merge_tool_messages` + `sort_tool_results_by_call_order`), so the only difference being measured is render path: hand-rolled string builder (Rust port) vs minijinja interpreter + filters.
+
+Bench source: `lib/llm/src/preprocessor/prompt/templates/_rust_parity_scratch/` (companion `bench.rs` was a throwaway probe under `_dis1850_rust/`).
+
+| Fixture | Bytes | Raw port p50 | minijinja+pre p50 | Render only | Pre-pass alone | Slowdown |
+|---|---|---|---|---|---|---|
+| 1 (tools) | 2390 | **9.3 µs** | 30.1 µs | 24.8 µs | 2.4 µs | 3.2× |
+| 2 (no tools) | 342 | **1.9 µs** | 12.3 µs | 11.0 µs | 1.1 µs | 6.5× |
+| 3 (developer + tools) | 3313 | **10.7 µs** | 43.9 µs | 35.7 µs | 3.6 µs | 4.1× |
+| 4 (chat + task) | 2552 | **2.5 µs** | 13.9 µs | 12.1 µs | 1.4 µs | 5.5× |
+
+p99 (worst single render in 5000):
+
+| Fixture | Raw port | minijinja+pre |
+|---|---|---|
+| 1 | 16.4 µs | 33.4 µs |
+| 2 | 2.1 µs | 16.9 µs |
+| 3 | 14.1 µs | 48.3 µs |
+| 4 | 4.0 µs | 24.9 µs |
+
+Single-thread throughput:
+- Raw Rust port: **92K–527K renders/sec**
+- Rust minijinja + pre-pass: **23K–80K renders/sec**
+
+**Reading:** the slowdown ratio (3–7×) is the price of running an interpreter over a hand-rolled string builder — same gap shows up everywhere Jinja is used. Absolute p99 stays under 50 µs even on the largest fixture, which is **0.005% of a 1-second LLM response**. The pre-pass itself is cheap (1–4 µs); the render is where minijinja spends its time (Value boxing, filter dispatch, lstrip/trim, custom `tojson` formatter for Python-style separators).
+
+### Python-side measurement (for context)
 
 | Fixture | Bytes | encoding_*.py p99 | jinja2 p99 | Overhead |
 |---|---|---|---|---|

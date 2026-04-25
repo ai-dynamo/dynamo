@@ -1,8 +1,26 @@
 [package]
 name = "dis1850-rust"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-minijinja = { version = "2.15", features = ["loader", "loop_controls"] }
-serde_json = "1"
+minijinja = { version = "=2.15.1", features = ["loader", "loop_controls"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde = "1"
+anyhow = "1"
+tracing = "0.1"
+
+[[bin]]
+name = "parity"
+path = "main.rs"
+
+[[bin]]
+name = "bench"
+path = "bench.rs"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+
+[workspace]

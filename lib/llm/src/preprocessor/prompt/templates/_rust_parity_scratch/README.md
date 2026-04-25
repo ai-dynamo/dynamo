@@ -1,23 +1,34 @@
-# Rust minijinja parity scratch
+# Rust minijinja parity + bench scratch
 
 Standalone Cargo project used during the DIS-1850 spike to validate
-templates against the actual production-runtime minijinja crate (the
-in-tree `_deepseek_jinja_parity.rs.rejected` integration test was
-blocked by a missing `libnixl` in the local-dev sglang container).
+the templates against the actual production-runtime minijinja crate
+(the in-tree `_deepseek_jinja_parity.rs.rejected` integration test was
+blocked by missing `libnixl` in local-dev sglang containers).
+
+## Files
+
+- `Cargo.toml` — needs cargo 1.85+ (edition 2024)
+- `main.rs` — parity binary: renders fixtures via Rust minijinja, byte-diffs against `test_output_*.txt`
+- `bench.rs` — head-to-head bench: minijinja+pre-pass vs `encode_messages` (the existing Rust port)
+- `deepseek_v4_port.rs` — copy of `lib/llm/src/preprocessor/prompt/deepseek_v4.rs` (sans `DeepSeekV4Formatter` impl, which depends on dynamo-llm internals); used by `bench.rs` as `mod deepseek_v4` for the head-to-head
 
 ## Run
 
 ```bash
-\cp -f Cargo.toml main.rs /tmp/claude/dis1850-rust/   # or any dir with cargo
-cd /tmp/claude/dis1850-rust
-cargo build --release && ./target/release/dis1850-rust
+mkdir -p /tmp/dis1850-rust/src
+cp Cargo.toml /tmp/dis1850-rust/
+cp main.rs /tmp/dis1850-rust/src/
+cp bench.rs deepseek_v4_port.rs /tmp/dis1850-rust/src/
+mv /tmp/dis1850-rust/src/deepseek_v4_port.rs /tmp/dis1850-rust/src/deepseek_v4.rs
+cd /tmp/dis1850-rust
+cargo build --release && ./target/release/parity && ./target/release/bench
 ```
 
-## Status
+(Or run from inside the dynamo devcontainer at `/workspace/_dis1850_rust/` —
+that's where the spike actually ran.)
 
-- Fixture 2 (no preprocessing) renders byte-identical via Rust minijinja.
-- Fixtures 1, 3 (with tools / tool_calls) blocked on three jinja2-only
-  idioms used in the templates: `.get()`, `.append()`, `.update()`.
-  See spike-results doc for the port-pass plan.
+## Status / measured numbers
+
+See `../../../../notes/DIS-1850-spike-results.md` → **Rust head-to-head bench**.
 
 This is throwaway scaffolding — delete on impl PR landing.
