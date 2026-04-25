@@ -290,7 +290,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // DeepSeek V4 coverage (see lib/parsers/TESTING.md for CASE.* taxonomy).
+    // DeepSeek V4 coverage (see lib/parsers/TEST_CASES.md for CASE.* taxonomy).
     //
     // Covered by the V4 tests below (or by a shared DSML generic test):
     //   - CASE.1   single-call            (parsers.rs :: test_deepseek_v4_single_tool_call)
