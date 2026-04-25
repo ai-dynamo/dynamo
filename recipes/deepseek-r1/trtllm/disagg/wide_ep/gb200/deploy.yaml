@@ -136,7 +136,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           env:
             - name: HF_HOME
               value: /model-cache
@@ -171,7 +171,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           workingDir: /workspace/components/backends/trtllm
           # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
           #       you might need to increase 'failureThreshold' below to allow more time for startup
@@ -229,7 +229,7 @@ spec:
         tolerations: []
         affinity: {}
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           workingDir: /workspace/components/backends/trtllm
           # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
           #       you might need to increase 'failureThreshold' below to allow more time for startup

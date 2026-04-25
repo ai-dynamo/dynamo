@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::preprocessor::media::MediaDecoder;
 
 pub mod deepseek_v32;
+pub mod deepseek_v4;
 mod template;
 
 pub use template::{ChatTemplate, ContextMixins};

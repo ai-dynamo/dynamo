@@ -72,9 +72,11 @@ enum ZmqRawKvEvent {
         parent_block_hash: Option<u64>,
         token_ids: Vec<u32>,
         block_size: u32,
+        group_idx: u32,
     },
     BlockRemoved {
         block_hashes: Vec<u64>,
+        group_idx: u32,
     },
 }
 
@@ -277,11 +279,15 @@ fn convert_to_zmq_events(
                 parent_block_hash,
                 token_ids,
                 block_size,
+                group_idx: 0,
             }]
         }
         KvCacheEventData::Removed(remove_data) => {
             let block_hashes: Vec<u64> = remove_data.block_hashes.iter().map(|h| h.0).collect();
-            vec![ZmqRawKvEvent::BlockRemoved { block_hashes }]
+            vec![ZmqRawKvEvent::BlockRemoved {
+                block_hashes,
+                group_idx: 0,
+            }]
         }
         KvCacheEventData::Cleared => vec![],
     }

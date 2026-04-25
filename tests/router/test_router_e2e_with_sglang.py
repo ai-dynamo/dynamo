@@ -260,11 +260,9 @@ def test_sglang_kv_router_basic(
     )
 
 
-@pytest.mark.skip(
-    reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2784"
-)  # Worker #2 dies during startup; KvRouter blocks forever waiting for min_initial_workers=2.
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
