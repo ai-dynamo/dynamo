@@ -31,11 +31,10 @@ source tree onto a vLLM nightly base image.
 Use the command below to build a container with the necessary dependencies:
 
 ```bash
-docker buildx build \
-  --platform linux/amd64 \
+docker build \
   -t <your-registry>/nemotron-omni-vllm:latest \
-  -f recipes/nemotron-omni/Dockerfile \
-  --push .
+  -f recipes/nemotron-omni/Dockerfile .
+docker push <your-registry>/nemotron-omni-vllm:latest
 ```
 
 Set `BASE_IMAGE=<image>` if you need to build from a different compatible
