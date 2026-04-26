@@ -1,36 +1,43 @@
 # DeepSeek-V4-Pro Recipe
 
-Aggregated-serving recipe for **DeepSeek-V4-Pro** on vLLM with Dynamo.
+Aggregated-serving recipe for **DeepSeek-V4-Pro** on Dynamo. Two backends are documented side by side: **vLLM** and **SGLang**. Both are single-replica decode-only deployments that fill all 8 GPUs of a B200 node.
 
-| Variant | Model | Status | Modality | Manifest | GPUs |
-|---------|-------|--------|----------|----------|------|
-| **vllm-agg** | `deepseek-ai/DeepSeek-V4-Pro` | Experimental | Text only | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml) | 8x B200 |
+| Variant | Backend | Manifest | GPUs | Topology | Container |
+|---------|---------|----------|------|----------|-----------|
+| **vllm-agg**   | vLLM   | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 8x B200 | TP=8 + Expert Parallel                         | Custom build (vLLM's V4 stack not in a stock release) |
+| **sglang-agg** | SGLang | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 8x B200 | TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](sglang/container/) |
 
-Aggregated, single-replica: 1 decode pod running TP=8 + Expert Parallel on all 8 GPUs of one node.
+Status: **Experimental** (Day-0). Modality: text only.
 
-> **⚠️ Known Day-0 issue: thinking modes produce corrupted output.**
-> Requests with `chat_template_kwargs: {"thinking": true, ...}` emit malformed tokens (numeric tokens spliced mid-word, occasional special-token leakage) on this engine. The bug is in the OSS port of DeepSeek-V4-Pro's sparse-attention path and does not affect DeepSeek-V4-Flash on the same stack. Until the upstream fix lands, send `chat_template_kwargs: {"thinking": false}` in chat completion requests. Tool calling, structured output, and non-thinking responses work normally.
+> **⚠️ Known Day-0 issue (vLLM): thinking modes produce corrupted output.**
+> On the **vLLM** variant, requests with `chat_template_kwargs: {"thinking": true, ...}` emit malformed tokens (numeric tokens spliced mid-word, occasional special-token leakage). The bug is in the OSS port of DeepSeek-V4-Pro's sparse-attention path on the dsv4 vLLM stack and does not affect DeepSeek-V4-Flash on the same stack. Until the upstream fix lands, send `chat_template_kwargs: {"thinking": false}` in chat completion requests against the vLLM variant. Tool calling, structured output, and non-thinking responses work normally. The SGLang variant uses a different attention path (MXFP4 MoE + EAGLE MTP); exercise caution and verify output if testing thinking modes there.
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
 2. **GPU cluster** with at least 8 B200 GPUs available on one node (TP=8 fills an 8-GPU box).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Pro`.
-4. **Dynamo + vLLM image with the DeepSeek-V4 stack.** DeepSeek-V4-Pro is not in a stock vLLM release yet. It is built in two steps:
+4. **Container image.** Pick the path that matches your variant:
 
-   1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
-   2. Build the DeepSeek-V4-Pro overlay on top of it using [`vllm/container/Dockerfile.dsv4-vllm`](vllm/container/Dockerfile.dsv4-vllm). See [`vllm/container/README.md`](vllm/container/README.md) for build args and troubleshooting. From the repo root:
+   - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see [`sglang/container/README.md`](sglang/container/README.md).
 
-      ```bash
-      docker build -f recipes/deepseek-v4-pro/vllm/container/Dockerfile.dsv4-vllm \
-        -t <your-registry>/vllm-dsv4:<tag> .
-      ```
+   - **vLLM** (`vllm-agg`): DeepSeek-V4 is not in a stock vLLM release yet, so the recipe ships its own reference Dockerfile. Build in two steps:
 
-   Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the frontend and decode workers) to `<your-registry>/vllm-dsv4:<tag>`.
+     1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
+     2. Build the DeepSeek-V4-Pro overlay on top of it using [`vllm/container/Dockerfile.dsv4-vllm`](vllm/container/Dockerfile.dsv4-vllm). See [`vllm/container/README.md`](vllm/container/README.md) for build args and troubleshooting. From the repo root:
 
-   > The Pro and Flash recipes share the same dsv4 image. If you've already built it for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model`.
+        ```bash
+        docker build -f recipes/deepseek-v4-pro/vllm/container/Dockerfile.dsv4-vllm \
+          -t <your-registry>/vllm-dsv4:<tag> .
+        ```
+
+     Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the Frontend and the decode worker) to `<your-registry>/vllm-dsv4:<tag>`.
+
+   > The Pro and Flash recipes share the same dsv4 image on each backend. If you've already built the vLLM or SGLang overlay for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
 
 ## Quick Start
+
+Common setup (run once — applies to both variants):
 
 ```bash
 export NAMESPACE=dynamo-demo
@@ -48,10 +55,13 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
 
-# Update the `image:` fields in vllm/agg/deploy.yaml to your Dynamo + vLLM build.
+### Deploy — vLLM (`vllm-agg`)
 
-# Deploy
+```bash
+# Update the `image:` fields in vllm/agg/deploy.yaml to your Dynamo + vLLM build
+# (Prerequisite 4 — vLLM path).
 kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 
 # First launch of the decode worker takes up to ~90 minutes (TP=8 weight load +
@@ -61,11 +71,34 @@ kubectl wait --for=condition=Ready pod \
   -n ${NAMESPACE} --timeout=5400s
 ```
 
-## Test the Deployment
+### Deploy — SGLang (`sglang-agg`)
 
 ```bash
+# Manifest already points at the prebuilt NGC image — no image edit needed.
+kubectl apply -f sglang/agg/deploy.yaml -n ${NAMESPACE}
+
+# First launch of the decode worker takes up to ~60 minutes (TP=8 weight load +
+# DeepGEMM warmup + cudagraph warmup). The startup probe is sized for this.
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=sglang-dsv4-pro \
+  -n ${NAMESPACE} --timeout=3600s
+```
+
+## Test the Deployment
+
+Port-forward the variant you deployed:
+
+```bash
+# vLLM
 kubectl port-forward svc/dsv4-pro-agg-frontend 8000:8000 -n ${NAMESPACE}
 
+# SGLang
+kubectl port-forward svc/sglang-dsv4-pro-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+Either way the request shape is the same. Send `thinking: false` on the vLLM variant per the Day-0 caveat above:
+
+```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -78,7 +111,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Recipe Details
 
-The worker command lives in `vllm/agg/deploy.yaml`. Key flags and why they're there:
+### vLLM (`vllm/agg/deploy.yaml`)
 
 | Flag | Purpose |
 |------|---------|
@@ -91,9 +124,22 @@ The worker command lives in `vllm/agg/deploy.yaml`. Key flags and why they're th
 | `--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Conservative cudagraph mode appropriate for the larger Pro model (matches upstream V4-Pro example) |
 | `--max-num-seqs 256` | Concurrency cap |
 
+### SGLang (`sglang/agg/deploy.yaml`)
+
+| Flag | Purpose |
+|------|---------|
+| `--dyn-reasoning-parser deepseek_v4` | Extracts chain-of-thought into `message.reasoning_content` |
+| `--dyn-tool-call-parser deepseek_v4` | Emits OpenAI-compatible structured `tool_calls` |
+| `--trust-remote-code` | Required for the V4 architecture's custom modeling code |
+| `--tp 8` | Tensor-parallel across all 8 GPUs of one node |
+| `--moe-runner-backend flashinfer_mxfp4` | MXFP4 MoE kernel via FlashInfer for the V4 expert weights |
+| `--speculative-algo EAGLE` + `--speculative-num-steps 3` + `--speculative-eagle-topk 1` + `--speculative-num-draft-tokens 4` | EAGLE MTP speculative decoding (3 draft steps, top-1 over the EAGLE head, 4 draft tokens per step) |
+| `--chunked-prefill-size 4096` | Chunk long prompts at 4k tokens for steady-state decode interleaving |
+| `--disable-flashinfer-autotune` | Skip per-shape autotuning at startup; the dsv4 base ships pre-tuned defaults |
+
 ### Why TP=8 (not DP=4 like Flash)?
 
-DeepSeek-V4-Pro is ~5.5x larger than Flash on disk (~865 GB vs. ~160 GB). With FP4+FP8 mixed weights it does not fit in 4 ranks at typical batch shapes, so the upstream tested shape for Pro is **TP=8 across all 8 GPUs of one node**. Expert Parallel is still enabled on top of TP — TP shards the dense (attention/router/norm) weights, EP shards the experts.
+DeepSeek-V4-Pro is ~5.5x larger than Flash on disk (~865 GB vs. ~160 GB). With FP4+FP8 mixed weights it does not fit in 4 ranks at typical batch shapes, so the upstream tested shape for Pro is **TP=8 across all 8 GPUs of one node** on both backends. On vLLM, Expert Parallel is layered on top of TP — TP shards the dense (attention/router/norm) weights, EP shards the experts. On SGLang, the MXFP4 MoE backend handles the expert sharding internally under the same TP=8 process group.
 
 ## Model Details
 
@@ -104,21 +150,25 @@ Sourced from the [`deepseek-ai/DeepSeek-V4-Pro` model card](https://huggingface.
 | **Model** | `deepseek-ai/DeepSeek-V4-Pro` (MoE, 1.6T total / 49B active per token) |
 | **Context length** | 1M tokens |
 | **Checkpoint** | Mixed precision — MoE expert weights in FP4; most other parameters in FP8 |
-| **Attention** | Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). Recipe enables the Blackwell FP4 indexer cache via `--attention-config '{"use_fp4_indexer_cache":true}'` |
+| **Attention** | Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). The vLLM variant enables the Blackwell FP4 indexer cache via `--attention-config '{"use_fp4_indexer_cache":true}'` |
 | **Residual path** | Manifold-Constrained Hyper-Connections (mHC) |
 | **Reasoning modes** | Three effort levels exposed via `chat_template_kwargs`: `{}` (Non-think), `{"thinking":true,"reasoning_effort":"high"}` (Think High), `{"thinking":true,"reasoning_effort":"max"}` (Think Max — needs `--max-model-len >= 393216`) |
 | **Long-context efficiency** | Per the model card, ~27% of the per-token inference FLOPs and ~10% of the KV cache vs. DeepSeek-V3.2 at 1M context |
 | **License** | MIT |
 
-Recipe-level (not model-card) settings in this deployment:
+Recipe-level (per-variant) settings:
 
-| | |
-|---|---|
-| **Backend** | vLLM with the DeepSeek-V4 stack (`vllm/vllm-openai:deepseekv4-cu130`) |
-| **Parallelism** | TP=8, Expert Parallel enabled |
-| **KV cache** | FP8, block size 256 |
+| | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) |
+|---|---|---|
+| **Backend image** | Custom overlay on `vllm/vllm-openai:deepseekv4-cu130` | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` |
+| **Parallelism** | TP=8, Expert Parallel enabled | TP=8 |
+| **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 |
+| **KV cache** | FP8, block size 256 | engine default |
+| **Speculative decoding** | — | EAGLE MTP (3 steps / 4 draft tokens) |
 
 ## Verifying Reasoning
+
+Same flow on both variants — same model, same `--dyn-reasoning-parser deepseek_v4`. On the vLLM variant, omit `chat_template_kwargs.thinking` (or set it to `false`) per the Day-0 caveat:
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -139,6 +189,8 @@ Expected:
 If `reasoning_content` is `null` and `</think>` appears in `content`, the reasoning parser isn't wired up — confirm `--dyn-reasoning-parser deepseek_v4` is on the worker command.
 
 ## Verifying Tool Calling
+
+Same flow on both variants:
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -174,10 +226,26 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ## Notes
 
-- **Storage class.** Update `storageClassName` in `model-cache/model-cache.yaml` to a RWX class that can serve the PVC to frontend and worker pods.
+### Common
+
+- **Storage class.** Update `storageClassName` in `model-cache/model-cache.yaml` to a RWX class that can serve the PVC to Frontend and worker pods.
 - **Model size.** `deepseek-ai/DeepSeek-V4-Pro` is ~865 GB on disk (64 safetensors shards in FP4+FP8 mixed form). The 1500Gi PVC leaves ~1.7x headroom for HF cache metadata and one alternate revision.
-- **Image tag.** The manifest ships with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace with your built Dynamo + vLLM (DeepSeek-V4) image — see Prerequisite 4.
-- **First launch is slow.** The decode worker loads weights across 8 TP ranks and warms CUDA graphs; the startup probe allows up to ~90 min (`failureThreshold: 540` at `periodSeconds: 10`) and `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match.
-- **Parser flags.** Use the Dynamo variants on the worker (`--dyn-reasoning-parser`, `--dyn-tool-call-parser`). vLLM's native `--reasoning-parser` / `--tool-call-parser` are engine-side and do not feed the Dynamo OpenAI renderer.
-- **Offline model cache.** The worker runs with `HF_HUB_OFFLINE=1` so vLLM reads the cached weights from the PVC and never contacts the HF Hub at startup. The HF token secret is mounted defensively; it isn't required at runtime once the download Job has completed.
-- **Sibling recipe.** [DeepSeek-V4-Flash](../deepseek-v4-flash/) is the smaller sibling (284B / 13B active, DP=4 + EP on 4 B200 GPUs) and uses the same dsv4 container image.
+- **Parser flags.** Use the Dynamo variants on the worker (`--dyn-reasoning-parser`, `--dyn-tool-call-parser`). Each engine's native `--reasoning-parser` / `--tool-call-parser` are engine-side and do not feed the Dynamo OpenAI renderer.
+- **Offline model cache.** Both workers run with `HF_HUB_OFFLINE=1` so the engine reads cached weights from the PVC and never contacts the HF Hub at startup. The HF token secret is mounted defensively; it isn't required at runtime once the download Job has completed.
+- **First launch is slow.** Decode workers load weights across 8 TP ranks and warm CUDA graphs / DeepGEMM kernels on first launch; the manifests' startup probes allow ~60–90 min before failing readiness.
+
+### vLLM-specific
+
+- **Image tag.** `vllm/agg/deploy.yaml` ships with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace it with your built Dynamo + vLLM (DeepSeek-V4) image — see Prerequisite 4.
+- **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe (`failureThreshold: 540` at `periodSeconds: 10`).
+- **Day-0 thinking modes.** Send `chat_template_kwargs: {"thinking": false}` until the upstream sparse-attention fix lands — see the callout at the top of this README.
+
+### SGLang-specific
+
+- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`sglang/container/README.md`](sglang/container/README.md).
+- **DeepGEMM / FlashInfer warmup.** `SGLANG_JIT_DEEPGEMM_PRECOMPILE=0` + `SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1` skip the slow precompile and use the fast warmup path. `--disable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup; the dsv4 base ships pre-tuned defaults.
+- **NCCL / Gloo.** `NCCL_CUMEM_ENABLE=1` is set for V4 NCCL collectives on Blackwell. `GLOO_SOCKET_IFNAME=eth0` pins Gloo to the standard pod interface.
+
+## Sibling Recipe
+
+[DeepSeek-V4-Flash](../deepseek-v4-flash/) is the smaller sibling (284B / 13B active, 4x B200) and shares the same dsv4 vLLM and SGLang container images.
