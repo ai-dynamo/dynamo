@@ -168,9 +168,11 @@ type ExperimentalSpec struct {
 	// failover configures active-passive GPU failover for this component.
 	// When set, the main container is cloned into two engine containers
 	// (active + standby) sharing GPUs via DRA. Requires
-	// `experimental.gpuMemoryService` to also be set, and
-	// `experimental.failover.mode` must match
-	// `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
+	// `spec.experimental.gpuMemoryService` to also be set, and
+	// `spec.experimental.failover.mode` must match
+	// `spec.experimental.gpuMemoryService.mode` (enforced by the validation
+	// webhook). Inside a DynamoGraphDeployment substitute
+	// `spec.components[*].experimental.…` for `spec.experimental.…`.
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
@@ -187,19 +189,20 @@ type ExperimentalSpec struct {
 }
 
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a
-// worker component. Setting `experimental.gpuMemoryService` (i.e. presence of
-// this struct) opts the component into GMS: the operator injects a GMS sidecar
-// and replaces the main container's GPU resources with a DRA `ResourceClaim`
-// for shared GPU access. Omitting the field disables GMS for the component.
-// The v1alpha1 `enabled` flag is dropped here to follow the standard
-// Kubernetes pattern of "presence == opt-in"; conversion from v1alpha1 maps
-// `enabled:false` (with or without a populated payload) to an absent field,
-// with the original payload preserved via an origin annotation when present
-// (see the v1alpha1 conversion code).
+// worker component. Setting `spec.experimental.gpuMemoryService` (i.e.
+// presence of this struct) opts the component into GMS: the operator injects
+// a GMS sidecar and replaces the main container's GPU resources with a DRA
+// `ResourceClaim` for shared GPU access. Omitting the field disables GMS for
+// the component. The v1alpha1 `enabled` flag is dropped here to follow the
+// standard Kubernetes pattern of "presence == opt-in"; conversion from
+// v1alpha1 maps `enabled:false` (with or without a populated payload) to an
+// absent field, with the original payload preserved via an origin annotation
+// when present (see the v1alpha1 conversion code).
 //
-// Exposed under
-// `DynamoComponentDeploymentSharedSpec.experimental.gpuMemoryService` in
-// v1beta1 -- see ExperimentalSpec for the stability caveat.
+// Exposed at `spec.experimental.gpuMemoryService` (or
+// `spec.components[*].experimental.gpuMemoryService` inside a
+// DynamoGraphDeployment) in v1beta1 -- see ExperimentalSpec for the stability
+// caveat.
 type GPUMemoryServiceSpec struct {
 	// mode selects the GMS deployment topology.
 	// +optional
@@ -213,12 +216,13 @@ type GPUMemoryServiceSpec struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// Setting `experimental.failover` opts the component into failover mode: the
-// main container is cloned into two engine containers (active + standby)
+// Setting `spec.experimental.failover` opts the component into failover mode:
+// the main container is cloned into two engine containers (active + standby)
 // sharing GPUs via DRA, and the standby acquires the flock when the active
 // engine fails. Omitting the field disables failover. Failover requires that
-// `experimental.gpuMemoryService` is also set, and `experimental.failover.mode`
-// must match `experimental.gpuMemoryService.mode` (enforced by the validation
+// `spec.experimental.gpuMemoryService` is also set, and
+// `spec.experimental.failover.mode` must match
+// `spec.experimental.gpuMemoryService.mode` (enforced by the validation
 // webhook). Also requires the `nvidia.com/dynamo-kube-discovery-mode: container`
 // annotation on the DGD. The v1alpha1 `enabled` flag is dropped here to follow
 // the standard Kubernetes pattern of "presence == opt-in"; conversion from
@@ -226,11 +230,15 @@ type GPUMemoryServiceSpec struct {
 // absent field, with the original payload preserved via an origin annotation
 // when present.
 //
-// Exposed under `DynamoComponentDeploymentSharedSpec.experimental.failover`
-// in v1beta1 -- see ExperimentalSpec for the stability caveat.
+// Exposed at `spec.experimental.failover` (or
+// `spec.components[*].experimental.failover` inside a
+// DynamoGraphDeployment) in v1beta1 -- see ExperimentalSpec for the stability
+// caveat.
 type FailoverSpec struct {
 	// mode selects the failover deployment topology. Must match
-	// `experimental.gpuMemoryService.mode`.
+	// `spec.experimental.gpuMemoryService.mode` (or
+	// `spec.components[*].experimental.gpuMemoryService.mode` inside a
+	// DynamoGraphDeployment).
 	// +optional
 	// +kubebuilder:default=IntraPod
 	// +kubebuilder:validation:Enum=IntraPod;InterPod
@@ -257,7 +265,8 @@ const (
 )
 
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
-// Setting `experimental.checkpoint` opts the component into checkpointing.
+// Setting `spec.components[*].experimental.checkpoint` opts the component
+// into checkpointing.
 // Omitting the field disables it. The v1alpha1 `enabled` flag is dropped here
 // to follow the standard Kubernetes pattern of "presence == opt-in";
 // conversion from v1alpha1 maps `enabled:false` (with or without a populated
