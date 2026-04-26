@@ -689,8 +689,14 @@ func checkpointIsZeroPayload(s *ServiceCheckpointConfig) bool {
 
 func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpointConfig {
 	dst := &v1beta1.ComponentCheckpointConfig{
-		Mode:          v1beta1.CheckpointMode(src.Mode),
-		CheckpointRef: src.CheckpointRef,
+		Mode: v1beta1.CheckpointMode(src.Mode),
+	}
+	// Deep-copy CheckpointRef so the v1alpha1 and v1beta1 objects do not
+	// share the same *string. A shared pointer would let a mutation on one
+	// side surface on the other after conversion, which violates the
+	// conversion-webhook contract.
+	if src.CheckpointRef != nil {
+		dst.CheckpointRef = ptr.To(*src.CheckpointRef)
 	}
 	if src.Identity != nil {
 		dst.Identity = &v1beta1.DynamoCheckpointIdentity{
@@ -709,9 +715,12 @@ func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpo
 
 func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool) *ServiceCheckpointConfig {
 	dst := &ServiceCheckpointConfig{
-		Enabled:       enabled,
-		Mode:          CheckpointMode(src.Mode),
-		CheckpointRef: src.CheckpointRef,
+		Enabled: enabled,
+		Mode:    CheckpointMode(src.Mode),
+	}
+	// Deep-copy CheckpointRef -- see checkpointToV1beta1 for the rationale.
+	if src.CheckpointRef != nil {
+		dst.CheckpointRef = ptr.To(*src.CheckpointRef)
 	}
 	if src.Identity != nil {
 		dst.Identity = &DynamoCheckpointIdentity{

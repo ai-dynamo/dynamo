@@ -161,6 +161,15 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Spec.Components))
 		for i := range src.Spec.Components {
 			compSrc := &src.Spec.Components[i]
+			// v1beta1 declares +listType=map +listMapKey=componentName so
+			// the API server normally rejects duplicates, but the
+			// conversion path is also reached from in-memory unit-test
+			// fixtures and other code paths that bypass CRD validation.
+			// Surface duplicates here as a hard error rather than
+			// silently overwriting the earlier entry on map insertion.
+			if _, dup := dst.Spec.Services[compSrc.ComponentName]; dup {
+				return fmt.Errorf("duplicate component name %q in spec.components", compSrc.ComponentName)
+			}
 			carrier := newDGDComponentCarrier(&dst.ObjectMeta, compSrc.ComponentName)
 			compDst := &DynamoComponentDeploymentSharedSpec{}
 			if err := convertSharedSpecFrom(compSrc, compDst, carrier); err != nil {
