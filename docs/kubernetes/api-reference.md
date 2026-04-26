@@ -1291,7 +1291,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `disabled` _boolean_ |  |  |  |
+| `disabled` _boolean_ | Disabled, when true, opts out of mounting a shared-memory medium for the<br />component. When false (or unset), shared memory is enabled and Size is<br />required (enforced by the validating webhook). Size is ignored when<br />Disabled is true. |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
 
 
