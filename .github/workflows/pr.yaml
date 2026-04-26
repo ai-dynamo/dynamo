@@ -612,7 +612,7 @@ jobs:
   #     namespace: ${{ needs.deploy-operator.outputs.namespace }}
   #     vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
   #     operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-  #   secrets: inherit
+  #   secrets: inherit 
 
   # deploy-cleanup:
   #   if: always()

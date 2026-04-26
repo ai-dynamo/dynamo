@@ -167,3 +167,4 @@ jobs:
           parallel_mode: ${{ inputs.gpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
           gpu_tests: 'true'
+          local_models_dir: ''
