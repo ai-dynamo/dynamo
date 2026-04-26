@@ -83,6 +83,12 @@ COPY --from=planner_builder /usr/bin/tar /bin/tar
 COPY --from=planner_builder /bin/gzip /bin/gzip
 COPY --from=planner_builder /usr/bin/cat /bin/cat
 COPY --from=planner_builder /usr/bin/grep /bin/grep
+COPY --from=planner_builder /usr/bin/tr /usr/bin/tr
+COPY --from=planner_builder /bin/mkdir /bin/mkdir
+COPY --from=planner_builder /bin/chmod /bin/chmod
+COPY --from=planner_builder /bin/cp /bin/cp
+COPY --from=planner_builder /bin/mv /bin/mv
+COPY --from=planner_builder /usr/bin/find /usr/bin/find
 COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
 COPY --chown=1000:0 --from=planner_builder /home/dynamo /home/dynamo
 COPY --chown=1000:0 --from=planner_builder /opt/dynamo/venv /opt/dynamo/venv
