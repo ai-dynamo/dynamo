@@ -479,9 +479,10 @@ impl VllmCore {
             .get(&uuid)
             .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
         debug_assert_vllm_request_invariants(uuid, request);
-        let prefill_cost = self.kv_manager.get_prefill_cost(&request.sequence);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
-            prefill_cost.cached_tokens
+            self.kv_manager
+                .get_prefill_cost(&request.sequence)
+                .cached_tokens
         } else {
             0
         };

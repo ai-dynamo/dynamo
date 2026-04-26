@@ -166,7 +166,11 @@ class WorkloadSpec(BaseModel):
 
     # Replay trace-source extensions (mutually exclusive with synthetic fields)
     traceFile: str | None = None
+    traceFormat: str = "mooncake"
     arrivalSpeedupRatio: float = 1.0
+    traceReplayConcurrency: int | None = None
+    traceSharedPrefixRatio: float = 0.0
+    traceNumPrefixGroups: int = 0
 
     @model_validator(mode="after")
     def _validate_source(self) -> "WorkloadSpec":
@@ -180,6 +184,31 @@ class WorkloadSpec(BaseModel):
                 raise ValueError(
                     "trace workload (traceFile set) must not also set synthetic "
                     f"fields: {mixed}"
+                )
+            if self.traceFormat not in {"mooncake", "applied_compute_agentic"}:
+                raise ValueError(
+                    "traceFormat must be either 'mooncake' or 'applied_compute_agentic', got "
+                    f"{self.traceFormat!r}"
+                )
+            if (
+                self.traceReplayConcurrency is not None
+                and self.traceReplayConcurrency < 1
+            ):
+                raise ValueError("traceReplayConcurrency must be at least 1")
+            if not 0.0 <= self.traceSharedPrefixRatio <= 1.0:
+                raise ValueError("traceSharedPrefixRatio must be between 0.0 and 1.0")
+            if self.traceNumPrefixGroups < 0:
+                raise ValueError("traceNumPrefixGroups must be non-negative")
+            if self.traceSharedPrefixRatio > 0.0 and self.traceNumPrefixGroups == 0:
+                raise ValueError(
+                    "traceSharedPrefixRatio > 0 requires traceNumPrefixGroups >= 1"
+                )
+            if (
+                self.traceFormat == "applied_compute_agentic"
+                and self.traceReplayConcurrency is None
+            ):
+                raise ValueError(
+                    "traceFormat='applied_compute_agentic' requires traceReplayConcurrency"
                 )
             return self
 

@@ -1106,6 +1106,167 @@ mod tests {
         );
     }
 
+    // ---- DeepSeek V4 (DSML format) streaming parser tests ----
+    //
+    // V4 emits tool calls inside a DSML block:
+    //   <｜DSML｜tool_calls>
+    //   <｜DSML｜invoke name="fn">
+    //   <｜DSML｜parameter name="k" string="true|false">v</｜DSML｜parameter>
+    //   </｜DSML｜invoke>
+    //   </｜DSML｜tool_calls>
+    // Fixtures live under tests/data/vllm/deepseek-v4/.
+
+    /// Shared harness for DeepSeek V4 e2e fixtures that end in a tool call.
+    async fn run_deepseek_v4_tool_call_fixture(file_path: &str) {
+        let test_data = load_test_data(file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    /// Single tool call, thinking mode (direct V4 analog of the V3 tool fixture).
+    /// `CASE.1` + `CASE.8` + `CASE.9` — single tool call, streaming assembly, paired with reasoning. Also validates `CASE.12` finish_reason=tool_calls.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_with_tools_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// No tool call — thinking + plain body; finish_reason=stop.
+    /// `CASE.3` + `CASE.10` — no tool call + reasoning only. Also validates `CASE.12` finish_reason=stop.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_with_no_tools_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
+    }
+
+    /// Two parallel tool calls inside one DSML block.
+    /// `CASE.2` — parallel tool calls in one DSML block.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_multi_tool_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_multi_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// string="true" vs string="false" — numbers, booleans, arrays, objects must
+    /// round-trip as their proper JSON types inside arguments.
+    /// `CASE.7` — complex args (mixed string="true|false" → strings / numbers / bools / arrays / objects round-trip).
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_mixed_param_types_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_mixed_param_types.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Body text emitted before the DSML block — parser must populate both
+    /// normal_content and tool_calls.
+    /// `CASE.13` — normal text interleaved before the DSML block.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_content_before_tool_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_content_before_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Parameter value containing unicode, emoji, embedded quotes/newlines/tabs,
+    /// and fragments that look like sentinels but aren't — must not confuse the
+    /// parser, which anchors only on the exact </｜DSML｜parameter> token.
+    /// `CASE.7` — Unicode / special characters inside argument values. (`CASE.xml.entities` is N/A for DSML — no entity decoding.)
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_special_chars_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_special_chars.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Adversarial streaming: every DSML character is its own delta (~200 chunks).
+    /// Exercises buffer accumulation across chunk boundaries.
+    /// `CASE.8` — streaming chunk-boundary splits (tokens straddle chunks).
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_fragmented_tokens_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_fragmented_tokens.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
     // ---- Kimi K2 streaming jail reproduction tests ----
     //
     // These reproduce the customer-reported issue (DIS-1765): Kimi K2 agentic

@@ -180,8 +180,9 @@ pub fn try_tool_call_parse_basic_json(
     let tool_call_start_tokens = &config.tool_call_start_tokens;
     let tool_call_end_tokens = &config.tool_call_end_tokens;
 
-    // Early exit if no tokens configured
-    if tool_call_start_tokens.is_empty() {
+    // Early exit if no tokens configured (unless bare_json_mode forces the
+    // no-marker extraction path).
+    if tool_call_start_tokens.is_empty() && !config.bare_json_mode {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -191,10 +192,12 @@ pub fn try_tool_call_parse_basic_json(
     let mut normal_text = trimmed.to_string();
     let mut found_start_token_with_no_valid_json = false;
 
-    // First, check if ANY start token exists in the input
-    let has_start_token = tool_call_start_tokens
-        .iter()
-        .any(|token| !token.is_empty() && normal_text.contains(token));
+    // First, check if ANY start token exists in the input. `bare_json_mode`
+    // short-circuits this to false so we always take the no-marker branch.
+    let has_start_token = !config.bare_json_mode
+        && tool_call_start_tokens
+            .iter()
+            .any(|token| !token.is_empty() && normal_text.contains(token));
 
     if !has_start_token {
         // No start tokens found, try to extract JSON directly. Everything that starts with { or [ is considered a potential JSON.
