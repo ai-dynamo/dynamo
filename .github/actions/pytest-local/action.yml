@@ -209,12 +209,25 @@ runs:
               ;;
           esac
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        umask 0022
+        cd "${CONTAINER_WORKSPACE}"
+
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          echo "▶️ Predownloading models (cwd=${CONTAINER_WORKSPACE}): ${PREDOWNLOAD_CMD}"
+          bash -c "${PREDOWNLOAD_CMD}"
+          PREDOWNLOAD_EXIT=$?
+          if [[ ${PREDOWNLOAD_EXIT} -ne 0 ]]; then
+            echo "❌ Model predownload failed with exit code ${PREDOWNLOAD_EXIT}"
+            echo "TEST_EXIT_CODE=${PREDOWNLOAD_EXIT}" >> $GITHUB_ENV
+            exit ${PREDOWNLOAD_EXIT}
+          fi
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
-        umask 0022
-        cd "${CONTAINER_WORKSPACE}"
         bash -c "${PYTEST_CMD}"
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
