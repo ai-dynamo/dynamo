@@ -46,7 +46,7 @@ def parse_endpoint(endpoint: str) -> Tuple[str, str, str]:
 def create_runtime(
     discovery_backend: str,
     request_plane: str,
-    event_plane: str,
+    event_plane: Optional[str] = None,
     use_kv_events: Optional[bool] = None,
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
@@ -54,7 +54,9 @@ def create_runtime(
     Args:
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
         request_plane: Request distribution method (nats, http, tcp).
-        event_plane: Event publishing method (nats, zmq).
+        event_plane: Event publishing method (nats, zmq). When None, the Rust
+            runtime auto-detects from the discovery backend (ZMQ for file/mem,
+            NATS for etcd/kubernetes).
         use_kv_events: Deprecated. NATS enablement is now determined automatically
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.
@@ -73,9 +75,19 @@ def create_runtime(
 
     loop = asyncio.get_running_loop()
 
-    os.environ["DYN_EVENT_PLANE"] = event_plane
-
-    runtime = DistributedRuntime(loop, discovery_backend, request_plane)
+    # Scope DYN_EVENT_PLANE to this call so an explicit event_plane doesn't leak
+    # process-wide and silently override later create_runtime(event_plane=None)
+    # calls that rely on the Rust-side auto-detect.
+    previous_event_plane = os.environ.get("DYN_EVENT_PLANE")
+    try:
+        if event_plane:
+            os.environ["DYN_EVENT_PLANE"] = event_plane
+        runtime = DistributedRuntime(loop, discovery_backend, request_plane)
+    finally:
+        if previous_event_plane is None:
+            os.environ.pop("DYN_EVENT_PLANE", None)
+        else:
+            os.environ["DYN_EVENT_PLANE"] = previous_event_plane
 
     return runtime, loop
 

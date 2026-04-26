@@ -81,6 +81,7 @@ python3 -m dynamo.sglang \
   --port 40000 \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 
@@ -97,6 +98,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 

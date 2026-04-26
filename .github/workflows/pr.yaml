@@ -31,6 +31,8 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      benchmarks: ${{ steps.changes.outputs.benchmarks }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -83,6 +85,17 @@ jobs:
   #     - name: Check all deploy test jobs
   #       run: |
   #         echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+
+  dynamo-status-check:
+    runs-on: ubuntu-slim
+    needs:
+      - changed-files
+      - dynamo-pipeline
+    if: always()
+    steps:
+      - name: Check all dynamo jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   # ============================================================================
   # Operator
@@ -416,9 +429,6 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
-  # # ============================================================================
-  # # IMAGE COMPLIANCE PIPELINES
-  # # ============================================================================
 
   # vllm-compliance:
   #   name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI

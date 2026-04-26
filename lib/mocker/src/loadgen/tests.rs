@@ -85,6 +85,87 @@ fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
 }
 
 #[test]
+fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
+    let file = write_trace(&[serde_json::json!({
+        "num_turns": 2,
+        "input_prompt_length": 100,
+        "assistant_response_length": [10, 20],
+        "tool_call_output_length": [30, 40],
+        "tool_call_latency": [0.5, 1.25],
+        "final_assistant_response_length": 50,
+    })]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 64, 0.0, 0).unwrap();
+    assert_eq!(trace.sessions.len(), 1);
+    let session = &trace.sessions[0];
+    assert_eq!(session.first_arrival_timestamp_ms, None);
+    assert_eq!(session.turns.len(), 3);
+    assert_eq!(session.turns[0].input_length, 100);
+    assert_eq!(session.turns[0].max_output_tokens, 10);
+    assert_eq!(session.turns[0].delay_after_previous_ms, 0.0);
+    assert_eq!(session.turns[1].input_length, 140);
+    assert_eq!(session.turns[1].max_output_tokens, 20);
+    assert_eq!(session.turns[1].delay_after_previous_ms, 500.0);
+    assert_eq!(session.turns[2].input_length, 200);
+    assert_eq!(session.turns[2].max_output_tokens, 50);
+    assert_eq!(session.turns[2].delay_after_previous_ms, 1250.0);
+}
+
+#[test]
+fn test_from_applied_compute_agentic_prefix_extends_hashes_across_turns() {
+    let file = write_trace(&[serde_json::json!({
+        "num_turns": 2,
+        "input_prompt_length": 600,
+        "assistant_response_length": [40, 50],
+        "tool_call_output_length": [40, 50],
+        "tool_call_latency": [0.1, 0.2],
+        "final_assistant_response_length": 60,
+    })]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.0, 0).unwrap();
+    let turns = &trace.sessions[0].turns;
+    assert_eq!(turns[0].hash_ids, vec![1, 2, 3]);
+    assert_eq!(turns[1].hash_ids, vec![1, 2, 3]);
+    assert_eq!(turns[2].hash_ids, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_from_applied_compute_agentic_can_share_initial_prefix_blocks_across_sessions() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "num_turns": 1,
+            "input_prompt_length": 600,
+            "assistant_response_length": [10],
+            "tool_call_output_length": [10],
+            "tool_call_latency": [0.1],
+            "final_assistant_response_length": 10,
+        }),
+        serde_json::json!({
+            "num_turns": 1,
+            "input_prompt_length": 600,
+            "assistant_response_length": [20],
+            "tool_call_output_length": [20],
+            "tool_call_latency": [0.2],
+            "final_assistant_response_length": 20,
+        }),
+    ]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.5, 1).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].hash_ids[0],
+        trace.sessions[1].turns[0].hash_ids[0]
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].hash_ids[1],
+        trace.sessions[1].turns[0].hash_ids[1]
+    );
+    assert_ne!(
+        trace.sessions[0].turns[0].hash_ids[2],
+        trace.sessions[1].turns[0].hash_ids[2]
+    );
+}
+
+#[test]
 fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
     let turn = TurnTrace {
         input_length: 6,
