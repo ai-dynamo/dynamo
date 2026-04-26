@@ -43,20 +43,6 @@ spec:
               type: Directory
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
-          args:
-            - -m
-            - dynamo.frontend
-            - --dyn-chat-processor
-            - sglang
-            - --trust-remote-code
-            - --model-path
-            - /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
-            - --model-name
-            - cerebras/DeepSeek-V3.2-REAP-345B-A37B
-            - --tool-call-parser
-            - deepseekv32
-            - --reasoning-parser
-            - deepseek-v3
           volumeMounts:
             - name: deepseek-v32-reap-model
               mountPath: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
