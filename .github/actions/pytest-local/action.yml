@@ -123,8 +123,9 @@ runs:
         # NVMe guard: GPU runners mount /scratch (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no /scratch mount.
         if [[ -d /scratch ]]; then
-          NVME_ROOT="/scratch"
+          # NVME_ROOT="/scratch"
           echo "✅ NVMe scratch available — caches will use /scratch"
+          NVME_ROOT="/tmp" # todo: remove this !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         else
           NVME_ROOT="/tmp"
           echo "⚠️  No /scratch — falling back to /tmp (CPU runner)"
