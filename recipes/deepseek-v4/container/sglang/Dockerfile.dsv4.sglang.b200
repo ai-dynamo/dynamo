@@ -4,33 +4,8 @@
 ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime
 ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-blackwell@sha256:e5fd4104528660214740dd1a7a38fc3bf212160daea7dc6af0e331fb7530b059
 
-# ---------- Stage 1: Build dynamo wheels with V4 parsers ----------
-FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder
-
-RUN yum install -y openssl-devel clang-devel && yum clean all
-
-RUN curl -sL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip \
-    -o /tmp/protoc.zip && unzip -o /tmp/protoc.zip -d /usr/local && rm /tmp/protoc.zip
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH=/root/.cargo/bin:/opt/python/cp312-cp312/bin:${PATH}
-
-RUN pip install maturin
-
-RUN git clone --depth 1 -b release/deepseekv4 \
-    https://github.com/ai-dynamo/dynamo.git /workspace
-
-WORKDIR /workspace/lib/bindings/python
-RUN maturin build --release --interpreter /opt/python/cp312-cp312/bin/python3 \
-    -o /opt/dynamo/wheelhouse
-
-WORKDIR /workspace
-RUN pip wheel --no-deps -w /opt/dynamo/wheelhouse .
-
-# ---------- Stage 2: Dynamo sglang-runtime donor ----------
 FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
 
-# ---------- Stage 3: Final image ----------
 FROM ${DSV4_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -44,15 +19,13 @@ COPY --from=dynamo_src /usr/lib/x86_64-linux-gnu/libuc*.so* /usr/lib/x86_64-linu
 
 COPY --from=dynamo_src /usr/local/lib/python3.12/dist-packages/nixl* /usr/local/lib/python3.12/dist-packages/
 
-COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl /opt/dynamo/wheelhouse/
-COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo-*.whl /opt/dynamo/wheelhouse/
-
+COPY --from=dynamo_src /opt/dynamo/wheelhouse /opt/dynamo/wheelhouse
 RUN pip install --no-cache-dir --force-reinstall --no-deps \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo-*.whl && \
     python3 -c "from dynamo._core import get_tool_parser_names; assert 'deepseek_v4' in get_tool_parser_names(), 'V4 parser missing!'; print('V4 parser verified')"
 
-COPY --from=wheel_builder /workspace/components/src/dynamo /workspace/components/src/dynamo
+COPY --from=dynamo_src /workspace/components/src/dynamo /workspace/components/src/dynamo
 
 # Avoid /workspace/sglang shadowing the dynamo Python package.
 ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH:-}
