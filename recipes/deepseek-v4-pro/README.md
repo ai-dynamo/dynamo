@@ -4,7 +4,7 @@ Aggregated-serving recipe for **DeepSeek-V4-Pro** on vLLM with Dynamo.
 
 | Variant | Model | Status | Modality | Manifest | GPUs |
 |---------|-------|--------|----------|----------|------|
-| **vllm-agg** | `deepseek-ai/DeepSeek-V4-Pro` | Experimental | Text only | [`vllm/agg/vllm-dgd.yaml`](vllm/agg/vllm-dgd.yaml) | 8x B200 |
+| **vllm-agg** | `deepseek-ai/DeepSeek-V4-Pro` | Experimental | Text only | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml) | 8x B200 |
 
 Aggregated, single-replica: 1 decode pod running TP=8 + Expert Parallel on all 8 GPUs of one node.
 
@@ -19,14 +19,14 @@ Aggregated, single-replica: 1 decode pod running TP=8 + Expert Parallel on all 8
 4. **Dynamo + vLLM image with the DeepSeek-V4 stack.** DeepSeek-V4-Pro is not in a stock vLLM release yet. It is built in two steps:
 
    1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
-   2. Build the DeepSeek-V4-Pro overlay on top of it using [`container/Dockerfile.dsv4`](container/Dockerfile.dsv4). See [`container/README.md`](container/README.md) for build args and troubleshooting. From the repo root:
+   2. Build the DeepSeek-V4-Pro overlay on top of it using [`vllm/container/Dockerfile.dsv4-vllm`](vllm/container/Dockerfile.dsv4-vllm). See [`vllm/container/README.md`](vllm/container/README.md) for build args and troubleshooting. From the repo root:
 
       ```bash
-      docker build -f recipes/deepseek-v4-pro/container/Dockerfile.dsv4 \
+      docker build -f recipes/deepseek-v4-pro/vllm/container/Dockerfile.dsv4-vllm \
         -t <your-registry>/vllm-dsv4:<tag> .
       ```
 
-   Then set the `image:` fields in `vllm/agg/vllm-dgd.yaml` (both the frontend and decode workers) to `<your-registry>/vllm-dsv4:<tag>`.
+   Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the frontend and decode workers) to `<your-registry>/vllm-dsv4:<tag>`.
 
    > The Pro and Flash recipes share the same dsv4 image. If you've already built it for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model`.
 
@@ -49,10 +49,10 @@ kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 
-# Update the `image:` fields in vllm/agg/vllm-dgd.yaml to your Dynamo + vLLM build.
+# Update the `image:` fields in vllm/agg/deploy.yaml to your Dynamo + vLLM build.
 
 # Deploy
-kubectl apply -f vllm/agg/vllm-dgd.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 
 # First launch of the decode worker takes up to ~90 minutes (TP=8 weight load +
 # FlashInfer autotune + cudagraph warmup). The startup probe is sized for this.
@@ -78,7 +78,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Recipe Details
 
-The worker command lives in `vllm/agg/vllm-dgd.yaml`. Key flags and why they're there:
+The worker command lives in `vllm/agg/deploy.yaml`. Key flags and why they're there:
 
 | Flag | Purpose |
 |------|---------|

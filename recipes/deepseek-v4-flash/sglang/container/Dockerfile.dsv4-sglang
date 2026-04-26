@@ -5,7 +5,7 @@
 #        python3 container/render.py --framework sglang --target runtime
 #        docker build -f container/sglang-runtime-*.Dockerfile -t dynamo:latest-sglang-runtime .
 #   2. Build this overlay (adds V4 parsers + routed_experts fix):
-#        docker build -f recipes/deepseek-v4-flash/sglang/Dockerfile.dsv4-sglang \
+#        docker build -f recipes/deepseek-v4-flash/sglang/container/Dockerfile.dsv4-sglang \
 #          -t <your-registry>/sglang-dsv4:<tag> .
 
 ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime

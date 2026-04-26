@@ -11,12 +11,12 @@ Both layers use Python 3.12; no vLLM reinstall is performed.
 
 Two Docker images are involved:
 
-1. **Dynamo vLLM runtime** — built from this repo using the instructions in [`<repo_root>/container/README.md`](../../../container/README.md). This image contains the Dynamo Rust runtime, wheels, and the `dynamo.vllm` worker.
+1. **Dynamo vLLM runtime** — built from this repo using the instructions in [`<repo_root>/container/README.md`](../../../../container/README.md). This image contains the Dynamo Rust runtime, wheels, and the `dynamo.vllm` worker.
 2. **DeepSeek-V4-Pro overlay** — built here, using the image from step 1 as the source stage (`DYNAMO_SRC_IMAGE`) and the upstream dsv4 vLLM image as the final base (`DSV4_BASE_IMAGE`).
 
 ## Step 1 — Build the Dynamo vLLM runtime
 
-From the **repo root**, render and build the runtime image per [`container/README.md`](../../../container/README.md):
+From the **repo root**, render and build the runtime image per [`container/README.md`](../../../../container/README.md):
 
 ```bash
 # From <repo_root>
@@ -32,7 +32,7 @@ Still from the **repo root**:
 
 ```bash
 docker build \
-  -f recipes/deepseek-v4-pro/container/Dockerfile.dsv4 \
+  -f recipes/deepseek-v4-pro/vllm/container/Dockerfile.dsv4-vllm \
   -t <your-registry>/vllm-dsv4:<tag> \
   .
 ```
@@ -54,7 +54,7 @@ Example — pin the overlay source to a released Dynamo tag on a CUDA 12.9 host:
 
 ```bash
 docker build \
-  -f recipes/deepseek-v4-pro/container/Dockerfile.dsv4 \
+  -f recipes/deepseek-v4-pro/vllm/container/Dockerfile.dsv4-vllm \
   --build-arg DYNAMO_SRC_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2-cuda13 \
   --build-arg DSV4_BASE_IMAGE=vllm/vllm-openai:deepseekv4-cu129 \
   -t <your-registry>/vllm-dsv4:<tag> \
@@ -70,7 +70,7 @@ docker push <your-registry>/vllm-dsv4:<tag>
 ## Wire into the recipe
 
 Once the image is pushed, update the `image:` fields in
-[`../vllm/agg/vllm-dgd.yaml`](../vllm/agg/vllm-dgd.yaml) (both the Frontend and the `VllmDecodeWorker`) to point at `<your-registry>/vllm-dsv4:<tag>`, then follow the recipe's [Quick Start](../README.md#quick-start) to deploy.
+[`../agg/deploy.yaml`](../agg/deploy.yaml) (both the Frontend and the `VllmDecodeWorker`) to point at `<your-registry>/vllm-dsv4:<tag>`, then follow the recipe's [Quick Start](../../README.md#quick-start) to deploy.
 
 ## What the Dockerfile does
 
@@ -84,7 +84,7 @@ Once the image is pushed, update the `image:` fields in
 
 ## Troubleshooting
 
-- **`pull access denied for dynamo:latest-vllm-runtime`** — Step 1 has not been run (or produced a different tag). Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../../container/README.md), or override `--build-arg DYNAMO_SRC_IMAGE=<your-image>`.
+- **`pull access denied for dynamo:latest-vllm-runtime`** — Step 1 has not been run (or produced a different tag). Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../../../container/README.md), or override `--build-arg DYNAMO_SRC_IMAGE=<your-image>`.
 - **`no matching manifest for linux/amd64`** — the dsv4 base is amd64-only today; build on an x86_64 host.
 - **CUDA version mismatch on the host** — use `DSV4_BASE_IMAGE=vllm/vllm-openai:deepseekv4-cu129` if your node is still on CUDA 12.9.
 - **NIXL plugins not found at runtime** — confirm `LD_LIBRARY_PATH` includes `/opt/nvidia/nvda_nixl/lib64/plugins` (set in the Dockerfile; don't unset it in the pod spec).

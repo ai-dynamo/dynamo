@@ -5,7 +5,7 @@
 # Aggregated mode (no P/D disagg), B200x4 TP4, MXFP4 MoE, EAGLE MTP 3/4
 #
 # Deploy:
-#   kubectl apply -f sglang-dgd.yaml -n <namespace>
+#   kubectl apply -f deploy.yaml -n <namespace>
 #
 # Test:
 #   kubectl port-forward -n <namespace> svc/sglang-dsv4-flash-frontend 8000:8000

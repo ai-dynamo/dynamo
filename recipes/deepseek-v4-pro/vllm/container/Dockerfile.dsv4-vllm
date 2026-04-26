@@ -14,10 +14,10 @@
 # without touching the vLLM install.
 #
 # Build (run from the repo root):
-#   docker build -f recipes/deepseek-v4-pro/container/Dockerfile.dsv4 \
+#   docker build -f recipes/deepseek-v4-pro/vllm/container/Dockerfile.dsv4-vllm \
 #     -t <your-registry>/vllm-dsv4:<tag> .
 #
-# See recipes/deepseek-v4-pro/container/README.md for build args and
+# See recipes/deepseek-v4-pro/vllm/container/README.md for build args and
 # troubleshooting.
 #
 # Both base images must be Python 3.12 (verified).
