@@ -45,6 +45,7 @@ import (
 
 	"github.com/imdario/mergo"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -551,6 +552,10 @@ func convertScalingAdapterTo(src *ScalingAdapter, dst *v1beta1.DynamoComponentDe
 func convertScalingAdapterFrom(src *v1beta1.ScalingAdapter, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
 	if src != nil {
 		dst.ScalingAdapter = &ScalingAdapter{Enabled: true}
+		// Drop any stale v1alpha1-first "disabled" annotation: v1beta1 is
+		// authoritative in this direction and an enabled v1beta1 entry
+		// must not resurrect a previous Enabled:false on the next round.
+		c.del(suffixScalingDisabled)
 		return
 	}
 	if _, ok := c.get(suffixScalingDisabled); ok {
@@ -621,12 +626,17 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 }
 
 func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	// For each experimental sub-block, if v1beta1 declares the feature we
+	// drop any stale "*-disabled-payload" annotation: v1beta1 is
+	// authoritative in this direction and an enabled v1beta1 entry must
+	// not resurrect a previous Enabled:false on the next round-trip.
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{
 			Enabled:         true,
 			Mode:            GPUMemoryServiceMode(src.Experimental.GPUMemoryService.Mode),
 			DeviceClassName: src.Experimental.GPUMemoryService.DeviceClassName,
 		}
+		c.del(suffixGMSDisabled)
 	} else if v, ok := c.get(suffixGMSDisabled); ok {
 		var g GPUMemoryServiceSpec
 		if err := json.Unmarshal([]byte(v), &g); err == nil {
@@ -642,6 +652,7 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 			Mode:       GPUMemoryServiceMode(src.Experimental.Failover.Mode),
 			NumShadows: src.Experimental.Failover.NumShadows,
 		}
+		c.del(suffixFailoverDisabled)
 	} else if v, ok := c.get(suffixFailoverDisabled); ok {
 		var f FailoverSpec
 		if err := json.Unmarshal([]byte(v), &f); err == nil {
@@ -653,6 +664,7 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 
 	if src.Experimental != nil && src.Experimental.Checkpoint != nil {
 		dst.Checkpoint = checkpointFromV1beta1(src.Experimental.Checkpoint, true)
+		c.del(suffixCheckpointDisabl)
 	} else if v, ok := c.get(suffixCheckpointDisabl); ok {
 		var cp ServiceCheckpointConfig
 		if err := json.Unmarshal([]byte(v), &cp); err == nil {
@@ -1004,29 +1016,22 @@ func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSp
 	podTpl.Spec.Containers = append(podTpl.Spec.Containers, ctr)
 }
 
-// podSpecIsZero reports whether a PodSpec has no fields set. This is a cheap
-// structural check sufficient for "should we emit extraPodSpec.podSpec".
+// podSpecIsZero reports whether a PodSpec has no fields set. Uses the
+// apiserver's own apiequality.Semantic.DeepEqual against the zero value so
+// that any newly-added PodSpec field (EphemeralContainers, DNSConfig,
+// TopologySpreadConstraints, ResourceClaims, HostPID/IPC, SchedulingGates,
+// etc.) is automatically covered without extending an allowlist.
+//
+// Semantic.DeepEqual is preferred over reflect.DeepEqual because it treats
+// nil-vs-empty (e.g. NodeSelector: nil vs map[string]string{}) as
+// equivalent, which is the exact same comparison the apiserver uses for
+// generation-bump checks; this matches what we want here ("would the
+// apiserver consider this PodSpec empty?").
 func podSpecIsZero(p *corev1.PodSpec) bool {
 	if p == nil {
 		return true
 	}
-	return len(p.Containers) == 0 &&
-		len(p.InitContainers) == 0 &&
-		len(p.Volumes) == 0 &&
-		len(p.Tolerations) == 0 &&
-		len(p.NodeSelector) == 0 &&
-		p.NodeName == "" &&
-		p.Affinity == nil &&
-		p.SecurityContext == nil &&
-		len(p.ImagePullSecrets) == 0 &&
-		p.ServiceAccountName == "" &&
-		p.PriorityClassName == "" &&
-		p.RuntimeClassName == nil &&
-		p.RestartPolicy == "" &&
-		!p.HostNetwork &&
-		p.Hostname == "" &&
-		p.Subdomain == "" &&
-		p.DNSPolicy == ""
+	return apiequality.Semantic.DeepEqual(*p, corev1.PodSpec{})
 }
 
 // ---------------------------------------------------------------------------
