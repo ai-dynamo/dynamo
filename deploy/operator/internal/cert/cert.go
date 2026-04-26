@@ -31,6 +31,7 @@ const (
 	dgdrCRDName                      = "dynamographdeploymentrequests.nvidia.com"
 	dgdCRDName                       = "dynamographdeployments.nvidia.com"
 	dcdCRDName                       = "dynamocomponentdeployments.nvidia.com"
+	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
@@ -44,6 +45,7 @@ var convertibleCRDs = []string{
 	dgdrCRDName,
 	dgdCRDName,
 	dcdCRDName,
+	dgdsaCRDName,
 }
 
 // CertProvisioner abstracts the mechanism that adds a certificate rotator to

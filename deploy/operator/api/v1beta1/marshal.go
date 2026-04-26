@@ -41,9 +41,9 @@
 //
 // A naive "just delete every empty map" pass would silently break sentinel
 // types like `v1beta1.ScalingAdapter`, which is a deliberately empty struct
-// whose *presence* at `services[i].scalingAdapter: {}` opts a service into
-// the DGDSA autoscaling path. Stripping that `{}` would turn the wire view
-// into an opt-out view, breaking autoscaling without any type-checker
+// whose *presence* at `components[i].scalingAdapter: {}` opts a component
+// into the DGDSA autoscaling path. Stripping that `{}` would turn the wire
+// view into an opt-out view, breaking autoscaling without any type-checker
 // warning. Any future "marker" struct we add to the API would hit the same
 // pitfall.
 //
