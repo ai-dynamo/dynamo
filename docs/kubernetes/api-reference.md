@@ -1638,10 +1638,10 @@ _Appears in:_
 
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
+operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
@@ -1731,10 +1731,10 @@ _Appears in:_
 
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
+operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
