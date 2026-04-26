@@ -85,25 +85,35 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		setAnnOnObj(&dst.ObjectMeta, annDGDPVCs, string(data))
 	}
 
-	// Services: v1alpha1 map -> v1beta1 list. Sort by name for a deterministic
+	// Components: v1alpha1 map -> v1beta1 list. Sort by name for a deterministic
 	// emission order; the unordered map cannot faithfully represent the
 	// v1beta1 list order, so round-trip V1 -> A1 -> V2 may reorder entries.
 	// This is called out in the golden-file test fixtures.
 	if len(src.Spec.Services) > 0 {
 		names := slices.Sorted(maps.Keys(src.Spec.Services))
-		dst.Spec.Services = make([]v1beta1.DynamoComponentDeploymentService, 0, len(names))
+		dst.Spec.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
 		for _, name := range names {
-			svcSrc := src.Spec.Services[name]
-			if svcSrc == nil {
+			compSrc := src.Spec.Services[name]
+			if compSrc == nil {
 				continue
 			}
-			carrier := newDGDServiceCarrier(&dst.ObjectMeta, name)
-			var svcDst v1beta1.DynamoComponentDeploymentService
-			svcDst.Name = name
-			if err := convertSharedSpecTo(svcSrc, &svcDst.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
-				return fmt.Errorf("service %q: %w", name, err)
+			carrier := newDGDComponentCarrier(&dst.ObjectMeta, name)
+			var compDst v1beta1.DynamoComponentDeploymentSharedSpec
+			if err := convertSharedSpecTo(compSrc, &compDst, carrier); err != nil {
+				return fmt.Errorf("component %q: %w", name, err)
 			}
-			dst.Spec.Services = append(dst.Spec.Services, svcDst)
+			// In v1alpha1 DGD, the services-map key is the canonical name and
+			// any value in compSrc.ServiceName is treated as legacy/dead by
+			// the reconciler (graph.go materialises DCDs with ServiceName =
+			// map key). Force the v1beta1 ComponentName to the map key so the
+			// +listMapKey invariant (and the round-trip identity) hold, and
+			// stash the (now redundant) v1alpha1 ServiceName in an origin
+			// annotation so a mismatched value still round-trips.
+			compDst.ComponentName = name
+			if compSrc.ServiceName != "" && compSrc.ServiceName != name {
+				carrier.set(suffixServiceName, compSrc.ServiceName)
+			}
+			dst.Spec.Components = append(dst.Spec.Components, compDst)
 		}
 	}
 
@@ -147,16 +157,27 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		delAnnFromObj(&dst.ObjectMeta, annDGDPVCs)
 	}
 
-	if len(src.Spec.Services) > 0 {
-		dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Spec.Services))
-		for i := range src.Spec.Services {
-			svcSrc := &src.Spec.Services[i]
-			carrier := newDGDServiceCarrier(&dst.ObjectMeta, svcSrc.Name)
-			svcDst := &DynamoComponentDeploymentSharedSpec{}
-			if err := convertSharedSpecFrom(&svcSrc.DynamoComponentDeploymentSharedSpec, svcDst, carrier); err != nil {
-				return fmt.Errorf("service %q: %w", svcSrc.Name, err)
+	if len(src.Spec.Components) > 0 {
+		dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Spec.Components))
+		for i := range src.Spec.Components {
+			compSrc := &src.Spec.Components[i]
+			carrier := newDGDComponentCarrier(&dst.ObjectMeta, compSrc.ComponentName)
+			compDst := &DynamoComponentDeploymentSharedSpec{}
+			if err := convertSharedSpecFrom(compSrc, compDst, carrier); err != nil {
+				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
 			}
-			dst.Spec.Services[svcSrc.Name] = svcDst
+			// In v1alpha1 the services-map key is the canonical name; the
+			// per-entry ServiceName field is redundant. Restore a non-matching
+			// legacy ServiceName from the origin annotation if present;
+			// otherwise leave it empty so v1beta1-first inputs round-trip
+			// without spurious values.
+			if v, ok := carrier.get(suffixServiceName); ok {
+				compDst.ServiceName = v
+				carrier.del(suffixServiceName)
+			} else {
+				compDst.ServiceName = ""
+			}
+			dst.Spec.Services[compSrc.ComponentName] = compDst
 		}
 	}
 
@@ -202,9 +223,9 @@ func convertDGDStatusTo(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGra
 		}
 	}
 	if len(src.Services) > 0 {
-		dst.Services = make(map[string]v1beta1.ServiceReplicaStatus, len(src.Services))
+		dst.Components = make(map[string]v1beta1.ComponentReplicaStatus, len(src.Services))
 		for k, v := range src.Services {
-			dst.Services[k] = *convertReplicaStatusTo(&v)
+			dst.Components[k] = *convertReplicaStatusTo(&v)
 		}
 	}
 	if src.Restart != nil {
@@ -215,9 +236,9 @@ func convertDGDStatusTo(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGra
 		}
 	}
 	if len(src.Checkpoints) > 0 {
-		dst.Checkpoints = make(map[string]v1beta1.ServiceCheckpointStatus, len(src.Checkpoints))
+		dst.Checkpoints = make(map[string]v1beta1.ComponentCheckpointStatus, len(src.Checkpoints))
 		for k, v := range src.Checkpoints {
-			dst.Checkpoints[k] = v1beta1.ServiceCheckpointStatus{
+			dst.Checkpoints[k] = v1beta1.ComponentCheckpointStatus{
 				CheckpointName: v.CheckpointName,
 				IdentityHash:   v.IdentityHash,
 				Ready:          v.Ready,
@@ -226,10 +247,10 @@ func convertDGDStatusTo(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGra
 	}
 	if src.RollingUpdate != nil {
 		dst.RollingUpdate = &v1beta1.RollingUpdateStatus{
-			Phase:           v1beta1.RollingUpdatePhase(src.RollingUpdate.Phase),
-			StartTime:       src.RollingUpdate.StartTime.DeepCopy(),
-			EndTime:         src.RollingUpdate.EndTime.DeepCopy(),
-			UpdatedServices: slices.Clone(src.RollingUpdate.UpdatedServices),
+			Phase:             v1beta1.RollingUpdatePhase(src.RollingUpdate.Phase),
+			StartTime:         src.RollingUpdate.StartTime.DeepCopy(),
+			EndTime:           src.RollingUpdate.EndTime.DeepCopy(),
+			UpdatedComponents: slices.Clone(src.RollingUpdate.UpdatedServices),
 		}
 	}
 }
@@ -243,9 +264,9 @@ func convertDGDStatusFrom(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoG
 			dst.Conditions = append(dst.Conditions, *c.DeepCopy())
 		}
 	}
-	if len(src.Services) > 0 {
-		dst.Services = make(map[string]ServiceReplicaStatus, len(src.Services))
-		for k, v := range src.Services {
+	if len(src.Components) > 0 {
+		dst.Services = make(map[string]ServiceReplicaStatus, len(src.Components))
+		for k, v := range src.Components {
 			dst.Services[k] = *convertReplicaStatusFrom(&v)
 		}
 	}
@@ -271,13 +292,13 @@ func convertDGDStatusFrom(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoG
 			Phase:           RollingUpdatePhase(src.RollingUpdate.Phase),
 			StartTime:       src.RollingUpdate.StartTime.DeepCopy(),
 			EndTime:         src.RollingUpdate.EndTime.DeepCopy(),
-			UpdatedServices: slices.Clone(src.RollingUpdate.UpdatedServices),
+			UpdatedServices: slices.Clone(src.RollingUpdate.UpdatedComponents),
 		}
 	}
 }
 
-func convertReplicaStatusTo(src *ServiceReplicaStatus) *v1beta1.ServiceReplicaStatus {
-	out := &v1beta1.ServiceReplicaStatus{
+func convertReplicaStatusTo(src *ServiceReplicaStatus) *v1beta1.ComponentReplicaStatus {
+	out := &v1beta1.ComponentReplicaStatus{
 		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
 		ComponentName:   src.ComponentName,
 		ComponentNames:  slices.Clone(src.ComponentNames),
@@ -293,7 +314,7 @@ func convertReplicaStatusTo(src *ServiceReplicaStatus) *v1beta1.ServiceReplicaSt
 	return out
 }
 
-func convertReplicaStatusFrom(src *v1beta1.ServiceReplicaStatus) *ServiceReplicaStatus {
+func convertReplicaStatusFrom(src *v1beta1.ComponentReplicaStatus) *ServiceReplicaStatus {
 	out := &ServiceReplicaStatus{
 		ComponentKind:   ComponentKind(src.ComponentKind),
 		ComponentName:   src.ComponentName,
@@ -310,27 +331,27 @@ func convertReplicaStatusFrom(src *v1beta1.ServiceReplicaStatus) *ServiceReplica
 	return out
 }
 
-// scrubStaleDGDAnnotations removes "nvidia.com/dgd-svc-<name>-*" keys for
-// any <name> that is not present in the current services map. Annotations
-// scoped to active services are kept: they were either produced by the
+// scrubStaleDGDAnnotations removes "nvidia.com/dgd-comp-<name>-*" keys for
+// any <name> that is not present in the current components map. Annotations
+// scoped to active components are kept: they were either produced by the
 // ConvertFrom path for the next ConvertTo to read (e.g. frontend-sidecar-ref)
 // or are pass-through keys that a v1alpha1 client may rely on.
-func scrubStaleDGDAnnotations(obj *metav1.ObjectMeta, services map[string]*DynamoComponentDeploymentSharedSpec) {
+func scrubStaleDGDAnnotations(obj *metav1.ObjectMeta, components map[string]*DynamoComponentDeploymentSharedSpec) {
 	anns := obj.GetAnnotations()
 	if len(anns) == 0 {
 		return
 	}
 	maps.DeleteFunc(anns, func(k, _ string) bool {
-		if !strings.HasPrefix(k, annDGDSvcPrefix) {
+		if !strings.HasPrefix(k, annDGDCompPrefix) {
 			return false
 		}
-		rest := strings.TrimPrefix(k, annDGDSvcPrefix)
+		rest := strings.TrimPrefix(k, annDGDCompPrefix)
 		idx := strings.Index(rest, "-")
 		if idx <= 0 {
 			return true
 		}
-		svc := rest[:idx]
-		_, active := services[svc]
+		name := rest[:idx]
+		_, active := components[name]
 		return !active
 	})
 	if len(anns) == 0 {

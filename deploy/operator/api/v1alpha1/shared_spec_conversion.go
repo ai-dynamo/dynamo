@@ -68,15 +68,21 @@ const (
 	// Resources.{Requests,Limits}.GPU without specifying GPUType.
 	defaultGPUResourceName = corev1.ResourceName("nvidia.com/gpu")
 
-	// DGD-scoped (DGD spec-level + per-service) annotation keys.
-	annDGDPVCs      = "nvidia.com/dgd-pvcs"
-	annDGDSvcPrefix = "nvidia.com/dgd-svc-"
+	// DGD-scoped (DGD spec-level + per-component) annotation keys.
+	annDGDPVCs       = "nvidia.com/dgd-pvcs"
+	annDGDCompPrefix = "nvidia.com/dgd-comp-"
 
 	// Shared-spec annotation key suffixes. Combined with the parent object's
-	// prefix ("nvidia.com/dgd-svc-<name>-" or "nvidia.com/dcd-") to form the
+	// prefix ("nvidia.com/dgd-comp-<name>-" or "nvidia.com/dcd-") to form the
 	// full annotation key.
-	suffixDynamoNamespace  = "dynamo-namespace"
+	//
+	// suffixServiceName preserves the v1alpha1-only DGD-entry ServiceName
+	// when it differs from the components-map key. v1beta1 fixes
+	// ComponentName == listMapKey so a non-matching ServiceName on the
+	// v1alpha1 side has no first-class home; we stash it here instead so
+	// ConvertTo(ConvertFrom(V)) is bitwise stable.
 	suffixServiceName      = "service-name"
+	suffixDynamoNamespace  = "dynamo-namespace"
 	suffixAutoscaling      = "autoscaling"
 	suffixIngress          = "ingress"
 	suffixSubComponentType = "sub-component-type"
@@ -108,10 +114,10 @@ type annCarrier struct {
 	prefix string
 }
 
-// newDGDServiceCarrier returns a carrier scoped to a named service on the DGD
-// object: keys are of the form "nvidia.com/dgd-svc-<name>-<suffix>".
-func newDGDServiceCarrier(obj metav1.Object, serviceName string) *annCarrier {
-	return &annCarrier{obj: obj, prefix: annDGDSvcPrefix + serviceName + "-"}
+// newDGDComponentCarrier returns a carrier scoped to a named component on the
+// DGD object: keys are of the form "nvidia.com/dgd-comp-<name>-<suffix>".
+func newDGDComponentCarrier(obj metav1.Object, componentName string) *annCarrier {
+	return &annCarrier{obj: obj, prefix: annDGDCompPrefix + componentName + "-"}
 }
 
 // newDCDCarrier returns a carrier scoped to a standalone DCD: keys are of the
@@ -230,11 +236,13 @@ func convertSharedSpecTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.
 		c.set(suffixSubComponentType, src.SubComponentType)
 	}
 
-	// ServiceName is DCD-only and has no v1beta1 equivalent. It is used by the
-	// v1alpha1 controller to look up the parent DGD's services map.
-	if src.ServiceName != "" {
-		c.set(suffixServiceName, src.ServiceName)
-	}
+	// v1alpha1 ServiceName <-> v1beta1 ComponentName: the same logical
+	// identifier, renamed at v1beta1 to align with the
+	// `spec.components` rename. For DGD components the caller overrides
+	// dst.ComponentName with the v1alpha1 services-map key (the canonical
+	// source of truth on v1alpha1); for standalone DCDs the caller falls
+	// back to ObjectMeta.Name when src.ServiceName is empty.
+	dst.ComponentName = src.ServiceName
 
 	// DynamoNamespace (deprecated) -> annotation.
 	if src.DynamoNamespace != nil {
@@ -366,10 +374,7 @@ func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst
 		dst.SubComponentType = v
 		c.del(suffixSubComponentType)
 	}
-	if v, ok := c.get(suffixServiceName); ok {
-		dst.ServiceName = v
-		c.del(suffixServiceName)
-	}
+	dst.ServiceName = src.ComponentName
 	if v, ok := c.get(suffixDynamoNamespace); ok {
 		dst.DynamoNamespace = ptr.To(v)
 		c.del(suffixDynamoNamespace)
@@ -670,8 +675,8 @@ func checkpointIsZeroPayload(s *ServiceCheckpointConfig) bool {
 	return s.Mode == "" && s.CheckpointRef == nil && s.Identity == nil
 }
 
-func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ServiceCheckpointConfig {
-	dst := &v1beta1.ServiceCheckpointConfig{
+func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpointConfig {
+	dst := &v1beta1.ComponentCheckpointConfig{
 		Mode:          v1beta1.CheckpointMode(src.Mode),
 		CheckpointRef: src.CheckpointRef,
 	}
@@ -690,7 +695,7 @@ func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ServiceCheckpoin
 	return dst
 }
 
-func checkpointFromV1beta1(src *v1beta1.ServiceCheckpointConfig, enabled bool) *ServiceCheckpointConfig {
+func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool) *ServiceCheckpointConfig {
 	dst := &ServiceCheckpointConfig{
 		Enabled:       enabled,
 		Mode:          CheckpointMode(src.Mode),

@@ -84,14 +84,11 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeWorker,
-						Replicas:      &replicas,
-					},
-				},
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					Replicas:      &replicas},
 			},
 		},
 	}
@@ -135,10 +132,10 @@ func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
-				{Name: "aa-frontend", DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: v1beta1.ComponentTypeFrontend}},
-				{Name: "bb-worker", DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: v1beta1.ComponentTypeWorker}},
-				{Name: "cc-planner", DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: v1beta1.ComponentTypePlanner}},
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "aa-frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+				{ComponentName: "bb-worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "cc-planner", ComponentType: v1beta1.ComponentTypePlanner},
 			},
 		},
 	}
@@ -153,27 +150,24 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeWorker,
-						Experimental: &v1beta1.ExperimentalSpec{
-							GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
-								Mode:            v1beta1.GMSModeIntraPod,
-								DeviceClassName: "gpu.nvidia.com",
-							},
-							Failover: &v1beta1.FailoverSpec{
-								Mode:       v1beta1.GMSModeIntraPod,
-								NumShadows: 1,
-							},
-							Checkpoint: &v1beta1.ServiceCheckpointConfig{
-								Mode:          v1beta1.CheckpointModeAuto,
-								CheckpointRef: &ref,
-							},
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
+							Mode:            v1beta1.GMSModeIntraPod,
+							DeviceClassName: "gpu.nvidia.com",
 						},
-					},
-				},
+						Failover: &v1beta1.FailoverSpec{
+							Mode:       v1beta1.GMSModeIntraPod,
+							NumShadows: 1,
+						},
+						Checkpoint: &v1beta1.ComponentCheckpointConfig{
+							Mode:          v1beta1.CheckpointModeAuto,
+							CheckpointRef: &ref,
+						},
+					}},
 			},
 		},
 	}
@@ -188,38 +182,35 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:    v1beta1.ComponentTypeWorker,
-						SharedMemorySize: &shm,
-						PodTemplate: &corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{
-								Annotations: map[string]string{"prom.io/scrape": "true"},
-								Labels:      map[string]string{"tier": "gpu"},
-							},
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "main",
-										Image: "dynamo:latest",
-										Env: []corev1.EnvVar{
-											{Name: "DYN_COMPONENT", Value: "worker"},
-										},
-										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{
-												corev1.ResourceCPU:                    resource.MustParse("2"),
-												corev1.ResourceMemory:                 resource.MustParse("4Gi"),
-												corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
-											},
+					ComponentName:    "worker",
+					ComponentType:    v1beta1.ComponentTypeWorker,
+					SharedMemorySize: &shm,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{"prom.io/scrape": "true"},
+							Labels:      map[string]string{"tier": "gpu"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "main",
+									Image: "dynamo:latest",
+									Env: []corev1.EnvVar{
+										{Name: "DYN_COMPONENT", Value: "worker"},
+									},
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU:                    resource.MustParse("2"),
+											corev1.ResourceMemory:                 resource.MustParse("4Gi"),
+											corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 										},
 									},
 								},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -238,29 +229,26 @@ func TestDGD_RoundTrip_CompilationCache(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "cc", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeWorker,
-						CompilationCache: &v1beta1.CompilationCacheConfig{
-							PVCName:   "cache-pvc",
-							MountPath: "/opt/cache",
-						},
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name: "main",
-										VolumeMounts: []corev1.VolumeMount{
-											{Name: "cache-pvc", MountPath: "/opt/cache"},
-										},
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					CompilationCache: &v1beta1.CompilationCacheConfig{
+						PVCName:   "cache-pvc",
+						MountPath: "/opt/cache",
+					},
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "main",
+									VolumeMounts: []corev1.VolumeMount{
+										{Name: "cache-pvc", MountPath: "/opt/cache"},
 									},
 								},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -274,14 +262,11 @@ func TestDGD_RoundTrip_ScalingAdapter(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sa", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:  v1beta1.ComponentTypeWorker,
-						ScalingAdapter: &v1beta1.ScalingAdapter{},
-					},
-				},
+					ComponentName:  "worker",
+					ComponentType:  v1beta1.ComponentTypeWorker,
+					ScalingAdapter: &v1beta1.ScalingAdapter{}},
 			},
 		},
 	}
@@ -391,7 +376,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 					LastTransitionTime: now,
 				},
 			},
-			Services: map[string]v1beta1.ServiceReplicaStatus{
+			Components: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
 					ComponentKind:     v1beta1.ComponentKindDeployment,
 					ComponentName:     "dgd-worker-0",
@@ -407,7 +392,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 				Phase:      v1beta1.RestartPhaseRestarting,
 				InProgress: []string{"worker"},
 			},
-			Checkpoints: map[string]v1beta1.ServiceCheckpointStatus{
+			Checkpoints: map[string]v1beta1.ComponentCheckpointStatus{
 				"worker": {
 					CheckpointName: "ckpt-abc",
 					IdentityHash:   "sha256:deadbeef",
@@ -415,10 +400,10 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 				},
 			},
 			RollingUpdate: &v1beta1.RollingUpdateStatus{
-				Phase:           v1beta1.RollingUpdatePhaseInProgress,
-				StartTime:       &now,
-				EndTime:         &later,
-				UpdatedServices: []string{"worker"},
+				Phase:             v1beta1.RollingUpdatePhaseInProgress,
+				StartTime:         &now,
+				EndTime:           &later,
+				UpdatedComponents: []string{"worker"},
 			},
 		},
 	}
@@ -436,34 +421,28 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "full", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "epp",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeEPP,
-						EPPConfig: &v1beta1.EPPConfig{
-							ConfigMapRef: &corev1.ConfigMapKeySelector{
-								LocalObjectReference: corev1.LocalObjectReference{Name: "epp-cfg"},
-								Key:                  "config.yaml",
-							},
+					ComponentName: "epp",
+					ComponentType: v1beta1.ComponentTypeEPP,
+					EPPConfig: &v1beta1.EPPConfig{
+						ConfigMapRef: &corev1.ConfigMapKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "epp-cfg"},
+							Key:                  "config.yaml",
 						},
-					},
-				},
+					}},
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:         v1beta1.ComponentTypeWorker,
-						GlobalDynamoNamespace: true,
-						Multinode:             &v1beta1.MultinodeSpec{NodeCount: 4},
-						ModelRef: &v1beta1.ModelReference{
-							Name:     "llama-3-70b-instruct",
-							Revision: "v1",
-						},
-						TopologyConstraint: &v1beta1.TopologyConstraint{
-							PackDomain: v1beta1.TopologyDomain("rack"),
-						},
+					ComponentName:         "worker",
+					ComponentType:         v1beta1.ComponentTypeWorker,
+					GlobalDynamoNamespace: true,
+					Multinode:             &v1beta1.MultinodeSpec{NodeCount: 4},
+					ModelRef: &v1beta1.ModelReference{
+						Name:     "llama-3-70b-instruct",
+						Revision: "v1",
 					},
-				},
+					TopologyConstraint: &v1beta1.TopologyConstraint{
+						PackDomain: v1beta1.TopologyDomain("rack"),
+					}},
 			},
 		},
 	}
@@ -480,47 +459,44 @@ func TestDGD_RoundTrip_PodTemplateProbesAndEnvFrom(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "probes", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeWorker,
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "main",
-										Image: "dynamo:latest",
-										EnvFrom: []corev1.EnvFromSource{
-											{
-												SecretRef: &corev1.SecretEnvSource{
-													LocalObjectReference: corev1.LocalObjectReference{Name: "aws-secret"},
-												},
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "main",
+									Image: "dynamo:latest",
+									EnvFrom: []corev1.EnvFromSource{
+										{
+											SecretRef: &corev1.SecretEnvSource{
+												LocalObjectReference: corev1.LocalObjectReference{Name: "aws-secret"},
 											},
 										},
-										LivenessProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(8080)},
-											},
-											InitialDelaySeconds: 5,
+									},
+									LivenessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(8080)},
 										},
-										ReadinessProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstrFromInt32(8080)},
-											},
+										InitialDelaySeconds: 5,
+									},
+									ReadinessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstrFromInt32(8080)},
 										},
-										StartupProbe: &corev1.Probe{
-											ProbeHandler: corev1.ProbeHandler{
-												HTTPGet: &corev1.HTTPGetAction{Path: "/startup", Port: intstrFromInt32(8080)},
-											},
-											FailureThreshold: 30,
+									},
+									StartupProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{Path: "/startup", Port: intstrFromInt32(8080)},
 										},
+										FailureThreshold: 30,
 									},
 								},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -537,34 +513,31 @@ func TestDGD_RoundTrip_PodSpecExtras(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "extras", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeWorker,
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								NodeSelector:       map[string]string{"node-pool": "gpu"},
-								ServiceAccountName: "dynamo-sa",
-								ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "ghcr-creds"}},
-								Tolerations: []corev1.Toleration{
-									{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-								},
-								Volumes: []corev1.Volume{
-									{
-										Name: "cache",
-										VolumeSource: corev1.VolumeSource{
-											EmptyDir: &corev1.EmptyDirVolumeSource{},
-										},
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							NodeSelector:       map[string]string{"node-pool": "gpu"},
+							ServiceAccountName: "dynamo-sa",
+							ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "ghcr-creds"}},
+							Tolerations: []corev1.Toleration{
+								{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+							},
+							Volumes: []corev1.Volume{
+								{
+									Name: "cache",
+									VolumeSource: corev1.VolumeSource{
+										EmptyDir: &corev1.EmptyDirVolumeSource{},
 									},
 								},
-								Containers: []corev1.Container{
-									{Name: "main", Image: "dynamo:latest"},
-								},
+							},
+							Containers: []corev1.Container{
+								{Name: "main", Image: "dynamo:latest"},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -580,26 +553,23 @@ func TestDGD_RoundTrip_FrontendSidecar(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "fs", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "epp",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:   v1beta1.ComponentTypeEPP,
-						FrontendSidecar: ptr.To("sidecar-frontend"),
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{Name: "main", Image: "dynamo:latest"},
-									{
-										Name:  "sidecar-frontend",
-										Image: "dynamo-frontend:latest",
-										Args:  []string{"-m", "dynamo.frontend"},
-									},
+					ComponentName:   "epp",
+					ComponentType:   v1beta1.ComponentTypeEPP,
+					FrontendSidecar: ptr.To("sidecar-frontend"),
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "main", Image: "dynamo:latest"},
+								{
+									Name:  "sidecar-frontend",
+									Image: "dynamo-frontend:latest",
+									Args:  []string{"-m", "dynamo.frontend"},
 								},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -616,14 +586,11 @@ func TestDGD_RoundTrip_SharedMemoryDisabledZero(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "shm", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:    v1beta1.ComponentTypeWorker,
-						SharedMemorySize: &zero,
-					},
-				},
+					ComponentName:    "worker",
+					ComponentType:    v1beta1.ComponentTypeWorker,
+					SharedMemorySize: &zero},
 			},
 		},
 	}
@@ -814,10 +781,10 @@ func TestDGD_FromV1alpha1_Resources_ForwardOnly(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	if len(b.Spec.Services) != 1 {
-		t.Fatalf("expected 1 service, got %d", len(b.Spec.Services))
+	if len(b.Spec.Components) != 1 {
+		t.Fatalf("expected 1 component, got %d", len(b.Spec.Components))
 	}
-	pt := b.Spec.Services[0].PodTemplate
+	pt := b.Spec.Components[0].PodTemplate
 	if pt == nil || len(pt.Spec.Containers) == 0 {
 		t.Fatalf("expected main container in podTemplate, got %+v", pt)
 	}
@@ -833,7 +800,7 @@ func TestDGD_FromV1alpha1_Resources_ForwardOnly(t *testing.T) {
 }
 
 // TestDGD_ConvertFrom_ScrubsLingeringAnnotations asserts that a stale
-// "nvidia.com/dgd-svc-*" annotation that does not correspond to any current
+// "nvidia.com/dgd-comp-*" annotation that does not correspond to any current
 // service is dropped by ConvertFrom. This protects users from leaking origin
 // annotations across deletions.
 func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
@@ -842,7 +809,7 @@ func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 			Name:      "scrub",
 			Namespace: "ns",
 			Annotations: map[string]string{
-				"nvidia.com/dgd-svc-deleted-dynamo-namespace": "stale-value",
+				"nvidia.com/dgd-comp-deleted-dynamo-namespace": "stale-value",
 				"user/keep-me": "kept",
 			},
 		},
@@ -851,8 +818,8 @@ func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	if err := a.ConvertFrom(src); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if _, stale := a.ObjectMeta.Annotations["nvidia.com/dgd-svc-deleted-dynamo-namespace"]; stale {
-		t.Errorf("stale dgd-svc- annotation was not scrubbed: %v", a.ObjectMeta.Annotations)
+	if _, stale := a.ObjectMeta.Annotations["nvidia.com/dgd-comp-deleted-dynamo-namespace"]; stale {
+		t.Errorf("stale dgd-comp- annotation was not scrubbed: %v", a.ObjectMeta.Annotations)
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep-me"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
@@ -872,22 +839,19 @@ func TestDGD_JSONRoundTrip_Bytes(t *testing.T) {
 			BackendFramework: "vllm",
 			Env:              []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
 			Restart:          &v1beta1.Restart{ID: "r1"},
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:    v1beta1.ComponentTypeWorker,
-						Replicas:         &replicas,
-						SharedMemorySize: &shm,
-						ScalingAdapter:   &v1beta1.ScalingAdapter{},
-						Experimental: &v1beta1.ExperimentalSpec{
-							GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
-								Mode:            v1beta1.GMSModeIntraPod,
-								DeviceClassName: "gpu.nvidia.com",
-							},
+					ComponentName:    "worker",
+					ComponentType:    v1beta1.ComponentTypeWorker,
+					Replicas:         &replicas,
+					SharedMemorySize: &shm,
+					ScalingAdapter:   &v1beta1.ScalingAdapter{},
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
+							Mode:            v1beta1.GMSModeIntraPod,
+							DeviceClassName: "gpu.nvidia.com",
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -944,30 +908,30 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	if len(b.Spec.Services) != 1 {
-		t.Fatalf("expected 1 service on v1beta1, got %d", len(b.Spec.Services))
+	if len(b.Spec.Components) != 1 {
+		t.Fatalf("expected 1 component on v1beta1, got %d", len(b.Spec.Components))
 	}
-	svc := b.Spec.Services[0]
-	if svc.FrontendSidecar == nil || *svc.FrontendSidecar != "sidecar-frontend" {
-		t.Fatalf("expected FrontendSidecar pointer = %q, got %v", "sidecar-frontend", svc.FrontendSidecar)
+	comp := b.Spec.Components[0]
+	if comp.FrontendSidecar == nil || *comp.FrontendSidecar != "sidecar-frontend" {
+		t.Fatalf("expected FrontendSidecar pointer = %q, got %v", "sidecar-frontend", comp.FrontendSidecar)
 	}
-	if svc.PodTemplate == nil {
+	if comp.PodTemplate == nil {
 		t.Fatalf("expected podTemplate to carry the sidecar container")
 	}
 	var sidecar *corev1.Container
-	for i := range svc.PodTemplate.Spec.Containers {
-		if svc.PodTemplate.Spec.Containers[i].Name == "sidecar-frontend" {
-			sidecar = &svc.PodTemplate.Spec.Containers[i]
+	for i := range comp.PodTemplate.Spec.Containers {
+		if comp.PodTemplate.Spec.Containers[i].Name == "sidecar-frontend" {
+			sidecar = &comp.PodTemplate.Spec.Containers[i]
 			break
 		}
 	}
 	if sidecar == nil {
-		t.Fatalf("expected 'sidecar-frontend' container in podTemplate, got %+v", svc.PodTemplate.Spec.Containers)
+		t.Fatalf("expected 'sidecar-frontend' container in podTemplate, got %+v", comp.PodTemplate.Spec.Containers)
 	}
 	if sidecar.Image != "dynamo-frontend:1.2.3" {
 		t.Errorf("sidecar image: got %q, want %q", sidecar.Image, "dynamo-frontend:1.2.3")
 	}
-	want := "nvidia.com/dgd-svc-epp-" + suffixFrontendSidecar
+	want := "nvidia.com/dgd-comp-epp-" + suffixFrontendSidecar
 	if _, ok := b.Annotations[want]; !ok {
 		t.Errorf("expected origin annotation %q to be set, got %v", want, b.Annotations)
 	}
@@ -979,7 +943,7 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("FrontendSidecar round-trip mismatch (-want +got):\n%s", diff)
 	}
-	if _, leaked := got.Annotations["nvidia.com/dgd-svc-epp-"+suffixFrontendSidecar]; leaked {
+	if _, leaked := got.Annotations["nvidia.com/dgd-comp-epp-"+suffixFrontendSidecar]; leaked {
 		t.Errorf("origin annotation was not consumed: %v", got.Annotations)
 	}
 }
@@ -1005,7 +969,7 @@ func TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-svc-worker-" + suffixGMSDisabled
+	key := "nvidia.com/dgd-comp-worker-" + suffixGMSDisabled
 	if v, ok := b.Annotations[key]; !ok || v != `{}` {
 		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
 	}
@@ -1034,7 +998,7 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-svc-worker-" + suffixFailoverDisabled
+	key := "nvidia.com/dgd-comp-worker-" + suffixFailoverDisabled
 	if v, ok := b.Annotations[key]; !ok || v != `{}` {
 		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
 	}
@@ -1064,7 +1028,7 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-svc-worker-" + suffixCheckpointDisabl
+	key := "nvidia.com/dgd-comp-worker-" + suffixCheckpointDisabl
 	if v, ok := b.Annotations[key]; !ok || v != `{}` {
 		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
 	}
@@ -1088,44 +1052,38 @@ func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 		ObjectMeta: metav1.ObjectMeta{Name: "conv-smoke", Namespace: "jsm"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
-			Services: []v1beta1.DynamoComponentDeploymentService{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "frontend",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType:    v1beta1.ComponentTypeFrontend,
-						Replicas:         &replicas,
-						FrontendSidecar:  ptr.To("sidecar-frontend"),
-						SharedMemorySize: ptr.To(resource.MustParse("0")),
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{Name: "main", Image: "nvcr.io/nvidia/dynamo:latest"},
-									{Name: "sidecar-frontend", Image: "nvcr.io/nvidia/dynamo-frontend:latest"},
-								},
+					ComponentName:    "frontend",
+					ComponentType:    v1beta1.ComponentTypeFrontend,
+					Replicas:         &replicas,
+					FrontendSidecar:  ptr.To("sidecar-frontend"),
+					SharedMemorySize: ptr.To(resource.MustParse("0")),
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "main", Image: "nvcr.io/nvidia/dynamo:latest"},
+								{Name: "sidecar-frontend", Image: "nvcr.io/nvidia/dynamo-frontend:latest"},
 							},
 						},
-					},
-				},
+					}},
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: v1beta1.ComponentTypeWorker,
-						Replicas:      &replicas,
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{
-									Name:  "main",
-									Image: "nvcr.io/nvidia/dynamo:latest",
-									Resources: corev1.ResourceRequirements{
-										Limits: corev1.ResourceList{
-											"nvidia.com/gpu": resource.MustParse("1"),
-										},
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					Replicas:      &replicas,
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "main",
+								Image: "nvcr.io/nvidia/dynamo:latest",
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										"nvidia.com/gpu": resource.MustParse("1"),
 									},
-								}},
-							},
+								},
+							}},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -1216,7 +1174,7 @@ func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	}
 	// Sanity: the empty-origin annotation is what triggers the path we want
 	// to cover; fail loudly if future refactors break the assumption.
-	if _, ok := b1.Annotations["nvidia.com/dgd-svc-worker-shared-memory-origin"]; !ok {
+	if _, ok := b1.Annotations["nvidia.com/dgd-comp-worker-shared-memory-origin"]; !ok {
 		t.Fatalf("expected shared-memory-origin=empty annotation on v1beta1, got: %#v", b1.Annotations)
 	}
 
