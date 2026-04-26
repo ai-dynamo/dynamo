@@ -79,9 +79,9 @@ spec:
             - --mem-fraction-static
             - "0.80"
             - --fp8-gemm-backend
-            - flashinfer_trtllm
+            - auto
             - --moe-runner-backend
-            - flashinfer_trtllm
+            - auto
             - --nsa-prefill-backend
             - flashmla_sparse
             - --nsa-decode-backend
