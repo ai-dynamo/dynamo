@@ -35,6 +35,7 @@ Check names:
   gpu-resources
   gpu-operator
   argocd
+  argocd-apps
   prometheus-operator
   prometheus-instance
   dcgm-servicemonitor
@@ -272,6 +273,34 @@ check_argocd() {
     DETAIL="Argo CD Application CRD or controller pods were not found"
     print_status "$RED" "FAIL: $DETAIL"
     return 1
+}
+
+check_argocd_apps() {
+    print_section "Checking Argo CD applications"
+
+    local apps
+    apps=$(kubectl_get applications.argoproj.io -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' || true)
+
+    if [[ -z "$apps" ]]; then
+        DETAIL="no Argo CD applications were found"
+        print_status "$RED" "FAIL: $DETAIL"
+        return 1
+    fi
+
+    local drifted
+    drifted=$(printf '%s\n' "$apps" | awk 'NF && ($2 != "Synced" || $3 != "Healthy") {print $1 "(" $2 "/" $3 ")"}')
+
+    if [[ -n "$drifted" ]]; then
+        DETAIL="applications not Synced/Healthy: $(echo "$drifted" | tr '\n' ' ' | sed 's/[[:space:]]$//')"
+        print_status "$RED" "FAIL: $DETAIL"
+        return 1
+    fi
+
+    local app_count
+    app_count=$(printf '%s\n' "$apps" | grep -c . || true)
+    DETAIL="all ${app_count} Argo CD application(s) are Synced and Healthy"
+    print_status "$GREEN" "PASS: $DETAIL"
+    return 0
 }
 
 check_prometheus_operator() {
@@ -646,6 +675,7 @@ check_for_name() {
         gpu-resources) run_check "Cluster GPU Resources" check_cluster_resources ;;
         gpu-operator) run_check "GPU Operator" check_gpu_operator ;;
         argocd) run_check "Argo CD" check_argocd ;;
+        argocd-apps) run_check "Argo CD Applications" check_argocd_apps ;;
         prometheus-operator) run_check "Prometheus Operator" check_prometheus_operator ;;
         prometheus-instance) run_check "Prometheus Instance" check_prometheus_instance ;;
         dcgm-servicemonitor) run_check "DCGM ServiceMonitor" check_dcgm_servicemonitor ;;
@@ -689,6 +719,7 @@ run_checks() {
             gpu-resources
             gpu-operator
             argocd
+            argocd-apps
             prometheus-operator
             prometheus-instance
             dcgm-servicemonitor

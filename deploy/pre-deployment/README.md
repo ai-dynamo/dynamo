@@ -151,7 +151,8 @@ The script provides a comprehensive summary showing the status of each check:
 | **Default StorageClass** | Checks for default StorageClass annotation | ✅ PASSED / ❌ FAILED |
 | **Cluster Resources** | Validates GPU nodes availability | ✅ PASSED / ❌ FAILED |
 | **GPU Operator** | Checks for NVIDIA GPU Operator CRDs or pods | ✅ PASSED / ❌ FAILED |
-| **Production Add-ons** | Checks Argo CD, Prometheus, DCGM, Loki, Fluentd, Falco, Trivy, Velero, External Secrets, Grove/KAI, and NetworkPolicies when `--profile production` is used | ✅ PASSED / ❌ FAILED |
+| **Argo CD Applications** | Checks that Argo CD applications are Synced and Healthy | ✅ PASSED / ❌ FAILED |
+| **Production Add-ons** | Checks Prometheus, DCGM, Loki, Fluentd, Falco, Trivy, Velero, External Secrets, Grove/KAI, and Dynamo PrometheusRules when `--profile production` is used | ✅ PASSED / ❌ FAILED |
 
 ## Setting a Default StorageClass
 

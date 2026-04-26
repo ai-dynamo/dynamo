@@ -115,7 +115,7 @@ The Dynamo Platform app uses `addons/dynamo-platform/values.yaml`. Key defaults:
 
 ## Verification
 
-Run verification from the deployment host or from `instance-20260415-161450`:
+Run verification from the deployment host:
 
 ```bash
 deploy/pre-deployment/pre-deployment-check.sh --profile production --output json

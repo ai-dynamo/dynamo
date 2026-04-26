@@ -59,7 +59,7 @@ python3 -m dynamo.sglang \
   --enable-dp-attention
 ```
 
-The full manifest also enables the DeepSeek V3 reasoning/tool parsers and the REAP benchmark environment used by the `ai-blaise/infrastructure` SGLang REAP harness.
+The full manifest also passes the DeepSeek V3 reasoning/tool parser flags and the REAP benchmark environment used by the `ai-blaise/infrastructure` SGLang REAP harness.
 
 ## Smoke Test
 
@@ -74,9 +74,9 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
     "model": "cerebras/DeepSeek-V3.2-REAP-345B-A37B",
-    "messages": [{"role": "user", "content": "Return the string dynamo-ready."}],
+    "messages": [{"role": "user", "content": "Say: dynamo-ready"}],
     "temperature": 0,
-    "max_tokens": 16
+    "max_tokens": 64
   }'
 ```
 

@@ -21,6 +21,23 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: dynamo-system
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: dynamocomponentdeployments.nvidia.com
+      jsonPointers:
+        - /metadata/annotations/dynamo.nvidia.com~1operator-version
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: dynamographdeployments.nvidia.com
+      jsonPointers:
+        - /metadata/annotations/dynamo.nvidia.com~1operator-version
+    - group: apps
+      kind: StatefulSet
+      name: dynamo-platform-nats
+      namespace: dynamo-system
+      jsonPointers:
+        - /spec/volumeClaimTemplates/0/status
   syncPolicy:
     automated:
       prune: false
@@ -28,3 +45,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true
