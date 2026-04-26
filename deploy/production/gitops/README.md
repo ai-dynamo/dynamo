@@ -20,6 +20,9 @@ Optional integrations live in `gitops/optional` and are not included by the root
 kubectl apply -f deploy/production/gitops/optional/keda.yaml
 kubectl apply -f deploy/production/gitops/optional/opentelemetry.yaml
 kubectl apply -f deploy/production/gitops/optional/actions-runner-controller.yaml
+kubectl apply -f deploy/production/gitops/optional/parca.yaml
+kubectl apply -f deploy/production/gitops/optional/volcano.yaml
+kubectl apply -f deploy/production/gitops/optional/lws.yaml
 ```
 
 The manifests default to `targetRevision: main` for `https://github.com/ai-blaise/k8s-playground.git`. Change that revision when validating a feature branch.

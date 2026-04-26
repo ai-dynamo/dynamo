@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+custom:
+  metrics_enable: true
+  controller_metrics_enable: true
+  scheduler_metrics_enable: true

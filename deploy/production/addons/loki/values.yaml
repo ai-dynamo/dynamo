@@ -7,6 +7,15 @@ loki:
   auth_enabled: false
   commonConfig:
     replication_factor: 1
+  schemaConfig:
+    configs:
+      - from: 2024-04-01
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
   storage:
     type: filesystem
 
@@ -18,3 +27,12 @@ singleBinary:
   persistence:
     enabled: true
     size: 100Gi
+
+read:
+  replicas: 0
+
+write:
+  replicas: 0
+
+backend:
+  replicas: 0

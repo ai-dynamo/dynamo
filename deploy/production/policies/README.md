@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Production Network Policies
 
-The `kubernetes/` directory contains portable `NetworkPolicy` examples for the `dynamo-system` namespace. They are intentionally not included in the default Argo CD root app because API server, registry, object-store, model-store, NATS, and service-mesh egress needs vary by cluster.
+The `kubernetes/` directory contains portable `NetworkPolicy` examples for the `dynamo-system` namespace. They are intentionally not included in the Argo CD root app because API server, registry, object-store, model-store, NATS, and service-mesh egress needs vary by cluster.
 
 The `calico/` directory contains a Calico `GlobalNetworkPolicy` variant for clusters that use Calico policy tiers and ordered rules.
 

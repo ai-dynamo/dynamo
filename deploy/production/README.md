@@ -44,6 +44,7 @@ This keeps `deploy/helm/charts/platform` close to upstream Dynamo while still pr
 | External Secrets Operator | `https://charts.external-secrets.io` | `2.4.0` |
 | KAI Scheduler | `ghcr.io/kai-scheduler/kai-scheduler` | `v0.14.0` |
 | Grove | `ghcr.io/ai-dynamo/grove` | `v0.1.0-alpha.8` |
+| Dynamo PrometheusRules | Repository manifests | `main` |
 
 ## Optional Add-ons
 
@@ -54,6 +55,17 @@ This keeps `deploy/helm/charts/platform` close to upstream Dynamo while still pr
 | Kubernetes CI runners | Actions Runner Controller | Use only when GitHub Actions jobs must run inside the cluster. |
 | Alternate multinode orchestration | LWS + Volcano | Use only when you intentionally choose the non-Grove path. |
 | Continuous profiling | Parca Agent | Use when always-on CPU/GPU profiling is required. |
+| Deprecated API checks | kube-no-trouble | Use before Kubernetes minor upgrades and before promoting GitOps changes. |
+
+Pinned optional versions:
+
+- KEDA chart `2.19.0`
+- OpenTelemetry Operator chart `0.110.0`
+- Actions Runner Controller chart `0.14.1`
+- LWS chart `v0.8.0`
+- Volcano chart `1.14.1`
+- Parca chart `4.19.0`, Parca server `v0.27.1`, Parca Agent `v0.47.1`
+- kube-no-trouble image `ghcr.io/doitintl/kube-no-trouble:0.7.3`
 
 ## Not Baseline
 
@@ -78,12 +90,17 @@ deploy/pre-deployment/pre-deployment-check.sh --profile production
 ```
 
 7. Deploy or sync `dynamo-platform` from the Argo CD root app.
+8. Verify Dynamo-created resources:
+
+```bash
+deploy/pre-deployment/pre-deployment-check.sh --require dynamo-crds,dynamo-webhooks,kai-queue
+```
 
 The root app assumes this repository is available at `https://github.com/ai-blaise/k8s-playground.git` and reads the `main` branch. Override `spec.source.targetRevision` when validating a feature branch.
 
 Optional integrations are stored under `gitops/optional` and are not deployed by the root app.
 
-Integration examples are stored under `examples/`, including KEDA scaling through `DynamoGraphDeploymentScalingAdapter`, External Secrets for Hugging Face tokens, and an OpenTelemetry collector for Dynamo traces.
+Integration examples are stored under `examples/`, including KEDA scaling through `DynamoGraphDeploymentScalingAdapter`, External Secrets for Hugging Face tokens, an AWS `ClusterSecretStore`, kube-no-trouble upgrade checks, and an OpenTelemetry collector for Dynamo traces.
 
 ## Dynamo Integration Values
 
@@ -109,6 +126,18 @@ kubectl get queues
 After Dynamo is installed, verify Dynamo-specific resources:
 
 ```bash
-deploy/pre-deployment/pre-deployment-check.sh --require dynamo-crds,dynamo-webhooks
+deploy/pre-deployment/pre-deployment-check.sh --require dynamo-crds,dynamo-webhooks,kai-queue
 kubectl get dgd,dgdr,dgdsa,dm -A
+```
+
+Cluster-specific checks are intentionally opt-in:
+
+```bash
+deploy/pre-deployment/pre-deployment-check.sh --require network-policies,trivy-reports,kubent
+```
+
+Optional add-ons expose their own checks:
+
+```bash
+deploy/pre-deployment/pre-deployment-check.sh --require keda,opentelemetry,parca,lws-volcano
 ```

@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dynamo-production
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: dynamo.frontend
+      rules:
+        - alert: DynamoFrontendNoSuccessfulRequests
+          expr: |
+            sum by (namespace) (rate(dynamo_frontend_requests_total{status="success"}[15m])) == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Dynamo frontend has no successful requests
+            description: No successful Dynamo frontend requests were observed for 30 minutes.
+        - alert: DynamoFrontendHighErrorRate
+          expr: |
+            (
+              sum by (namespace) (rate(dynamo_frontend_requests_total{status="error"}[5m]))
+              /
+              clamp_min(sum by (namespace) (rate(dynamo_frontend_requests_total[5m])), 1)
+            ) > 0.05
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: Dynamo frontend error rate is above 5 percent
+            description: Dynamo frontend requests have exceeded the error-rate threshold for 10 minutes.
+        - alert: DynamoFrontendHighTTFT
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, namespace) (rate(dynamo_frontend_time_to_first_token_seconds_bucket[5m]))
+            ) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Dynamo frontend p95 TTFT is high
+            description: Dynamo frontend p95 time-to-first-token has exceeded 2 seconds for 10 minutes.
+        - alert: DynamoFrontendHighActiveRequests
+          expr: |
+            sum by (namespace) (dynamo_frontend_active_requests) > 100
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Dynamo frontend active request count is high
+            description: Dynamo frontend active requests have remained above the configured threshold for 10 minutes.
+    - name: dynamo.planner
+      rules:
+        - alert: DynamoPlannerNoTrafficData
+          expr: |
+            dynamo_planner_throughput_scaling_decision{dynamo_planner_throughput_scaling_decision="no_traffic_data"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Dynamo Planner has no traffic data
+            description: Dynamo Planner is not receiving the Prometheus traffic metrics required for throughput scaling.
+        - alert: DynamoPlannerPredictionFailed
+          expr: |
+            dynamo_planner_throughput_scaling_decision{dynamo_planner_throughput_scaling_decision="predict_failed"} == 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: Dynamo Planner prediction failed
+            description: Dynamo Planner throughput prediction has failed for 10 minutes.
+        - alert: DynamoPlannerModelNotReady
+          expr: |
+            dynamo_planner_throughput_scaling_decision{dynamo_planner_throughput_scaling_decision="model_not_ready"} == 1
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: Dynamo Planner model is not ready
+            description: Dynamo Planner has reported the model_not_ready state for 20 minutes.

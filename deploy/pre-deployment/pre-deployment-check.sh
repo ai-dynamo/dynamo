@@ -42,13 +42,19 @@ Check names:
   fluentd
   falco
   trivy
+  trivy-reports
   velero
+  velero-schedule
   external-secrets
   grove-kai
+  kai-queue
   lws-volcano
   keda
   opentelemetry
+  kubent
+  parca
   network-policies
+  prometheus-rules
   dynamo-crds
   dynamo-webhooks
 EOF
@@ -377,6 +383,26 @@ check_trivy() {
     return 1
 }
 
+check_trivy_reports() {
+    print_section "Checking Trivy reports"
+
+    if ! kubectl_has_crd vulnerabilityreports.aquasecurity.github.io; then
+        DETAIL="Trivy vulnerability report CRD was not found"
+        print_status "$RED" "FAIL: $DETAIL"
+        return 1
+    fi
+
+    if kubectl_get vulnerabilityreports.aquasecurity.github.io -A --no-headers | grep -q .; then
+        DETAIL="Trivy vulnerability reports are present"
+        print_status "$GREEN" "PASS: $DETAIL"
+        return 0
+    fi
+
+    DETAIL="Trivy Operator is installed, but no vulnerability reports were found"
+    print_status "$RED" "FAIL: $DETAIL"
+    return 1
+}
+
 check_velero() {
     print_section "Checking Velero"
 
@@ -387,6 +413,20 @@ check_velero() {
     fi
 
     DETAIL="Velero backup CRD or server pods were not found"
+    print_status "$RED" "FAIL: $DETAIL"
+    return 1
+}
+
+check_velero_schedule() {
+    print_section "Checking Velero schedules"
+
+    if kubectl_get schedules.velero.io -A --no-headers | grep -q .; then
+        DETAIL="Velero schedules are present"
+        print_status "$GREEN" "PASS: $DETAIL"
+        return 0
+    fi
+
+    DETAIL="no Velero schedules were found"
     print_status "$RED" "FAIL: $DETAIL"
     return 1
 }
@@ -421,13 +461,28 @@ check_grove_kai() {
         return 1
     fi
 
-    if ! kubectl_get queues dynamo >/dev/null; then
-        DETAIL="Grove and KAI CRDs are present, but KAI queue 'dynamo' was not found"
+    DETAIL="Grove CRDs and KAI Queue CRD are present"
+    print_status "$GREEN" "PASS: $DETAIL"
+    return 0
+}
+
+check_kai_queue() {
+    print_section "Checking Dynamo KAI queues"
+
+    local missing=()
+    for queue in dynamo-default dynamo; do
+        if ! kubectl_get queues.scheduling.run.ai "$queue" >/dev/null; then
+            missing+=("$queue")
+        fi
+    done
+
+    if [[ "${#missing[@]}" -gt 0 ]]; then
+        DETAIL="missing KAI queues: ${missing[*]}"
         print_status "$RED" "FAIL: $DETAIL"
         return 1
     fi
 
-    DETAIL="Grove CRDs, KAI Queue CRD, and queue 'dynamo' are present"
+    DETAIL="Dynamo KAI queues are present"
     print_status "$GREEN" "PASS: $DETAIL"
     return 0
 }
@@ -481,6 +536,40 @@ check_opentelemetry() {
     return 1
 }
 
+check_kubent() {
+    print_section "Checking kube-no-trouble"
+
+    if command -v kubent >/dev/null 2>&1; then
+        DETAIL="$(kubent --version 2>/dev/null | head -n1 || echo "kubent is installed")"
+        print_status "$GREEN" "PASS: $DETAIL"
+        return 0
+    fi
+
+    if kubectl_get jobs -A -l app.kubernetes.io/name=kube-no-trouble --no-headers | grep -q .; then
+        DETAIL="kube-no-trouble Job is present"
+        print_status "$GREEN" "PASS: $DETAIL"
+        return 0
+    fi
+
+    DETAIL="neither kubent CLI nor kube-no-trouble Job was found"
+    print_status "$RED" "FAIL: $DETAIL"
+    return 1
+}
+
+check_parca() {
+    print_section "Checking Parca"
+
+    if kubectl_has_pods app.kubernetes.io/name=parca || kubectl_get daemonset -A --no-headers | grep -i 'parca-agent' >/dev/null; then
+        DETAIL="Parca server pods or Parca Agent DaemonSet are present"
+        print_status "$GREEN" "PASS: $DETAIL"
+        return 0
+    fi
+
+    DETAIL="Parca was not found"
+    print_status "$RED" "FAIL: $DETAIL"
+    return 1
+}
+
 check_network_policies() {
     print_section "Checking NetworkPolicies"
 
@@ -496,6 +585,20 @@ check_network_policies() {
     DETAIL="found ${policy_count} NetworkPolicy resource(s)"
     print_status "$GREEN" "PASS: $DETAIL"
     return 0
+}
+
+check_prometheus_rules() {
+    print_section "Checking Dynamo PrometheusRules"
+
+    if kubectl_get prometheusrule -A --no-headers | grep -i 'dynamo' >/dev/null; then
+        DETAIL="Dynamo PrometheusRule resources are present"
+        print_status "$GREEN" "PASS: $DETAIL"
+        return 0
+    fi
+
+    DETAIL="no Dynamo PrometheusRule resources were found"
+    print_status "$RED" "FAIL: $DETAIL"
+    return 1
 }
 
 check_dynamo_crds() {
@@ -548,13 +651,19 @@ check_for_name() {
         fluentd) run_check "Fluentd" check_fluentd ;;
         falco) run_check "Falco" check_falco ;;
         trivy) run_check "Trivy" check_trivy ;;
+        trivy-reports) run_check "Trivy Reports" check_trivy_reports ;;
         velero) run_check "Velero" check_velero ;;
+        velero-schedule) run_check "Velero Schedules" check_velero_schedule ;;
         external-secrets) run_check "External Secrets" check_external_secrets ;;
         grove-kai) run_check "Grove and KAI Scheduler" check_grove_kai ;;
+        kai-queue) run_check "Dynamo KAI Queues" check_kai_queue ;;
         lws-volcano) run_check "LWS and Volcano" check_lws_volcano ;;
         keda) run_check "KEDA" check_keda ;;
         opentelemetry) run_check "OpenTelemetry Operator" check_opentelemetry ;;
+        kubent) run_check "kube-no-trouble" check_kubent ;;
+        parca) run_check "Parca" check_parca ;;
         network-policies) run_check "NetworkPolicies" check_network_policies ;;
+        prometheus-rules) run_check "Dynamo PrometheusRules" check_prometheus_rules ;;
         dynamo-crds) run_check "Dynamo CRDs" check_dynamo_crds ;;
         dynamo-webhooks) run_check "Dynamo Webhooks" check_dynamo_webhooks ;;
         *)
@@ -586,9 +695,10 @@ run_checks() {
             falco
             trivy
             velero
+            velero-schedule
             external-secrets
             grove-kai
-            network-policies
+            prometheus-rules
         )
     else
         checks=(

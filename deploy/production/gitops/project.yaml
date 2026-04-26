@@ -23,6 +23,9 @@ spec:
     - https://kedacore.github.io/charts
     - https://open-telemetry.github.io/opentelemetry-helm-charts
     - ghcr.io/actions/actions-runner-controller-charts
+    - https://parca-dev.github.io/helm-charts
+    - https://github.com/kubernetes-sigs/lws
+    - https://volcano-sh.github.io/helm-charts
   destinations:
     - namespace: "*"
       server: https://kubernetes.default.svc
