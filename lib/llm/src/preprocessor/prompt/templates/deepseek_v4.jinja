@@ -1,0 +1,164 @@
+{#-
+  DeepSeek V4 chat template — DIS-1850 spike.
+
+  Native Jinja port of `encoding_dsv4.py` (deepseek-ai/DeepSeek-V4-Pro).
+  Validated byte-identical against test_input/test_output fixtures.
+
+  Inputs (all optional except `messages`):
+    - messages: list[dict]               — assumed pre-processed (merge_tool_messages
+                                            + sort_tool_results_by_call_order applied
+                                            by Rust pre-pass)
+    - thinking_mode: "thinking" | "chat" — default "chat"
+    - drop_thinking: bool                — default true (auto-disabled if any tools)
+    - reasoning_effort: "max" | "high" | none
+    - add_bos_token: bool                — default true
+-#}
+{#- Constants. -#}
+{%- set BOS = "<｜begin▁of▁sentence｜>" -%}
+{%- set EOS = "<｜end▁of▁sentence｜>" -%}
+{%- set THINK_OPEN = "<think>" -%}
+{%- set THINK_CLOSE = "</think>" -%}
+{%- set DSML = "｜DSML｜" -%}
+{%- set USER_TOK = "<｜User｜>" -%}
+{%- set ASSIST_TOK = "<｜Assistant｜>" -%}
+{%- set REMINDER_TOK = "<｜latest_reminder｜>" -%}
+{%- set TASK_TOKENS = {
+    "action":   "<｜action｜>",
+    "query":    "<｜query｜>",
+    "authority":"<｜authority｜>",
+    "domain":   "<｜domain｜>",
+    "title":    "<｜title｜>",
+    "read_url": "<｜read_url｜>"
+} -%}
+{%- set REASONING_EFFORT_MAX_PREFIX = "Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n" -%}
+
+{#- Default flags. -#}
+{%- if thinking_mode is not defined %}{% set thinking_mode = "chat" %}{% endif -%}
+{%- if drop_thinking is not defined %}{% set drop_thinking = true %}{% endif -%}
+{%- if add_bos_token is not defined %}{% set add_bos_token = true %}{% endif -%}
+{%- if reasoning_effort is not defined %}{% set reasoning_effort = none %}{% endif -%}
+
+{#- Auto-disable drop_thinking if any message carries tools. -#}
+{%- set ns = namespace(has_tools=false, last_user_idx=-1) -%}
+{%- for m in messages -%}
+    {%- if m.tools %}{%- set ns.has_tools = true -%}{%- endif -%}
+    {%- if m.role == "user" or m.role == "developer" %}{%- set ns.last_user_idx = loop.index0 -%}{%- endif -%}
+{%- endfor -%}
+{%- set effective_drop_thinking = drop_thinking and (not ns.has_tools) -%}
+
+{#- BOS. -#}
+{%- if add_bos_token -%}{{ BOS }}{%- endif -%}
+
+{#- Render each message. -#}
+{%- for message in messages -%}
+    {%- set idx = loop.index0 -%}
+
+    {#- Reasoning effort prefix at index 0 in thinking mode + max. -#}
+    {%- if idx == 0 and thinking_mode == "thinking" and reasoning_effort == "max" -%}
+        {{ REASONING_EFFORT_MAX_PREFIX }}
+    {%- endif -%}
+
+    {#- Role dispatch. -#}
+    {%- if message.role == "system" -%}
+        {{ message.content or "" }}
+        {%- if message.tools %}{{ "\n\n" }}{% include "_v4_tools_block.jinja" %}{{ "\n" }}{% endif -%}
+        {%- if message.response_format -%}
+            {{ "\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n" }}{{ message.response_format | tojson }}
+        {%- endif -%}
+    {%- elif message.role == "developer" -%}
+        {{ USER_TOK }}{{ message.content }}
+        {%- if message.tools %}{{ "\n\n" }}{% include "_v4_tools_block.jinja" %}{{ "\n" }}{% endif -%}
+        {%- if message.response_format -%}
+            {{ "\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n" }}{{ message.response_format | tojson }}
+        {%- endif -%}
+    {%- elif message.role == "user" -%}
+        {{ USER_TOK }}
+        {%- if message.content_blocks -%}
+            {%- set parts = [] -%}
+            {%- for block in message.content_blocks -%}
+                {%- if block.type == "text" -%}
+                    {%- set _ = parts.append(block.text or "") -%}
+                {%- elif block.type == "tool_result" -%}
+                    {%- set tc = block.content -%}
+                    {%- if tc is iterable and tc is not string -%}
+                        {%- set tparts = [] -%}
+                        {%- for b in tc -%}
+                            {%- if b.type == "text" -%}{%- set _ = tparts.append(b.text or "") -%}
+                            {%- else -%}{%- set _ = tparts.append("[Unsupported " ~ b.type ~ "]") -%}{%- endif -%}
+                        {%- endfor -%}
+                        {%- set tc = tparts | join("\n\n") -%}
+                    {%- endif -%}
+                    {%- set _ = parts.append("<tool_result>" ~ tc ~ "</tool_result>") -%}
+                {%- else -%}
+                    {%- set _ = parts.append("[Unsupported " ~ block.type ~ "]") -%}
+                {%- endif -%}
+            {%- endfor -%}
+            {{ parts | join("\n\n") }}
+        {%- else -%}
+            {{ message.content or "" }}
+        {%- endif -%}
+    {%- elif message.role == "latest_reminder" -%}
+        {{ REMINDER_TOK }}{{ message.content }}
+    {%- elif message.role == "assistant" -%}
+        {%- set thinking_part = "" -%}
+        {%- set tc_content = "" -%}
+        {#- Tool calls. -#}
+        {%- if message.tool_calls -%}
+            {%- set tc_list = [] -%}
+            {%- for tc in message.tool_calls -%}
+                {%- set tc_name = tc.function.name if tc.function is defined else tc.name -%}
+                {%- set tc_args_raw = tc.function.arguments if tc.function is defined else tc.arguments -%}
+                {%- set parsed_args = tc_args_raw -%}
+                {%- if tc_args_raw is string -%}
+                    {%- set parsed_args = tc_args_raw | fromjson -%}
+                {%- endif -%}
+                {%- set arg_lines = [] -%}
+                {%- for k, v in parsed_args.items() -%}
+                    {%- if v is string -%}
+                        {%- set _ = arg_lines.append("<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"true\">" ~ v ~ "</" ~ DSML ~ "parameter>") -%}
+                    {%- else -%}
+                        {%- set _ = arg_lines.append("<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"false\">" ~ (v | tojson) ~ "</" ~ DSML ~ "parameter>") -%}
+                    {%- endif -%}
+                {%- endfor -%}
+                {%- set tc_block = "<" ~ DSML ~ "invoke name=\"" ~ tc_name ~ "\">\n" ~ (arg_lines | join("\n")) ~ "\n</" ~ DSML ~ "invoke>" -%}
+                {%- set _ = tc_list.append(tc_block) -%}
+            {%- endfor -%}
+            {%- set tc_content = "\n\n<" ~ DSML ~ "tool_calls>\n" ~ (tc_list | join("\n")) ~ "\n</" ~ DSML ~ "tool_calls>" -%}
+        {%- endif -%}
+        {%- set summary_content = message.content or "" -%}
+        {%- set rc = message.reasoning_content or "" -%}
+        {%- set prev_has_task = idx > 0 and (messages[idx-1].task is defined) -%}
+        {%- if thinking_mode == "thinking" and not prev_has_task -%}
+            {%- if (not effective_drop_thinking) or idx > ns.last_user_idx -%}
+                {#- Note: leading <think> opener comes from previous message's
+                    transition appendix, not here — only emit content + closer. -#}
+                {%- set thinking_part = rc ~ THINK_CLOSE -%}
+            {%- endif -%}
+        {%- endif -%}
+        {{ thinking_part }}{{ summary_content }}{{ tc_content }}
+        {%- if not message.wo_eos -%}{{ EOS }}{%- endif -%}
+    {%- endif -%}
+
+    {#- Transition to next message: append role markers if next is assistant/latest_reminder
+        OR if current is user/developer. -#}
+    {%- set is_last = idx == (messages | length - 1) -%}
+    {%- set next_role = messages[idx+1].role if not is_last else none -%}
+    {%- if is_last or next_role == "assistant" or next_role == "latest_reminder" -%}
+        {%- if message.task is defined and message.task is not none -%}
+            {%- if message.task == "action" -%}
+                {{ ASSIST_TOK }}{{ THINK_OPEN if thinking_mode == "thinking" else THINK_CLOSE }}{{ TASK_TOKENS[message.task] }}
+            {%- else -%}
+                {{ TASK_TOKENS[message.task] }}
+            {%- endif -%}
+        {%- elif message.role == "user" or message.role == "developer" -%}
+            {{ ASSIST_TOK }}
+            {%- if (not effective_drop_thinking) and thinking_mode == "thinking" -%}
+                {{ THINK_OPEN }}
+            {%- elif effective_drop_thinking and thinking_mode == "thinking" and idx >= ns.last_user_idx -%}
+                {{ THINK_OPEN }}
+            {%- else -%}
+                {{ THINK_CLOSE }}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}

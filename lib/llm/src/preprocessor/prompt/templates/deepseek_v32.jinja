@@ -1,0 +1,136 @@
+{#-
+  DeepSeek V3.2 chat template — DIS-1850 spike.
+
+  Native Jinja port of `encoding_dsv32.py` (deepseek-ai/DeepSeek-V3.2).
+  Validated byte-identical against test_input/test_output fixtures.
+
+  Differences from V4 (see deepseek_v4.jinja):
+    - tool_calls block name is `function_calls` (not `tool_calls`).
+    - user_msg_template embeds <｜User｜>...<｜Assistant｜> directly; no separate
+      transition appendix.
+    - tool role exists (no merge_tool_messages preprocessing); wrapped in
+      <function_results> blocks with <result>...</result> entries.
+    - No latest_reminder, developer-with-tools, task tokens, reasoning_effort,
+      or wo_eos.
+-#}
+{%- set BOS = "<｜begin▁of▁sentence｜>" -%}
+{%- set EOS = "<｜end▁of▁sentence｜>" -%}
+{%- set THINK_OPEN = "<think>" -%}
+{%- set THINK_CLOSE = "</think>" -%}
+{%- set DSML = "｜DSML｜" -%}
+{%- set USER_TOK = "<｜User｜>" -%}
+{%- set ASSIST_TOK = "<｜Assistant｜>" -%}
+
+{%- if thinking_mode is not defined %}{% set thinking_mode = "chat" %}{% endif -%}
+{%- if drop_thinking is not defined %}{% set drop_thinking = true %}{% endif -%}
+{%- if add_bos_token is not defined %}{% set add_bos_token = true %}{% endif -%}
+
+{#- Find last user/developer index for `<think>` vs `</think>` decision. -#}
+{%- set ns = namespace(last_user_idx=-1) -%}
+{%- for m in messages -%}
+    {%- if m.role == "user" or m.role == "developer" %}{%- set ns.last_user_idx = loop.index0 -%}{%- endif -%}
+{%- endfor -%}
+
+{#- Optionally drop reasoning_content from non-latest assistant turns. -#}
+{%- set msgs = [] -%}
+{%- for m in messages -%}
+    {%- if thinking_mode == "thinking" and drop_thinking and m.role == "assistant" and loop.index0 < ns.last_user_idx -%}
+        {%- set m_copy = {} -%}
+        {%- for k, v in m.items() if k != "reasoning_content" -%}
+            {%- set _ = m_copy.update({k: v}) -%}
+        {%- endfor -%}
+        {%- set _ = msgs.append(m_copy) -%}
+    {%- else -%}
+        {%- set _ = msgs.append(m) -%}
+    {%- endif -%}
+{%- endfor -%}
+
+{%- if add_bos_token -%}{{ BOS }}{%- endif -%}
+
+{%- for message in msgs -%}
+    {%- set idx = loop.index0 -%}
+
+    {%- if message.role == "system" -%}
+        {{ message.content or "" }}
+        {%- if message.tools %}{{ "\n\n" }}{% include "_v32_tools_block.jinja" %}{{ "\n" }}{% endif -%}
+        {%- if message.response_format -%}
+            {{ "\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n" }}{{ message.response_format | tojson }}
+        {%- endif -%}
+    {%- elif message.role == "developer" -%}
+        {%- set developer_content = "" -%}
+        {%- if message.tools -%}
+            {%- set developer_content = developer_content ~ "\n\n" -%}
+        {%- endif -%}
+        {{ USER_TOK }}
+        {%- if message.tools %}{{ "\n\n" }}{% include "_v32_tools_block.jinja" %}{{ "\n" }}{% endif -%}
+        {%- if message.response_format -%}
+            {{ "\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n" }}{{ message.response_format | tojson }}
+        {%- endif -%}
+        {{ "\n\n# The user's message is: " }}{{ message.content }}{{ ASSIST_TOK }}
+        {%- if idx == ns.last_user_idx and thinking_mode == "thinking" -%}
+            {{ THINK_OPEN }}
+        {%- else -%}
+            {{ THINK_CLOSE }}
+        {%- endif -%}
+    {%- elif message.role == "user" -%}
+        {{ USER_TOK }}{{ message.content }}{{ ASSIST_TOK }}
+        {%- if idx == ns.last_user_idx and thinking_mode == "thinking" -%}
+            {{ THINK_OPEN }}
+        {%- else -%}
+            {{ THINK_CLOSE }}
+        {%- endif -%}
+    {%- elif message.role == "tool" -%}
+        {#- Find the most recent assistant message (skipping back over tool messages). -#}
+        {%- set ns2 = namespace(prev_assistant_idx=-1, prev_assistant=none) -%}
+        {%- for j in range(idx - 1, -1, -1) -%}
+            {%- if ns2.prev_assistant_idx == -1 and msgs[j].role == "assistant" -%}
+                {%- set ns2.prev_assistant_idx = j -%}
+                {%- set ns2.prev_assistant = msgs[j] -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- set tool_call_order = idx - ns2.prev_assistant_idx -%}
+        {%- set assistant_tool_calls = ns2.prev_assistant.tool_calls or [] -%}
+        {%- if tool_call_order == 1 -%}
+            {{ "\n\n<function_results>" }}
+        {%- endif -%}
+        {{ "\n<result>" }}{{ message.content }}{{ "</result>" }}
+        {%- if tool_call_order == (assistant_tool_calls | length) -%}
+            {{ "\n</function_results>" }}
+            {%- if idx >= ns.last_user_idx and thinking_mode == "thinking" -%}
+                {{ "\n\n" }}{{ THINK_OPEN }}
+            {%- else -%}
+                {{ "\n\n" }}{{ THINK_CLOSE }}
+            {%- endif -%}
+        {%- endif -%}
+    {%- elif message.role == "assistant" -%}
+        {%- set thinking_part = "" -%}
+        {%- set tc_content = "" -%}
+        {%- if message.tool_calls -%}
+            {%- set tc_list = [] -%}
+            {%- for tc in message.tool_calls -%}
+                {%- set tc_name = tc.function.name if tc.function is defined else tc.name -%}
+                {%- set tc_args_raw = tc.function.arguments if tc.function is defined else tc.arguments -%}
+                {%- set parsed_args = tc_args_raw -%}
+                {%- if tc_args_raw is string -%}
+                    {%- set parsed_args = tc_args_raw | fromjson -%}
+                {%- endif -%}
+                {%- set arg_lines = [] -%}
+                {%- for k, v in parsed_args.items() -%}
+                    {%- if v is string -%}
+                        {%- set _ = arg_lines.append("<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"true\">" ~ v ~ "</" ~ DSML ~ "parameter>") -%}
+                    {%- else -%}
+                        {%- set _ = arg_lines.append("<" ~ DSML ~ "parameter name=\"" ~ k ~ "\" string=\"false\">" ~ (v | tojson) ~ "</" ~ DSML ~ "parameter>") -%}
+                    {%- endif -%}
+                {%- endfor -%}
+                {%- set tc_block = "<" ~ DSML ~ "invoke name=\"" ~ tc_name ~ "\">\n" ~ (arg_lines | join("\n")) ~ "\n</" ~ DSML ~ "invoke>" -%}
+                {%- set _ = tc_list.append(tc_block) -%}
+            {%- endfor -%}
+            {%- set tc_content = "\n\n<" ~ DSML ~ "function_calls>\n" ~ (tc_list | join("\n")) ~ "\n</" ~ DSML ~ "function_calls>" -%}
+        {%- endif -%}
+        {%- set summary_content = message.content or "" -%}
+        {%- if thinking_mode == "thinking" and idx > ns.last_user_idx -%}
+            {%- set thinking_part = (message.reasoning_content or "") ~ THINK_CLOSE -%}
+        {%- endif -%}
+        {{ thinking_part }}{{ summary_content }}{{ tc_content }}{{ EOS }}
+    {%- endif -%}
+{%- endfor -%}
