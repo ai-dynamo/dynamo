@@ -35,7 +35,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           # Approximate KV-aware routing: uses prefix hashing to route
           # requests to workers likely to have relevant KV cache, without
           # requiring KV events from the backend.
@@ -67,7 +67,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 120
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           env:
             - name: HF_HOME
               value: "/opt/models"

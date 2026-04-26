@@ -80,6 +80,10 @@ inputs:
     description: 'Additional Docker build args (newline-separated KEY=VALUE pairs) forwarded to docker-remote-build'
     required: false
     default: ''
+  dev_version_suffix:
+    description: 'PEP 440 dev suffix (e.g. .dev20260423+g1234567). Empty = stable build.'
+    required: false
+    default: ''
   fresh_builder:
     description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
     required: false
@@ -219,6 +223,10 @@ runs:
             ${MAKE_EFA_FLAG} \
             --show-result \
             --output-short-filename
+    - name: Apply nightly dev version
+      if: inputs.dev_version_suffix != ''
+      shell: bash
+      run: python3 .github/scripts/apply_dev_version.py "${{ inputs.dev_version_suffix }}" .
     - name: Build and Push Image
       id: build-image
       uses: ./.github/actions/docker-remote-build

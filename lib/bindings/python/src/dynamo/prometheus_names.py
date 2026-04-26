@@ -423,5 +423,19 @@ class work_handler:
     NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
     # Backend processing: handle_payload entry to first response sent
     TIME_TO_FIRST_RESPONSE_SECONDS = "time_to_first_response_seconds"
+    # Current items in the bounded work queue awaiting dispatcher pickup (gauge)
+    QUEUE_DEPTH = "queue_depth"
+    # Configured capacity of the bounded work queue (gauge, static)
+    QUEUE_CAPACITY = "queue_capacity"
+    # Total times enqueuing work failed because the dispatcher channel was closed.
+    # tokio bounded mpsc applies backpressure on full — saturation shows up as
+    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
+    # Time spent waiting to acquire a worker-pool permit (histogram)
+    PERMIT_WAIT_SECONDS = "permit_wait_seconds"
+    # Current number of active worker-pool tasks holding a permit (gauge)
+    POOL_ACTIVE_TASKS = "pool_active_tasks"
+    # Configured worker-pool size / total permits (gauge, static)
+    POOL_CAPACITY = "pool_capacity"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"

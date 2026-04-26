@@ -19,7 +19,7 @@ metadata:
   name: qwen-0-6b
 spec:
   model: "Qwen/Qwen3-0.6B"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
 ```
 
 ### Dense Model: Thorough
@@ -34,7 +34,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
   searchStrategy: thorough
 ```
 
@@ -55,7 +55,7 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
 
   hardware:
     numGpusPerNode: 8
@@ -85,7 +85,7 @@ metadata:
   name: llama-private
 spec:
   model: "meta-llama/Llama-3.1-8B-Instruct"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
 
   overrides:
     profilingJob:
@@ -116,7 +116,7 @@ metadata:
   name: low-latency-dense
 spec:
   model: "Qwen/Qwen3-0.6B"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
 
   sla:
     ttft: 500      # Time To First Token target in milliseconds
@@ -150,7 +150,7 @@ metadata:
   name: dense-with-tolerations
 spec:
   model: "Qwen/Qwen3-0.6B"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2"
 
   overrides:
     profilingJob:
