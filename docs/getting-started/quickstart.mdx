@@ -33,17 +33,17 @@ Dynamo is backend-agnostic — every install path works with **SGLang**, **Tenso
 Containers have all dependencies pre-installed. Pick your backend:
 
 <Tabs>
-  <Tab title="SGLang">
+  <Tab title="SGLang" language="sglang">
     ```bash
     docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
     ```
   </Tab>
-  <Tab title="TensorRT-LLM">
+  <Tab title="TensorRT-LLM" language="trtllm">
     ```bash
     docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
     ```
   </Tab>
-  <Tab title="vLLM">
+  <Tab title="vLLM" language="vllm">
     ```bash
     docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
     ```
@@ -73,17 +73,17 @@ python3 -m dynamo.frontend --discovery-backend file
 In another terminal, launch a worker for your backend:
 
 <Tabs>
-  <Tab title="SGLang">
+  <Tab title="SGLang" language="sglang">
     ```bash
     python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
     ```
   </Tab>
-  <Tab title="TensorRT-LLM">
+  <Tab title="TensorRT-LLM" language="trtllm">
     ```bash
     python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
     ```
   </Tab>
-  <Tab title="vLLM">
+  <Tab title="vLLM" language="vllm">
     ```bash
     python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
       --kv-events-config '{"enable_kv_cache_events": false}'
