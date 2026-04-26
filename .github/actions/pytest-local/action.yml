@@ -48,6 +48,11 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Initialize test type env var
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo '${{ inputs.test_type }}' | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
     - name: verify minio
       if: inputs.gpu_tests == 'true' # only gpu tests require minio
       shell: bash
