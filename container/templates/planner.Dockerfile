@@ -75,6 +75,7 @@ COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
+COPY --from=planner_builder /bin/bash /bin/bash
 COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /usr/bin/tail /bin/tail
 COPY --from=planner_builder /usr/bin/env /bin/env
@@ -90,6 +91,7 @@ COPY --from=planner_builder /usr/lib/*-linux-gnu/libacl.so.1* /opt/dynamo/lib/
 COPY --from=planner_builder /usr/lib/*-linux-gnu/libattr.so.1* /opt/dynamo/lib/
 COPY --from=planner_builder /usr/lib/*-linux-gnu/libpcre2-8.so.0* /opt/dynamo/lib/
 COPY --from=planner_builder /usr/lib/*-linux-gnu/libselinux.so.1* /opt/dynamo/lib/
+COPY --from=planner_builder /usr/lib/*-linux-gnu/libtinfo.so.6* /opt/dynamo/lib/
 COPY --from=planner_builder /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --from=planner_builder /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --chown=1000:0 --from=planner_builder /workspace /workspace
