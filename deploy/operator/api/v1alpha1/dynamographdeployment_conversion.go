@@ -346,13 +346,18 @@ func scrubStaleDGDAnnotations(obj *metav1.ObjectMeta, components map[string]*Dyn
 			return false
 		}
 		rest := strings.TrimPrefix(k, annDGDCompPrefix)
-		idx := strings.Index(rest, "-")
-		if idx <= 0 {
-			return true
+		// Key format is "<annDGDCompPrefix><name>-<suffix>", but both the
+		// component name (e.g. "aa-frontend") and the suffix (e.g.
+		// "frontend-sidecar-ref") may contain hyphens, so a simple
+		// Index("-") split is unsafe. Keep the annotation if its remainder
+		// starts with "<active-component-name>-" for any current component;
+		// drop it otherwise.
+		for name := range components {
+			if strings.HasPrefix(rest, name+"-") {
+				return false
+			}
 		}
-		name := rest[:idx]
-		_, active := components[name]
-		return !active
+		return true
 	})
 	if len(anns) == 0 {
 		obj.SetAnnotations(nil)
