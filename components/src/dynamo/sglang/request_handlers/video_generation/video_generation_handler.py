@@ -111,6 +111,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             # Calculate num_frames if not explicitly provided
             if nvext.fps is None:
                 raise ValueError("FPS is required")
+            num_frames = nvext.num_frames
             if nvext.num_frames is None:
                 if req.seconds is None:
                     raise ValueError("Seconds is required")

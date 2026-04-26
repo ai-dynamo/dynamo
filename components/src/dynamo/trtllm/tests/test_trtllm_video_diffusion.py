@@ -956,7 +956,7 @@ class TestVideoHandlerOutputFormat:
             {"prompt": "p", "model": "m", "output_format": "webm"},
         )
         assert results[0]["status"] == "failed"
-        assert "Unsupported" in results[0]["error"]
+        assert "Input should be 'mp4' or 'mjpeg'" in results[0]["error"]
 
     @pytest.mark.asyncio
     async def test_url_response_has_output_format_in_video_data(self):
