@@ -42,10 +42,34 @@ spec:
       kind: StatefulSet
       name: dynamo-platform-nats
       namespace: dynamo-system
-      managedFieldsManagers:
-        - k3s
       jsonPointers:
+        - /spec/persistentVolumeClaimRetentionPolicy
+        - /spec/revisionHistoryLimit
+        - /spec/template/spec/containers/0/env/0/valueFrom/fieldRef/apiVersion
+        - /spec/template/spec/containers/0/imagePullPolicy
+        - /spec/template/spec/containers/0/livenessProbe/httpGet/scheme
+        - /spec/template/spec/containers/0/ports/0/protocol
+        - /spec/template/spec/containers/0/ports/1/protocol
+        - /spec/template/spec/containers/0/readinessProbe/httpGet/scheme
+        - /spec/template/spec/containers/0/resources
+        - /spec/template/spec/containers/0/startupProbe/httpGet/scheme
+        - /spec/template/spec/containers/0/terminationMessagePath
+        - /spec/template/spec/containers/0/terminationMessagePolicy
+        - /spec/template/spec/containers/1/imagePullPolicy
+        - /spec/template/spec/containers/1/resources
+        - /spec/template/spec/containers/1/terminationMessagePath
+        - /spec/template/spec/containers/1/terminationMessagePolicy
+        - /spec/template/spec/dnsPolicy
+        - /spec/template/spec/restartPolicy
+        - /spec/template/spec/schedulerName
+        - /spec/template/spec/securityContext
+        - /spec/template/spec/terminationGracePeriodSeconds
         - /spec/template/spec/tolerations
+        - /spec/template/spec/volumes/0/configMap/defaultMode
+        - /spec/updateStrategy
+        - /spec/volumeClaimTemplates/0/apiVersion
+        - /spec/volumeClaimTemplates/0/kind
+        - /spec/volumeClaimTemplates/0/spec/volumeMode
         - /spec/volumeClaimTemplates/0/status
   syncPolicy:
     automated:
