@@ -79,6 +79,7 @@ COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /usr/bin/tail /bin/tail
 COPY --from=planner_builder /usr/bin/env /bin/env
 COPY --from=planner_builder /usr/bin/tar /bin/tar
+COPY --from=planner_builder /bin/gzip /bin/gzip
 COPY --from=planner_builder /usr/bin/cat /bin/cat
 COPY --from=planner_builder /usr/bin/grep /bin/grep
 COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
