@@ -336,6 +336,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
+      gpu_test_timeout_minutes: 40 # todo: here for testsing 
     secrets: inherit
 
   # sglang-multi-gpu-test:
