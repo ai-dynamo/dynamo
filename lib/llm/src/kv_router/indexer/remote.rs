@@ -88,6 +88,7 @@ impl RemoteIndexer {
     pub(super) async fn find_matches_by_tier(
         &self,
         block_hashes: Vec<LocalBlockHash>,
+        device_only: bool,
     ) -> Result<TieredMatchDetails> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_query_failures();
@@ -96,6 +97,7 @@ impl RemoteIndexer {
         let request = IndexerQueryRequest {
             model_name: self.model_name.clone(),
             block_hashes,
+            device_only,
         };
         let mut stream: ManyOut<IndexerQueryResponse> = self
             .query_router
@@ -433,10 +435,25 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
         let indexer = self.bindings.read().get(&request.model_name).cloned();
 
         let response = match indexer {
-            Some(indexer) => match indexer.find_matches_by_tier(request.block_hashes).await {
-                Ok(tiered) => IndexerQueryResponse::TieredScores((&tiered).into()),
-                Err(error) => IndexerQueryResponse::Error(error.to_string()),
-            },
+            Some(indexer) => {
+                // Skip the per-tier walk when the caller only needs the device
+                // overlap; saves server-side CPU and wire bytes.
+                let result: Result<TieredMatchDetails, _> = if request.device_only {
+                    indexer
+                        .find_match_details(request.block_hashes)
+                        .await
+                        .map(|device| TieredMatchDetails {
+                            device,
+                            lower_tier: HashMap::new(),
+                        })
+                } else {
+                    indexer.find_matches_by_tier(request.block_hashes).await
+                };
+                match result {
+                    Ok(tiered) => IndexerQueryResponse::TieredScores((&tiered).into()),
+                    Err(error) => IndexerQueryResponse::Error(error.to_string()),
+                }
+            }
             None => IndexerQueryResponse::Error(format!(
                 "served indexer model {} is not registered",
                 request.model_name
@@ -506,12 +523,9 @@ fn service_key(component: &Component) -> ServiceKey {
 mod tests {
     use super::*;
     use crate::kv_router::indexer::LowerTierIndexers;
+    use crate::kv_router::indexer::test_util::store_event;
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, RouterEvent, StorageTier, WorkerWithDpRank,
-        compute_seq_hash_for_block,
-    };
+    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank};
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
@@ -524,6 +538,7 @@ mod tests {
         let request = SingleIn::new(IndexerQueryRequest {
             model_name: "model-b".to_string(),
             block_hashes: vec![LocalBlockHash(1)],
+            device_only: false,
         });
 
         let mut stream = engine.generate(request).await.unwrap();
@@ -532,54 +547,6 @@ mod tests {
             stream.next().await,
             Some(IndexerQueryResponse::TieredScores(_))
         ));
-    }
-
-    fn store_event(
-        worker_id: u64,
-        dp_rank: u32,
-        event_id: u64,
-        prefix_hashes: &[u64],
-        local_hashes: &[u64],
-        storage_tier: StorageTier,
-    ) -> RouterEvent {
-        let prefix_block_hashes: Vec<LocalBlockHash> =
-            prefix_hashes.iter().copied().map(LocalBlockHash).collect();
-        let parent_hash = compute_seq_hash_for_block(&prefix_block_hashes)
-            .last()
-            .copied()
-            .map(ExternalSequenceBlockHash);
-
-        let full_hashes: Vec<LocalBlockHash> = prefix_hashes
-            .iter()
-            .chain(local_hashes.iter())
-            .copied()
-            .map(LocalBlockHash)
-            .collect();
-        let full_sequence_hashes = compute_seq_hash_for_block(&full_hashes);
-        let new_sequence_hashes = &full_sequence_hashes[prefix_hashes.len()..];
-        let blocks = local_hashes
-            .iter()
-            .zip(new_sequence_hashes.iter())
-            .map(|(&local_hash, &sequence_hash)| KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(sequence_hash),
-                tokens_hash: LocalBlockHash(local_hash),
-                mm_extra_info: None,
-            })
-            .collect();
-
-        RouterEvent::with_storage_tier(
-            worker_id,
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash,
-                    start_position: None,
-                    blocks,
-                }),
-                dp_rank,
-            },
-            storage_tier,
-        )
     }
 
     /// Verifies the served query engine returns a tiered payload with populated
@@ -630,6 +597,7 @@ mod tests {
             .generate(SingleIn::new(IndexerQueryRequest {
                 model_name: "m".to_string(),
                 block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+                device_only: false,
             }))
             .await
             .unwrap();
@@ -674,6 +642,78 @@ mod tests {
                 .get(&StorageTier::HostPinned)
                 .and_then(|d| d.hits.get(&worker).copied()),
             Some(1)
+        );
+    }
+
+    /// `device_only=true` must skip the lower-tier walk: the response carries
+    /// the device overlap but no per-tier entries, even when the underlying
+    /// indexer holds host-pinned data.
+    #[tokio::test]
+    async fn query_engine_device_only_skips_lower_tiers() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+        };
+
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+
+        let Indexer::KvIndexer {
+            primary,
+            lower_tier,
+        } = &indexer
+        else {
+            unreachable!()
+        };
+        let _ = primary.flush().await;
+        for lt in lower_tier.all() {
+            let _ = lt.dump_events().await.unwrap();
+        }
+
+        let bindings = Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerQueryRequest {
+                model_name: "m".to_string(),
+                block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+                device_only: true,
+            }))
+            .await
+            .unwrap();
+
+        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+            panic!("expected TieredScores response");
+        };
+
+        assert_eq!(
+            wire.device
+                .scores
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, s)| *s),
+            Some(2),
+            "device should still report 2 overlap blocks"
+        );
+        assert!(
+            wire.lower_tier.is_empty(),
+            "device_only=true must omit lower-tier entries, got {:?}",
+            wire.lower_tier
         );
     }
 }

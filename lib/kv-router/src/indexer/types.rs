@@ -129,6 +129,11 @@ pub struct IndexerQueryRequest {
     pub model_name: String,
     /// Block hashes to find matches for in the radix tree.
     pub block_hashes: Vec<LocalBlockHash>,
+    /// When true, the server skips the lower-tier walk and returns only the
+    /// device-tier overlap. Older clients that omit this field default to
+    /// `false`, preserving the full tiered response.
+    #[serde(default)]
+    pub device_only: bool,
 }
 
 /// Wire-friendly overlap scores for JSON serialization.
@@ -195,7 +200,9 @@ impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetail
 /// Wire-friendly tiered match payload: device overlap plus per-tier hits.
 ///
 /// Lower tiers are a `Vec<(StorageTier, _)>` rather than a map so we never
-/// depend on `StorageTier` being a JSON-legal map key.
+/// depend on `StorageTier` being a JSON-legal map key. Each `StorageTier` is
+/// expected to appear at most once; the inbound conversion warns and keeps the
+/// last entry if duplicates are observed.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct WireTieredMatchDetails {
     pub device: WireOverlapScores,
