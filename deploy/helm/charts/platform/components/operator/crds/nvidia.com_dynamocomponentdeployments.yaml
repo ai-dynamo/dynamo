@@ -11262,6 +11262,11 @@ spec:
                   description: SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
                   properties:
                     disabled:
+                      description: |-
+                        Disabled, when true, opts out of mounting a shared-memory medium for the
+                        component. When false (or unset), shared memory is enabled and Size is
+                        required (enforced by the validating webhook). Size is ignored when
+                        Disabled is true.
                       type: boolean
                     size:
                       anyOf:
@@ -11270,9 +11275,6 @@ spec:
                       pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                       x-kubernetes-int-or-string: true
                   type: object
-                  x-kubernetes-validations:
-                    - message: sharedMemory.size must not be set when sharedMemory.disabled is true
-                      rule: '!(has(self.disabled) && self.disabled && has(self.size))'
                 subComponentType:
                   description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                   type: string
