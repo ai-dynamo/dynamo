@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime
 ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-blackwell@sha256:e5fd4104528660214740dd1a7a38fc3bf212160daea7dc6af0e331fb7530b059
 

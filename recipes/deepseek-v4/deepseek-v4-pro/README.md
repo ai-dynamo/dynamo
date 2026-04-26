@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # DeepSeek-V4-Pro Recipe
 
 Aggregated-serving recipe for **DeepSeek-V4-Pro** on Dynamo. Two backends are documented side by side: **vLLM** and **SGLang**. Both are single-replica decode-only deployments that fill all 8 GPUs of a B200 node.

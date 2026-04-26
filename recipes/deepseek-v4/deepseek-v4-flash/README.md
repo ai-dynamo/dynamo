@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # DeepSeek-V4-Flash Recipe
 
 Aggregated-serving recipe for **DeepSeek-V4-Flash** on Dynamo. Two backends are documented side by side: **vLLM** and **SGLang**. Both are single-replica decode-only deployments that fill 4 of 8 GPUs on a B200 node.
