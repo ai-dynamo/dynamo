@@ -220,7 +220,8 @@ runs:
           echo "▶️ Predownloading models (cwd=${CONTAINER_WORKSPACE}): ${PREDOWNLOAD_CMD}"
           bash -c "${PREDOWNLOAD_CMD}"
           PREDOWNLOAD_EXIT=$?
-          if [[ ${PREDOWNLOAD_EXIT} -ne 0 ]]; then
+          # Exit code 5 = no tests collected (predownload test not selected by this marker set, e.g. gpu_0 CPU runs)
+          if [[ ${PREDOWNLOAD_EXIT} -ne 0 && ${PREDOWNLOAD_EXIT} -ne 5 ]]; then
             echo "❌ Model predownload failed with exit code ${PREDOWNLOAD_EXIT}"
             echo "TEST_EXIT_CODE=${PREDOWNLOAD_EXIT}" >> $GITHUB_ENV
             exit ${PREDOWNLOAD_EXIT}
