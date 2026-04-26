@@ -768,6 +768,18 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1beta1.DynamoGraphDeployment{}).
+		Complete(); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
+	}
+
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}).
+		Complete(); err != nil {
+		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
+	}
+
 	setupLog.Info("Registering defaulting webhooks")
 
 	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
