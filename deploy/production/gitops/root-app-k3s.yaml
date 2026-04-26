@@ -11,7 +11,7 @@ spec:
   source:
     repoURL: https://github.com/ai-blaise/k8s-playground.git
     targetRevision: main
-    path: deploy/production/gitops/k3s
+    path: deploy/production/gitops
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
