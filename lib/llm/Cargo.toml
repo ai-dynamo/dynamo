@@ -158,7 +158,7 @@ galil-seiferas = { version = "0.1" }
 
 # preprocessor
 bs62 = { version = "0.1" }
-minijinja = { version = "2.15.1", features = ["loader", "loop_controls"] }
+minijinja = { version = "2.15.1", features = ["loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.15.1", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
