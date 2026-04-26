@@ -11819,250 +11819,91 @@ spec:
             metadata:
               type: object
             spec:
-              description: Spec defines the desired state for this graph deployment.
+              description: spec defines the desired state for this graph deployment.
               properties:
                 annotations:
                   additionalProperties:
                     type: string
                   description: |-
-                    Annotations to propagate to all child resources (PCS, DCD, Deployments,
-                    and pod templates). Service-level (podTemplate) values take precedence
+                    annotations to propagate to all child resources (PCS, DCD, Deployments,
+                    and pod templates). Component-level (`podTemplate`) values take precedence
                     on conflict.
                   type: object
                 backendFramework:
-                  description: BackendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
+                  description: backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
                   enum:
                     - sglang
                     - vllm
                     - trtllm
                   type: string
-                env:
+                components:
                   description: |-
-                    Env is the list of environment variables applied to all services in the
-                    deployment unless overridden by service-specific configuration. Renamed
-                    from v1alpha1's `envs` to match the Kubernetes convention
-                    (`pod.spec.containers[].env`).
-                  items:
-                    description: EnvVar represents an environment variable present in a Container.
-                    properties:
-                      name:
-                        description: |-
-                          Name of the environment variable.
-                          May consist of any printable ASCII characters except '='.
-                        type: string
-                      value:
-                        description: |-
-                          Variable references $(VAR_NAME) are expanded
-                          using the previously defined environment variables in the container and
-                          any service environment variables. If a variable cannot be resolved,
-                          the reference in the input string will be unchanged. Double $$ are reduced
-                          to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
-                          "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
-                          Escaped references will never be expanded, regardless of whether the variable
-                          exists or not.
-                          Defaults to "".
-                        type: string
-                      valueFrom:
-                        description: Source for the environment variable's value. Cannot be used if value is not empty.
-                        properties:
-                          configMapKeyRef:
-                            description: Selects a key of a ConfigMap.
-                            properties:
-                              key:
-                                description: The key to select.
-                                type: string
-                              name:
-                                default: ""
-                                description: |-
-                                  Name of the referent.
-                                  This field is effectively required, but due to backwards compatibility is
-                                  allowed to be empty. Instances of this type with an empty value here are
-                                  almost certainly wrong.
-                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                type: string
-                              optional:
-                                description: Specify whether the ConfigMap or its key must be defined
-                                type: boolean
-                            required:
-                              - key
-                            type: object
-                            x-kubernetes-map-type: atomic
-                          fieldRef:
-                            description: |-
-                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
-                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
-                            properties:
-                              apiVersion:
-                                description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
-                                type: string
-                              fieldPath:
-                                description: Path of the field to select in the specified API version.
-                                type: string
-                            required:
-                              - fieldPath
-                            type: object
-                            x-kubernetes-map-type: atomic
-                          fileKeyRef:
-                            description: |-
-                              FileKeyRef selects a key of the env file.
-                              Requires the EnvFiles feature gate to be enabled.
-                            properties:
-                              key:
-                                description: |-
-                                  The key within the env file. An invalid key will prevent the pod from starting.
-                                  The keys defined within a source may consist of any printable ASCII characters except '='.
-                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
-                                type: string
-                              optional:
-                                default: false
-                                description: |-
-                                  Specify whether the file or its key must be defined. If the file or key
-                                  does not exist, then the env var is not published.
-                                  If optional is set to true and the specified key does not exist,
-                                  the environment variable will not be set in the Pod's containers.
-
-                                  If optional is set to false and the specified key does not exist,
-                                  an error will be returned during Pod creation.
-                                type: boolean
-                              path:
-                                description: |-
-                                  The path within the volume from which to select the file.
-                                  Must be relative and may not contain the '..' path or start with '..'.
-                                type: string
-                              volumeName:
-                                description: The name of the volume mount containing the env file.
-                                type: string
-                            required:
-                              - key
-                              - path
-                              - volumeName
-                            type: object
-                            x-kubernetes-map-type: atomic
-                          resourceFieldRef:
-                            description: |-
-                              Selects a resource of the container: only resources limits and requests
-                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
-                            properties:
-                              containerName:
-                                description: 'Container name: required for volumes, optional for env vars'
-                                type: string
-                              divisor:
-                                anyOf:
-                                  - type: integer
-                                  - type: string
-                                description: Specifies the output format of the exposed resources, defaults to "1"
-                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                x-kubernetes-int-or-string: true
-                              resource:
-                                description: 'Required: resource to select'
-                                type: string
-                            required:
-                              - resource
-                            type: object
-                            x-kubernetes-map-type: atomic
-                          secretKeyRef:
-                            description: Selects a key of a secret in the pod's namespace
-                            properties:
-                              key:
-                                description: The key of the secret to select from.  Must be a valid secret key.
-                                type: string
-                              name:
-                                default: ""
-                                description: |-
-                                  Name of the referent.
-                                  This field is effectively required, but due to backwards compatibility is
-                                  allowed to be empty. Instances of this type with an empty value here are
-                                  almost certainly wrong.
-                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                type: string
-                              optional:
-                                description: Specify whether the Secret or its key must be defined
-                                type: boolean
-                            required:
-                              - key
-                            type: object
-                            x-kubernetes-map-type: atomic
-                        type: object
-                    required:
-                      - name
-                    type: object
-                  type: array
-                labels:
-                  additionalProperties:
-                    type: string
-                  description: Labels to propagate to all child resources. Same precedence rules as Annotations.
-                  type: object
-                restart:
-                  description: Restart specifies the restart policy for the graph deployment.
-                  properties:
-                    id:
-                      description: |-
-                        ID is an arbitrary string that triggers a restart when changed.
-                        Any modification to this value initiates a restart of the graph deployment
-                        according to the configured strategy.
-                      minLength: 1
-                      type: string
-                    strategy:
-                      description: Strategy specifies the restart strategy for the graph deployment.
-                      properties:
-                        order:
-                          description: Order specifies the order in which services should be restarted.
-                          items:
-                            type: string
-                          type: array
-                        type:
-                          default: Sequential
-                          description: Type specifies the restart strategy type.
-                          enum:
-                            - Sequential
-                            - Parallel
-                          type: string
-                      type: object
-                  required:
-                    - id
-                  type: object
-                services:
-                  description: |-
-                    Services are the services deployed as part of this graph. Names must be
-                    unique within the list; the API server enforces this via the
-                    listType=map + listMapKey=name markers below (no CEL rule needed, which
-                    keeps the CRD within its x-kubernetes-validations cost budget).
+                    components are the components deployed as part of this graph. Each entry
+                    is the shared component spec carrying its own `componentName` (the
+                    stable logical identifier). Names must be unique within the list; the
+                    API server enforces this via the `listType=map` + `listMapKey=componentName`
+                    markers below (no CEL rule needed, which keeps the CRD within its
+                    `x-kubernetes-validations` cost budget).
                   items:
                     description: |-
-                      DynamoComponentDeploymentService pairs a service name with its shared spec.
-                      In v1beta1 the DGD `services` field is a list of these rather than a
-                      name-keyed map, so that object ordering is stable in YAML and GitOps diffs
-                      and so that the name lives as a first-class field alongside the spec.
+                      DynamoComponentDeploymentSharedSpec is the shared configuration used by both
+                      standalone DCDs and by the components embedded in a DynamoGraphDeployment.
+
+                      In v1beta1 the ten per-component pod-configuration fields that existed in
+                      v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
+                      volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
+                      replaced with a single `podTemplate` field holding a native
+                      `corev1.PodTemplateSpec`. The operator injects its defaults into the
+                      container named `"main"` and merges user overrides using strategic-merge-by-name
+                      semantics. Users can add sidecars, init containers, and pod-level configuration
+                      directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
                     properties:
                       compilationCache:
                         description: |-
-                          CompilationCache configures a PVC-backed compilation cache. The operator
-                          handles backend-specific mount paths and environment variables, so users do
-                          not need to hand-wire them into `podTemplate`. Extracted from v1alpha1's
-                          `VolumeMount.UseAsCompilationCache` flag.
+                          compilationCache configures a PVC-backed compilation cache. The operator
+                          handles backend-specific mount paths and environment variables, so
+                          users do not need to hand-wire them into `podTemplate`. Extracted from
+                          v1alpha1's `volumeMount.useAsCompilationCache` flag.
                         properties:
                           mountPath:
                             description: |-
-                              MountPath overrides the backend-specific default mount path.
-                              When empty, the operator selects a default appropriate for the backend framework.
+                              mountPath overrides the backend-specific default mount path. When
+                              empty, the operator selects a default appropriate for the backend
+                              framework.
                             type: string
                           pvcName:
                             description: |-
-                              PVCName references a user-created PVC by name. The PVC must exist in the
-                              same namespace as the DynamoGraphDeployment.
+                              pvcName references a user-created PVC by name. The PVC must exist in
+                              the same namespace as the DynamoGraphDeployment.
                             minLength: 1
                             type: string
                         required:
                           - pvcName
                         type: object
+                      componentName:
+                        description: |-
+                          componentName is the stable logical identifier for this component within
+                          its DynamoGraphDeployment. For DGD entries it is required and must be
+                          unique within the parent's `spec.components` list (uniqueness is
+                          enforced by the API server via the `+listMapKey=componentName` marker).
+                          For standalone DynamoComponentDeployment objects it may be omitted; the
+                          defaulting webhook will populate it from `metadata.name` on admission.
+
+                          `componentName` is decoupled from the underlying Kubernetes resource
+                          name so that the operator can rename child workloads (e.g. suffixing
+                          worker DCDs with a hash during rolling updates) without losing the
+                          stable identity that downstream consumers (labels, status maps,
+                          DGDSA references, planner RBAC, EPP filters) depend on.
+                        type: string
                       componentType:
                         description: |-
-                          ComponentType indicates the role of this component within a Dynamo graph.
-                          Drives port mapping, frontend detection, planner RBAC, and the pod label
-                          `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
-                          first-class values, users can set them directly -- downstream consumers
-                          (e.g. the EPP) can filter on the component-type label rather than the
-                          v1alpha1 workaround of setting `componentType: worker` plus `subComponentType`.
+                          componentType indicates the role of this component within a Dynamo
+                          graph. Drives port mapping, frontend detection, planner RBAC, and the
+                          pod label `nvidia.com/dynamo-component-type`. Because `prefill` and
+                          `decode` are first-class values, users can set them directly --
+                          downstream consumers (e.g. the EPP) can filter on the component-type
+                          label rather than the v1alpha1 workaround of setting `componentType:
+                          worker` plus `subComponentType`.
                         enum:
                           - frontend
                           - worker
@@ -12073,14 +11914,15 @@ spec:
                         type: string
                       eppConfig:
                         description: |-
-                          EPPConfig holds EPP-specific configuration for Endpoint Picker Plugin
-                          components. Only meaningful when ComponentType is `epp`.
+                          eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+                          components. Only meaningful when `componentType` is `epp`.
                         properties:
                           config:
                             description: |-
-                              Config allows specifying EPP EndpointPickerConfig directly as a structured object.
-                              The operator marshals this to YAML and creates a ConfigMap automatically.
-                              Mutually exclusive with ConfigMapRef. One of ConfigMapRef or Config must be specified.
+                              config allows specifying EPP `EndpointPickerConfig` directly as a
+                              structured object. The operator marshals this to YAML and creates a
+                              ConfigMap automatically. Mutually exclusive with `configMapRef`. One of
+                              `configMapRef` or `config` must be specified.
                             properties:
                               apiVersion:
                                 description: |-
@@ -12199,8 +12041,8 @@ spec:
                             x-kubernetes-preserve-unknown-fields: true
                           configMapRef:
                             description: |-
-                              ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
-                              Mutually exclusive with Config.
+                              configMapRef references a user-provided ConfigMap containing EPP
+                              configuration. Mutually exclusive with `config`.
                             properties:
                               key:
                                 description: The key to select.
@@ -12224,74 +12066,79 @@ spec:
                         type: object
                       experimental:
                         description: |-
-                          Experimental groups opt-in preview features whose API shape and behavior
-                          may change in breaking ways between v1beta1 releases, including disappearing
-                          without a name-preserving graduation path. In v1beta1 this block holds
-                          `gpuMemoryService` and `failover` (which remain tightly coupled -- failover
-                          requires GMS -- and are expected to evolve together as the DRA-based GPU
-                          sharing story matures), and `checkpoint` (whose interaction with the
-                          standalone DynamoCheckpoint resource and identity-hash computation is
-                          still settling). Fields here are explicitly NOT covered by the normal
-                          v1beta1 deprecation policy; do not depend on them for production workloads.
+                          experimental groups opt-in preview features whose API shape and
+                          behavior may change in breaking ways between v1beta1 releases,
+                          including disappearing without a name-preserving graduation path.
+                          In v1beta1 this block holds `gpuMemoryService` and `failover` (which
+                          remain tightly coupled -- failover requires GMS -- and are expected to
+                          evolve together as the DRA-based GPU sharing story matures), and
+                          `checkpoint` (whose interaction with the standalone DynamoCheckpoint
+                          resource and identity-hash computation is still settling). Fields here
+                          are explicitly NOT covered by the normal v1beta1 deprecation policy;
+                          do not depend on them for production workloads.
                         properties:
                           checkpoint:
                             description: |-
-                              Checkpoint configures container-image snapshotting and restore for this
-                              service. When set, the DGD controller can produce a DynamoCheckpoint CR
-                              from a running pod and later restore pods from that checkpoint for
-                              faster cold start. The user-facing shape of this field -- especially its
-                              interaction with the standalone DynamoCheckpoint resource and the
-                              identity-hash computation -- is still settling, which is why it lives
-                              under `experimental` in v1beta1 instead of at the top level.
+                              checkpoint configures container-image snapshotting and restore for
+                              this component. When set, the DGD controller can produce a
+                              DynamoCheckpoint CR from a running pod and later restore pods from
+                              that checkpoint for faster cold start. The user-facing shape of this
+                              field -- especially its interaction with the standalone
+                              DynamoCheckpoint resource and the identity-hash computation -- is
+                              still settling, which is why it lives under `experimental` in v1beta1
+                              instead of at the top level.
                             properties:
                               checkpointRef:
                                 description: |-
-                                  CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-                                  When set, this service's Identity is ignored and the referenced checkpoint is used directly.
+                                  checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
+                                  When set, this component's `identity` is ignored and the referenced
+                                  checkpoint is used directly.
                                 type: string
                               identity:
                                 description: |-
-                                  Identity defines the checkpoint identity for hash computation.
-                                  Used when Mode is Auto or when looking up existing checkpoints.
-                                  Required when checkpointRef is not specified.
+                                  identity defines the checkpoint identity for hash computation. Used
+                                  when `mode` is `Auto` or when looking up existing checkpoints.
+                                  Required when `checkpointRef` is not specified.
                                 properties:
                                   backendFramework:
-                                    description: BackendFramework is the runtime framework (vllm, sglang, trtllm).
+                                    description: backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
                                     enum:
                                       - vllm
                                       - sglang
                                       - trtllm
                                     type: string
                                   dtype:
-                                    description: Dtype is the data type (fp16, bf16, fp8, etc.).
+                                    description: dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
                                     type: string
                                   dynamoVersion:
                                     description: |-
-                                      DynamoVersion is the Dynamo platform version. If empty, the version is not
-                                      included in the identity hash, so checkpoints remain compatible across releases.
+                                      dynamoVersion is the Dynamo platform version. If empty, the version is
+                                      not included in the identity hash, so checkpoints remain compatible
+                                      across releases.
                                     type: string
                                   extraParameters:
                                     additionalProperties:
                                       type: string
-                                    description: ExtraParameters are additional parameters that affect the checkpoint hash.
+                                    description: extraParameters are additional parameters that affect the checkpoint hash.
                                     type: object
                                   maxModelLen:
-                                    description: MaxModelLen is the maximum sequence length.
+                                    description: maxModelLen is the maximum sequence length.
                                     format: int32
                                     minimum: 1
                                     type: integer
                                   model:
-                                    description: Model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                                    description: model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                                    minLength: 1
                                     type: string
                                   pipelineParallelSize:
                                     default: 1
-                                    description: PipelineParallelSize is the pipeline parallel configuration.
+                                    description: pipelineParallelSize is the pipeline parallel configuration.
                                     format: int32
                                     minimum: 1
                                     type: integer
                                   tensorParallelSize:
                                     default: 1
-                                    description: TensorParallelSize is the tensor parallel configuration.
+                                    description: tensorParallelSize is the tensor parallel configuration.
                                     format: int32
                                     minimum: 1
                                     type: integer
@@ -12302,39 +12149,41 @@ spec:
                               mode:
                                 default: Auto
                                 description: |-
-                                  Mode defines how checkpoint creation is handled.
-                                  Auto: DGD controller creates the DynamoCheckpoint CR automatically.
-                                  Manual: user must create the DynamoCheckpoint CR.
+                                  mode defines how checkpoint creation is handled.
+                                  `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
+                                  `Manual`: user must create the DynamoCheckpoint CR.
                                 enum:
                                   - Auto
                                   - Manual
                                 type: string
                             type: object
                             x-kubernetes-validations:
-                              - message: When checkpoint is configured, either checkpointRef or both identity.model and identity.backendFramework must be specified
-                                rule: (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))
+                              - message: When checkpoint is configured, either checkpointRef or identity must be specified
+                                rule: (has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)
                           failover:
                             description: |-
-                              Failover configures active-passive GPU failover for this service. When
-                              set, the main container is cloned into two engine containers (active +
-                              standby) sharing GPUs via DRA. Requires `experimental.gpuMemoryService`
-                              to also be set, and `failover.mode` must match
+                              failover configures active-passive GPU failover for this component.
+                              When set, the main container is cloned into two engine containers
+                              (active + standby) sharing GPUs via DRA. Requires
+                              `experimental.gpuMemoryService` to also be set, and
+                              `experimental.failover.mode` must match
                               `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
                             properties:
                               mode:
-                                default: intraPod
+                                default: IntraPod
                                 description: |-
-                                  Mode selects the failover deployment topology. Must match
+                                  mode selects the failover deployment topology. Must match
                                   `experimental.gpuMemoryService.mode`.
                                 enum:
-                                  - intraPod
-                                  - interPod
+                                  - IntraPod
+                                  - InterPod
                                 type: string
                               numShadows:
                                 default: 1
                                 description: |-
-                                  NumShadows is the number of shadow (standby) engine containers per rank.
-                                  Reserved for future use; the operator currently creates exactly one shadow.
+                                  numShadows is the number of shadow (standby) engine containers per
+                                  rank. Reserved for future use; the operator currently creates exactly
+                                  one shadow.
                                 format: int32
                                 maximum: 1
                                 minimum: 1
@@ -12342,83 +12191,82 @@ spec:
                             type: object
                           gpuMemoryService:
                             description: |-
-                              GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+                              gpuMemoryService configures the GPU Memory Service (GMS) sidecar.
                               When set, a GMS sidecar is injected and GPU access is managed via DRA.
                             properties:
                               deviceClassName:
                                 default: gpu.nvidia.com
-                                description: DeviceClassName is the DRA DeviceClass to request GPUs from.
+                                description: deviceClassName is the DRA `DeviceClass` to request GPUs from.
                                 type: string
                               mode:
-                                default: intraPod
-                                description: Mode selects the GMS deployment topology.
+                                default: IntraPod
+                                description: mode selects the GMS deployment topology.
                                 enum:
-                                  - intraPod
-                                  - interPod
+                                  - IntraPod
+                                  - InterPod
                                 type: string
                             type: object
                         type: object
                       frontendSidecar:
                         description: |-
-                          FrontendSidecar optionally designates a container in `podTemplate.spec.containers`
-                          as the frontend sidecar. The value must match the `name` of a container in
-                          that list; the operator merges its frontend-sidecar defaults (auto-generated
-                          Dynamo env vars, ports, health probes) into that container the same way it
-                          merges into `"main"`. The full container definition (image, args, envFrom,
-                          env) lives in `podTemplate` -- this eliminates the redundant `Image`,
-                          `Args`, `EnvFromSecret`, and `Envs` fields from v1alpha1's `FrontendSidecarSpec`.
-                          The validation webhook rejects values that do not match any container name
-                          in `podTemplate.spec.containers`.
+                          frontendSidecar optionally designates a container in
+                          `podTemplate.spec.containers` as the frontend sidecar. The value must
+                          match the `name` of a container in that list; the operator merges its
+                          frontend-sidecar defaults (auto-generated Dynamo env vars, ports,
+                          health probes) into that container the same way it merges into `"main"`.
+                          The full container definition (image, args, envFrom, env) lives in
+                          `podTemplate` -- this eliminates the redundant `image`, `args`,
+                          `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
+                          The validation webhook rejects values that do not match any container
+                          name in `podTemplate.spec.containers`.
                         type: string
                       globalDynamoNamespace:
                         description: |-
-                          GlobalDynamoNamespace places the component in the global Dynamo namespace
-                          rather than the per-deployment namespace derived from the DGD name.
+                          globalDynamoNamespace places the component in the global Dynamo
+                          namespace rather than the per-deployment namespace derived from the
+                          DGD name.
                         type: boolean
                       modelRef:
                         description: |-
-                          ModelRef references a model served by this component. When specified,
+                          modelRef references a model served by this component. When specified,
                           a headless service is created for endpoint discovery.
                         properties:
                           name:
-                            description: Name is the base model identifier (e.g. "llama-3-70b-instruct-v1").
+                            description: name is the base model identifier (e.g. "llama-3-70b-instruct-v1").
+                            minLength: 1
                             type: string
                           revision:
-                            description: Revision is the model revision/version.
+                            description: revision is the model revision/version.
                             type: string
                         required:
                           - name
                         type: object
                       multinode:
-                        description: Multinode configures multinode components.
+                        description: multinode configures multinode components.
                         properties:
                           nodeCount:
                             default: 2
                             description: |-
-                              NodeCount is the number of nodes to deploy for the multinode component.
-                              Total GPUs used is NodeCount * container GPU request.
+                              nodeCount is the number of nodes to deploy for the multinode component.
+                              Total GPUs used is `nodeCount * container GPU request`.
                             format: int32
                             minimum: 2
                             type: integer
                         required:
                           - nodeCount
                         type: object
-                      name:
-                        description: Name identifies the service within the graph (e.g. "vllm-worker", "frontend").
-                        minLength: 1
-                        type: string
                       podTemplate:
                         description: |-
-                          PodTemplate is the pod template used to create the component's pods.
+                          podTemplate is the pod template used to create the component's pods.
                           The operator injects its defaults (image, command, env, ports, probes,
                           resources, volume mounts) into the container named `"main"` inside
                           `podTemplate.spec.containers`, merging user overrides by name. If no
-                          container named `"main"` is present, the operator auto-generates it with
-                          standard defaults. All other containers in `podTemplate.spec.containers`
+                          container named `"main"` is present, the operator auto-generates it
+                          with standard defaults. All other containers in `podTemplate.spec.containers`
                           are treated as user-managed sidecars: the operator does not inject
                           defaults into them, so sidecars must specify required fields (e.g. `image`)
-                          themselves. The validation webhook rejects podTemplates where a non-`"main"`
-                          container is missing a required field such as `image`.
+                          themselves. The validation webhook rejects pod templates where a
+                          non-`"main"` container is missing a required field such as `image`.
                         properties:
                           metadata:
                             description: |-
@@ -20441,74 +20289,261 @@ spec:
                         type: object
                       replicas:
                         description: |-
-                          Replicas is the desired number of Pods for this component.
-                          When `scalingAdapter` is set on this service, this field is managed by
-                          the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+                          replicas is the desired number of Pods for this component. When
+                          `scalingAdapter` is set on this component, this field is managed by
+                          the DynamoGraphDeploymentScalingAdapter and should not be modified
+                          directly.
                         format: int32
                         minimum: 0
                         type: integer
                       scalingAdapter:
                         description: |-
-                          ScalingAdapter opts this service into using the
-                          DynamoGraphDeploymentScalingAdapter. When set (even as `scalingAdapter: {}`),
-                          a DGDSA is created and owns the `replicas` field so external autoscalers
-                          (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the
-                          field to opt out. The struct is currently empty -- v1alpha1's `Enabled`
-                          bool was redundant with field presence -- but is intentionally kept as a
-                          struct so that future per-service DGDSA configuration knobs can be added
-                          without another API break.
+                          scalingAdapter opts this component into using the
+                          DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
+                          `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
+                          so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
+                          the Scale subresource. Omit the field to opt out. The struct is
+                          currently empty -- v1alpha1's `enabled` bool was redundant with field
+                          presence -- but is intentionally kept as a struct so that future
+                          per-component DGDSA configuration knobs can be added without another
+                          API break.
                         type: object
                       sharedMemorySize:
                         anyOf:
                           - type: integer
                           - type: string
                         description: |-
-                          SharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
+                          sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
                           `nil` selects the operator default (8Gi), a positive quantity sets a
                           custom size, and `"0"` disables the shared-memory volume entirely.
                           Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its
-                          `Disabled bool` + `Size Quantity` pattern.
+                          `disabled bool` + `size Quantity` pattern.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       topologyConstraint:
                         description: |-
-                          TopologyConstraint applies to this service. `packDomain` is required.
-                          When both this and `spec.topologyConstraint.packDomain` are set, this
-                          field's `packDomain` must be narrower than or equal to the spec-level value.
+                          topologyConstraint applies to this component.
+                          `topologyConstraint.packDomain` is required. When both this and
+                          `spec.topologyConstraint.packDomain` are set, this field's `packDomain`
+                          must be narrower than or equal to the spec-level value.
                         properties:
                           packDomain:
                             description: |-
-                              PackDomain is the topology domain to pack pods within. Must match a
+                              packDomain is the topology domain to pack pods within. Must match a
                               domain defined in the referenced ClusterTopology CR.
                             pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                             type: string
                         required:
                           - packDomain
                         type: object
-                    required:
-                      - name
                     type: object
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
-                    - name
+                    - componentName
                   x-kubernetes-list-type: map
+                env:
+                  description: |-
+                    env is the list of environment variables applied to all components in
+                    the deployment unless overridden by component-specific configuration.
+                    Renamed from v1alpha1's `envs` to match the Kubernetes convention
+                    (`pod.spec.containers[].env`).
+                  items:
+                    description: EnvVar represents an environment variable present in a Container.
+                    properties:
+                      name:
+                        description: |-
+                          Name of the environment variable.
+                          May consist of any printable ASCII characters except '='.
+                        type: string
+                      value:
+                        description: |-
+                          Variable references $(VAR_NAME) are expanded
+                          using the previously defined environment variables in the container and
+                          any service environment variables. If a variable cannot be resolved,
+                          the reference in the input string will be unchanged. Double $$ are reduced
+                          to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                          "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                          Escaped references will never be expanded, regardless of whether the variable
+                          exists or not.
+                          Defaults to "".
+                        type: string
+                      valueFrom:
+                        description: Source for the environment variable's value. Cannot be used if value is not empty.
+                        properties:
+                          configMapKeyRef:
+                            description: Selects a key of a ConfigMap.
+                            properties:
+                              key:
+                                description: The key to select.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap or its key must be defined
+                                type: boolean
+                            required:
+                              - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fieldRef:
+                            description: |-
+                              Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                              spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                            properties:
+                              apiVersion:
+                                description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
+                                type: string
+                              fieldPath:
+                                description: Path of the field to select in the specified API version.
+                                type: string
+                            required:
+                              - fieldPath
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          fileKeyRef:
+                            description: |-
+                              FileKeyRef selects a key of the env file.
+                              Requires the EnvFiles feature gate to be enabled.
+                            properties:
+                              key:
+                                description: |-
+                                  The key within the env file. An invalid key will prevent the pod from starting.
+                                  The keys defined within a source may consist of any printable ASCII characters except '='.
+                                  During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                type: string
+                              optional:
+                                default: false
+                                description: |-
+                                  Specify whether the file or its key must be defined. If the file or key
+                                  does not exist, then the env var is not published.
+                                  If optional is set to true and the specified key does not exist,
+                                  the environment variable will not be set in the Pod's containers.
+
+                                  If optional is set to false and the specified key does not exist,
+                                  an error will be returned during Pod creation.
+                                type: boolean
+                              path:
+                                description: |-
+                                  The path within the volume from which to select the file.
+                                  Must be relative and may not contain the '..' path or start with '..'.
+                                type: string
+                              volumeName:
+                                description: The name of the volume mount containing the env file.
+                                type: string
+                            required:
+                              - key
+                              - path
+                              - volumeName
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          resourceFieldRef:
+                            description: |-
+                              Selects a resource of the container: only resources limits and requests
+                              (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                            properties:
+                              containerName:
+                                description: 'Container name: required for volumes, optional for env vars'
+                                type: string
+                              divisor:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                description: Specifies the output format of the exposed resources, defaults to "1"
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              resource:
+                                description: 'Required: resource to select'
+                                type: string
+                            required:
+                              - resource
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          secretKeyRef:
+                            description: Selects a key of a secret in the pod's namespace
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key must be defined
+                                type: boolean
+                            required:
+                              - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                    required:
+                      - name
+                    type: object
+                  type: array
+                labels:
+                  additionalProperties:
+                    type: string
+                  description: labels to propagate to all child resources. Same precedence rules as `annotations`.
+                  type: object
+                restart:
+                  description: restart specifies the restart policy for the graph deployment.
+                  properties:
+                    id:
+                      description: |-
+                        id is an arbitrary string that triggers a restart when changed. Any
+                        modification to this value initiates a restart of the graph deployment
+                        according to the configured strategy.
+                      minLength: 1
+                      type: string
+                    strategy:
+                      description: strategy specifies the restart strategy for the graph deployment.
+                      properties:
+                        order:
+                          description: order specifies the order in which components should be restarted.
+                          items:
+                            type: string
+                          type: array
+                        type:
+                          default: Sequential
+                          description: type specifies the restart strategy type.
+                          enum:
+                            - Sequential
+                            - Parallel
+                          type: string
+                      type: object
+                  required:
+                    - id
+                  type: object
                 topologyConstraint:
                   description: |-
-                    TopologyConstraint is the deployment-level topology constraint. When set,
-                    `topologyProfile` names the ClusterTopology CR to use. `packDomain` is
-                    optional at this level and can be omitted when only services carry constraints.
-                    Services without their own topologyConstraint inherit from this value.
+                    topologyConstraint is the deployment-level topology constraint. When
+                    set, `spec.topologyConstraint.topologyProfile` names the ClusterTopology
+                    CR to use. `spec.topologyConstraint.packDomain` is optional at this
+                    level and can be omitted when only components carry constraints.
+                    Components without their own `topologyConstraint` inherit from this value.
                   properties:
                     packDomain:
                       description: |-
-                        PackDomain is the default topology domain to pack pods within.
-                        Optional; omit when only services carry constraints.
+                        packDomain is the default topology domain to pack pods within.
+                        Optional; omit when only components carry constraints.
                       pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                       type: string
                     topologyProfile:
                       description: |-
-                        TopologyProfile is the name of the ClusterTopology CR that defines the
+                        topologyProfile is the name of the ClusterTopology CR that defines the
                         topology hierarchy for this deployment.
                       minLength: 1
                       type: string
@@ -20517,27 +20552,90 @@ spec:
                   type: object
               type: object
             status:
-              description: Status reflects the current observed state of this graph deployment.
+              description: status reflects the current observed state of this graph deployment.
               properties:
                 checkpoints:
                   additionalProperties:
-                    description: ServiceCheckpointStatus contains checkpoint information for a single service.
+                    description: ComponentCheckpointStatus contains checkpoint information for a single component.
                     properties:
                       checkpointName:
-                        description: CheckpointName is the name of the associated Checkpoint CR.
+                        description: checkpointName is the name of the associated DynamoCheckpoint CR.
                         type: string
                       identityHash:
-                        description: IdentityHash is the computed hash of the checkpoint identity.
+                        description: identityHash is the computed hash of the checkpoint identity.
                         type: string
                       ready:
-                        description: Ready indicates if the checkpoint was visible to the worker at startup.
+                        description: ready indicates if the checkpoint was visible to the worker at startup.
                         type: boolean
                     type: object
-                  description: Checkpoints contains per-service checkpoint status, keyed by service name.
+                  description: checkpoints contains per-component checkpoint status, keyed by `componentName`.
+                  type: object
+                components:
+                  additionalProperties:
+                    description: ComponentReplicaStatus contains replica information for a single component.
+                    properties:
+                      availableReplicas:
+                        description: |-
+                          availableReplicas is the number of available replicas. Populated for
+                          `Deployment` and `PodCliqueScalingGroup`; not available for
+                          `PodClique` or `LeaderWorkerSet`.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      componentKind:
+                        description: |-
+                          componentKind is the underlying resource kind (e.g. `PodClique`,
+                          `Deployment`, `LeaderWorkerSet`).
+                        enum:
+                          - PodClique
+                          - PodCliqueScalingGroup
+                          - Deployment
+                          - LeaderWorkerSet
+                        type: string
+                      componentName:
+                        description: |-
+                          componentName is the name of the primary underlying Kubernetes
+                          resource backing this Dynamo component.
+                          Deprecated: use `componentNames`. During rolling updates this reflects
+                          the new (target) resource name only.
+                        type: string
+                      componentNames:
+                        description: |-
+                          componentNames is the list of underlying Kubernetes resource names for
+                          this Dynamo component. During normal operation this contains a single
+                          name; during rolling updates it contains both old and new resource names.
+                        items:
+                          type: string
+                        type: array
+                      readyReplicas:
+                        description: |-
+                          readyReplicas is the number of ready replicas. Populated for
+                          `PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for
+                          `PodCliqueScalingGroup`.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      replicas:
+                        description: replicas is the total number of non-terminated replicas.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      updatedReplicas:
+                        description: updatedReplicas is the number of replicas at the current/desired revision.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                      - componentKind
+                      - componentName
+                      - replicas
+                      - updatedReplicas
+                    type: object
+                  description: components contains per-component replica status information, keyed by `componentName`.
                   type: object
                 conditions:
                   description: |-
-                    Conditions contains the latest observed conditions of the graph deployment.
+                    conditions contains the latest observed conditions of the graph deployment.
                     Merged by type on patch updates.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
@@ -20594,35 +20692,35 @@ spec:
                     type: object
                   type: array
                 observedGeneration:
-                  description: ObservedGeneration is the most recent generation observed by the controller.
+                  description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
                 restart:
-                  description: Restart contains the status of a graph-level restart.
+                  description: restart contains the status of a graph-level restart.
                   properties:
                     inProgress:
-                      description: InProgress contains the names of the services currently being restarted.
+                      description: inProgress contains the names of the components currently being restarted.
                       items:
                         type: string
                       type: array
                     observedID:
-                      description: ObservedID is the restart ID currently being processed. Matches Restart.ID in the spec.
+                      description: observedID is the restart ID currently being processed. Matches `Restart.id` in the spec.
                       type: string
                     phase:
-                      description: Phase is the phase of the restart.
+                      description: phase is the phase of the restart.
                       type: string
                   type: object
                 rollingUpdate:
                   description: |-
-                    RollingUpdate tracks the progress of operator-managed rolling updates.
+                    rollingUpdate tracks the progress of operator-managed rolling updates.
                     Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
                   properties:
                     endTime:
-                      description: EndTime is when the rolling update completed (successfully or failed).
+                      description: endTime is when the rolling update completed (successfully or failed).
                       format: date-time
                       type: string
                     phase:
-                      description: Phase indicates the current phase of the rolling update.
+                      description: phase indicates the current phase of the rolling update.
                       enum:
                         - Pending
                         - InProgress
@@ -20631,75 +20729,20 @@ spec:
                         - ""
                       type: string
                     startTime:
-                      description: StartTime is when the rolling update began.
+                      description: startTime is when the rolling update began.
                       format: date-time
                       type: string
-                    updatedServices:
-                      description: UpdatedServices is the list of services that have completed the rolling update.
+                    updatedComponents:
+                      description: |-
+                        updatedComponents is the list of components that have completed the
+                        rolling update.
                       items:
                         type: string
                       type: array
                   type: object
-                services:
-                  additionalProperties:
-                    description: ServiceReplicaStatus contains replica information for a single service.
-                    properties:
-                      availableReplicas:
-                        description: |-
-                          AvailableReplicas is the number of available replicas. Populated for Deployment
-                          and PodCliqueScalingGroup; not available for PodClique or LeaderWorkerSet.
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      componentKind:
-                        description: ComponentKind is the underlying resource kind (e.g. "PodClique", "Deployment", "LeaderWorkerSet").
-                        enum:
-                          - PodClique
-                          - PodCliqueScalingGroup
-                          - Deployment
-                          - LeaderWorkerSet
-                        type: string
-                      componentName:
-                        description: |-
-                          ComponentName is the name of the primary underlying resource.
-                          Deprecated: use ComponentNames. During rolling updates this reflects the new (target) component name.
-                        type: string
-                      componentNames:
-                        description: |-
-                          ComponentNames is the list of underlying resource names for this service.
-                          During normal operation this contains a single name; during rolling updates it
-                          contains both old and new component names.
-                        items:
-                          type: string
-                        type: array
-                      readyReplicas:
-                        description: |-
-                          ReadyReplicas is the number of ready replicas. Populated for PodClique,
-                          Deployment, and LeaderWorkerSet; not available for PodCliqueScalingGroup.
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      replicas:
-                        description: Replicas is the total number of non-terminated replicas.
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      updatedReplicas:
-                        description: UpdatedReplicas is the number of replicas at the current/desired revision.
-                        format: int32
-                        minimum: 0
-                        type: integer
-                    required:
-                      - componentKind
-                      - componentName
-                      - replicas
-                      - updatedReplicas
-                    type: object
-                  description: Services contains per-service replica status information, keyed by service name.
-                  type: object
                 state:
                   default: initializing
-                  description: State is a high-level textual status of the graph deployment lifecycle.
+                  description: state is a high-level textual status of the graph deployment lifecycle.
                   enum:
                     - initializing
                     - pending

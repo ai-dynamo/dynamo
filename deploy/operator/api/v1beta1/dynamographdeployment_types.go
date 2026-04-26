@@ -22,61 +22,50 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// DynamoComponentDeploymentService pairs a service name with its shared spec.
-// In v1beta1 the DGD `services` field is a list of these rather than a
-// name-keyed map, so that object ordering is stable in YAML and GitOps diffs
-// and so that the name lives as a first-class field alongside the spec.
-type DynamoComponentDeploymentService struct {
-	// Name identifies the service within the graph (e.g. "vllm-worker", "frontend").
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// DynamoComponentDeploymentSharedSpec embeds the component's spec inline.
-	DynamoComponentDeploymentSharedSpec `json:",inline"`
-}
-
 // DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
-	// Annotations to propagate to all child resources (PCS, DCD, Deployments,
-	// and pod templates). Service-level (podTemplate) values take precedence
+	// annotations to propagate to all child resources (PCS, DCD, Deployments,
+	// and pod templates). Component-level (`podTemplate`) values take precedence
 	// on conflict.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
-	// Labels to propagate to all child resources. Same precedence rules as Annotations.
+	// labels to propagate to all child resources. Same precedence rules as `annotations`.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Services are the services deployed as part of this graph. Names must be
-	// unique within the list; the API server enforces this via the
-	// listType=map + listMapKey=name markers below (no CEL rule needed, which
-	// keeps the CRD within its x-kubernetes-validations cost budget).
+	// components are the components deployed as part of this graph. Each entry
+	// is the shared component spec carrying its own `componentName` (the
+	// stable logical identifier). Names must be unique within the list; the
+	// API server enforces this via the `listType=map` + `listMapKey=componentName`
+	// markers below (no CEL rule needed, which keeps the CRD within its
+	// `x-kubernetes-validations` cost budget).
 	// +optional
 	// +listType=map
-	// +listMapKey=name
+	// +listMapKey=componentName
 	// +kubebuilder:validation:MaxItems=25
-	Services []DynamoComponentDeploymentService `json:"services,omitempty"`
+	Components []DynamoComponentDeploymentSharedSpec `json:"components,omitempty"`
 
-	// Env is the list of environment variables applied to all services in the
-	// deployment unless overridden by service-specific configuration. Renamed
-	// from v1alpha1's `envs` to match the Kubernetes convention
+	// env is the list of environment variables applied to all components in
+	// the deployment unless overridden by component-specific configuration.
+	// Renamed from v1alpha1's `envs` to match the Kubernetes convention
 	// (`pod.spec.containers[].env`).
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
-	// BackendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
+	// backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
-	// Restart specifies the restart policy for the graph deployment.
+	// restart specifies the restart policy for the graph deployment.
 	// +optional
 	Restart *Restart `json:"restart,omitempty"`
 
-	// TopologyConstraint is the deployment-level topology constraint. When set,
-	// `topologyProfile` names the ClusterTopology CR to use. `packDomain` is
-	// optional at this level and can be omitted when only services carry constraints.
-	// Services without their own topologyConstraint inherit from this value.
+	// topologyConstraint is the deployment-level topology constraint. When
+	// set, `spec.topologyConstraint.topologyProfile` names the ClusterTopology
+	// CR to use. `spec.topologyConstraint.packDomain` is optional at this
+	// level and can be omitted when only components carry constraints.
+	// Components without their own `topologyConstraint` inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 }
@@ -84,32 +73,32 @@ type DynamoGraphDeploymentSpec struct {
 // DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.
 // Unchanged between v1alpha1 and v1beta1.
 type DynamoGraphDeploymentStatus struct {
-	// ObservedGeneration is the most recent generation observed by the controller.
+	// observedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// State is a high-level textual status of the graph deployment lifecycle.
+	// state is a high-level textual status of the graph deployment lifecycle.
 	// +kubebuilder:default=initializing
 	State DGDState `json:"state"`
 
-	// Conditions contains the latest observed conditions of the graph deployment.
+	// conditions contains the latest observed conditions of the graph deployment.
 	// Merged by type on patch updates.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
-	// Services contains per-service replica status information, keyed by service name.
+	// components contains per-component replica status information, keyed by `componentName`.
 	// +optional
-	Services map[string]ServiceReplicaStatus `json:"services,omitempty"`
+	Components map[string]ComponentReplicaStatus `json:"components,omitempty"`
 
-	// Restart contains the status of a graph-level restart.
+	// restart contains the status of a graph-level restart.
 	// +optional
 	Restart *RestartStatus `json:"restart,omitempty"`
 
-	// Checkpoints contains per-service checkpoint status, keyed by service name.
+	// checkpoints contains per-component checkpoint status, keyed by `componentName`.
 	// +optional
-	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
+	Checkpoints map[string]ComponentCheckpointStatus `json:"checkpoints,omitempty"`
 
-	// RollingUpdate tracks the progress of operator-managed rolling updates.
+	// rollingUpdate tracks the progress of operator-managed rolling updates.
 	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
@@ -133,9 +122,9 @@ type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// Spec defines the desired state for this graph deployment.
+	// spec defines the desired state for this graph deployment.
 	Spec DynamoGraphDeploymentSpec `json:"spec,omitempty"`
-	// Status reflects the current observed state of this graph deployment.
+	// status reflects the current observed state of this graph deployment.
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 
@@ -186,12 +175,12 @@ func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	s.Status.Conditions = append(s.Status.Conditions, condition)
 }
 
-// GetServiceByName returns the service entry with the given name, or nil if not found.
-// Helper for the v1beta1 list-based services field.
-func (s *DynamoGraphDeployment) GetServiceByName(name string) *DynamoComponentDeploymentService {
-	for i := range s.Spec.Services {
-		if s.Spec.Services[i].Name == name {
-			return &s.Spec.Services[i]
+// GetComponentByName returns the component entry with the given `componentName`,
+// or nil if not found. Helper for the v1beta1 list-based `components` field.
+func (s *DynamoGraphDeployment) GetComponentByName(name string) *DynamoComponentDeploymentSharedSpec {
+	for i := range s.Spec.Components {
+		if s.Spec.Components[i].ComponentName == name {
+			return &s.Spec.Components[i]
 		}
 	}
 	return nil
@@ -202,46 +191,46 @@ func (s *DynamoGraphDeployment) HasAnyTopologyConstraint() bool {
 	if s.Spec.TopologyConstraint != nil {
 		return true
 	}
-	for i := range s.Spec.Services {
-		if s.Spec.Services[i].TopologyConstraint != nil {
+	for i := range s.Spec.Components {
+		if s.Spec.Components[i].TopologyConstraint != nil {
 			return true
 		}
 	}
 	return false
 }
 
-// HasAnyMultinodeService reports whether any service is configured with more than one node.
-func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
-	for i := range s.Spec.Services {
-		if s.Spec.Services[i].GetNumberOfNodes() > 1 {
+// HasAnyMultinodeComponent reports whether any component is configured with more than one node.
+func (s *DynamoGraphDeployment) HasAnyMultinodeComponent() bool {
+	for i := range s.Spec.Components {
+		if s.Spec.Components[i].GetNumberOfNodes() > 1 {
 			return true
 		}
 	}
 	return false
 }
 
-// HasEPPService returns true if any service in the DGD has the EPP component type.
-func (s *DynamoGraphDeployment) HasEPPService() bool {
-	for i := range s.Spec.Services {
-		if s.Spec.Services[i].ComponentType == ComponentTypeEPP {
+// HasEPPComponent returns true if any component in the DGD has the EPP component type.
+func (s *DynamoGraphDeployment) HasEPPComponent() bool {
+	for i := range s.Spec.Components {
+		if s.Spec.Components[i].ComponentType == ComponentTypeEPP {
 			return true
 		}
 	}
 	return false
 }
 
-// GetEPPService returns the EPP service's name and spec if present.
-func (s *DynamoGraphDeployment) GetEPPService() (string, *DynamoComponentDeploymentSharedSpec, bool) {
-	for i := range s.Spec.Services {
-		svc := &s.Spec.Services[i]
-		if svc.ComponentType == ComponentTypeEPP {
-			return svc.Name, &svc.DynamoComponentDeploymentSharedSpec, true
+// GetEPPComponent returns the EPP component's name and shared spec if present.
+func (s *DynamoGraphDeployment) GetEPPComponent() (string, *DynamoComponentDeploymentSharedSpec, bool) {
+	for i := range s.Spec.Components {
+		comp := &s.Spec.Components[i]
+		if comp.ComponentType == ComponentTypeEPP {
+			return comp.ComponentName, comp, true
 		}
 	}
 	return "", nil, false
 }
 
-// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
-func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(svc *DynamoComponentDeploymentSharedSpec) string {
-	return ComputeDynamoNamespace(svc.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
+// GetDynamoNamespaceForComponent returns the Dynamo namespace for a given component.
+func (s *DynamoGraphDeployment) GetDynamoNamespaceForComponent(comp *DynamoComponentDeploymentSharedSpec) string {
+	return ComputeDynamoNamespace(comp.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
 }

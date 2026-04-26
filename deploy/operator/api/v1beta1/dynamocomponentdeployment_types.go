@@ -37,17 +37,18 @@ const (
 	DynamoComponentDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 
 	// MainContainerName is the well-known name of the primary Dynamo workload
-	// container inside a service's `podTemplate.spec.containers`. The operator
+	// container inside a component's `podTemplate.spec.containers`. The operator
 	// injects its defaults (image, command, env, ports, probes, resources,
 	// volume mounts) into this container. If no container with this name is
-	// present in the user-supplied podTemplate, the operator auto-generates it.
-	// Any other container in the podTemplate is treated as a user-managed sidecar.
+	// present in the user-supplied `podTemplate`, the operator auto-generates
+	// it. Any other container in the `podTemplate` is treated as a user-managed
+	// sidecar.
 	MainContainerName = "main"
 )
 
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
 type DynamoComponentDeploymentSpec struct {
-	// BackendFramework specifies the backend framework.
+	// backendFramework specifies the backend framework.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
@@ -57,137 +58,161 @@ type DynamoComponentDeploymentSpec struct {
 }
 
 // DynamoComponentDeploymentSharedSpec is the shared configuration used by both
-// standalone DCDs and by services embedded in a DynamoGraphDeployment.
+// standalone DCDs and by the components embedded in a DynamoGraphDeployment.
 //
-// In v1beta1 the ten per-service pod-configuration fields that existed in v1alpha1
-// (resources, envs, envFromSecret, livenessProbe, readinessProbe, volumeMounts,
-// annotations, labels, extraPodMetadata, extraPodSpec) are replaced with a single
-// `podTemplate` field holding a native `corev1.PodTemplateSpec`. The operator
-// injects its defaults into the container named `"main"` and merges user
-// overrides using strategic-merge-by-name semantics. Users can add sidecars,
-// init containers, and pod-level configuration directly in `podTemplate`
-// without any `extraPodSpec`-style escape hatch.
+// In v1beta1 the ten per-component pod-configuration fields that existed in
+// v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
+// volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
+// replaced with a single `podTemplate` field holding a native
+// `corev1.PodTemplateSpec`. The operator injects its defaults into the
+// container named `"main"` and merges user overrides using strategic-merge-by-name
+// semantics. Users can add sidecars, init containers, and pod-level configuration
+// directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 type DynamoComponentDeploymentSharedSpec struct {
-	// ComponentType indicates the role of this component within a Dynamo graph.
-	// Drives port mapping, frontend detection, planner RBAC, and the pod label
-	// `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
-	// first-class values, users can set them directly -- downstream consumers
-	// (e.g. the EPP) can filter on the component-type label rather than the
-	// v1alpha1 workaround of setting `componentType: worker` plus `subComponentType`.
+	// componentName is the stable logical identifier for this component within
+	// its DynamoGraphDeployment. For DGD entries it is required and must be
+	// unique within the parent's `spec.components` list (uniqueness is
+	// enforced by the API server via the `+listMapKey=componentName` marker).
+	// For standalone DynamoComponentDeployment objects it may be omitted; the
+	// defaulting webhook will populate it from `metadata.name` on admission.
+	//
+	// `componentName` is decoupled from the underlying Kubernetes resource
+	// name so that the operator can rename child workloads (e.g. suffixing
+	// worker DCDs with a hash during rolling updates) without losing the
+	// stable identity that downstream consumers (labels, status maps,
+	// DGDSA references, planner RBAC, EPP filters) depend on.
+	// +optional
+	ComponentName string `json:"componentName,omitempty"`
+
+	// componentType indicates the role of this component within a Dynamo
+	// graph. Drives port mapping, frontend detection, planner RBAC, and the
+	// pod label `nvidia.com/dynamo-component-type`. Because `prefill` and
+	// `decode` are first-class values, users can set them directly --
+	// downstream consumers (e.g. the EPP) can filter on the component-type
+	// label rather than the v1alpha1 workaround of setting `componentType:
+	// worker` plus `subComponentType`.
 	// +optional
 	ComponentType ComponentType `json:"componentType,omitempty"`
 
-	// GlobalDynamoNamespace places the component in the global Dynamo namespace
-	// rather than the per-deployment namespace derived from the DGD name.
+	// globalDynamoNamespace places the component in the global Dynamo
+	// namespace rather than the per-deployment namespace derived from the
+	// DGD name.
+	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// PodTemplate is the pod template used to create the component's pods.
+	// podTemplate is the pod template used to create the component's pods.
 	// The operator injects its defaults (image, command, env, ports, probes,
 	// resources, volume mounts) into the container named `"main"` inside
 	// `podTemplate.spec.containers`, merging user overrides by name. If no
-	// container named `"main"` is present, the operator auto-generates it with
-	// standard defaults. All other containers in `podTemplate.spec.containers`
+	// container named `"main"` is present, the operator auto-generates it
+	// with standard defaults. All other containers in `podTemplate.spec.containers`
 	// are treated as user-managed sidecars: the operator does not inject
 	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. The validation webhook rejects podTemplates where a non-`"main"`
-	// container is missing a required field such as `image`.
+	// themselves. The validation webhook rejects pod templates where a
+	// non-`"main"` container is missing a required field such as `image`.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
-	// Replicas is the desired number of Pods for this component.
-	// When `scalingAdapter` is set on this service, this field is managed by
-	// the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+	// replicas is the desired number of Pods for this component. When
+	// `scalingAdapter` is set on this component, this field is managed by
+	// the DynamoGraphDeploymentScalingAdapter and should not be modified
+	// directly.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// Multinode configures multinode components.
+	// multinode configures multinode components.
 	// +optional
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 
-	// SharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
+	// sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
 	// `nil` selects the operator default (8Gi), a positive quantity sets a
 	// custom size, and `"0"` disables the shared-memory volume entirely.
 	// Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its
-	// `Disabled bool` + `Size Quantity` pattern.
+	// `disabled bool` + `size Quantity` pattern.
 	// +optional
 	SharedMemorySize *resource.Quantity `json:"sharedMemorySize,omitempty"`
 
-	// ModelRef references a model served by this component. When specified,
+	// modelRef references a model served by this component. When specified,
 	// a headless service is created for endpoint discovery.
 	// +optional
 	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
-	// ScalingAdapter opts this service into using the
-	// DynamoGraphDeploymentScalingAdapter. When set (even as `scalingAdapter: {}`),
-	// a DGDSA is created and owns the `replicas` field so external autoscalers
-	// (HPA/KEDA/Planner) can drive scaling via the Scale subresource. Omit the
-	// field to opt out. The struct is currently empty -- v1alpha1's `Enabled`
-	// bool was redundant with field presence -- but is intentionally kept as a
-	// struct so that future per-service DGDSA configuration knobs can be added
-	// without another API break.
+	// scalingAdapter opts this component into using the
+	// DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
+	// `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
+	// so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
+	// the Scale subresource. Omit the field to opt out. The struct is
+	// currently empty -- v1alpha1's `enabled` bool was redundant with field
+	// presence -- but is intentionally kept as a struct so that future
+	// per-component DGDSA configuration knobs can be added without another
+	// API break.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
-	// EPPConfig holds EPP-specific configuration for Endpoint Picker Plugin
-	// components. Only meaningful when ComponentType is `epp`.
+	// eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+	// components. Only meaningful when `componentType` is `epp`.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
-	// FrontendSidecar optionally designates a container in `podTemplate.spec.containers`
-	// as the frontend sidecar. The value must match the `name` of a container in
-	// that list; the operator merges its frontend-sidecar defaults (auto-generated
-	// Dynamo env vars, ports, health probes) into that container the same way it
-	// merges into `"main"`. The full container definition (image, args, envFrom,
-	// env) lives in `podTemplate` -- this eliminates the redundant `Image`,
-	// `Args`, `EnvFromSecret`, and `Envs` fields from v1alpha1's `FrontendSidecarSpec`.
-	// The validation webhook rejects values that do not match any container name
-	// in `podTemplate.spec.containers`.
+	// frontendSidecar optionally designates a container in
+	// `podTemplate.spec.containers` as the frontend sidecar. The value must
+	// match the `name` of a container in that list; the operator merges its
+	// frontend-sidecar defaults (auto-generated Dynamo env vars, ports,
+	// health probes) into that container the same way it merges into `"main"`.
+	// The full container definition (image, args, envFrom, env) lives in
+	// `podTemplate` -- this eliminates the redundant `image`, `args`,
+	// `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
+	// The validation webhook rejects values that do not match any container
+	// name in `podTemplate.spec.containers`.
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
-	// CompilationCache configures a PVC-backed compilation cache. The operator
-	// handles backend-specific mount paths and environment variables, so users do
-	// not need to hand-wire them into `podTemplate`. Extracted from v1alpha1's
-	// `VolumeMount.UseAsCompilationCache` flag.
+	// compilationCache configures a PVC-backed compilation cache. The operator
+	// handles backend-specific mount paths and environment variables, so
+	// users do not need to hand-wire them into `podTemplate`. Extracted from
+	// v1alpha1's `volumeMount.useAsCompilationCache` flag.
 	// +optional
 	CompilationCache *CompilationCacheConfig `json:"compilationCache,omitempty"`
 
-	// TopologyConstraint applies to this service. `packDomain` is required.
-	// When both this and `spec.topologyConstraint.packDomain` are set, this
-	// field's `packDomain` must be narrower than or equal to the spec-level value.
+	// topologyConstraint applies to this component.
+	// `topologyConstraint.packDomain` is required. When both this and
+	// `spec.topologyConstraint.packDomain` are set, this field's `packDomain`
+	// must be narrower than or equal to the spec-level value.
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
 
-	// Experimental groups opt-in preview features whose API shape and behavior
-	// may change in breaking ways between v1beta1 releases, including disappearing
-	// without a name-preserving graduation path. In v1beta1 this block holds
-	// `gpuMemoryService` and `failover` (which remain tightly coupled -- failover
-	// requires GMS -- and are expected to evolve together as the DRA-based GPU
-	// sharing story matures), and `checkpoint` (whose interaction with the
-	// standalone DynamoCheckpoint resource and identity-hash computation is
-	// still settling). Fields here are explicitly NOT covered by the normal
-	// v1beta1 deprecation policy; do not depend on them for production workloads.
+	// experimental groups opt-in preview features whose API shape and
+	// behavior may change in breaking ways between v1beta1 releases,
+	// including disappearing without a name-preserving graduation path.
+	// In v1beta1 this block holds `gpuMemoryService` and `failover` (which
+	// remain tightly coupled -- failover requires GMS -- and are expected to
+	// evolve together as the DRA-based GPU sharing story matures), and
+	// `checkpoint` (whose interaction with the standalone DynamoCheckpoint
+	// resource and identity-hash computation is still settling). Fields here
+	// are explicitly NOT covered by the normal v1beta1 deprecation policy;
+	// do not depend on them for production workloads.
 	// +optional
 	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of a DynamoComponentDeployment.
 //
-// Unchanged from v1alpha1 except that v1alpha1's unused `PodSelector` field is
-// removed. `PodSelector` was never written or read by the operator controller.
+// Unchanged from v1alpha1 except that v1alpha1's unused `podSelector` field is
+// removed. `podSelector` was never written or read by the operator controller.
 type DynamoComponentDeploymentStatus struct {
-	// ObservedGeneration is the most recent generation observed by the controller.
+	// observedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Conditions captures the latest observed state of the component using
-	// standard Kubernetes condition types (including Available and DynamoComponentReady).
+	// conditions captures the latest observed state of the component using
+	// standard Kubernetes condition types (including `Available` and
+	// `DynamoComponentReady`).
 	Conditions []metav1.Condition `json:"conditions"`
 
-	// Service contains replica status information for this component.
+	// component contains replica status information for this component.
 	// +optional
-	Service *ServiceReplicaStatus `json:"service,omitempty"`
+	Component *ComponentReplicaStatus `json:"component,omitempty"`
 }
 
 // +genclient
@@ -209,9 +234,9 @@ type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// Spec defines the desired state for this Dynamo component deployment.
+	// spec defines the desired state for this Dynamo component deployment.
 	Spec DynamoComponentDeploymentSpec `json:"spec,omitempty"`
-	// Status reflects the current observed state of the component deployment.
+	// status reflects the current observed state of the component deployment.
 	Status DynamoComponentDeploymentStatus `json:"status,omitempty"`
 }
 
@@ -228,12 +253,12 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-// IsReady returns true if the component is Available.
+// IsReady returns true if the component is `Available`.
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	return s.Status.IsReady()
 }
 
-// IsReady reports whether the component status signals Available=True.
+// IsReady reports whether the component status signals `Available=True`.
 func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {
 	for _, condition := range s.Conditions {
 		if condition.Type == DynamoComponentDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
@@ -294,9 +319,10 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 }
 
 // ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
-// When globalDynamoNamespace is true, returns the global namespace constant.
-// Otherwise returns {k8sNamespace}-{dgdName} with dots in dgdName replaced by hyphens
-// so that the namespace can safely form the first segment of endpoint paths.
+// When `globalDynamoNamespace` is true, returns the global namespace constant.
+// Otherwise returns `{k8sNamespace}-{dgdName}` with dots in `dgdName` replaced
+// by hyphens so that the namespace can safely form the first segment of
+// endpoint paths.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
@@ -315,14 +341,15 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoComponentDeploymentSpec)
 }
 
-// GetServiceStatuses returns per-service replica status. In the DCD case the
-// map contains a single entry keyed by the DCD's own name, mirroring the DGD
-// behaviour and letting generic callers treat both the same way.
-func (s *DynamoComponentDeployment) GetServiceStatuses() map[string]ServiceReplicaStatus {
-	if s.Status.Service == nil {
-		return map[string]ServiceReplicaStatus{}
+// GetComponentStatuses returns per-component replica status. In the standalone
+// DCD case the map contains a single entry keyed by the DCD's own name,
+// mirroring the DGD behaviour and letting generic callers treat both the same
+// way.
+func (s *DynamoComponentDeployment) GetComponentStatuses() map[string]ComponentReplicaStatus {
+	if s.Status.Component == nil {
+		return map[string]ComponentReplicaStatus{}
 	}
-	return map[string]ServiceReplicaStatus{s.GetName(): *s.Status.Service}
+	return map[string]ComponentReplicaStatus{s.GetName(): *s.Status.Component}
 }
 
 // GetState returns "ready" or "not_ready" based on status conditions.
