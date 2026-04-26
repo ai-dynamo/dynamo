@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: dynamo-system-baseline
+spec:
+  selector: projectcalico.org/namespace == "dynamo-system"
+  order: 1000
+  types:
+    - Ingress
+    - Egress
+  ingress:
+    - action: Allow
+      source:
+        namespaceSelector: projectcalico.org/name == "dynamo-system"
+    - action: Allow
+      source:
+        namespaceSelector: projectcalico.org/name == "monitoring"
+  egress:
+    - action: Allow
+      destination:
+        namespaceSelector: projectcalico.org/name == "dynamo-system"
+    - action: Allow
+      protocol: UDP
+      destination:
+        namespaceSelector: projectcalico.org/name == "kube-system"
+        ports:
+          - 53
+    - action: Allow
+      protocol: TCP
+      destination:
+        namespaceSelector: projectcalico.org/name == "kube-system"
+        ports:
+          - 53

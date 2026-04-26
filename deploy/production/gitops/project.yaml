@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: dynamo-production
+  namespace: argocd
+spec:
+  description: Production Dynamo stack and externally managed Kubernetes add-ons.
+  sourceRepos:
+    - https://github.com/ai-blaise/k8s-playground.git
+    - https://prometheus-community.github.io/helm-charts
+    - https://grafana.github.io/helm-charts
+    - https://fluent.github.io/helm-charts
+    - https://falcosecurity.github.io/charts
+    - https://aquasecurity.github.io/helm-charts
+    - https://vmware-tanzu.github.io/helm-charts
+    - https://charts.external-secrets.io
+    - https://helm.ngc.nvidia.com/nvidia
+    - ghcr.io/kai-scheduler/kai-scheduler
+    - ghcr.io/ai-dynamo/grove
+    - https://kedacore.github.io/charts
+    - https://open-telemetry.github.io/opentelemetry-helm-charts
+    - ghcr.io/actions/actions-runner-controller-charts
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

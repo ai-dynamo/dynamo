@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: dynamo-velero-backups
+      config:
+        region: us-east-1
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: us-east-1
+
+deployNodeAgent: true
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: kube-prometheus-stack
+
+schedules:
+  dynamo-daily:
+    disabled: false
+    schedule: "0 7 * * *"
+    template:
+      ttl: 336h
+      includedNamespaces:
+        - dynamo-system
+      includedResources:
+        - dynamographdeployments.nvidia.com
+        - dynamographdeploymentrequests.nvidia.com
+        - dynamographdeploymentscalingadapters.nvidia.com
+        - dynamomodels.nvidia.com
+        - configmaps
+        - secrets
+        - persistentvolumeclaims

@@ -31,6 +31,24 @@ Run the pre-deployment check before deploying Dynamo:
 ./pre-deployment-check.sh
 ```
 
+Run the production profile check after the production add-ons have synced:
+
+```bash
+./pre-deployment-check.sh --profile production
+```
+
+Machine-readable output is available for automation:
+
+```bash
+./pre-deployment-check.sh --profile production --output json
+```
+
+To check only selected capabilities:
+
+```bash
+./pre-deployment-check.sh --require prometheus-operator,grove-kai,dynamo-crds
+```
+
 ## What it checks
 
 The script performs few checks and provides a detailed summary:
@@ -132,6 +150,8 @@ The script provides a comprehensive summary showing the status of each check:
 | **kubectl Connectivity** | Verifies kubectl installation and cluster access | ✅ PASSED / ❌ FAILED |
 | **Default StorageClass** | Checks for default StorageClass annotation | ✅ PASSED / ❌ FAILED |
 | **Cluster Resources** | Validates GPU nodes availability | ✅ PASSED / ❌ FAILED |
+| **GPU Operator** | Checks for NVIDIA GPU Operator CRDs or pods | ✅ PASSED / ❌ FAILED |
+| **Production Add-ons** | Checks Argo CD, Prometheus, DCGM, Loki, Fluentd, Falco, Trivy, Velero, External Secrets, Grove/KAI, and NetworkPolicies when `--profile production` is used | ✅ PASSED / ❌ FAILED |
 
 ## Setting a Default StorageClass
 

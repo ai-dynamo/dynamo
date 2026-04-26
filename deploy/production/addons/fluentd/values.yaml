@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+kind: DaemonSet
+
+env:
+  - name: LOKI_URL
+    value: http://loki-gateway.logging.svc.cluster.local/loki/api/v1/push
+
+fileConfigs:
+  01_sources.conf: |-
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type json
+        time_key time
+        time_type string
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+  02_filters.conf: |-
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+    </filter>
+  03_outputs.conf: |-
+    <match kubernetes.**>
+      @type loki
+      url "#{ENV['LOKI_URL']}"
+      extra_labels {"cluster":"dynamo-production"}
+      <label>
+        namespace $.kubernetes.namespace_name
+        pod $.kubernetes.pod_name
+        container $.kubernetes.container_name
+        app $.kubernetes.labels.app
+      </label>
+      <buffer>
+        flush_interval 10s
+      </buffer>
+    </match>

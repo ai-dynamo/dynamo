@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+global:
+  etcd:
+    install: false
+  grove:
+    install: false
+    enabled: true
+  kai-scheduler:
+    install: false
+    enabled: true
+
+dynamo-operator:
+  discoveryBackend: kubernetes
+  webhook:
+    failurePolicy: Fail
+    timeoutSeconds: 10
+  dynamo:
+    metrics:
+      prometheusEndpoint: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+  controllerManager:
+    manager:
+      image:
+        pullPolicy: IfNotPresent
