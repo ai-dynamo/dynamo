@@ -48,6 +48,11 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Initialize test type env var
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo '${{ inputs.test_type }}' | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
     - name: verify minio
       if: inputs.gpu_tests == 'true' # only gpu tests require minio
       shell: bash
@@ -115,19 +120,24 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-        # HF cache: use HOME (/__w/dynamo/dynamo, set by the workflow container config)
-        # which is on the EBS work volume and writable by the runner uid (1001).
-        # Mirrors DinD behavior where the test container used its own writable cache.
+        # NVMe guard: GPU runners mount /scratch (nvme-scratch emptyDir, NVMe-backed via
+        # instanceStorePolicy: RAID0). CPU/ARM runners have no /scratch mount.
+        if [[ -d /scratch ]]; then
+          NVME_ROOT="/scratch"
+          echo "✅ NVMe scratch available — caches will use /scratch"
+        else
+          NVME_ROOT="/tmp"
+          echo "⚠️  No /scratch — falling back to /tmp (CPU runner)"
+        fi
+
+        # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
         # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
-        # to set HOME=/ by default regardless of the workflow container env. Pin HOME
-        # to GITHUB_WORKSPACE (the EBS work volume, writable by uid 1001) so that all
-        # downstream code that reads HOME (Python huggingface_hub, Rust dynamo_llm::hub,
-        # flashinfer JIT) gets a writable path.
+        # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
+        # that reads HOME (git, getpass.getuser) gets a writable path.
         export HOME="${GITHUB_WORKSPACE}"
 
-        # Seed from the image's baked-in cache (built as uid 1000/dynamo) so models
-        # pre-cached in the image are available without re-downloading.
-        export HF_HOME="${HOME}/.cache/huggingface"
+        # HF cache → NVMe when available (model weight reads are the largest I/O)
+        export HF_HOME="${NVME_ROOT}/.cache/huggingface"
         mkdir -p "${HF_HOME}"
         for IMG_CACHE in /home/dynamo/.cache/huggingface /root/.cache/huggingface; do
           if [ -d "${IMG_CACHE}" ]; then
@@ -138,9 +148,8 @@ runs:
         done
         echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
 
-        # XDG cache: flashinfer and other XDG-aware tools need a writable cache.
-        # Use HOME/.cache (EBS-backed) rather than /tmp (memory-backed, small in K8s).
-        export XDG_CACHE_HOME="${HOME}/.cache"
+        # XDG cache (flashinfer JIT, torch compile) → NVMe when available
+        export XDG_CACHE_HOME="${NVME_ROOT}/.cache"
         mkdir -p "${XDG_CACHE_HOME}"
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
@@ -182,7 +191,7 @@ runs:
               ;;
           esac
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
