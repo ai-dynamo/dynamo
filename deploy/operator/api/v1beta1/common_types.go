@@ -23,11 +23,11 @@ import (
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
-// ComponentType identifies the role of a Dynamo service within a graph.
-// In v1beta1 this is a strict enum. Unlike v1alpha1 (where `subComponentType` was
-// used as a workaround for disaggregated serving), `prefill` and `decode` are
-// first-class values: users can set them directly and downstream consumers (e.g.,
-// the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
+// ComponentType identifies the role of a Dynamo component within a graph.
+// In v1beta1 this is a strict enum. Unlike v1alpha1 (where `subComponentType`
+// was used as a workaround for disaggregated serving), `prefill` and `decode`
+// are first-class values: users can set them directly and downstream consumers
+// (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
 // +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp
 type ComponentType string
 
@@ -40,26 +40,27 @@ const (
 	ComponentTypeEPP      ComponentType = "epp"
 )
 
-// CompilationCacheConfig configures a PVC-backed compilation cache for a service.
+// CompilationCacheConfig configures a PVC-backed compilation cache for a component.
 // The operator handles backend-specific mount paths and environment variables so
 // users do not need to hand-wire them into the pod template.
 type CompilationCacheConfig struct {
-	// PVCName references a user-created PVC by name. The PVC must exist in the
-	// same namespace as the DynamoGraphDeployment.
+	// pvcName references a user-created PVC by name. The PVC must exist in
+	// the same namespace as the DynamoGraphDeployment.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	PVCName string `json:"pvcName"`
 
-	// MountPath overrides the backend-specific default mount path.
-	// When empty, the operator selects a default appropriate for the backend framework.
+	// mountPath overrides the backend-specific default mount path. When
+	// empty, the operator selects a default appropriate for the backend
+	// framework.
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
 }
 
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
-	// NodeCount is the number of nodes to deploy for the multinode component.
-	// Total GPUs used is NodeCount * container GPU request.
+	// nodeCount is the number of nodes to deploy for the multinode component.
+	// Total GPUs used is `nodeCount * container GPU request`.
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
@@ -68,25 +69,26 @@ type MultinodeSpec struct {
 // ModelReference identifies a model served by a component.
 // When specified, a headless service is created for endpoint discovery.
 type ModelReference struct {
-	// Name is the base model identifier (e.g. "llama-3-70b-instruct-v1").
+	// name is the base model identifier (e.g. "llama-3-70b-instruct-v1").
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// Revision is the model revision/version.
+	// revision is the model revision/version.
 	// +optional
 	Revision string `json:"revision,omitempty"`
 }
 
 // Restart specifies the restart policy for a graph deployment.
 type Restart struct {
-	// ID is an arbitrary string that triggers a restart when changed.
-	// Any modification to this value initiates a restart of the graph deployment
+	// id is an arbitrary string that triggers a restart when changed. Any
+	// modification to this value initiates a restart of the graph deployment
 	// according to the configured strategy.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	ID string `json:"id"`
 
-	// Strategy specifies the restart strategy for the graph deployment.
+	// strategy specifies the restart strategy for the graph deployment.
 	// +optional
 	Strategy *RestartStrategy `json:"strategy,omitempty"`
 }
@@ -99,38 +101,41 @@ const (
 	RestartStrategyTypeParallel   RestartStrategyType = "Parallel"
 )
 
-// RestartStrategy defines how services are restarted.
+// RestartStrategy defines how components are restarted.
 type RestartStrategy struct {
-	// Type specifies the restart strategy type.
+	// type specifies the restart strategy type.
+	// +optional
 	// +kubebuilder:validation:Enum=Sequential;Parallel
 	// +kubebuilder:default=Sequential
 	Type RestartStrategyType `json:"type,omitempty"`
 
-	// Order specifies the order in which services should be restarted.
+	// order specifies the order in which components should be restarted.
 	// +optional
 	Order []string `json:"order,omitempty"`
 }
 
-// ScalingAdapter opts a service into using the DynamoGraphDeploymentScalingAdapter
-// (DGDSA). When `scalingAdapter` is set on a service (even as an empty object,
-// `scalingAdapter: {}`), the DGDSA is created and owns the `replicas` field so
-// that external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale
-// subresource. Omitting the field opts the service out. The struct is empty in
-// v1beta1 (it carried only an `Enabled` bool in v1alpha1, which is redundant
-// with field presence) but is intentionally kept as a struct so that future
-// per-service DGDSA configuration knobs can be added without another API break.
+// ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
+// (DGDSA). When `scalingAdapter` is set on a component (even as an empty
+// object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
+// field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
+// the Scale subresource. Omitting the field opts the component out. The
+// struct is empty in v1beta1 (it carried only an `enabled` bool in v1alpha1,
+// which is redundant with field presence) but is intentionally kept as a
+// struct so that future per-component DGDSA configuration knobs can be added
+// without another API break.
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
 type EPPConfig struct {
-	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
-	// Mutually exclusive with Config.
+	// configMapRef references a user-provided ConfigMap containing EPP
+	// configuration. Mutually exclusive with `config`.
 	// +optional
 	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
 
-	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
-	// The operator marshals this to YAML and creates a ConfigMap automatically.
-	// Mutually exclusive with ConfigMapRef. One of ConfigMapRef or Config must be specified.
+	// config allows specifying EPP `EndpointPickerConfig` directly as a
+	// structured object. The operator marshals this to YAML and creates a
+	// ConfigMap automatically. Mutually exclusive with `configMapRef`. One of
+	// `configMapRef` or `config` must be specified.
 	// +optional
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -142,9 +147,9 @@ type GPUMemoryServiceMode string
 
 const (
 	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
-	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
+	GMSModeIntraPod GPUMemoryServiceMode = "IntraPod"
 	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
-	GMSModeInterPod GPUMemoryServiceMode = "interPod"
+	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
@@ -155,82 +160,88 @@ const (
 // graduate out of this block (and become first-class fields on the shared
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
-	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// gpuMemoryService configures the GPU Memory Service (GMS) sidecar.
 	// When set, a GMS sidecar is injected and GPU access is managed via DRA.
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
-	// Failover configures active-passive GPU failover for this service. When
-	// set, the main container is cloned into two engine containers (active +
-	// standby) sharing GPUs via DRA. Requires `experimental.gpuMemoryService`
-	// to also be set, and `failover.mode` must match
+	// failover configures active-passive GPU failover for this component.
+	// When set, the main container is cloned into two engine containers
+	// (active + standby) sharing GPUs via DRA. Requires
+	// `experimental.gpuMemoryService` to also be set, and
+	// `experimental.failover.mode` must match
 	// `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
-	// Checkpoint configures container-image snapshotting and restore for this
-	// service. When set, the DGD controller can produce a DynamoCheckpoint CR
-	// from a running pod and later restore pods from that checkpoint for
-	// faster cold start. The user-facing shape of this field -- especially its
-	// interaction with the standalone DynamoCheckpoint resource and the
-	// identity-hash computation -- is still settling, which is why it lives
-	// under `experimental` in v1beta1 instead of at the top level.
+	// checkpoint configures container-image snapshotting and restore for
+	// this component. When set, the DGD controller can produce a
+	// DynamoCheckpoint CR from a running pod and later restore pods from
+	// that checkpoint for faster cold start. The user-facing shape of this
+	// field -- especially its interaction with the standalone
+	// DynamoCheckpoint resource and the identity-hash computation -- is
+	// still settling, which is why it lives under `experimental` in v1beta1
+	// instead of at the top level.
 	// +optional
-	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-// Setting `experimental.gpuMemoryService` (i.e. presence of this struct) opts the
-// service into GMS: the operator injects a GMS sidecar and replaces the main
-// container's GPU resources with a DRA ResourceClaim for shared GPU access.
-// Omitting the field disables GMS for the service. The v1alpha1 `enabled` flag
-// is dropped here to follow the standard Kubernetes pattern of "presence ==
-// opt-in"; conversion from v1alpha1 maps `enabled:false` (with or without a
-// populated payload) to an absent field, with the original payload preserved
-// via an origin annotation when present (see the v1alpha1 conversion code).
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a
+// worker component. Setting `experimental.gpuMemoryService` (i.e. presence of
+// this struct) opts the component into GMS: the operator injects a GMS sidecar
+// and replaces the main container's GPU resources with a DRA `ResourceClaim`
+// for shared GPU access. Omitting the field disables GMS for the component.
+// The v1alpha1 `enabled` flag is dropped here to follow the standard
+// Kubernetes pattern of "presence == opt-in"; conversion from v1alpha1 maps
+// `enabled:false` (with or without a populated payload) to an absent field,
+// with the original payload preserved via an origin annotation when present
+// (see the v1alpha1 conversion code).
 //
-// Exposed under `DynamoComponentDeploymentSharedSpec.Experimental.GPUMemoryService`
-// in v1beta1 -- see ExperimentalSpec for the stability caveat.
+// Exposed under
+// `DynamoComponentDeploymentSharedSpec.experimental.gpuMemoryService` in
+// v1beta1 -- see ExperimentalSpec for the stability caveat.
 type GPUMemoryServiceSpec struct {
-	// Mode selects the GMS deployment topology.
-	// +kubebuilder:default=intraPod
-	// +kubebuilder:validation:Enum=intraPod;interPod
+	// mode selects the GMS deployment topology.
 	// +optional
+	// +kubebuilder:default=IntraPod
+	// +kubebuilder:validation:Enum=IntraPod;InterPod
 	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
-	// DeviceClassName is the DRA DeviceClass to request GPUs from.
-	// +kubebuilder:default="gpu.nvidia.com"
+	// deviceClassName is the DRA `DeviceClass` to request GPUs from.
 	// +optional
+	// +kubebuilder:default="gpu.nvidia.com"
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// Setting `experimental.failover` opts the service into failover mode: the main
-// container is cloned into two engine containers (active + standby) sharing
-// GPUs via DRA, and the standby acquires the flock when the active engine
-// fails. Omitting the field disables failover. Failover requires that
-// `experimental.gpuMemoryService` is also set, and `failover.mode` must match
-// `gpuMemoryService.mode` (enforced by the validation webhook). Also requires
-// the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
-// The v1alpha1 `enabled` flag is dropped here to follow the standard Kubernetes
-// pattern of "presence == opt-in"; conversion from v1alpha1 maps
-// `enabled:false` (with or without a populated payload) to an absent field,
-// with the original payload preserved via an origin annotation when present.
+// Setting `experimental.failover` opts the component into failover mode: the
+// main container is cloned into two engine containers (active + standby)
+// sharing GPUs via DRA, and the standby acquires the flock when the active
+// engine fails. Omitting the field disables failover. Failover requires that
+// `experimental.gpuMemoryService` is also set, and `experimental.failover.mode`
+// must match `experimental.gpuMemoryService.mode` (enforced by the validation
+// webhook). Also requires the `nvidia.com/dynamo-kube-discovery-mode: container`
+// annotation on the DGD. The v1alpha1 `enabled` flag is dropped here to follow
+// the standard Kubernetes pattern of "presence == opt-in"; conversion from
+// v1alpha1 maps `enabled:false` (with or without a populated payload) to an
+// absent field, with the original payload preserved via an origin annotation
+// when present.
 //
-// Exposed under `DynamoComponentDeploymentSharedSpec.Experimental.Failover`
+// Exposed under `DynamoComponentDeploymentSharedSpec.experimental.failover`
 // in v1beta1 -- see ExperimentalSpec for the stability caveat.
 type FailoverSpec struct {
-	// Mode selects the failover deployment topology. Must match
+	// mode selects the failover deployment topology. Must match
 	// `experimental.gpuMemoryService.mode`.
-	// +kubebuilder:default=intraPod
-	// +kubebuilder:validation:Enum=intraPod;interPod
 	// +optional
+	// +kubebuilder:default=IntraPod
+	// +kubebuilder:validation:Enum=IntraPod;InterPod
 	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
-	// NumShadows is the number of shadow (standby) engine containers per rank.
-	// Reserved for future use; the operator currently creates exactly one shadow.
+	// numShadows is the number of shadow (standby) engine containers per
+	// rank. Reserved for future use; the operator currently creates exactly
+	// one shadow.
+	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1
-	// +optional
 	NumShadows int32 `json:"numShadows,omitempty"`
 }
 
@@ -245,30 +256,31 @@ const (
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
-// ServiceCheckpointConfig configures checkpointing for a DGD service.
-// Setting `experimental.checkpoint` opts the service into checkpointing.
+// ComponentCheckpointConfig configures checkpointing for a DGD component.
+// Setting `experimental.checkpoint` opts the component into checkpointing.
 // Omitting the field disables it. The v1alpha1 `enabled` flag is dropped here
 // to follow the standard Kubernetes pattern of "presence == opt-in";
 // conversion from v1alpha1 maps `enabled:false` (with or without a populated
 // payload) to an absent field, with the original payload preserved via an
 // origin annotation when present.
-// +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When checkpoint is configured, either checkpointRef or both identity.model and identity.backendFramework must be specified"
-type ServiceCheckpointConfig struct {
-	// Mode defines how checkpoint creation is handled.
-	// Auto: DGD controller creates the DynamoCheckpoint CR automatically.
-	// Manual: user must create the DynamoCheckpoint CR.
+// +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)",message="When checkpoint is configured, either checkpointRef or identity must be specified"
+type ComponentCheckpointConfig struct {
+	// mode defines how checkpoint creation is handled.
+	// `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
+	// `Manual`: user must create the DynamoCheckpoint CR.
 	// +optional
 	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
 
-	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-	// When set, this service's Identity is ignored and the referenced checkpoint is used directly.
+	// checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
+	// When set, this component's `identity` is ignored and the referenced
+	// checkpoint is used directly.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Identity defines the checkpoint identity for hash computation.
-	// Used when Mode is Auto or when looking up existing checkpoints.
-	// Required when checkpointRef is not specified.
+	// identity defines the checkpoint identity for hash computation. Used
+	// when `mode` is `Auto` or when looking up existing checkpoints.
+	// Required when `checkpointRef` is not specified.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 }
@@ -277,65 +289,68 @@ type ServiceCheckpointConfig struct {
 // Two checkpoints with the same identity hash are considered equivalent.
 // Duplicated from v1alpha1 to keep the v1beta1 type graph self-contained. The
 // DynamoCheckpoint resource itself is not graduating in this MR; this type is
-// only used as a sub-field of ServiceCheckpointConfig.
+// only used as a sub-field of `ComponentCheckpointConfig`.
 type DynamoCheckpointIdentity struct {
-	// Model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
-	// BackendFramework is the runtime framework (vllm, sglang, trtllm).
+	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
-	// DynamoVersion is the Dynamo platform version. If empty, the version is not
-	// included in the identity hash, so checkpoints remain compatible across releases.
+	// dynamoVersion is the Dynamo platform version. If empty, the version is
+	// not included in the identity hash, so checkpoints remain compatible
+	// across releases.
 	// +optional
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
-	// TensorParallelSize is the tensor parallel configuration.
+	// tensorParallelSize is the tensor parallel configuration.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
-	// PipelineParallelSize is the pipeline parallel configuration.
+	// pipelineParallelSize is the pipeline parallel configuration.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
-	// Dtype is the data type (fp16, bf16, fp8, etc.).
+	// dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
-	// MaxModelLen is the maximum sequence length.
+	// maxModelLen is the maximum sequence length.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
-	// ExtraParameters are additional parameters that affect the checkpoint hash.
+	// extraParameters are additional parameters that affect the checkpoint hash.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }
 
 // SpecTopologyConstraint defines deployment-level topology placement requirements.
 type SpecTopologyConstraint struct {
-	// TopologyProfile is the name of the ClusterTopology CR that defines the
+	// topologyProfile is the name of the ClusterTopology CR that defines the
 	// topology hierarchy for this deployment.
 	// +kubebuilder:validation:MinLength=1
 	TopologyProfile string `json:"topologyProfile"`
 
-	// PackDomain is the default topology domain to pack pods within.
-	// Optional; omit when only services carry constraints.
+	// packDomain is the default topology domain to pack pods within.
+	// Optional; omit when only components carry constraints.
 	// +optional
 	PackDomain TopologyDomain `json:"packDomain,omitempty"`
 }
 
-// TopologyConstraint defines service-level topology placement requirements.
-// The topology profile is inherited from the deployment-level SpecTopologyConstraint.
+// TopologyConstraint defines component-level topology placement requirements.
+// The topology profile is inherited from the deployment-level
+// `SpecTopologyConstraint`.
 type TopologyConstraint struct {
-	// PackDomain is the topology domain to pack pods within. Must match a
+	// packDomain is the topology domain to pack pods within. Must match a
 	// domain defined in the referenced ClusterTopology CR.
 	PackDomain TopologyDomain `json:"packDomain"`
 }
@@ -346,7 +361,7 @@ type TopologyConstraint struct {
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 type TopologyDomain string
 
-// ComponentKind represents the type of underlying Kubernetes resource backing a DGD service.
+// ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
 // +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet
 type ComponentKind string
 
@@ -381,11 +396,11 @@ const (
 
 // RestartStatus contains the status of a graph-level restart.
 type RestartStatus struct {
-	// ObservedID is the restart ID currently being processed. Matches Restart.ID in the spec.
+	// observedID is the restart ID currently being processed. Matches `Restart.id` in the spec.
 	ObservedID string `json:"observedID,omitempty"`
-	// Phase is the phase of the restart.
+	// phase is the phase of the restart.
 	Phase RestartPhase `json:"phase,omitempty"`
-	// InProgress contains the names of the services currently being restarted.
+	// inProgress contains the names of the components currently being restarted.
 	// +optional
 	InProgress []string `json:"inProgress,omitempty"`
 }
@@ -398,73 +413,80 @@ const (
 	RollingUpdatePhasePending    RollingUpdatePhase = "Pending"
 	RollingUpdatePhaseInProgress RollingUpdatePhase = "InProgress"
 	RollingUpdatePhaseCompleted  RollingUpdatePhase = "Completed"
+	RollingUpdatePhaseFailed     RollingUpdatePhase = "Failed"
 	RollingUpdatePhaseNone       RollingUpdatePhase = ""
 )
 
 // RollingUpdateStatus tracks the progress of an operator-managed rolling update.
 type RollingUpdateStatus struct {
-	// Phase indicates the current phase of the rolling update.
+	// phase indicates the current phase of the rolling update.
 	// +optional
 	Phase RollingUpdatePhase `json:"phase,omitempty"`
 
-	// StartTime is when the rolling update began.
+	// startTime is when the rolling update began.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
-	// EndTime is when the rolling update completed (successfully or failed).
+	// endTime is when the rolling update completed (successfully or failed).
 	// +optional
 	EndTime *metav1.Time `json:"endTime,omitempty"`
 
-	// UpdatedServices is the list of services that have completed the rolling update.
+	// updatedComponents is the list of components that have completed the
+	// rolling update.
 	// +optional
-	UpdatedServices []string `json:"updatedServices,omitempty"`
+	UpdatedComponents []string `json:"updatedComponents,omitempty"`
 }
 
-// ServiceCheckpointStatus contains checkpoint information for a single service.
-type ServiceCheckpointStatus struct {
-	// CheckpointName is the name of the associated Checkpoint CR.
+// ComponentCheckpointStatus contains checkpoint information for a single component.
+type ComponentCheckpointStatus struct {
+	// checkpointName is the name of the associated DynamoCheckpoint CR.
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
-	// IdentityHash is the computed hash of the checkpoint identity.
+	// identityHash is the computed hash of the checkpoint identity.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint was visible to the worker at startup.
+	// ready indicates if the checkpoint was visible to the worker at startup.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }
 
-// ServiceReplicaStatus contains replica information for a single service.
-type ServiceReplicaStatus struct {
-	// ComponentKind is the underlying resource kind (e.g. "PodClique", "Deployment", "LeaderWorkerSet").
+// ComponentReplicaStatus contains replica information for a single component.
+type ComponentReplicaStatus struct {
+	// componentKind is the underlying resource kind (e.g. `PodClique`,
+	// `Deployment`, `LeaderWorkerSet`).
 	ComponentKind ComponentKind `json:"componentKind"`
 
-	// ComponentName is the name of the primary underlying resource.
-	// Deprecated: use ComponentNames. During rolling updates this reflects the new (target) component name.
-	// +kubebuilder:deprecatedversion:warning="ComponentName is deprecated, view ComponentNames instead"
+	// componentName is the name of the primary underlying Kubernetes
+	// resource backing this Dynamo component.
+	// Deprecated: use `componentNames`. During rolling updates this reflects
+	// the new (target) resource name only.
+	// +kubebuilder:deprecatedversion:warning="componentName is deprecated, view componentNames instead"
 	ComponentName string `json:"componentName"`
 
-	// ComponentNames is the list of underlying resource names for this service.
-	// During normal operation this contains a single name; during rolling updates it
-	// contains both old and new component names.
+	// componentNames is the list of underlying Kubernetes resource names for
+	// this Dynamo component. During normal operation this contains a single
+	// name; during rolling updates it contains both old and new resource names.
 	// +optional
 	ComponentNames []string `json:"componentNames,omitempty"`
 
-	// Replicas is the total number of non-terminated replicas.
+	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
-	// UpdatedReplicas is the number of replicas at the current/desired revision.
+	// updatedReplicas is the number of replicas at the current/desired revision.
 	// +kubebuilder:validation:Minimum=0
 	UpdatedReplicas int32 `json:"updatedReplicas"`
 
-	// ReadyReplicas is the number of ready replicas. Populated for PodClique,
-	// Deployment, and LeaderWorkerSet; not available for PodCliqueScalingGroup.
+	// readyReplicas is the number of ready replicas. Populated for
+	// `PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for
+	// `PodCliqueScalingGroup`.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	ReadyReplicas *int32 `json:"readyReplicas,omitempty"`
 
-	// AvailableReplicas is the number of available replicas. Populated for Deployment
-	// and PodCliqueScalingGroup; not available for PodClique or LeaderWorkerSet.
+	// availableReplicas is the number of available replicas. Populated for
+	// `Deployment` and `PodCliqueScalingGroup`; not available for
+	// `PodClique` or `LeaderWorkerSet`.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
