@@ -11887,17 +11887,21 @@ spec:
                       componentName:
                         description: |-
                           componentName is the stable logical identifier for this component within
-                          its DynamoGraphDeployment. For DGD entries it is required and must be
-                          unique within the parent's `spec.components` list (uniqueness is
-                          enforced by the API server via the `+listMapKey=componentName` marker).
-                          For standalone DynamoComponentDeployment objects it may be omitted; the
-                          defaulting webhook will populate it from `metadata.name` on admission.
+                          its DynamoGraphDeployment. It must be unique within the parent's
+                          `spec.components` list (uniqueness is enforced by the API server via the
+                          `+listMapKey=componentName` marker, which also requires this field to be
+                          `Required` at the schema level).
+
+                          For standalone DynamoComponentDeployment objects, the defaulting webhook
+                          populates `componentName` from `metadata.name` on admission, so users
+                          typically do not need to set it explicitly.
 
                           `componentName` is decoupled from the underlying Kubernetes resource
                           name so that the operator can rename child workloads (e.g. suffixing
                           worker DCDs with a hash during rolling updates) without losing the
                           stable identity that downstream consumers (labels, status maps,
                           DGDSA references, planner RBAC, EPP filters) depend on.
+                        minLength: 1
                         type: string
                       componentType:
                         description: |-
@@ -20340,6 +20344,8 @@ spec:
                         required:
                           - packDomain
                         type: object
+                    required:
+                      - componentName
                     type: object
                   maxItems: 25
                   type: array
