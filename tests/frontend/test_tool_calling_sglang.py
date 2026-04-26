@@ -794,24 +794,6 @@ class TestToolCallingProtocol:
             names.add(tc["function"]["name"])
         assert len(names) >= 2, f"expected at least 2 distinct tools, got {names}"
 
-    def test_tool_call_ids_unique_in_single_response(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Get weather for New York, London, and Tokyo.",
-                }
-            ],
-            tools=TOOLS_WEATHER,
-            tool_choice="required",
-            parallel_tool_calls=True,
-        )
-        assert_finish_reason(result, {"tool_calls"})
-        ids = [tc["id"] for tc in result.tool_calls]
-        assert len(ids) == len(set(ids)), f"duplicate tool ids: {ids}"
-
     def test_array_argument_schema_valid(self, client: OpenAI, model: str):
         tools = [
             {

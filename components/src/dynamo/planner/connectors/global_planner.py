@@ -218,15 +218,32 @@ class GlobalPlannerConnector(PlannerConnector):
 
     async def wait_for_deployment_ready(self, include_planner: bool = True):
         """
-        Wait for deployment to be ready (no-op for GlobalPlanner).
+        Wait for the pool's own workers to be ready.
 
-        The GlobalPlanner manages deployment state, so we don't need to
-        wait locally in delegating mode.
+        Even though GlobalPlanner handles cluster-wide orchestration, the
+        pool Planner still reads its own workers' DynamoWorkerMetadata CRs
+        for capability discovery (``get_worker_info``). Without a local
+        wait, ``_async_init`` runs within milliseconds of pod entry — long
+        before workers register MDC — so ``get_worker_info`` falls back to
+        defaults with ``context_length`` / ``max_kv_tokens`` unset and
+        load-scaling silently disables itself for the pod's lifetime.
+
+        Mirror the standalone path by delegating to the pool-local
+        KubernetesConnector. If no local connector is available (e.g.
+        running outside a cluster), fall back to the previous no-op so
+        out-of-cluster callers are not blocked.
         """
+        local = self._get_local_k8s_connector()
+        if local is None:
+            logger.info(
+                "GlobalPlannerConnector: no local KubernetesConnector available, "
+                "skipping deployment ready check"
+            )
+            return
         logger.info(
-            "GlobalPlannerConnector: Skipping deployment ready check "
-            "(GlobalPlanner manages deployment state)"
+            "GlobalPlannerConnector: waiting for pool-local workers to be ready"
         )
+        await local.wait_for_deployment_ready(include_planner=include_planner)
 
     def _get_local_k8s_connector(self) -> Optional[KubernetesConnector]:
         """Lazily build a KubernetesConnector scoped to the pool's own DGD.

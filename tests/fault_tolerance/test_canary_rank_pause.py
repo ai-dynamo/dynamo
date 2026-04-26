@@ -56,11 +56,6 @@ class RankPauseScenario:
 
 def _scenarios_for(backend: str) -> list:
     mark = getattr(pytest.mark, backend)
-    prefill_marks = [mark]
-    if backend == "sglang":
-        prefill_marks.append(
-            pytest.mark.skip(reason="sglang prefill canary fix needed")
-        )
     return [
         pytest.param(
             RankPauseScenario(f"{backend}-agg", backend, "aggregated", 0),
@@ -71,7 +66,7 @@ def _scenarios_for(backend: str) -> list:
             RankPauseScenario(
                 f"{backend}-disagg-prefill", backend, "disaggregated_same_gpu", 0
             ),
-            marks=prefill_marks,
+            marks=mark,
             id=f"{backend}-disagg-prefill",
         ),
         pytest.param(

@@ -45,7 +45,7 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--endpoint-types", default="chat,completions")
         parser.add_argument("--discovery-backend", default="etcd")
         parser.add_argument("--request-plane", default="tcp")
-        parser.add_argument("--event-plane", default="nats")
+        parser.add_argument("--event-plane", default=None)
         args = parser.parse_args(argv)
 
         engine = cls(
