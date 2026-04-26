@@ -243,9 +243,16 @@ runs:
               ;;
           esac
 
+          # Add coverage flags if enabled
+          COVERAGE_FLAGS=""
+          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+            echo "📊 Coverage collection enabled"
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
+          fi
+
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -262,6 +269,10 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+        if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+          DOCKER_ENV_FLAGS+=(--env "COVERAGE_FILE=/workspace/test-results/.coverage")
+          DOCKER_ENV_FLAGS+=(--env "PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src")
+        fi
 
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
