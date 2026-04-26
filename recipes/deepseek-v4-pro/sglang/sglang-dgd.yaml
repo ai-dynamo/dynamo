@@ -18,7 +18,7 @@ spec:
           mountPoint: /models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/kprashanth:sglang-dsv4-v2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1
           imagePullPolicy: Always
           env:
             - name: HF_HOME
@@ -54,7 +54,7 @@ spec:
             value: "true"
             effect: NoSchedule
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/kprashanth:sglang-dsv4-v2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1
           imagePullPolicy: Always
           workingDir: /workspace
           command:
