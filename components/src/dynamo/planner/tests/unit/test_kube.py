@@ -70,7 +70,9 @@ def test_kubernetes_api_init_with_namespace(mock_custom_api, mock_config):
     assert api.current_namespace == "custom-namespace"
 
 
-def test_kubernetes_api_init_without_namespace(mock_custom_api, mock_config, mock_namespace):
+def test_kubernetes_api_init_without_namespace(
+    mock_custom_api, mock_config, mock_namespace
+):
     """Test KubernetesAPI initialization without custom namespace"""
     api = KubernetesAPI()
     # Should use the default namespace logic
