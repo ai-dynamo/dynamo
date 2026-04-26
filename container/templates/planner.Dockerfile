@@ -78,6 +78,7 @@ COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/bash /bin/bash
 COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /usr/bin/tail /bin/tail
+COPY --from=planner_builder /usr/bin/head /bin/head
 COPY --from=planner_builder /usr/bin/env /bin/env
 COPY --from=planner_builder /usr/bin/tar /bin/tar
 COPY --from=planner_builder /bin/gzip /bin/gzip
