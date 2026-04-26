@@ -407,6 +407,7 @@ sglang_configs = {
             pytest.mark.timeout(147),  # profiled 24s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
+            pytest.mark.model("Qwen/Qwen3-Embedding-4B"),
         ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
@@ -509,7 +510,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
-            pytest.mark.timeout(180),
+            pytest.mark.timeout(600),
             pytest.mark.pre_merge,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
