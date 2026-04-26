@@ -43,7 +43,6 @@ COPY --from=dynamo_src /usr/lib/x86_64-linux-gnu/ucx /usr/lib/x86_64-linux-gnu/u
 COPY --from=dynamo_src /usr/lib/x86_64-linux-gnu/libuc*.so* /usr/lib/x86_64-linux-gnu/
 
 COPY --from=dynamo_src /usr/local/lib/python3.12/dist-packages/nixl* /usr/local/lib/python3.12/dist-packages/
-COPY --from=dynamo_src /usr/local/lib/python3.12/dist-packages/nixl_cu12* /usr/local/lib/python3.12/dist-packages/
 
 COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder /opt/dynamo/wheelhouse/ai_dynamo-*.whl /opt/dynamo/wheelhouse/
@@ -56,7 +55,7 @@ RUN pip install --no-cache-dir --force-reinstall --no-deps \
 COPY --from=wheel_builder /workspace/components/src/dynamo /workspace/components/src/dynamo
 
 # Avoid /workspace/sglang shadowing the dynamo Python package.
-ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH}
+ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH:-}
 
 ENV SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
     SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1
