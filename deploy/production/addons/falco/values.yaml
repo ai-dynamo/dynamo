@@ -13,6 +13,20 @@ collectors:
   kubernetes:
     enabled: true
 
+extra:
+  initContainers:
+    - name: tune-inotify
+      image: busybox:1.37
+      securityContext:
+        privileged: true
+      command:
+        - /bin/sh
+        - -c
+      args:
+        - |
+          sysctl -w fs.inotify.max_user_instances=8192
+          sysctl -w fs.inotify.max_queued_events=32768
+
 falco:
   json_output: true
   priority: warning

@@ -3,3 +3,6 @@
 
 controllerManager:
   replicas: 1
+
+webhookServerSecret:
+  enabled: false

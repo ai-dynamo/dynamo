@@ -19,11 +19,27 @@ fileConfigs:
       tag kubernetes.*
       read_from_head true
       <parse>
-        @type json
-        time_key time
-        time_type string
-        time_format %Y-%m-%dT%H:%M:%S.%NZ
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_type string
+          time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+          keep_time_key false
+        </pattern>
+        <pattern>
+          format regexp
+          expression /^(?<time>.+) (?<stream>stdout|stderr)( (.))? (?<log>.*)$/
+          time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+          keep_time_key false
+        </pattern>
       </parse>
+    </source>
+    <source>
+      @type prometheus
+      bind 0.0.0.0
+      port 24231
+      metrics_path /metrics
     </source>
   02_filters.conf: |-
     <filter kubernetes.**>
