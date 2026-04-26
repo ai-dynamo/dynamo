@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG DYNAMO_SRC_IMAGE=dynamo:latest-vllm-runtime
+ARG DSV4_BASE_IMAGE=vllm/vllm-openai:deepseekv4-cu130
+
+FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
+
+FROM ${DSV4_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        ca-certificates jq curl \
+    && apt list --upgradable 2>/dev/null | tail -n +2 | grep 'jammy-' | awk -F/ '{print $1}' | xargs -r apt-get install -y --only-upgrade \
+    && rm -rf /var/lib/apt/lists/*
+
+# Patch vLLM sparse attn indexer (drop unsupported topk=1024). Remove once
+# https://github.com/vllm-project/vllm/pull/40760 lands in the base image.
+RUN sed -i 's/(512, 1024, 2048)/(512, 2048)/' \
+      /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer.py
+
+COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
+ENV PATH=/usr/local/bin/etcd:${PATH}
+
+COPY --from=dynamo_src /usr/local/ucx /usr/local/ucx
+ENV PATH=/usr/local/ucx/bin:${PATH}
+
+COPY --from=dynamo_src /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+
+COPY --from=dynamo_src /opt/dynamo/wheelhouse /opt/dynamo/wheelhouse
+RUN pip install --no-cache-dir \
+        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl
+
+COPY --from=dynamo_src /workspace/components/src/dynamo /workspace/components/src/dynamo
+ENV PYTHONPATH=/workspace/components/src:${PYTHONPATH:-}
+
+WORKDIR /workspace
+
+ENV VLLM_USE_FLASHINFER_SAMPLER=1
+
+ENTRYPOINT []
+CMD ["bash"]

@@ -5,26 +5,26 @@ Aggregated-serving recipe for **DeepSeek-V4-Flash** on Dynamo. Two backends are 
 | Variant | Backend | Manifest | GPUs | Topology | Container |
 |---------|---------|----------|------|----------|-----------|
 | **vllm-agg**   | vLLM   | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 4x B200 | DP=4 + Expert Parallel, TP=1                   | Custom build (vLLM's V4 stack not in a stock release) |
-| **sglang-agg** | SGLang | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 4x B200 | TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](sglang/container/) |
+| **sglang-agg** | SGLang | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 4x B200 | TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](../container/) |
 
 Status: **Experimental** (Day-0). Modality: text only.
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
+1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
 2. **GPU cluster** with at least 4 B200 GPUs available on one node.
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.
 4. **Container image.** Pick the path that matches your variant:
 
-   - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see [`sglang/container/README.md`](sglang/container/README.md).
+   - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 
-   - **vLLM** (`vllm-agg`): DeepSeek-V4 is not in a stock vLLM release yet, so the recipe ships its own reference Dockerfile. Build in two steps:
+   - **vLLM** (`vllm-agg`): DeepSeek-V4 is not in a stock vLLM release yet, so a reference Dockerfile ships in [`recipes/deepseek-v4/container/`](../container/) (shared with the V4-Pro recipe). Build in two steps:
 
-     1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
-     2. Build the DeepSeek-V4-Flash overlay on top of it using [`vllm/container/Dockerfile.dsv4-vllm`](vllm/container/Dockerfile.dsv4-vllm). See [`vllm/container/README.md`](vllm/container/README.md) for build args and troubleshooting. From the repo root:
+     1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
+     2. Build the dsv4 overlay on top of it using [`vllm/Dockerfile.dsv4.vllm.b200`](../container/vllm/Dockerfile.dsv4.vllm.b200). See [`recipes/deepseek-v4/container/README.md`](../container/README.md) for build args. From the repo root:
 
         ```bash
-        docker build -f recipes/deepseek-v4-flash/vllm/container/Dockerfile.dsv4-vllm \
+        docker build -f recipes/deepseek-v4/container/vllm/Dockerfile.dsv4.vllm.b200 \
           -t <your-registry>/vllm-dsv4:<tag> .
         ```
 
@@ -225,7 +225,7 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### SGLang-specific
 
-- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`sglang/container/README.md`](sglang/container/README.md).
+- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 - **DeepGEMM / FlashInfer warmup.** `SGLANG_JIT_DEEPGEMM_PRECOMPILE=0` + `SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1` skip the slow precompile and use the fast warmup path. `--disable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup; the dsv4 base ships pre-tuned defaults.
 - **NCCL / Gloo.** `NCCL_CUMEM_ENABLE=1` is set for V4 NCCL collectives on Blackwell. `GLOO_SOCKET_IFNAME=eth0` pins Gloo to the standard pod interface.
 
