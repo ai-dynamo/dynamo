@@ -11,3 +11,4 @@ Use these runbooks after Argo CD has synced the production profile:
 - [Backup and restore](backup-restore.md)
 - [Kubernetes upgrade checks](upgrade-checks.md)
 - [DeepSeek REAP SGLang](deepseek-reap-sglang.md)
+- [GPU Operator on k3s with host drivers](gpu-operator-k3s-host-driver.md)
