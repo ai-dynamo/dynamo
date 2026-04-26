@@ -27,16 +27,25 @@ spec:
       name: dynamocomponentdeployments.nvidia.com
       jsonPointers:
         - /metadata/annotations/dynamo.nvidia.com~1operator-version
+        - /spec/conversion
+        - /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/extraPodSpec/properties/mainContainer/required
+        - /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/extraPodSpec/required
     - group: apiextensions.k8s.io
       kind: CustomResourceDefinition
       name: dynamographdeployments.nvidia.com
       jsonPointers:
         - /metadata/annotations/dynamo.nvidia.com~1operator-version
+        - /spec/conversion
+        - /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/services/additionalProperties/properties/extraPodSpec/properties/mainContainer/required
+        - /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/services/additionalProperties/properties/extraPodSpec/required
     - group: apps
       kind: StatefulSet
       name: dynamo-platform-nats
       namespace: dynamo-system
+      managedFieldsManagers:
+        - k3s
       jsonPointers:
+        - /spec/template/spec/tolerations
         - /spec/volumeClaimTemplates/0/status
   syncPolicy:
     automated:
