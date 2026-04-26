@@ -68,7 +68,7 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
-  - 'container/Dockerfile.test'
+  - 'container/templates/test.Dockerfile'
 
 core:
   - *ci

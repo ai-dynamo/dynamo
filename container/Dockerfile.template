@@ -13,7 +13,7 @@
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
         {% include "templates/frontend.Dockerfile" %}
-    {% elif target == "planner" %}
+    {% elif target == "planner" or target == "planner-test" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
         {% include "templates/planner.Dockerfile" %}

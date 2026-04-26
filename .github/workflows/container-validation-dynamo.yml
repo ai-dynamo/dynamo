@@ -147,7 +147,7 @@ jobs:
             --progress=plain \
             --push \
             --platform linux/amd64 \
-            -f container/Dockerfile.test \
+            -f container/rendered.Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.define_image_tag.outputs.runtime_remote_tag }} \
             ${CACHE_ARGS} \
             -t ${{ steps.define_image_tag.outputs.test_remote_tag }} .

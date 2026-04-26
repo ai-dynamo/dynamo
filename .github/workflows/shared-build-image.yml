@@ -284,13 +284,18 @@ jobs:
             NO_CACHE_ARG="--no-cache"
           fi
 
+          if [[ "${{ inputs.target }}" == "planner" || "${{ inputs.target }}" == "planner-test" ]]; then
+            DOCKERFILE_ARGS="-f container/rendered.Dockerfile --target planner_test"
+          else
+            DOCKERFILE_ARGS="-f container/rendered.Dockerfile.test --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }}"
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
             --platform ${{ inputs.platform }} \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
+            ${DOCKERFILE_ARGS} \
             ${CACHE_ARGS} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
