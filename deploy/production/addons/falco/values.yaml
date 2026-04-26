@@ -3,6 +3,16 @@
 
 driver:
   kind: modern_ebpf
+  modernEbpf:
+    cpusForEachBuffer: 16
+
+resources:
+  limits:
+    cpu: 1
+    memory: 2Gi
+  requests:
+    cpu: 100m
+    memory: 512Mi
 
 falcosidekick:
   enabled: true
