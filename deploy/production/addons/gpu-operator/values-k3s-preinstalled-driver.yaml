@@ -3,3 +3,6 @@
 
 driver:
   enabled: false
+
+hostPaths:
+  driverInstallDir: /

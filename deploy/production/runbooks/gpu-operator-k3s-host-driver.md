@@ -44,7 +44,7 @@ valueFiles:
   - $values/deploy/production/addons/gpu-operator/values-k3s-preinstalled-driver.yaml
 ```
 
-The first k3s overlay points GPU Operator at the k3s containerd template and socket. The preinstalled-driver overlay sets `driver.enabled=false`, leaving GPU Operator to manage the toolkit, device plugin, GFD, and DCGM exporter.
+The first k3s overlay points GPU Operator at the k3s containerd template and socket. The preinstalled-driver overlay sets `driver.enabled=false` and maps the driver install directory to `/`, leaving GPU Operator to manage the toolkit, device plugin, GFD, and DCGM exporter.
 
 ## Verify
 
