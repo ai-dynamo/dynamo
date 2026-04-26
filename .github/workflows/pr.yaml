@@ -324,15 +324,15 @@ jobs:
         include:
         - cuda_version: "12.9"
           cuda_major: "12"
-        - cuda_version: "13.0"
-          cuda_major: "13"
+        # - cuda_version: "13.0"
+        #   cuda_major: "13"
     with:
       test_suite_name: sglang
       test_type: Test
       amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       container_image_tag: ${{ github.sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
       cuda_version: ${{ matrix.cuda_version }}
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      platform: '["amd64"]' #, "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1

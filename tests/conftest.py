@@ -389,6 +389,16 @@ def _models_dir_env(pytestconfig):
     orig = _apply_models_dir_env(models_dir)
     pytestconfig._original_hf_hub_cache = _get_original_hf_hub_cache(orig)
     pytestconfig._models_dir_value = models_dir
+    cache_entries = sorted(Path(models_dir).glob("models--*"))
+    print(
+        f"\n[models-dir] Local cache active: {models_dir} ({len(cache_entries)} entries)",
+        flush=True,
+    )
+    print(f"[models-dir] HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')}", flush=True)
+    print(
+        f"[models-dir] HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE', 'not set yet')}",
+        flush=True,
+    )
     try:
         yield
     finally:
@@ -412,6 +422,15 @@ def predownload_models(pytestconfig, _models_dir_env):
     models = getattr(pytestconfig, "models_to_download", None)
     if pytestconfig.getoption("--models-dir"):
         missing = _missing_from_hf_cache(list(models)) if models else []
+        if models:
+            for m in sorted(models):
+                status = "⚠️  MISSING" if m in missing else "✅ cached"
+                print(f"[predownload_models] {status}: {m}", flush=True)
+        if missing:
+            print(
+                f"[predownload_models] {len(missing)} model(s) not in local cache — will download before going offline",
+                flush=True,
+            )
         for m in missing:
             logging.warning(
                 "Model '%s' not found in --models-dir cache; downloading from network.",

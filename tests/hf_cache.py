@@ -215,5 +215,15 @@ def _missing_from_hf_cache(model_ids: list) -> list:
     return [
         m
         for m in model_ids
-        if not (cache_path / ("models--" + m.replace("/", "--"))).exists()
+        if not _is_complete_in_hf_cache(cache_path / ("models--" + m.replace("/", "--")))
     ]
+
+
+def _is_complete_in_hf_cache(model_dir: Path) -> bool:
+    """Return True only if the model directory looks like a valid, complete HF cache entry.
+
+    A directory that exists but lacks snapshots/ (e.g. from a partial download or
+    a broken cache seed) would pass a plain .exists() check yet fail at load time.
+    """
+    snapshots = model_dir / "snapshots"
+    return model_dir.is_dir() and snapshots.is_dir() and any(snapshots.iterdir())
