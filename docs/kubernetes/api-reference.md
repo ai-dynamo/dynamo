@@ -1869,10 +1869,9 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1alpha1 remains the storage version; conversion between served versions is
+handled by the operator's conversion webhook
+(see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
 

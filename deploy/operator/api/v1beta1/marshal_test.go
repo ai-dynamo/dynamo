@@ -45,31 +45,28 @@ func TestDGDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "sglang-agg", Namespace: "jsm"},
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{
+			Components: []DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "decode",
-					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						ComponentType: ComponentType("worker"),
-						PodTemplate: &corev1.PodTemplateSpec{
-							// Deliberately no ObjectMeta fields set: this
-							// mirrors the ConvertTo output for a stored
-							// v1alpha1 object with no ExtraPodMetadata.
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "main",
-										Image: "my-registry/sglang-runtime:my-tag",
-										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{
-												"nvidia.com/gpu": resource.MustParse("1"),
-											},
+					ComponentName: "decode",
+					ComponentType: ComponentType("worker"),
+					PodTemplate: &corev1.PodTemplateSpec{
+						// Deliberately no ObjectMeta fields set: this
+						// mirrors the ConvertTo output for a stored
+						// v1alpha1 object with no ExtraPodMetadata.
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "main",
+									Image: "my-registry/sglang-runtime:my-tag",
+									Resources: corev1.ResourceRequirements{
+										Limits: corev1.ResourceList{
+											"nvidia.com/gpu": resource.MustParse("1"),
 										},
 									},
 								},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -81,7 +78,7 @@ func TestDGDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 	t.Logf("marshaled: %s", string(b))
 
 	m := unmarshalToMap(t, b)
-	svcs := m["spec"].(map[string]any)["services"].([]any)
+	svcs := m["spec"].(map[string]any)["components"].([]any)
 	pt := svcs[0].(map[string]any)["podTemplate"].(map[string]any)
 	if _, ok := pt["metadata"]; ok {
 		t.Errorf("expected podTemplate.metadata to be absent after normalization, got: %v", pt["metadata"])
@@ -96,20 +93,17 @@ func TestDGDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 func TestDGDMarshal_PreservesNonEmptyPodTemplateMetadata(t *testing.T) {
 	dgd := &DynamoGraphDeployment{
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{
+			Components: []DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "decode",
-					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						PodTemplate: &corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{
-								Labels: map[string]string{"k": "v"},
-							},
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: "main", Image: "x"}},
-							},
+					ComponentName: "decode",
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"k": "v"},
 						},
-					},
-				},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "x"}},
+						},
+					}},
 			},
 		},
 	}
@@ -118,7 +112,7 @@ func TestDGDMarshal_PreservesNonEmptyPodTemplateMetadata(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	m := unmarshalToMap(t, b)
-	pt := m["spec"].(map[string]any)["services"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)
+	pt := m["spec"].(map[string]any)["components"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)
 	md, ok := pt["metadata"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected podTemplate.metadata to be preserved when user set labels, got: %v", pt["metadata"])
@@ -137,22 +131,19 @@ func TestDGDMarshal_PreservesNonEmptyPodTemplateMetadata(t *testing.T) {
 func TestDGDMarshal_StripsEmptyContainerResources(t *testing.T) {
 	dgd := &DynamoGraphDeployment{
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{
+			Components: []DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "frontend",
-					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								InitContainers: []corev1.Container{
-									{Name: "wait", Image: "busybox"},
-								},
-								Containers: []corev1.Container{
-									{Name: "main", Image: "frontend"},
-								},
+					ComponentName: "frontend",
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							InitContainers: []corev1.Container{
+								{Name: "wait", Image: "busybox"},
+							},
+							Containers: []corev1.Container{
+								{Name: "main", Image: "frontend"},
 							},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -161,7 +152,7 @@ func TestDGDMarshal_StripsEmptyContainerResources(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	m := unmarshalToMap(t, b)
-	spec := m["spec"].(map[string]any)["services"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
+	spec := m["spec"].(map[string]any)["components"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
 	if c0, ok := spec["containers"].([]any)[0].(map[string]any); ok {
 		if _, has := c0["resources"]; has {
 			t.Errorf("expected empty resources to be stripped on containers[0], got: %v", c0["resources"])
@@ -179,25 +170,22 @@ func TestDGDMarshal_StripsEmptyContainerResources(t *testing.T) {
 func TestDGDMarshal_PreservesNonEmptyContainerResources(t *testing.T) {
 	dgd := &DynamoGraphDeployment{
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{
+			Components: []DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "worker",
-					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{
-									Name:  "main",
-									Image: "x",
-									Resources: corev1.ResourceRequirements{
-										Limits: corev1.ResourceList{
-											"nvidia.com/gpu": resource.MustParse("1"),
-										},
+					ComponentName: "worker",
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "main",
+								Image: "x",
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										"nvidia.com/gpu": resource.MustParse("1"),
 									},
-								}},
-							},
+								},
+							}},
 						},
-					},
-				},
+					}},
 			},
 		},
 	}
@@ -206,7 +194,7 @@ func TestDGDMarshal_PreservesNonEmptyContainerResources(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	m := unmarshalToMap(t, b)
-	c := m["spec"].(map[string]any)["services"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	c := m["spec"].(map[string]any)["components"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
 	res, ok := c["resources"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected resources to be preserved when limits are set, got: %v", c["resources"])
@@ -267,15 +255,12 @@ func TestDCDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 func TestDGDMarshal_PreservesScalingAdapterSentinel(t *testing.T) {
 	dgd := &DynamoGraphDeployment{
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{{
-				Name: "decode",
-				DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-					ScalingAdapter: &ScalingAdapter{},
-					PodTemplate: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "x"}}},
-					},
-				},
-			}},
+			Components: []DynamoComponentDeploymentSharedSpec{{
+				ComponentName:  "decode",
+				ScalingAdapter: &ScalingAdapter{},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "x"}}},
+				}}},
 		},
 	}
 	b, err := json.Marshal(dgd)
@@ -284,8 +269,8 @@ func TestDGDMarshal_PreservesScalingAdapterSentinel(t *testing.T) {
 	}
 	t.Logf("marshaled: %s", string(b))
 	m := unmarshalToMap(t, b)
-	svc := m["spec"].(map[string]any)["services"].([]any)[0].(map[string]any)
-	sa, ok := svc["scalingAdapter"]
+	comp := m["spec"].(map[string]any)["components"].([]any)[0].(map[string]any)
+	sa, ok := comp["scalingAdapter"]
 	if !ok {
 		t.Fatalf("expected scalingAdapter sentinel to be preserved, but field was stripped")
 	}
@@ -324,36 +309,30 @@ func TestMarshal_RoundTrip(t *testing.T) {
 			},
 		},
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{
+			Components: []DynamoComponentDeploymentSharedSpec{
 				{
-					Name: "decode",
-					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						ComponentType: ComponentType("worker"),
-						Replicas:      ptrInt32(2),
-						PodTemplate: &corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "decode"}},
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{
-									Name:  "main",
-									Image: "my-registry/sglang-runtime:my-tag",
-									Env:   []corev1.EnvVar{{Name: "X", Value: "1"}},
-									Resources: corev1.ResourceRequirements{
-										Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
-									},
-								}},
-							},
+					ComponentName: "decode",
+					ComponentType: ComponentType("worker"),
+					Replicas:      ptrInt32(2),
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "decode"}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "main",
+								Image: "my-registry/sglang-runtime:my-tag",
+								Env:   []corev1.EnvVar{{Name: "X", Value: "1"}},
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+								},
+							}},
 						},
-					},
-				},
+					}},
 				{
-					Name: "prefill",
-					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						ScalingAdapter: &ScalingAdapter{},
-						PodTemplate: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "x"}}},
-						},
-					},
-				},
+					ComponentName:  "prefill",
+					ScalingAdapter: &ScalingAdapter{},
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "x"}}},
+					}},
 			},
 		},
 	}
@@ -414,7 +393,7 @@ func TestDGDListMarshal_StripsArtifactsOnItems(t *testing.T) {
 		t.Fatalf("items missing or wrong length: %v", m["items"])
 	}
 	for i, raw := range items {
-		pt := raw.(map[string]any)["spec"].(map[string]any)["services"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)
+		pt := raw.(map[string]any)["spec"].(map[string]any)["components"].([]any)[0].(map[string]any)["podTemplate"].(map[string]any)
 		if _, has := pt["metadata"]; has {
 			t.Errorf("items[%d] podTemplate.metadata should be stripped, got: %v", i, pt["metadata"])
 		}
@@ -540,22 +519,19 @@ func newDGDWithEmptyPodTemplateMetadata(name string) DynamoGraphDeployment {
 		TypeMeta:   metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "jsm"},
 		Spec: DynamoGraphDeploymentSpec{
-			Services: []DynamoComponentDeploymentService{{
-				Name: "decode",
-				DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-					PodTemplate: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{
-								Name:  "main",
-								Image: "my-registry/sglang-runtime:my-tag",
-								Resources: corev1.ResourceRequirements{
-									Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
-								},
-							}},
-						},
+			Components: []DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "my-registry/sglang-runtime:my-tag",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+							},
+						}},
 					},
-				},
-			}},
+				}}},
 		},
 	}
 }

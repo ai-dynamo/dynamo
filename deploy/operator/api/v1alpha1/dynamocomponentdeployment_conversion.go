@@ -46,6 +46,17 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		return err
 	}
 
+	// v1beta1 requires DCD.spec.componentName (it is the +listMapKey on
+	// DGD.spec.components and is enforced as Required by the schema). When a
+	// v1alpha1 caller omits ServiceName -- the common case for standalone
+	// DCDs -- fall back to ObjectMeta.Name so the converted object is
+	// schema-valid. The deferred defaulting webhook (see DEP #8069) will
+	// own the same defaulting at admission time once v1beta1 is the storage
+	// version.
+	if dst.Spec.ComponentName == "" {
+		dst.Spec.ComponentName = dst.ObjectMeta.Name
+	}
+
 	convertDCDStatusTo(&src.Status, &dst.Status)
 	return nil
 }
@@ -81,7 +92,7 @@ func convertDCDStatusTo(src *DynamoComponentDeploymentStatus, dst *v1beta1.Dynam
 		}
 	}
 	if src.Service != nil {
-		dst.Service = convertReplicaStatusTo(src.Service)
+		dst.Component = convertReplicaStatusTo(src.Service)
 	}
 	// PodSelector is dropped in v1beta1 (the field was never populated by the
 	// controller). No annotation is needed: the round-trip invariant is on
@@ -96,8 +107,8 @@ func convertDCDStatusFrom(src *v1beta1.DynamoComponentDeploymentStatus, dst *Dyn
 			dst.Conditions = append(dst.Conditions, *c.DeepCopy())
 		}
 	}
-	if src.Service != nil {
-		dst.Service = convertReplicaStatusFrom(src.Service)
+	if src.Component != nil {
+		dst.Service = convertReplicaStatusFrom(src.Component)
 	}
 }
 

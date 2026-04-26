@@ -61,6 +61,11 @@ func dcdRoundTripFromV1beta1(t *testing.T, src *v1beta1.DynamoComponentDeploymen
 func TestDCD_RoundTrip_Empty(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "empty",
+			},
+		},
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
@@ -75,6 +80,7 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "min",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Replicas:      &replicas,
 			},
@@ -91,6 +97,7 @@ func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "pt",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -127,6 +134,7 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "exp",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Experimental: &v1beta1.ExperimentalSpec{
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
@@ -152,12 +160,17 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 func TestDCD_RoundTrip_Status(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "status", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "status",
+			},
+		},
 		Status: v1beta1.DynamoComponentDeploymentStatus{
 			ObservedGeneration: 4,
 			Conditions: []metav1.Condition{
 				{Type: "Available", Status: metav1.ConditionTrue, Reason: "AllReady", Message: "ok"},
 			},
-			Service: &v1beta1.ServiceReplicaStatus{
+			Component: &v1beta1.ComponentReplicaStatus{
 				ComponentKind:   v1beta1.ComponentKindDeployment,
 				ComponentName:   "dcd-0",
 				Replicas:        3,
@@ -239,6 +252,7 @@ func TestDCD_JSONRoundTrip_Bytes(t *testing.T) {
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:    "json",
 				ComponentType:    v1beta1.ComponentTypeWorker,
 				Replicas:         &replicas,
 				SharedMemorySize: &shm,
