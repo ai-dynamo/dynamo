@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Standalone test image — layers test deps on top of a pre-built runtime image.
-# Usage: docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
+# Generic test image — layers test deps on top of a pre-built runtime image.
+# Not for distroless targets (e.g. planner); those use --target planner_test
+# with the main rendered.Dockerfile instead.
+# Usage: docker build -f container/rendered.Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 

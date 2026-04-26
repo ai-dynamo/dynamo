@@ -1,7 +1,7 @@
 name: 'Docker Test Image Build'
 description: 'Build and push a Dynamo test image from an existing runtime image base'
 
-# Builds container/Dockerfile.test on top of a pre-built runtime image.
+# Builds container/rendered.Dockerfile.test on top of a pre-built runtime image.
 # Unlike docker-remote-build this action has no sccache wiring, no build metrics,
 # and always uses the "test-<framework>-..." cache namespace.
 
@@ -76,7 +76,7 @@ runs:
           ${PUSH_ARGS} \
           ${NO_CACHE_ARG} \
           --platform "linux/${{ inputs.platform }}" \
-          -f container/Dockerfile.test \
+          -f container/rendered.Dockerfile.test \
           --build-arg "BASE_IMAGE=${{ inputs.base_image }}" \
           ${CACHE_ARGS} \
           -t "${{ inputs.image_tag }}" .

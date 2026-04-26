@@ -5,6 +5,7 @@
 issues/
 plans/
 *rendered.Dockerfile
+*rendered.Dockerfile.test
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
