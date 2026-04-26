@@ -3,19 +3,22 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GPU Operator on k3s with Host Drivers
+# GPU Operator on k3s with CIQ Host Drivers
 
-Use this path for k3s nodes where the host OS owns NVIDIA driver installation. This is useful when GPU Operator driver containers cannot resolve the host kernel packages, such as custom Rocky or CIQ kernel builds.
+Use this path for k3s nodes where the host OS needs to install the NVIDIA driver before GPU Operator runs. This is useful when GPU Operator driver containers cannot resolve the host kernel packages, such as custom Rocky or CIQ kernel builds.
 
 ## Install the host driver
 
 ```bash
 sudo dnf install -y dnf-plugins-core
+sudo dnf install -y epel-release
 
 if [[ ! -f /etc/yum.repos.d/cuda-rhel9.repo ]]; then
-  sudo dnf config-manager addrepo \
-    --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+  sudo dnf config-manager --add-repo \
+    https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
 fi
+
+sudo sed -i 's/gpgcheck=1/gpgcheck=0/' /etc/yum.repos.d/cuda-rhel9.repo
 
 sudo dnf install -y \
   "kernel-devel-$(uname -r)" \
@@ -35,16 +38,15 @@ nvidia-smi -L
 
 ## Sync GPU Operator
 
-Add both k3s overlays to the `gpu-operator` Argo CD application:
+Add the k3s overlay to the `gpu-operator` Argo CD application:
 
 ```yaml
 valueFiles:
   - $values/deploy/production/addons/gpu-operator/values.yaml
   - $values/deploy/production/addons/gpu-operator/values-k3s.yaml
-  - $values/deploy/production/addons/gpu-operator/values-k3s-preinstalled-driver.yaml
 ```
 
-The first k3s overlay points GPU Operator at the k3s containerd template and socket. The preinstalled-driver overlay sets `driver.enabled=false` and maps the driver install directory to `/`, leaving GPU Operator to manage the toolkit, device plugin, GFD, and DCGM exporter.
+The k3s overlay points GPU Operator at the k3s containerd template and socket. Leave `driver.enabled` at the chart default so the GPU Operator driver pod can detect the preinstalled driver and proceed with toolkit, device plugin, GFD, and DCGM exporter reconciliation.
 
 ## Verify
 

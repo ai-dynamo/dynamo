@@ -102,7 +102,7 @@ Optional integrations are stored under `gitops/optional` and are not deployed by
 
 Integration examples are stored under `examples/`, including KEDA scaling through `DynamoGraphDeploymentScalingAdapter`, External Secrets for Hugging Face tokens, an AWS `ClusterSecretStore`, kube-no-trouble upgrade checks, an OpenTelemetry collector for Dynamo traces, and the DeepSeek REAP SGLang deployment described in `runbooks/deepseek-reap-sglang.md`.
 
-The `addons/gpu-operator/values-k3s.yaml` overlay is available for k3s validation clusters. If those k3s nodes already manage NVIDIA drivers on the host, also use `addons/gpu-operator/values-k3s-preinstalled-driver.yaml`. Keep these overlays out of the baseline root app unless the target fleet standardizes on k3s.
+The `addons/gpu-operator/values-k3s.yaml` overlay is available for k3s validation clusters. Keep it out of the baseline root app unless the target fleet standardizes on k3s.
 
 ## Dynamo Integration Values
 
