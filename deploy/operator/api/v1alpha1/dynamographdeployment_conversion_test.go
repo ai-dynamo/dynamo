@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"maps"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -824,6 +825,33 @@ func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep-me"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
+	}
+}
+
+// TestDGD_ConvertFrom_DuplicateComponentNames asserts that ConvertFrom
+// returns an error when the v1beta1 spec.components list has two entries
+// with the same componentName, instead of silently overwriting the earlier
+// entry on map insertion. The CRD's +listType=map +listMapKey=componentName
+// already enforces uniqueness at the API server, but the conversion path is
+// also reachable from in-memory unit tests and other code paths that bypass
+// CRD validation, so the conversion code defends in depth.
+func TestDGD_ConvertFrom_DuplicateComponentNames(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dup", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "frontend"},
+				{ComponentName: "frontend"},
+			},
+		},
+	}
+	a := &DynamoGraphDeployment{}
+	err := a.ConvertFrom(src)
+	if err == nil {
+		t.Fatalf("ConvertFrom with duplicate componentName must error, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate component name") {
+		t.Errorf("error message should mention duplicate component name, got %q", err.Error())
 	}
 }
 

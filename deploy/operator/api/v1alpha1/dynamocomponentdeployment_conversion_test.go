@@ -31,20 +31,6 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-// dcdRoundTripFromV1alpha1 converts a v1alpha1 DCD to v1beta1 and back.
-func dcdRoundTripFromV1alpha1(t *testing.T, src *DynamoComponentDeployment) *DynamoComponentDeployment {
-	t.Helper()
-	b := &v1beta1.DynamoComponentDeployment{}
-	if err := src.ConvertTo(b); err != nil {
-		t.Fatalf("ConvertTo: %v", err)
-	}
-	out := &DynamoComponentDeployment{}
-	if err := out.ConvertFrom(b); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	return out
-}
-
 func dcdRoundTripFromV1beta1(t *testing.T, src *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeployment {
 	t.Helper()
 	a := &DynamoComponentDeployment{}
@@ -68,7 +54,7 @@ func TestDCD_RoundTrip_Empty(t *testing.T) {
 		},
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
-	if diff := cmp.Diff(src, got); diff != "" {
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -87,7 +73,7 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 		},
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
-	if diff := cmp.Diff(src, got); diff != "" {
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -146,7 +132,7 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 		},
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
-	if diff := cmp.Diff(src, got); diff != "" {
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -180,7 +166,7 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 		},
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
-	if diff := cmp.Diff(src, got); diff != "" {
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -211,22 +197,71 @@ func TestDCD_FromV1alpha1_AnnotationPreservedFields(t *testing.T) {
 			},
 		},
 	}
-	got := dcdRoundTripFromV1alpha1(t, src)
+
+	// Manually drive the round-trip so we can assert that the intermediate
+	// v1beta1 object actually carries the "nvidia.com/dcd-*" origin
+	// annotations for v1alpha1-only fields (this is the contract the
+	// v1alpha1-first round-trip relies on; if the carrier silently stops
+	// emitting them, the equality check below would still pass for the
+	// wrong reason).
+	b := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(b); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	// Suffix list deliberately excludes "service-name" (DGD-only suffix:
+	// for standalone DCDs ServiceName flows directly into ComponentName)
+	// and "shared-memory-origin" (only emitted for the empty-struct edge
+	// case; SharedMemorySpec{Disabled:true} is canonically encoded as
+	// SharedMemorySize=0 without an annotation).
+	for _, suffix := range []string{
+		"sub-component-type",
+		"dynamo-namespace",
+		"autoscaling",
+		"ingress",
+		"scaling-adapter-disabled",
+		"gms-disabled-payload",
+		"annotations",
+		"labels",
+	} {
+		key := "nvidia.com/dcd-" + suffix
+		if _, ok := b.ObjectMeta.Annotations[key]; !ok {
+			t.Errorf("expected intermediate v1beta1 carrier annotation %q, got %v", key, b.ObjectMeta.Annotations)
+		}
+	}
+
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(b); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
 
-// TestDCD_ConvertFrom_ScrubsLingeringAnnotations checks that a stale
-// "nvidia.com/dcd-*" annotation is dropped by ConvertFrom.
+// TestDCD_ConvertFrom_ScrubsLingeringAnnotations pins the consume-then-scrub
+// contract of ConvertFrom: known-suffix "nvidia.com/dcd-*" origin annotations
+// are consumed (applied to the resulting v1alpha1 fields and then removed),
+// unknown "nvidia.com/dcd-*" annotations are scrubbed, and unrelated user
+// annotations are preserved verbatim.
 func TestDCD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "scrub",
 			Namespace: "ns",
 			Annotations: map[string]string{
+				// Known suffix carrying a v1alpha1-only field: must be
+				// applied to dst.Spec.DynamoNamespace AND removed from
+				// the resulting object's annotation map.
+				"nvidia.com/dcd-dynamo-namespace": "legacy-ns",
+				// Unknown suffix: nothing on the v1alpha1 side maps to
+				// it, so the scrub must drop it.
 				"nvidia.com/dcd-unknown-suffix": "stale",
 				"user/keep":                     "kept",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "scrub",
 			},
 		},
 	}
@@ -234,8 +269,16 @@ func TestDCD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	if err := a.ConvertFrom(src); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if _, stale := a.ObjectMeta.Annotations["nvidia.com/dcd-unknown-suffix"]; stale {
-		t.Errorf("stale dcd- annotation was not scrubbed: %v", a.ObjectMeta.Annotations)
+	if a.Spec.DynamoNamespace == nil || *a.Spec.DynamoNamespace != "legacy-ns" {
+		t.Errorf("expected known-suffix annotation to be consumed into Spec.DynamoNamespace=legacy-ns, got %v", a.Spec.DynamoNamespace)
+	}
+	for _, k := range []string{
+		"nvidia.com/dcd-dynamo-namespace",
+		"nvidia.com/dcd-unknown-suffix",
+	} {
+		if _, present := a.ObjectMeta.Annotations[k]; present {
+			t.Errorf("nvidia.com/dcd-* annotation %q must not survive ConvertFrom: %v", k, a.ObjectMeta.Annotations)
+		}
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
@@ -243,7 +286,10 @@ func TestDCD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 }
 
 // TestDCD_JSONRoundTrip_Bytes asserts byte-identical JSON representation
-// across a v1beta1 -> v1alpha1 -> v1beta1 round-trip.
+// across a v1beta1 -> v1alpha1 -> v1beta1 round-trip. The PodTemplate carries
+// an empty PodTemplateSpec.ObjectMeta and a Container with empty Resources so
+// the v1beta1 MarshalJSON normalizer (which strips zero-value
+// podTemplate.metadata{} and containers[*].resources{}) is exercised.
 func TestDCD_JSONRoundTrip_Bytes(t *testing.T) {
 	shm := resource.MustParse("4Gi")
 	replicas := int32(2)
@@ -257,6 +303,17 @@ func TestDCD_JSONRoundTrip_Bytes(t *testing.T) {
 				Replicas:         &replicas,
 				SharedMemorySize: &shm,
 				ScalingAdapter:   &v1beta1.ScalingAdapter{},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:      "main",
+								Image:     "dynamo:latest",
+								Resources: corev1.ResourceRequirements{},
+							},
+						},
+					},
+				},
 			},
 		},
 	}
