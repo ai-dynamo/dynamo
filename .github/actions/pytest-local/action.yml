@@ -149,7 +149,9 @@ runs:
         for IMG_CACHE in /home/dynamo/.cache/huggingface /root/.cache/huggingface; do
           if [ -d "${IMG_CACHE}" ]; then
             echo "📦 Seeding HF cache: ${IMG_CACHE} → ${HF_HOME}"
+            _SEED_T0=$(date +%s)
             cp -rn "${IMG_CACHE}/." "${HF_HOME}/" 2>/dev/null || true
+            echo "📦 Cache seed complete in $(( $(date +%s) - _SEED_T0 ))s"
             break
           fi
         done

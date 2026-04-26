@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -330,12 +331,14 @@ def download_models(model_list=None, ignore_weights=False, cache_dir=None):
         ) from exc
 
     failures = []
+    t_total = time.perf_counter()
     for model_id in model_list:
         logging.info(
             f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )
 
         try:
+            t0 = time.perf_counter()
             if ignore_weights:
                 # Weight file patterns to exclude (based on hub.rs implementation)
                 weight_patterns = [
@@ -358,11 +361,16 @@ def download_models(model_list=None, ignore_weights=False, cache_dir=None):
                     repo_id=model_id,
                     cache_dir=cache_dir,
                 )
-            logging.info(f"Successfully pre-downloaded: {model_id}")
+            elapsed = time.perf_counter() - t0
+            logging.info(f"[download] {model_id}: {elapsed:.1f}s")
 
         except Exception as exc:
-            logging.error(f"Failed to pre-download {model_id}: {exc}")
+            elapsed = time.perf_counter() - t0
+            logging.error(f"[download] {model_id}: FAILED after {elapsed:.1f}s — {exc}")
             failures.append(f"{model_id}: {exc}")
+
+    total_elapsed = time.perf_counter() - t_total
+    logging.info(f"[download] Total: {len(model_list)} model(s) in {total_elapsed:.1f}s")
 
     if failures:
         raise RuntimeError(
@@ -436,6 +444,7 @@ def predownload_models(pytestconfig, _models_dir_env):
                 "Model '%s' not found in --models-dir cache; downloading from network.",
                 m,
             )
+        t_lock = time.perf_counter()
         with FileLock(_download_lock_path):
             if missing:
                 original_cache = pytestconfig._original_hf_hub_cache
@@ -448,12 +457,19 @@ def predownload_models(pytestconfig, _models_dir_env):
                 if original_cache != os.environ.get("HF_HUB_CACHE"):
                     _merge_models_dir_into_writable_cache(models_dir, original_cache)
                     os.environ["HF_HUB_CACHE"] = original_cache
+        lock_elapsed = time.perf_counter() - t_lock
+        print(
+            f"[predownload_models] Download phase complete in {lock_elapsed:.1f}s "
+            f"({'no downloads needed' if not missing else f'{len(missing)} model(s) downloaded'})",
+            flush=True,
+        )
         _enable_offline_with_mistral_patch()
         try:
             yield
         finally:
             _disable_offline_with_mistral_patch()
         return
+    t_lock = time.perf_counter()
     with FileLock(_download_lock_path):
         if models:
             logging.info(
@@ -462,7 +478,12 @@ def predownload_models(pytestconfig, _models_dir_env):
             download_models(model_list=list(models))
         else:
             download_models()
-
+    lock_elapsed = time.perf_counter() - t_lock
+    print(
+        f"[predownload_models] Download phase complete in {lock_elapsed:.1f}s "
+        f"({len(models) if models else 0} model(s))",
+        flush=True,
+    )
     _enable_offline_with_mistral_patch()
     yield
     _disable_offline_with_mistral_patch()
