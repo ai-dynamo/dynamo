@@ -1,5 +1,5 @@
 ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime
-ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-blackwell
+ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-blackwell@sha256:e5fd4104528660214740dd1a7a38fc3bf212160daea7dc6af0e331fb7530b059
 
 # ---------- Stage 1: Build dynamo wheels with V4 parsers ----------
 FROM quay.io/pypa/manylinux_2_28_x86_64 AS wheel_builder
