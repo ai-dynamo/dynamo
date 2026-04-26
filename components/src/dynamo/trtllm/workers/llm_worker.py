@@ -22,14 +22,11 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import (
-    TOKENIZER_ALIASES,
-    KvCacheConnectorConfig,
-    LoadFormat,
-)
+from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig, LoadFormat
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
+from tensorrt_llm.tokenizer import TOKENIZER_ALIASES
 from torch.cuda import device_count
 from transformers import AutoConfig
 
