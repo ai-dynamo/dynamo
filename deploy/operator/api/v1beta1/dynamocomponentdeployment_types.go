@@ -70,19 +70,23 @@ type DynamoComponentDeploymentSpec struct {
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 type DynamoComponentDeploymentSharedSpec struct {
 	// componentName is the stable logical identifier for this component within
-	// its DynamoGraphDeployment. For DGD entries it is required and must be
-	// unique within the parent's `spec.components` list (uniqueness is
-	// enforced by the API server via the `+listMapKey=componentName` marker).
-	// For standalone DynamoComponentDeployment objects it may be omitted; the
-	// defaulting webhook will populate it from `metadata.name` on admission.
+	// its DynamoGraphDeployment. It must be unique within the parent's
+	// `spec.components` list (uniqueness is enforced by the API server via the
+	// `+listMapKey=componentName` marker, which also requires this field to be
+	// `Required` at the schema level).
+	//
+	// For standalone DynamoComponentDeployment objects, the defaulting webhook
+	// populates `componentName` from `metadata.name` on admission, so users
+	// typically do not need to set it explicitly.
 	//
 	// `componentName` is decoupled from the underlying Kubernetes resource
 	// name so that the operator can rename child workloads (e.g. suffixing
 	// worker DCDs with a hash during rolling updates) without losing the
 	// stable identity that downstream consumers (labels, status maps,
 	// DGDSA references, planner RBAC, EPP filters) depend on.
-	// +optional
-	ComponentName string `json:"componentName,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ComponentName string `json:"componentName"`
 
 	// componentType indicates the role of this component within a Dynamo
 	// graph. Drives port mapping, frontend detection, planner RBAC, and the
