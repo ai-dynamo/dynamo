@@ -370,7 +370,9 @@ def download_models(model_list=None, ignore_weights=False, cache_dir=None):
             failures.append(f"{model_id}: {exc}")
 
     total_elapsed = time.perf_counter() - t_total
-    logging.info(f"[download] Total: {len(model_list)} model(s) in {total_elapsed:.1f}s")
+    logging.info(
+        f"[download] Total: {len(model_list)} model(s) in {total_elapsed:.1f}s"
+    )
 
     if failures:
         raise RuntimeError(
@@ -438,6 +440,10 @@ def predownload_models(pytestconfig, _models_dir_env):
             print(
                 f"[predownload_models] {len(missing)} model(s) not in local cache — will download before going offline",
                 flush=True,
+            )
+        if not missing:
+            logging.info(
+                "All models present in --models-dir cache — no downloads needed"
             )
         for m in missing:
             logging.warning(
@@ -518,7 +524,9 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
                     f"Downloading tokenizers for {len(missing)} models missing from --models-dir cache "
                     f"to writable cache {original_cache}\nModels: {missing}"
                 )
-                download_models(model_list=missing, ignore_weights=True, cache_dir=original_cache)
+                download_models(
+                    model_list=missing, ignore_weights=True, cache_dir=original_cache
+                )
                 if original_cache != os.environ.get("HF_HUB_CACHE"):
                     _merge_models_dir_into_writable_cache(models_dir, original_cache)
                     os.environ["HF_HUB_CACHE"] = original_cache
