@@ -261,7 +261,9 @@ check_gpu_operator() {
 check_argocd() {
     print_section "Checking Argo CD"
 
-    if kubectl_has_crd applications.argoproj.io && kubectl_has_pods app.kubernetes.io/part-of=argocd; then
+    if kubectl_has_crd applications.argoproj.io && \
+        (kubectl_has_pods app.kubernetes.io/part-of=argocd || \
+            kubectl_get pods -n argocd -l app.kubernetes.io/name=argocd-application-controller --no-headers | grep -q .); then
         DETAIL="Argo CD Application CRD and controller pods are present"
         print_status "$GREEN" "PASS: $DETAIL"
         return 0
