@@ -293,7 +293,7 @@ jobs:
             NO_CACHE_ARG="--no-cache"
           fi
 
-          if [[ "${{ inputs.target }}" == "planner" || "${{ inputs.target }}" == "planner-test" ]]; then
+          if [[ "${{ inputs.target }}" == "planner" ]]; then
             DOCKERFILE_ARGS="-f container/rendered.Dockerfile --target planner_test"
           else
             DOCKERFILE_ARGS="-f container/rendered.Dockerfile.test --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }}"

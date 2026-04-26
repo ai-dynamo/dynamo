@@ -225,6 +225,13 @@ def render_test(args, context, script_dir):
     with open(f"{script_dir}/{filename}", "w") as f:
         f.write(cleaned)
 
+    if args.show_result:
+        print("###################")
+        print("# Test Dockerfile #")
+        print("###################")
+        print(cleaned)
+        print("###################")
+
     print(f"INFO: Generated test Dockerfile written to {script_dir}/{filename}")
 
 
