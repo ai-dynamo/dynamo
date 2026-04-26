@@ -19,6 +19,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"testing"
 	"time"
@@ -801,8 +802,8 @@ func TestDGD_FromV1alpha1_Resources_ForwardOnly(t *testing.T) {
 
 // TestDGD_ConvertFrom_ScrubsLingeringAnnotations asserts that a stale
 // "nvidia.com/dgd-comp-*" annotation that does not correspond to any current
-// service is dropped by ConvertFrom. This protects users from leaking origin
-// annotations across deletions.
+// component is dropped by ConvertFrom. This protects users from leaking
+// origin annotations across deletions.
 func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -823,6 +824,99 @@ func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep-me"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
+	}
+}
+
+// TestScrubStaleDGDAnnotations_HyphenatedNames directly exercises
+// scrubStaleDGDAnnotations on cases where either the component name or the
+// origin suffix (or both) contain "-". This is a regression test for a
+// previous bug where the function split the key on the first "-" after the
+// "nvidia.com/dgd-comp-" prefix and used the leading segment as the
+// component name; that approach silently dropped origin annotations for
+// hyphenated active components such as "aa-frontend" or "bb-worker".
+func TestScrubStaleDGDAnnotations_HyphenatedNames(t *testing.T) {
+	type tc struct {
+		name       string
+		components map[string]*DynamoComponentDeploymentSharedSpec
+		anns       map[string]string
+		wantKept   []string
+		wantGone   []string
+	}
+	cases := []tc{
+		{
+			name: "active hyphen-name component with multi-hyphen suffix is kept",
+			components: map[string]*DynamoComponentDeploymentSharedSpec{
+				"aa-frontend": {},
+			},
+			anns: map[string]string{
+				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref": "ref",
+				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace":     "ns",
+				"user/keep-me": "kept",
+			},
+			wantKept: []string{
+				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref",
+				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace",
+				"user/keep-me",
+			},
+		},
+		{
+			name: "stale hyphen-name annotations are scrubbed when no match",
+			components: map[string]*DynamoComponentDeploymentSharedSpec{
+				"keeper": {},
+			},
+			anns: map[string]string{
+				"nvidia.com/dgd-comp-old-worker-frontend-sidecar-ref": "stale",
+				"nvidia.com/dgd-comp-deleted-dynamo-namespace":        "stale",
+				"nvidia.com/dgd-comp-keeper-dynamo-namespace":         "active",
+			},
+			wantKept: []string{"nvidia.com/dgd-comp-keeper-dynamo-namespace"},
+			wantGone: []string{
+				"nvidia.com/dgd-comp-old-worker-frontend-sidecar-ref",
+				"nvidia.com/dgd-comp-deleted-dynamo-namespace",
+			},
+		},
+		{
+			name: "shorter active prefix does not falsely match longer stale name",
+			components: map[string]*DynamoComponentDeploymentSharedSpec{
+				// "aa" is active; "aa-frontend" is NOT. An annotation key
+				// like "...-aa-frontend-..." is ambiguous (could be "aa"
+				// + suffix "frontend-..." OR "aa-frontend" + suffix). The
+				// scrub function treats it as "for aa" and keeps it; that
+				// is acceptable because the encoding cannot distinguish.
+				"aa": {},
+			},
+			anns: map[string]string{
+				"nvidia.com/dgd-comp-aa-frontend-sidecar-ref": "ambiguous-keep",
+				"nvidia.com/dgd-comp-zz-dynamo-namespace":     "stale",
+			},
+			wantKept: []string{"nvidia.com/dgd-comp-aa-frontend-sidecar-ref"},
+			wantGone: []string{"nvidia.com/dgd-comp-zz-dynamo-namespace"},
+		},
+		{
+			name:       "non-dgd-comp annotations are never touched",
+			components: map[string]*DynamoComponentDeploymentSharedSpec{},
+			anns: map[string]string{
+				"foo":                      "bar",
+				"nvidia.com/dcd-something": "kept",
+			},
+			wantKept: []string{"foo", "nvidia.com/dcd-something"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj := &metav1.ObjectMeta{Annotations: maps.Clone(c.anns)}
+			scrubStaleDGDAnnotations(obj, c.components)
+			for _, k := range c.wantKept {
+				if _, ok := obj.Annotations[k]; !ok {
+					t.Errorf("expected %q to be kept; got annotations: %v", k, obj.Annotations)
+				}
+			}
+			for _, k := range c.wantGone {
+				if _, ok := obj.Annotations[k]; ok {
+					t.Errorf("expected %q to be scrubbed; got annotations: %v", k, obj.Annotations)
+				}
+			}
+		})
 	}
 }
 
