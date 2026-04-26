@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../apps/00-gpu-operator.yaml
+  - ../apps/05-external-secrets.yaml
+  - ../apps/10-prometheus.yaml
+  - ../apps/20-loki.yaml
+  - ../apps/21-fluentd.yaml
+  - ../apps/30-falco.yaml
+  - ../apps/31-trivy-operator.yaml
+  - ../apps/40-velero.yaml
+  - ../apps/50-kai-scheduler.yaml
+  - ../apps/51-grove.yaml
+  - ../apps/60-dynamo-prometheus-rules.yaml
+  - ../apps/90-dynamo-platform.yaml
+patches:
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Application
+      name: gpu-operator
+    patch: |-
+      - op: add
+        path: /spec/sources/0/helm/valueFiles/-
+        value: $values/deploy/production/addons/gpu-operator/values-k3s.yaml

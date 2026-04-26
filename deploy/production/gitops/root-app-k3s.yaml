@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dynamo-production
+  namespace: argocd
+spec:
+  project: dynamo-production
+  source:
+    repoURL: https://github.com/ai-blaise/k8s-playground.git
+    targetRevision: main
+    path: deploy/production/gitops/k3s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

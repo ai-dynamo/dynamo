@@ -38,15 +38,14 @@ nvidia-smi -L
 
 ## Sync GPU Operator
 
-Add the k3s overlay to the `gpu-operator` Argo CD application:
+Use the k3s root app when installing the production GitOps profile on k3s:
 
-```yaml
-valueFiles:
-  - $values/deploy/production/addons/gpu-operator/values.yaml
-  - $values/deploy/production/addons/gpu-operator/values-k3s.yaml
+```bash
+kubectl apply -f deploy/production/gitops/project.yaml
+kubectl apply -f deploy/production/gitops/root-app-k3s.yaml
 ```
 
-The k3s overlay points GPU Operator at the k3s containerd template and socket. Leave `driver.enabled` at the chart default so the GPU Operator driver pod can detect the preinstalled driver and proceed with toolkit, device plugin, GFD, and DCGM exporter reconciliation.
+The k3s root app renders the standard production app-of-apps tree with the k3s GPU Operator values overlay. That overlay points GPU Operator at the k3s containerd template and socket. Leave `driver.enabled` at the chart default so the GPU Operator driver pod can detect the preinstalled driver and proceed with toolkit, device plugin, GFD, and DCGM exporter reconciliation.
 
 ## Verify
 
