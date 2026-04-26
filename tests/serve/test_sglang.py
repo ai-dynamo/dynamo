@@ -402,6 +402,11 @@ sglang_configs = {
             pytest.mark.gpu_1,
             # No profiled_vram_gib: multimodal_epd.sh uses explicit
             # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
+            # Expected to fail until SGLang release includes the upstream fix:
+            # https://github.com/sgl-project/sglang/pull/22431
+            pytest.mark.xfail(
+                reason="Known upstream SGLang issue for video_e_pd_qwen E/P/D path; expected failure until next SGLang version bump includes sglang#22431."
+            ),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
