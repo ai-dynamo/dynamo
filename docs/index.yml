@@ -28,35 +28,8 @@ navigation:
         path: getting-started/local-installation.md
       - page: Building from Source
         path: getting-started/building-from-source.md
-      - section: Kubernetes Deployment Guide
+      - page: Kubernetes Deployment
         path: kubernetes/README.md
-        contents:
-          - page: Detailed Installation Guide
-            path: kubernetes/installation-guide.md
-          - page: Deploying Your First Model
-            path: kubernetes/dgdr.md
-          - page: Dynamo Operator
-            path: kubernetes/dynamo-operator.md
-          - page: Service Discovery
-            path: kubernetes/service-discovery.md
-          - page: Webhooks
-            path: kubernetes/webhooks.md
-          - page: Minikube Setup
-            path: kubernetes/deployment/minikube.md
-          - page: Managing Models with DynamoModel
-            path: kubernetes/deployment/dynamomodel-guide.md
-          - page: Autoscaling
-            path: kubernetes/autoscaling.md
-          - page: Rolling Update
-            path: kubernetes/rolling-update.md
-          - page: Developing with Tilt
-            path: kubernetes/tilt-dev-setup.md
-          - page: Inference Gateway (GAIE)
-            path: kubernetes/inference-gateway.md
-          - page: Snapshot
-            path: kubernetes/snapshot.md
-          - page: Disagg Communication
-            path: kubernetes/disagg-communication-guide.md
       - page: Contribution Guide
         path: contribution-guide.md
 
@@ -89,6 +62,34 @@ navigation:
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
+      - section: Deployment Guide
+        contents:
+          - page: Detailed Installation Guide
+            path: kubernetes/installation-guide.md
+          - page: Deploying Your First Model
+            path: kubernetes/dgdr.md
+          - page: Dynamo Operator
+            path: kubernetes/dynamo-operator.md
+          - page: Service Discovery
+            path: kubernetes/service-discovery.md
+          - page: Webhooks
+            path: kubernetes/webhooks.md
+          - page: Minikube Setup
+            path: kubernetes/deployment/minikube.md
+          - page: Managing Models with DynamoModel
+            path: kubernetes/deployment/dynamomodel-guide.md
+          - page: Autoscaling
+            path: kubernetes/autoscaling.md
+          - page: Rolling Update
+            path: kubernetes/rolling-update.md
+          - page: Developing with Tilt
+            path: kubernetes/tilt-dev-setup.md
+          - page: Inference Gateway (GAIE)
+            path: kubernetes/inference-gateway.md
+          - page: Snapshot
+            path: kubernetes/snapshot.md
+          - page: Disagg Communication
+            path: kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
