@@ -91,7 +91,6 @@ spec:
             - --skip-server-warmup
             - --cuda-graph-max-bs
             - "32"
-            - --disable-piecewise-cuda-graph
             - --tool-call-parser
             - deepseekv32
             - --reasoning-parser
