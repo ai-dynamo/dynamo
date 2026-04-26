@@ -48,7 +48,7 @@ spec:
                 --tensor-parallel-size 1 \
                 --gpu-memory-utilization 0.85 \
                 --max-model-len 16384 \
-                --disable-log-requests \
+                --no-enable-log-requests \
                 --enable-prefix-caching \
                 --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
