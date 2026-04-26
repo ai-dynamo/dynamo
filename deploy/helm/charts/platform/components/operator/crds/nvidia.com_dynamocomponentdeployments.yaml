@@ -11821,15 +11821,19 @@ spec:
                         failover configures active-passive GPU failover for this component.
                         When set, the main container is cloned into two engine containers
                         (active + standby) sharing GPUs via DRA. Requires
-                        `experimental.gpuMemoryService` to also be set, and
-                        `experimental.failover.mode` must match
-                        `experimental.gpuMemoryService.mode` (enforced by the validation webhook).
+                        `spec.experimental.gpuMemoryService` to also be set, and
+                        `spec.experimental.failover.mode` must match
+                        `spec.experimental.gpuMemoryService.mode` (enforced by the validation
+                        webhook). Inside a DynamoGraphDeployment substitute
+                        `spec.components[*].experimental.…` for `spec.experimental.…`.
                       properties:
                         mode:
                           default: IntraPod
                           description: |-
                             mode selects the failover deployment topology. Must match
-                            `experimental.gpuMemoryService.mode`.
+                            `spec.experimental.gpuMemoryService.mode` (or
+                            `spec.components[*].experimental.gpuMemoryService.mode` inside a
+                            DynamoGraphDeployment).
                           enum:
                             - IntraPod
                             - InterPod
