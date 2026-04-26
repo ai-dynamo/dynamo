@@ -7,6 +7,9 @@ env:
   - name: LOKI_URL
     value: http://loki-gateway.logging.svc.cluster.local/loki/api/v1/push
 
+plugins:
+  - fluent-plugin-grafana-loki
+
 fileConfigs:
   01_sources.conf: |-
     <source>

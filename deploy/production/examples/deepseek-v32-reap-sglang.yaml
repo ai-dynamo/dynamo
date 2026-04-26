@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-reap-sglang
+  labels:
+    app.kubernetes.io/name: deepseek-v32-reap-sglang
+    app.kubernetes.io/part-of: dynamo-production
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: HF_XET_HIGH_PERFORMANCE
+      value: "1"
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: PYTORCH_ALLOC_CONF
+      value: expandable_segments:True,max_split_size_mb:512
+    - name: SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD
+      value: "2048"
+    - name: SGLANG_ENABLE_JIT_DEEPGEMM
+      value: "0"
+    - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+      value: "0"
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "0"
+    - name: NCCL_P2P_LEVEL
+      value: NVL
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
+    decode:
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      sharedMemory:
+        size: 64Gi
+      extraPodSpec:
+        volumes:
+          - name: deepseek-v32-reap-model
+            hostPath:
+              path: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+              type: Directory
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+            - --served-model-name
+            - cerebras/DeepSeek-V3.2-REAP-345B-A37B
+            - --host
+            - 0.0.0.0
+            - --page-size
+            - "16"
+            - --tp
+            - "8"
+            - --dp
+            - "8"
+            - --enable-dp-attention
+            - --trust-remote-code
+            - --kv-cache-dtype
+            - bfloat16
+            - --mem-fraction-static
+            - "0.80"
+            - --fp8-gemm-backend
+            - flashinfer_trtllm
+            - --moe-runner-backend
+            - flashinfer_trtllm
+            - --nsa-prefill-backend
+            - flashmla_sparse
+            - --nsa-decode-backend
+            - flashmla_sparse
+            - --disable-cuda-graph
+            - --disable-flashinfer-autotune
+            - --skip-server-warmup
+            - --cuda-graph-max-bs
+            - "32"
+            - --disable-piecewise-cuda-graph
+            - --tool-call-parser
+            - deepseekv32
+            - --reasoning-parser
+            - deepseek-v3
+          volumeMounts:
+            - name: deepseek-v32-reap-model
+              mountPath: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+              readOnly: true

@@ -14,5 +14,5 @@ collectors:
     enabled: true
 
 falco:
-  jsonOutput: true
+  json_output: true
   priority: warning
