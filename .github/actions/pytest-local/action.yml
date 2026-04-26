@@ -44,6 +44,10 @@ inputs:
     description: 'Path to a pre-staged, read-only HuggingFace model cache on the runner. When set and the path exists, --models-dir is passed to pytest (offline mode, no downloads). Only used when gpu_tests=true.'
     required: false
     default: '/models/ci/models'
+  nvme_dir:
+    description: 'Path to the NVMe directory on the runner. When set, the NVME_ROOT environment variable is set to this path.'
+    required: false
+    default: '/scratch'
 
 runs:
   using: "composite"
@@ -122,13 +126,12 @@ runs:
 
         # NVMe guard: GPU runners mount /scratch (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no /scratch mount.
-        if [[ -d /scratch ]]; then
-          # NVME_ROOT="/scratch"
-          echo "✅ NVMe scratch available — caches will use /scratch"
-          NVME_ROOT="/tmp" # todo: remove this !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        if [[ -d "${{ inputs.nvme_dir }}" ]]; then
+          NVME_ROOT="${{ inputs.nvme_dir }}"
+          echo "✅ NVMe scratch available — caches will use ${NVME_ROOT}"
         else
           NVME_ROOT="/tmp"
-          echo "⚠️  No /scratch — falling back to /tmp (CPU runner)"
+          echo "⚠️  No ${{ inputs.nvme_dir }} — falling back to /tmp (CPU runner)"
         fi
 
         # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
