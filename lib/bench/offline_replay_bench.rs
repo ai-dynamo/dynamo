@@ -3,8 +3,9 @@
 
 //! Rust-native offline replay benchmark entrypoint.
 //!
-//! Useful for profiling replay itself without the Python CLI wrapper. This keeps
-//! the default mocker perf model unless CLI overrides are provided.
+//! Useful for profiling replay itself without the Python CLI wrapper. This
+//! bench intentionally uses the mocker's internal polynomial perf model so the
+//! measurements stay focused on replay and router overhead.
 //!
 //! Run with: cargo bench --package dynamo-bench --bench offline_replay_bench -- --help
 
@@ -80,10 +81,6 @@ struct Args {
     #[arg(long)]
     decode_speedup_ratio: Option<f64>,
 
-    /// Explicit planner profile NPZ to use for perf-model timing
-    #[arg(long)]
-    planner_profile_data: Option<PathBuf>,
-
     /// Optional path to write the full replay report as pretty JSON
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -111,9 +108,6 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
     }
     if let Some(decode_speedup_ratio) = args.decode_speedup_ratio {
         builder = builder.decode_speedup_ratio(decode_speedup_ratio);
-    }
-    if let Some(planner_profile_data) = args.planner_profile_data.as_ref() {
-        builder = builder.planner_profile_data(Some(planner_profile_data.clone()));
     }
     builder
         .build()

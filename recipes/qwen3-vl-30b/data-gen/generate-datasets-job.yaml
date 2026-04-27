@@ -20,7 +20,7 @@ spec:
         fsGroup: 0
       containers:
         - name: generate-datasets
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
