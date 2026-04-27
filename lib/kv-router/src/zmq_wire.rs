@@ -167,7 +167,13 @@ impl KvCacheSpecKind {
             "sink_full_attention" => Self::SinkFullAttention,
             "encoder_only_attention" => Self::EncoderOnlyAttention,
             "cross_attention" => Self::CrossAttention,
-            _ => Self::Unknown,
+            unknown => {
+                tracing::warn!(
+                    kv_cache_spec_kind = unknown,
+                    "Unknown KV cache spec kind; treating KV event as non-main"
+                );
+                Self::Unknown
+            }
         }
     }
 
