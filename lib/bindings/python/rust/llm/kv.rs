@@ -720,8 +720,18 @@ async fn create_kv_router_from_endpoint(
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
             let mut warned = false;
             loop {
-                if let Some(card) = lookup_card().await? {
-                    break Some(card);
+                match lookup_card().await {
+                    Ok(Some(card)) => break Some(card),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Discovery lookup failed while waiting for worker model card; will retry"
+                        );
+                        if std::time::Instant::now() >= deadline {
+                            return Err(e);
+                        }
+                    }
                 }
                 if std::time::Instant::now() >= deadline {
                     break None;
