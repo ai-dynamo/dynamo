@@ -135,6 +135,8 @@ def _log_trtllm_shadow_control_result(method: str, result) -> None:
 
         before = rank_result.get("before") or {}
         after = rank_result.get("after") or {}
+        timings = rank_result.get("timings") or {}
+        release_tag_stats = rank_result.get("release_tag_stats") or []
         rank = after.get("rank", before.get("rank", "unknown"))
         mode = after.get("gms_mode", before.get("gms_mode", "unknown"))
         before_current = before.get("nvml_current_process")
@@ -171,6 +173,7 @@ def _log_trtllm_shadow_control_result(method: str, result) -> None:
             "[Shadow] TRTLLM %s memory rank=%s mode=%s "
             "released_blobs=%s materialized_blobs=%s moe_release=%s moe_restore=%s "
             "pools=%s graphs=%s cleared_buffers=%s cleared_buffer_bytes=%s "
+            "timings=%s "
             "gms_mapping=%s "
             "before(current=%s allocated=%s reserved=%s cached=%s active=%s "
             "inactive=%s non_torch=%s driver=%s gms_weights=%s "
@@ -192,6 +195,11 @@ def _log_trtllm_shadow_control_result(method: str, result) -> None:
             rank_result.get("released_cuda_graphs"),
             rank_result.get("cleared_memory_buffers"),
             _fmt_gib(rank_result.get("cleared_memory_buffer_bytes")),
+            {
+                name: f"{float(value):.3f}s"
+                for name, value in timings.items()
+                if isinstance(value, (int, float))
+            },
             _fmt_gib(rank_result.get("gms_mapping_bytes")),
             _fmt_gib(before_current),
             _fmt_gib(before_allocated),
@@ -227,6 +235,30 @@ def _log_trtllm_shadow_control_result(method: str, result) -> None:
             _fmt_gib(reserved_delta),
             _fmt_gib(driver_delta),
         )
+        if release_tag_stats:
+            formatted_stats = []
+            for stat in release_tag_stats:
+                if not isinstance(stat, dict):
+                    continue
+                formatted_stats.append(
+                    {
+                        "tag": stat.get("tag"),
+                        "blobs": stat.get("released_blobs"),
+                        "pools": stat.get("released_pools"),
+                        "elapsed": f"{float(stat.get('elapsed_s', 0.0)):.3f}s",
+                        "current_delta": _fmt_gib(stat.get("delta_current")),
+                        "reserved_delta": _fmt_gib(stat.get("delta_reserved")),
+                        "before_current": _fmt_gib(stat.get("before_current")),
+                        "after_current": _fmt_gib(stat.get("after_current")),
+                    }
+                )
+            logging.info(
+                "[Shadow] TRTLLM %s release-by-tag rank=%s mode=%s %s",
+                method,
+                rank,
+                mode,
+                formatted_stats,
+            )
 
 
 async def _run_trtllm_shadow_control(engine, method: str, tags: list[str]) -> None:
