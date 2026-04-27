@@ -112,7 +112,11 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: GenerateChunk = {"token_ids": []}
+            # SGLang includes an output index when n>1. Preserve it so the
+            # Rust/OpenAI response layer can keep choices separate; default to
+            # 0 for legacy/non-n chunks.
+            output_idx = res.get("index", 0) or 0
+            out: GenerateChunk = {"token_ids": [], "index": output_idx}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 
@@ -123,6 +127,7 @@ class SglangLLMEngine(LLMEngine):
                     completion_tokens = meta_info.get("completion_tokens", 0)
                     yield {
                         "token_ids": [],
+                        "index": output_idx,
                         "finish_reason": "cancelled",
                         "completion_usage": {
                             "prompt_tokens": prompt_tokens,
@@ -150,6 +155,7 @@ class SglangLLMEngine(LLMEngine):
                 completion_tokens = meta_info.get("completion_tokens", 0)
                 yield {
                     "token_ids": output_ids,
+                    "index": output_idx,
                     "finish_reason": "cancelled",
                     "completion_usage": {
                         "prompt_tokens": prompt_tokens,
@@ -184,6 +190,7 @@ class SglangLLMEngine(LLMEngine):
                 "temperature": sampling_opts.get("temperature"),
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
+                "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
             }
@@ -192,6 +199,7 @@ class SglangLLMEngine(LLMEngine):
                 "temperature": request.get("temperature"),
                 "top_p": request.get("top_p"),
                 "top_k": request.get("top_k"),
+                "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
             }
         return {k: v for k, v in param_mapping.items() if v is not None}

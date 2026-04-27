@@ -63,6 +63,8 @@ class SglangUtils:
             sampling_params["top_p"] = sampling_options.top_p
         if sampling_options.top_k is not None:
             sampling_params["top_k"] = sampling_options.top_k
+        if sampling_options.n is not None:
+            sampling_params["n"] = sampling_options.n
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
         if stop_conditions.ignore_eos:
@@ -159,6 +161,9 @@ class StreamProcessor:
 
                     output = {
                         "token_ids": output_ids,
+                        # Preserve SGLang's choice index for n>1 multimodal
+                        # streams; older/non-n chunks are choice 0.
+                        "index": res.get("index", 0) or 0,
                         "text": res.get("text", ""),
                         "finished": False,
                     }
