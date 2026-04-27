@@ -45,7 +45,6 @@ use crate::protocols::common::preprocessor::{
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
-use dynamo_agents::trace::{AgentRequestMetrics, WorkerInfo};
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
@@ -1485,42 +1484,12 @@ impl
                         "agent_context present but request tracker is missing; emitting partial trace"
                     );
                 }
-                let worker = request_tracker.as_ref().and_then(|tracker| {
-                    tracker.get_worker_info().map(|worker| WorkerInfo {
-                        prefill_worker_id: worker.prefill_worker_id,
-                        prefill_dp_rank: worker.prefill_dp_rank,
-                        decode_worker_id: worker.decode_worker_id,
-                        decode_dp_rank: worker.decode_dp_rank,
-                    })
-                });
-                dynamo_agents::trace::emit_request_end(
-                    agent_context,
-                    AgentRequestMetrics {
-                        request_id,
-                        model: request_model,
-                        input_tokens: request_tracker
-                            .as_ref()
-                            .and_then(|tracker| tracker.isl_tokens().map(|v| v as u64)),
-                        output_tokens: request_tracker.as_ref().map(|tracker| tracker.osl_tokens()),
-                        cached_tokens: request_tracker
-                            .as_ref()
-                            .and_then(|tracker| tracker.cached_tokens().map(|v| v as u64)),
-                        request_received_ms: request_tracker
-                            .as_ref()
-                            .map(|tracker| tracker.request_received_epoch_ms())
-                            .unwrap_or(0),
-                        ttft_ms: request_tracker
-                            .as_ref()
-                            .and_then(|tracker| tracker.ttft_ms()),
-                        total_time_ms: request_tracker
-                            .as_ref()
-                            .and_then(|tracker| tracker.total_time_ms()),
-                        queue_depth: request_tracker
-                            .as_ref()
-                            .and_then(|tracker| tracker.router_queue_depth().map(|v| v as u64)),
-                        worker,
-                    },
+                let metrics = crate::agent_trace::request_metrics(
+                    request_id,
+                    request_model,
+                    request_tracker.as_deref(),
                 );
+                dynamo_agents::trace::emit_request_end(agent_context, metrics);
             });
             stream
         } else {
