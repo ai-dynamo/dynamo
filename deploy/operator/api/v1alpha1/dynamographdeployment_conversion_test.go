@@ -120,8 +120,8 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 				},
 			},
 			TopologyConstraint: &v1beta1.SpecTopologyConstraint{
-				TopologyProfile: "default",
-				PackDomain:      v1beta1.TopologyDomain("rack"),
+				ClusterTopologyName: "default",
+				PackDomain:          v1beta1.TopologyDomain("rack"),
 			},
 		},
 	}
