@@ -41,11 +41,13 @@ class GenerateChunk(TypedDict, total=False):
     """Single chunk yielded by ``LLMEngine.generate()``.
 
     Every chunk must include ``token_ids``.
-    The final chunk must additionally include ``finish_reason`` and
-    ``completion_usage``.
+    Chunks may include ``index`` when a backend returns multiple choices for
+    one request. Missing ``index`` means choice 0. The final chunk must
+    additionally include ``finish_reason`` and ``completion_usage``.
     """
 
     token_ids: Required[list[int]]
+    index: int
     finish_reason: str
     completion_usage: dict[str, int]
 
