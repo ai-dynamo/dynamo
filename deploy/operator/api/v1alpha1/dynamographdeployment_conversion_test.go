@@ -37,6 +37,8 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
+const backendFrameworkSGLang = "sglang"
+
 // roundTripFromV1beta1 converts a v1beta1 DGD to v1alpha1 and back, returning
 // the final v1beta1 object. For any valid v1beta1 input V the returned V'
 // must equal V (syntactic round-trip invariant).
@@ -106,7 +108,7 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Annotations:      map[string]string{"a": "1"},
 			Labels:           map[string]string{"l": "v"},
-			BackendFramework: "sglang",
+			BackendFramework: backendFrameworkSGLang,
 			Env: []corev1.EnvVar{
 				{Name: "FOO", Value: "bar"},
 			},
@@ -126,6 +128,49 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "overlay", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Name: "hub-only-template-name"},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "worker:old"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	spoke.Spec.BackendFramework = backendFrameworkSGLang
+	spoke.Spec.Services["worker"].ComponentType = string(v1beta1.ComponentTypePlanner)
+
+	got := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	if got.Spec.BackendFramework != backendFrameworkSGLang {
+		t.Fatalf("expected v1alpha1 backendFramework edit to win, got %q", got.Spec.BackendFramework)
+	}
+	if len(got.Spec.Components) != 1 || got.Spec.Components[0].ComponentType != v1beta1.ComponentTypePlanner {
+		t.Fatalf("expected v1alpha1 componentType edit to win, got %#v", got.Spec.Components)
+	}
+	if got.Spec.Components[0].PodTemplate == nil || got.Spec.Components[0].PodTemplate.Name != "hub-only-template-name" {
+		t.Fatalf("expected hub-only podTemplate metadata to be preserved, got %#v", got.Spec.Components[0].PodTemplate)
 	}
 }
 
@@ -191,7 +236,7 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 					SharedMemorySize: &shm,
 					PodTemplate: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"prom.io/scrape": "true"},
+							Annotations: map[string]string{"prom.io/scrape": annotationTrue},
 							Labels:      map[string]string{"tier": "gpu"},
 						},
 						Spec: corev1.PodSpec{
@@ -1018,7 +1063,7 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 						Args:          []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
 						EnvFromSecret: &secret,
 						Envs: []corev1.EnvVar{
-							{Name: "FRONTEND_FLAG", Value: "true"},
+							{Name: "FRONTEND_FLAG", Value: annotationTrue},
 						},
 					},
 				},

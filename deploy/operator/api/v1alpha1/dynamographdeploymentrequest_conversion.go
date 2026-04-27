@@ -147,6 +147,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -167,6 +168,11 @@ const (
 	annDGDRProfilingResults = "nvidia.com/dgdr-profiling-results"
 	annDGDRDeploymentStatus = "nvidia.com/dgdr-deployment-status"
 	annDGDRProfilingJobName = "nvidia.com/dgdr-profiling-job-name"
+	annDGDRHubSpec          = "nvidia.com/dgdr-hub-spec"
+	annDGDRHubStatus        = "nvidia.com/dgdr-hub-status"
+	annDGDRSpokeSpec        = "nvidia.com/dgdr-spoke-spec"
+	annDGDRSpokeStatus      = "nvidia.com/dgdr-spoke-status"
+	annDGDRProfilingEmpty   = "nvidia.com/dgdr-profiling-config-empty"
 )
 
 // ConvertTo converts this DynamoGraphDeploymentRequest (v1alpha1) to the Hub version (v1beta1).
@@ -178,11 +184,20 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 
 	dst.ObjectMeta = src.ObjectMeta
 
+	if restoreDGDRHubPreserved(src, dst) {
+		scrubDGDRInternalAnnotations(dst.Annotations)
+		if len(dst.Annotations) == 0 {
+			dst.Annotations = nil
+		}
+		return nil
+	}
+
 	if err := convertDGDRSpecTo(&src.Spec, &dst.Spec, dst); err != nil {
 		return err
 	}
 
 	convertDGDRStatusTo(&src.Status, &dst.Status, dst)
+	preserveDGDRSpoke(src, dst)
 
 	return nil
 }
@@ -196,8 +211,17 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 
 	dst.ObjectMeta = src.ObjectMeta
 
+	if restoreDGDRSpokePreserved(src, dst) {
+		scrubDGDRInternalAnnotations(dst.Annotations)
+		if len(dst.Annotations) == 0 {
+			dst.Annotations = nil
+		}
+		return nil
+	}
+
 	convertDGDRSpecFrom(&src.Spec, &dst.Spec, src)
 	convertDGDRStatusFrom(&src.Status, &dst.Status, src)
+	preserveDGDRHub(src, dst)
 
 	// ProfilingJobName — no v1alpha1 status field; store as annotation for round-trip
 	if src.Status.ProfilingJobName != "" {
@@ -218,6 +242,116 @@ func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string)
 	obj.Annotations[key] = value
 }
 
+func setAnnotationAlpha(obj *DynamoGraphDeploymentRequest, key, value string) {
+	if obj.Annotations == nil {
+		obj.Annotations = make(map[string]string)
+	}
+	obj.Annotations[key] = value
+}
+
+type dgdrSpokeSpecPreservation struct {
+	Spec               DynamoGraphDeploymentRequestSpec `json:"spec"`
+	ProfilingConfigSet bool                             `json:"profilingConfigSet,omitempty"`
+	ProfilingConfigRaw []byte                           `json:"profilingConfigRaw,omitempty"`
+}
+
+func preserveDGDRSpoke(src *DynamoGraphDeploymentRequest, dst *v1beta1.DynamoGraphDeploymentRequest) {
+	specPreserved := false
+	envelope := dgdrSpokeSpecPreservation{Spec: src.Spec}
+	if src.Spec.ProfilingConfig.Config != nil {
+		envelope.ProfilingConfigSet = true
+		envelope.ProfilingConfigRaw = slices.Clone(src.Spec.ProfilingConfig.Config.Raw)
+		envelope.Spec.ProfilingConfig.Config = nil
+	}
+	if data, err := json.Marshal(envelope); err == nil {
+		setAnnotation(dst, annDGDRSpokeSpec, string(data))
+		specPreserved = true
+	}
+	if data, err := json.Marshal(src.Status); err == nil {
+		setAnnotation(dst, annDGDRSpokeStatus, string(data))
+	}
+	if specPreserved && src.Spec.ProfilingConfig.Config != nil && len(src.Spec.ProfilingConfig.Config.Raw) == 0 {
+		setAnnotation(dst, annDGDRProfilingEmpty, annotationTrue)
+	}
+}
+
+func preserveDGDRHub(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequest) {
+	if data, err := json.Marshal(src.Spec); err == nil {
+		setAnnotationAlpha(dst, annDGDRHubSpec, string(data))
+	}
+	if data, err := json.Marshal(src.Status); err == nil {
+		setAnnotationAlpha(dst, annDGDRHubStatus, string(data))
+	}
+}
+
+func restoreDGDRHubPreserved(src *DynamoGraphDeploymentRequest, dst *v1beta1.DynamoGraphDeploymentRequest) bool {
+	restored := false
+	if src.Annotations == nil {
+		return false
+	}
+	if raw, ok := src.Annotations[annDGDRHubSpec]; ok && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &dst.Spec); err == nil {
+			restored = true
+		}
+	}
+	if raw, ok := src.Annotations[annDGDRHubStatus]; ok && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &dst.Status); err == nil {
+			restored = true
+		}
+	}
+	return restored
+}
+
+func restoreDGDRSpokePreserved(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequest) bool {
+	restored := false
+	if src.Annotations == nil {
+		return false
+	}
+	if raw, ok := src.Annotations[annDGDRSpokeSpec]; ok && raw != "" {
+		var envelope dgdrSpokeSpecPreservation
+		if err := json.Unmarshal([]byte(raw), &envelope); err == nil {
+			dst.Spec = envelope.Spec
+			if envelope.ProfilingConfigSet {
+				dst.Spec.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: slices.Clone(envelope.ProfilingConfigRaw)}
+			}
+			restored = true
+		} else if err := json.Unmarshal([]byte(raw), &dst.Spec); err == nil {
+			restored = true
+		}
+	}
+	if raw, ok := src.Annotations[annDGDRSpokeStatus]; ok && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &dst.Status); err == nil {
+			restored = true
+		}
+	}
+	if src.Annotations[annDGDRProfilingEmpty] == annotationTrue {
+		dst.Spec.ProfilingConfig.Config = &apiextensionsv1.JSON{}
+		restored = true
+	}
+	return restored
+}
+
+func scrubDGDRInternalAnnotations(annotations map[string]string) {
+	for _, key := range []string{
+		annDGDRConfigMapRef,
+		annDGDROutputPVC,
+		annDGDREnableGPUDisc,
+		annDGDRDeployOverrides,
+		annDGDRProfilingConfig,
+		annDGDRStatusBackend,
+		annDGDRProfilingResults,
+		annDGDRDeploymentStatus,
+		annDGDRProfilingJobName,
+		annDGDRHubSpec,
+		annDGDRHubStatus,
+		annDGDRSpokeSpec,
+		annDGDRSpokeStatus,
+		annDGDRProfilingEmpty,
+	} {
+		delete(annotations, key)
+	}
+}
+
 // convertDGDRSpecTo converts the v1alpha1 Spec into the v1beta1 Spec.
 func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) error {
 	dst.Model = src.Model
@@ -236,18 +370,26 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		dst.Features.Mocker = &v1beta1.MockerSpec{Enabled: true}
 	}
 	if src.EnableGPUDiscovery != nil && *src.EnableGPUDiscovery {
-		setAnnotation(dstObj, annDGDREnableGPUDisc, "true")
+		setAnnotation(dstObj, annDGDREnableGPUDisc, annotationTrue)
 	}
 
-	if src.ProfilingConfig.Config != nil && src.ProfilingConfig.Config.Raw != nil {
+	if src.ProfilingConfig.Config != nil && len(src.ProfilingConfig.Config.Raw) > 0 {
+		setAnnotation(dstObj, annDGDRProfilingConfig, string(src.ProfilingConfig.Config.Raw))
+
 		var blob map[string]interface{}
 		if err := json.Unmarshal(src.ProfilingConfig.Config.Raw, &blob); err != nil {
-			return fmt.Errorf("failed to parse ProfilingConfig.Config: %w", err)
+			// ProfilingConfig.Config is an opaque JSON extension point on the
+			// v1alpha1 side. Generic fuzzers may populate it with arbitrary
+			// RawExtension bytes; preserve those bytes via the annotation but
+			// only project typed v1beta1 fields when it is a JSON object in the
+			// legacy shape we understand.
+			blob = nil
 		}
-		applySLAAndWorkloadFromBlob(blob, dst)
-		applyModelCacheFromBlob(blob, dst)
-		applyPlannerFromBlob(blob, dst)
-		setAnnotation(dstObj, annDGDRProfilingConfig, string(src.ProfilingConfig.Config.Raw))
+		if blob != nil {
+			applySLAAndWorkloadFromBlob(blob, dst)
+			applyModelCacheFromBlob(blob, dst)
+			applyPlannerFromBlob(blob, dst)
+		}
 	}
 
 	// ProfilerImage → Image (the profiler runs in the frontend image)
@@ -412,7 +554,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 	}
 
 	if srcObj.Annotations != nil {
-		if v, ok := srcObj.Annotations[annDGDREnableGPUDisc]; ok && v == "true" {
+		if v, ok := srcObj.Annotations[annDGDREnableGPUDisc]; ok && v == annotationTrue {
 			trueVal := true
 			dst.EnableGPUDiscovery = &trueVal
 		}
@@ -423,6 +565,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 	var blob map[string]interface{}
 	if srcObj.Annotations != nil {
 		if rawBlob, ok := srcObj.Annotations[annDGDRProfilingConfig]; ok && rawBlob != "" {
+			dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(rawBlob)}
 			_ = json.Unmarshal([]byte(rawBlob), &blob) // best-effort
 		}
 	}
