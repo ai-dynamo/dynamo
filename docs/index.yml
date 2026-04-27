@@ -62,12 +62,12 @@ navigation:
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
-      - section: Deployment Guide
+      - section: Quickstart
         path: kubernetes/README.md
         contents:
-          - page: Detailed Installation Guide
+          - page: Installation Guide
             path: kubernetes/installation-guide.md
-          - page: Deploying Your First Model
+          - page: DGDR Deployment Guide
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
