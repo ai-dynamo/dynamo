@@ -129,8 +129,9 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
 
 | Flag | Default | What it does |
 |------|---------|-------------|
-| `-d N` | — | N concurrent `find_matches` callers; higher stresses the read path |
-| `--trace-simulation-duration-ms` | 30000 | Warm-up: replay KV events before measuring |
+| `-d N` | 1 | Worker duplication factor: replay the trace with N copies of each unique worker (higher = more write pressure) |
+| `--find-matches-concurrency N` | 0 | N additional tokio tasks issuing `find_matches` in a tight loop alongside trace replay; stresses the read path |
+| `--trace-simulation-duration-ms` | — | Rescale trace to this wall-clock duration (ms); omit to preserve original Mooncake timestamps |
 | `--benchmark-duration-ms` | 60000 | Measurement window; shorter = higher offered rate |
 | `--num-unique-inference-workers` | 1000 | Workers partitioned from the trace |
 | `--trace-length-factor` | 1 | Stretch each request's hash sequence |
@@ -138,8 +139,8 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
 | `--seed` | 42 | RNG seed for worker-to-trace assignment |
 | `--sweep` | off | Find saturation point by varying benchmark window |
 | `--sweep-min-ms` | 1000 | Shortest benchmark window in sweep |
-| `--sweep-max-ms` | 30000 | Longest benchmark window in sweep |
-| `--sweep-steps` | 8 | Number of steps in sweep |
+| `--sweep-max-ms` | 50000 | Longest benchmark window in sweep |
+| `--sweep-steps` | 10 | Number of steps in sweep |
 | `--shard-metrics-csv FILE` | — | Sample shard block/node counts over time → CSV + SVG |
 
 ### `branch-sharded-crtc` flags
@@ -149,7 +150,6 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
 | `--num-shards` | 2 | Number of independent CRTC shards |
 | `--num-event-workers-per-shard` | 4 | OS threads per shard for KV event processing |
 | `--prefix-depth` | 2 | Blocks hashed to compute the branch routing key |
-| `--read-threads` | 0 | Dedicated threads for `find_matches` (0 = inline on caller) |
 
 ---
 
