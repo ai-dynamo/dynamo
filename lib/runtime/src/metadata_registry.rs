@@ -51,6 +51,24 @@ impl MetadataArtifactRegistry {
             .get(&(model_slug.to_string(), filename.to_string()))
             .cloned()
     }
+
+    /// Remove all entries for a given `model_slug`. Called when a
+    /// model is deregistered so stale paths don't accumulate.
+    pub fn unregister_model(&self, model_slug: &str) {
+        let mut entries = self.entries.write().unwrap();
+        entries.retain(|(slug, _), _| slug != model_slug);
+    }
+
+    /// Number of registered `(model_slug, filename)` entries.
+    /// Intended for tests and observability.
+    pub fn len(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().unwrap().is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -70,6 +88,7 @@ mod tests {
     fn miss_returns_none() {
         let reg = MetadataArtifactRegistry::new();
         assert!(reg.get("unknown", "nope.json").is_none());
+        assert!(reg.is_empty());
     }
 
     #[test]
@@ -77,7 +96,7 @@ mod tests {
         let reg = MetadataArtifactRegistry::new();
         reg.register("m", "config.json", PathBuf::from("/x"));
         assert!(reg.get("m", "tokenizer.json").is_none());
-        assert_eq!(reg.get("m", "config.json"), Some(PathBuf::from("/x")));
+        assert_eq!(reg.len(), 1);
     }
 
     #[test]
@@ -90,5 +109,29 @@ mod tests {
 
         assert_eq!(reg.get("m1", "tokenizer.json"), Some(p1));
         assert_eq!(reg.get("m2", "tokenizer.json"), Some(p2));
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn unregister_model_removes_only_its_entries() {
+        let reg = MetadataArtifactRegistry::new();
+        reg.register("m1", "config.json", PathBuf::from("/m1/c"));
+        reg.register("m1", "tokenizer.json", PathBuf::from("/m1/t"));
+        reg.register("m2", "config.json", PathBuf::from("/m2/c"));
+
+        reg.unregister_model("m1");
+
+        assert!(reg.get("m1", "config.json").is_none());
+        assert!(reg.get("m1", "tokenizer.json").is_none());
+        assert_eq!(reg.get("m2", "config.json"), Some(PathBuf::from("/m2/c")));
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn clone_shares_state() {
+        let reg = MetadataArtifactRegistry::new();
+        let reg2 = reg.clone();
+        reg.register("m", "f", PathBuf::from("/p"));
+        assert_eq!(reg2.get("m", "f"), Some(PathBuf::from("/p")));
     }
 }
