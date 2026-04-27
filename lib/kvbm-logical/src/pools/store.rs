@@ -134,7 +134,7 @@ impl BlockSlot {
 
 /// Inner state of a `BlockStore` — protected by a single mutex.
 pub(crate) struct BlockStoreInner {
-    /// `slots[block_id as usize]` — created at construction, never grows.
+    /// `slots[block_id]` — created at construction, never grows.
     slots: Vec<BlockSlot>,
     /// Free list (reset pool). FIFO via `pop_front`/`push_back`.
     free: VecDeque<BlockId>,
@@ -162,7 +162,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let mut free = VecDeque::with_capacity(total_blocks);
         for i in 0..total_blocks {
             slots.push(BlockSlot::new_reset(block_size));
-            free.push_back(i as BlockId);
+            free.push_back(i);
         }
         if let Some(ref m) = metrics {
             for _ in 0..total_blocks {
@@ -215,7 +215,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let mut out = Vec::with_capacity(take);
         for _ in 0..take {
             let id = inner.free.pop_front().unwrap();
-            inner.slots[id as usize].state = SlotState::CheckedOut(CheckedOutKind::Mutable);
+            inner.slots[id].state = SlotState::CheckedOut(CheckedOutKind::Mutable);
             if let Some(ref m) = self.metrics {
                 m.dec_reset_pool_size();
             }
@@ -229,10 +229,10 @@ impl<T: BlockMetadata> BlockStore<T> {
     pub(crate) fn return_to_reset(&self, block_id: BlockId) {
         let mut inner = self.inner.lock();
         debug_assert!(matches!(
-            inner.slots[block_id as usize].state,
+            inner.slots[block_id].state,
             SlotState::CheckedOut(_)
         ));
-        inner.slots[block_id as usize].state = SlotState::Reset;
+        inner.slots[block_id].state = SlotState::Reset;
         inner.free.push_back(block_id);
         if let Some(ref m) = self.metrics {
             m.inc_reset_pool_size();
@@ -242,7 +242,7 @@ impl<T: BlockMetadata> BlockStore<T> {
     /// Transition `block_id` from `CheckedOut(Mutable)` to `CheckedOut(Staged)`.
     pub(crate) fn mark_staged(&self, block_id: BlockId, seq_hash: SequenceHash) {
         let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id as usize];
+        let slot = &mut inner.slots[block_id];
         debug_assert!(matches!(
             slot.state,
             SlotState::CheckedOut(CheckedOutKind::Mutable)
@@ -253,7 +253,7 @@ impl<T: BlockMetadata> BlockStore<T> {
     /// Transition `block_id` from `CheckedOut(Staged)` back to `CheckedOut(Mutable)`.
     pub(crate) fn unmark_staged(&self, block_id: BlockId) {
         let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id as usize];
+        let slot = &mut inner.slots[block_id];
         debug_assert!(matches!(
             slot.state,
             SlotState::CheckedOut(CheckedOutKind::Staged { .. })
@@ -274,7 +274,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         handle.mark_present::<T>();
         let seq_hash = handle.seq_hash();
         let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id as usize];
+        let slot = &mut inner.slots[block_id];
         debug_assert!(matches!(
             slot.state,
             SlotState::CheckedOut(CheckedOutKind::Staged { .. })
@@ -293,7 +293,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         handle.mark_present::<T>();
         let seq_hash = handle.seq_hash();
         let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id as usize];
+        let slot = &mut inner.slots[block_id];
         debug_assert!(matches!(
             slot.state,
             SlotState::CheckedOut(CheckedOutKind::Staged { .. })
@@ -306,7 +306,7 @@ impl<T: BlockMetadata> BlockStore<T> {
     /// `CheckedOut(Primary)` → `Inactive` (block becomes evictable).
     pub(crate) fn primary_to_inactive(&self, block_id: BlockId) {
         let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id as usize];
+        let slot = &mut inner.slots[block_id];
         let (seq_hash, handle) = match std::mem::replace(&mut slot.state, SlotState::Reset) {
             SlotState::CheckedOut(CheckedOutKind::Primary { seq_hash, handle }) => {
                 (seq_hash, handle)
@@ -331,7 +331,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         // Must extract handle before locking attachments to honour ordering.
         let handle = {
             let mut inner = self.inner.lock();
-            let slot = &mut inner.slots[block_id as usize];
+            let slot = &mut inner.slots[block_id];
             let handle = match std::mem::replace(&mut slot.state, SlotState::Reset) {
                 SlotState::CheckedOut(CheckedOutKind::Duplicate { handle, .. }) => handle,
                 other => panic!("duplicate_to_reset: unexpected state {other:?}"),
@@ -359,7 +359,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let matched = inner.inactive.find_matches(hashes, touch);
         let mut out = Vec::with_capacity(matched.len());
         for (seq_hash, block_id) in matched {
-            let slot = &mut inner.slots[block_id as usize];
+            let slot = &mut inner.slots[block_id];
             let handle = match std::mem::replace(&mut slot.state, SlotState::Reset) {
                 SlotState::Inactive { handle, .. } => handle,
                 other => panic!("find_inactive: slot for {block_id} was {other:?}"),
@@ -386,7 +386,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let matched = inner.inactive.scan_matches(hashes, touch);
         let mut out = Vec::with_capacity(matched.len());
         for (seq_hash, block_id) in matched {
-            let slot = &mut inner.slots[block_id as usize];
+            let slot = &mut inner.slots[block_id];
             let handle = match std::mem::replace(&mut slot.state, SlotState::Reset) {
                 SlotState::Inactive { handle, .. } => handle,
                 other => panic!("scan_inactive: slot for {block_id} was {other:?}"),
@@ -413,7 +413,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let mut matched = inner.inactive.find_matches(&[seq_hash], false);
         let (hash, block_id) = matched.pop()?;
         debug_assert_eq!(hash, seq_hash);
-        let slot = &mut inner.slots[block_id as usize];
+        let slot = &mut inner.slots[block_id];
         let handle = match std::mem::replace(&mut slot.state, SlotState::Reset) {
             SlotState::Inactive { handle, .. } => handle,
             other => panic!("resurrect_primary: slot for {block_id} was {other:?}"),
@@ -454,7 +454,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let mut handles = Vec::with_capacity(count);
         let mut out = Vec::with_capacity(count);
         for (seq_hash, block_id) in evicted {
-            let slot = &mut inner.slots[block_id as usize];
+            let slot = &mut inner.slots[block_id];
             let handle = match std::mem::replace(&mut slot.state, SlotState::Reset) {
                 SlotState::Inactive { handle, .. } => handle,
                 other => panic!("evict_for_reset: slot for {block_id} was {other:?}"),
@@ -483,7 +483,7 @@ impl<T: BlockMetadata> BlockStore<T> {
         let mut handles = Vec::with_capacity(drained.len());
         let mut ids = Vec::with_capacity(drained.len());
         for (_seq_hash, block_id) in drained {
-            let slot = &mut inner.slots[block_id as usize];
+            let slot = &mut inner.slots[block_id];
             let handle = match std::mem::replace(&mut slot.state, SlotState::Reset) {
                 SlotState::Inactive { handle, .. } => handle,
                 other => panic!("drain_inactive_to_reset: slot for {block_id} was {other:?}"),

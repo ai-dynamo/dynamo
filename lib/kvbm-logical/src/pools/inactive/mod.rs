@@ -8,71 +8,39 @@
 //! - Conversion of registered blocks back to mutable blocks for reuse
 //! - Thread-safe access via interior mutability
 //! - Automatic block return via RAII ImmutableBlock guards
+//!
+//! Internally, eviction order lives in a [`InactiveIndex`](crate::pools::store::InactiveIndex)
+//! backend (T-free, indexed by `BlockId`+`SequenceHash`); the actual
+//! `Block<T, Registered>` payloads live alongside in a `HashMap<BlockId, _>`
+//! side-table. This split is the transitional layer for the unified
+//! `BlockStore<T>` refactor — once guards talk to the store directly the
+//! side-table goes away.
 
 pub mod backends;
 
-use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
 use crate::metrics::BlockPoolMetrics;
+use crate::pools::store::InactiveIndex;
 
 use super::{
     Block, BlockId, BlockMetadata, InactiveBlock, MutableBlock, PrimaryBlock, Registered,
     RegisteredBlock, SequenceHash, reset::ResetPool,
 };
 
-// pub(crate) use backends::*;
-
-/// Backend trait for InactivePool storage strategies
-pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
-    /// Find blocks matching the given hashes in order, stopping on first miss.
-    fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
-
-    /// Scan for blocks matching any of the given hashes (full scan, doesn't stop on miss).
-    /// Unlike find_matches, continues scanning even when a hash is not found.
-    /// Acquires/removes found blocks from pool (caller owns until dropped).
-    fn scan_matches(
-        &mut self,
-        hashes: &[SequenceHash],
-        touch: bool,
-    ) -> Vec<(SequenceHash, Block<T, Registered>)>;
-
-    fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>>;
-
-    fn insert(&mut self, block: Block<T, Registered>);
-
-    fn len(&self) -> usize;
-
-    #[allow(dead_code)]
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    #[allow(dead_code)]
-    fn has_block(&self, seq_hash: SequenceHash) -> bool;
-
-    /// Allocate all blocks from the pool, removing them from the backend.
-    /// Default implementation calls len() then allocate(), which is atomic
-    /// since the caller holds the lock.
-    fn allocate_all(&mut self) -> Vec<Block<T, Registered>> {
-        let count = self.len();
-        self.allocate(count)
-    }
-}
 use crate::blocks::{RegisteredReturnFn, ResetReturnFn};
 
 /// Pool for managing registered (immutable) blocks
 ///
 /// This pool handles blocks in the Registered state and provides them as
 /// RegisteredBlock RAII guards that automatically return to the pool on drop.
-
 #[derive(Clone)]
 pub(crate) struct InactivePool<T: BlockMetadata> {
-    // Inner state protected by RwLock for thread-safe access from guards
     inner: Arc<RwLock<InactivePoolInner<T>>>,
-    // Return function for MutableBlocks to return to ResetPool
     reset_return_fn: ResetReturnFn<T>,
-
     return_fn: RegisteredReturnFn<T>,
     #[expect(dead_code)]
     block_size: usize,
@@ -80,28 +48,34 @@ pub(crate) struct InactivePool<T: BlockMetadata> {
 }
 
 struct InactivePoolInner<T: BlockMetadata> {
-    backend: Box<dyn InactivePoolBackend<T>>,
+    /// Eviction-order tracker (T-free).
+    index: Box<dyn InactiveIndex>,
+    /// Side-table of the actual `Block<T, Registered>` payloads, keyed by
+    /// `BlockId`. Always kept in sync with `index`.
+    blocks: HashMap<BlockId, Block<T, Registered>>,
 }
 
 impl<T: BlockMetadata + Sync> InactivePool<T> {
-    /// Create a new InactivePool with the given backend and reset pool
     pub(crate) fn new(
-        backend: Box<dyn InactivePoolBackend<T>>,
+        index: Box<dyn InactiveIndex>,
         reset_pool: &ResetPool<T>,
         metrics: Option<Arc<BlockPoolMetrics>>,
     ) -> Self {
-        let inner = Arc::new(RwLock::new(InactivePoolInner { backend }));
+        let inner = Arc::new(RwLock::new(InactivePoolInner {
+            index,
+            blocks: HashMap::new(),
+        }));
 
         let inner_clone = inner.clone();
         let metrics_clone = metrics.clone();
         let return_fn = Arc::new(move |block: Arc<Block<T, Registered>>| {
             let seq_hash = block.sequence_hash();
-
             let mut inner = inner_clone.write();
             match Arc::try_unwrap(block) {
                 Ok(block) => {
                     let block_id = block.block_id();
-                    inner.backend.insert(block);
+                    inner.index.insert(seq_hash, block_id);
+                    inner.blocks.insert(block_id, block);
                     if let Some(ref m) = metrics_clone {
                         m.inc_inactive_pool_size();
                     }
@@ -135,18 +109,22 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         touch: bool,
     ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
         let mut inner = self.inner.write();
-        let matched_blocks = inner.backend.find_matches(hashes, touch);
+        let matched = inner.index.find_matches(hashes, touch);
 
-        let count = matched_blocks.len();
+        let count = matched.len();
         if let Some(ref m) = self.metrics {
             for _ in 0..count {
                 m.dec_inactive_pool_size();
             }
         }
 
-        matched_blocks
+        matched
             .into_iter()
-            .map(|block| {
+            .map(|(_seq_hash, block_id)| {
+                let block = inner
+                    .blocks
+                    .remove(&block_id)
+                    .expect("inactive index/side-table out of sync");
                 PrimaryBlock::new_attached(Arc::new(block), self.return_fn.clone())
                     as Arc<dyn RegisteredBlock<T>>
             })
@@ -154,15 +132,14 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     }
 
     /// Scan for all blocks matching the given hashes (doesn't stop on miss).
-    /// Acquires/removes found blocks from pool - caller owns until dropped.
-    /// Returns RAII guards (PrimaryBlocks) for found blocks.
+    /// Acquires/removes found blocks from pool — caller owns until dropped.
     pub(crate) fn scan_blocks(
         &self,
         hashes: &[SequenceHash],
         touch: bool,
     ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
         let mut inner = self.inner.write();
-        let found = inner.backend.scan_matches(hashes, touch);
+        let found = inner.index.scan_matches(hashes, touch);
 
         let count = found.len();
         if let Some(ref m) = self.metrics {
@@ -173,20 +150,21 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
         found
             .into_iter()
-            .map(|(hash, block)| {
+            .map(|(seq_hash, block_id)| {
+                let block = inner
+                    .blocks
+                    .remove(&block_id)
+                    .expect("inactive index/side-table out of sync");
                 let registered = PrimaryBlock::new_attached(Arc::new(block), self.return_fn.clone())
                     as Arc<dyn RegisteredBlock<T>>;
-                (hash, registered)
+                (seq_hash, registered)
             })
             .collect()
     }
 
-    /// Allocate blocks from registered pool, converting them to
+    /// Allocate blocks from the registered pool, converting them to
     /// [`MutableBlock`]s for the [`ResetPool`]. Also reports the
-    /// [`SequenceHash`] of each evicted block so upstream layers can
-    /// propagate cache-invalidation events without a secondary presence scan.
-    ///
-    /// Returns `None` if fewer than `count` evictable blocks are available.
+    /// [`SequenceHash`] of each evicted block.
     pub(crate) fn allocate_blocks(
         &self,
         count: usize,
@@ -197,52 +175,51 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
 
         let mut inner = self.inner.write();
 
-        if inner.backend.len() < count {
+        if inner.index.len() < count {
             return None;
         }
 
-        let allocated_blocks = inner.backend.allocate(count);
+        let evicted_pairs = inner.index.allocate(count);
 
-        if allocated_blocks.len() == count {
-            if let Some(ref m) = self.metrics {
-                for _ in 0..count {
-                    m.dec_inactive_pool_size();
-                }
+        if evicted_pairs.len() != count {
+            for (h, id) in evicted_pairs {
+                inner.index.insert(h, id);
             }
-            let mut mutable_blocks = Vec::with_capacity(count);
-            let mut evicted = Vec::with_capacity(count);
-            for registered_block in allocated_blocks {
-                // Capture the identity BEFORE `reset()` drops the
-                // registration handle and marks the block absent.
-                evicted.push(registered_block.sequence_hash());
-                let reset_block = registered_block.reset();
-                mutable_blocks.push(MutableBlock::new(
-                    reset_block,
-                    self.reset_return_fn.clone(),
-                    self.metrics.clone(),
-                ));
-            }
-            Some((mutable_blocks, evicted))
-        } else {
-            for block in allocated_blocks {
-                inner.backend.insert(block);
-            }
-            None
+            return None;
         }
+
+        if let Some(ref m) = self.metrics {
+            for _ in 0..count {
+                m.dec_inactive_pool_size();
+            }
+        }
+        let mut mutable_blocks = Vec::with_capacity(count);
+        let mut evicted = Vec::with_capacity(count);
+        for (seq_hash, block_id) in evicted_pairs {
+            let block = inner
+                .blocks
+                .remove(&block_id)
+                .expect("inactive index/side-table out of sync");
+            evicted.push(seq_hash);
+            let reset_block = block.reset();
+            mutable_blocks.push(MutableBlock::new(
+                reset_block,
+                self.reset_return_fn.clone(),
+                self.metrics.clone(),
+            ));
+        }
+        Some((mutable_blocks, evicted))
     }
 
-    /// Check if a block exists in the pool
+    /// Check if a block exists in the pool.
     #[allow(dead_code)]
     pub(crate) fn has_block(&self, hash: SequenceHash) -> bool {
         let inner = self.inner.read();
-        inner.backend.has_block(hash)
+        inner.index.has(hash)
     }
 
     /// Find and promote a single block from inactive to active by sequence hash.
     /// Returns the concrete `Arc<PrimaryBlock<T>>` for duplicate referencing.
-    ///
-    /// This differs from `find_blocks()` which returns trait objects. This method
-    /// returns the concrete type needed when creating `DuplicateBlock` references.
     ///
     /// Uses `new_unattached` because this is called from `try_find_existing_block`
     /// while the attachments lock is held. The caller MUST call
@@ -253,26 +230,30 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         touch: bool,
     ) -> Option<Arc<PrimaryBlock<T>>> {
         let mut inner = self.inner.write();
-        let matched = inner.backend.find_matches(&[hash], touch);
-        matched.into_iter().next().map(|block| {
-            if let Some(ref m) = self.metrics {
-                m.dec_inactive_pool_size();
-            }
-            PrimaryBlock::new_unattached(Arc::new(block), self.return_fn.clone())
-        })
+        let mut matched = inner.index.find_matches(&[hash], touch);
+        let (_, block_id) = matched.pop()?;
+        let block = inner
+            .blocks
+            .remove(&block_id)
+            .expect("inactive index/side-table out of sync");
+        if let Some(ref m) = self.metrics {
+            m.dec_inactive_pool_size();
+        }
+        Some(PrimaryBlock::new_unattached(
+            Arc::new(block),
+            self.return_fn.clone(),
+        ))
     }
 
-    /// Get the number of blocks in the pool
     pub(crate) fn len(&self) -> usize {
         let inner = self.inner.read();
-        inner.backend.len()
+        inner.index.len()
     }
 
-    /// Check if the pool is empty
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         let inner = self.inner.read();
-        inner.backend.is_empty()
+        inner.index.is_empty()
     }
 
     pub(crate) fn return_fn(&self) -> RegisteredReturnFn<T> {
@@ -283,17 +264,21 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// The MutableBlocks will return to the ResetPool when dropped via RAII.
     pub(crate) fn allocate_all_blocks(&self) -> Vec<MutableBlock<T>> {
         let mut inner = self.inner.write();
-        let blocks = inner.backend.allocate_all();
-        let count = blocks.len();
+        let drained = inner.index.allocate_all();
+        let count = drained.len();
         if let Some(ref m) = self.metrics {
             for _ in 0..count {
                 m.dec_inactive_pool_size();
             }
         }
-        blocks
+        drained
             .into_iter()
-            .map(|registered_block| {
-                let reset_block = registered_block.reset();
+            .map(|(_seq_hash, block_id)| {
+                let block = inner
+                    .blocks
+                    .remove(&block_id)
+                    .expect("inactive index/side-table out of sync");
+                let reset_block = block.reset();
                 MutableBlock::new(
                     reset_block,
                     self.reset_return_fn.clone(),
@@ -313,7 +298,10 @@ mod tests {
     impl<T: BlockMetadata> InactivePool<T> {
         fn insert(&self, block: Block<T, Registered>) {
             let mut inner = self.inner.write();
-            inner.backend.insert(block);
+            let seq_hash = block.sequence_hash();
+            let block_id = block.block_id();
+            inner.index.insert(seq_hash, block_id);
+            inner.blocks.insert(block_id, block);
         }
     }
 
@@ -330,9 +318,7 @@ mod tests {
         (inactive_pool, reset_pool)
     }
 
-    /// Create a sequence hash for a block that doesn't exist in any pool.
     fn nonexistent_hash() -> SequenceHash {
-        // Create a registered block just to get its sequence hash, then drop it
         let (_, seq_hash) = create_registered_block::<TestMeta>(999, &[9999, 9998, 9997, 9996]);
         seq_hash
     }
@@ -360,7 +346,6 @@ mod tests {
         assert_eq!(found_blocks[0].block_id(), 1);
         assert_eq!(found_blocks[0].sequence_hash(), seq_hash);
 
-        // Block should be removed from pool after finding
         assert_eq!(pool.len(), 0);
         assert!(!pool.has_block(seq_hash));
     }
@@ -381,7 +366,6 @@ mod tests {
         assert_eq!(found_blocks.len(), 1);
         assert_eq!(found_blocks[0].sequence_hash(), seq_hash1);
 
-        // Block 3 should still be in pool since search stopped at first miss
         assert_eq!(pool.len(), 1);
         assert!(pool.has_block(seq_hash3));
     }
@@ -418,11 +402,7 @@ mod tests {
 
         let (mutable_blocks, evicted) = pool.allocate_blocks(1).expect("Should allocate 1 block");
         assert_eq!(mutable_blocks.len(), 1);
-        assert_eq!(
-            evicted.len(),
-            1,
-            "one sequence hash should be reported as evicted"
-        );
+        assert_eq!(evicted.len(), 1);
         assert!(
             [seq_hash1, seq_hash2, seq_hash3].contains(&evicted[0]),
             "evicted hash must match one of the inserted blocks; got {:?}",
@@ -436,8 +416,6 @@ mod tests {
         assert_eq!(reset_pool.available_blocks(), 11);
     }
 
-    /// Sanity: asking for multiple evictions returns that many distinct hashes,
-    /// each matching an inserted block.
     #[test]
     fn test_allocate_blocks_reports_all_evicted_hashes() {
         let (pool, _reset_pool) = create_test_pool();
@@ -456,10 +434,7 @@ mod tests {
         assert_eq!(mutable_blocks.len(), 3);
         assert_eq!(evicted.len(), 3);
         for h in &evicted {
-            assert!(
-                inserted.contains(h),
-                "evicted hash {h:?} not in inserted set"
-            );
+            assert!(inserted.contains(h), "evicted hash {h:?} not in inserted set");
         }
         let unique: std::collections::HashSet<_> = evicted.iter().copied().collect();
         assert_eq!(unique.len(), 3, "evicted hashes must all be distinct");
@@ -489,7 +464,6 @@ mod tests {
         let (block1, seq_hash1) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
         let (block3, seq_hash3) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
         pool.insert(block1);
-        // Sleep for FIFO timestamp uniqueness (HashMap backend)
         std::thread::sleep(std::time::Duration::from_millis(2));
         pool.insert(block3);
 
@@ -497,7 +471,6 @@ mod tests {
 
         let missing = nonexistent_hash();
 
-        // scan_blocks should NOT stop on miss — should find both hash1 and hash3
         let found = pool.scan_blocks(&[seq_hash1, missing, seq_hash3], true);
         assert_eq!(
             found.len(),
@@ -509,10 +482,8 @@ mod tests {
         assert!(found_hashes.contains(&seq_hash1));
         assert!(found_hashes.contains(&seq_hash3));
 
-        // Both blocks were removed from the pool
         assert_eq!(pool.len(), 0);
 
-        // RAII return: dropping the found blocks should return them
         drop(found);
         assert_eq!(pool.len(), 2);
     }
@@ -534,14 +505,11 @@ mod tests {
         assert_eq!(mutable_blocks.len(), 3);
         assert_eq!(pool.len(), 0);
 
-        // Verify they are MutableBlocks by checking block_id
         for block in &mutable_blocks {
             let _id = block.block_id();
         }
 
-        // Drop them — they should return to the reset pool
         drop(mutable_blocks);
-        // 10 original reset blocks + 3 returned = 13
         assert_eq!(reset_pool.available_blocks(), 13);
     }
 }

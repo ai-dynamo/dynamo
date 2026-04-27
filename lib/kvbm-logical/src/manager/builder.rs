@@ -14,7 +14,7 @@ use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 use crate::{
     blocks::{Block, BlockMetadata, state::Reset},
     pools::{
-        ActivePool, BlockDuplicationPolicy, InactivePool, InactivePoolBackend, ResetPool,
+        ActivePool, BlockDuplicationPolicy, InactiveIndex, InactivePool, ResetPool,
         ReusePolicy, SequenceHash,
         backends::{HashMapBackend, LruBackend, MultiLruBackend},
     },
@@ -337,7 +337,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         metrics.set_reset_pool_size(block_count as i64);
 
         // Create backend based on configuration
-        let backend: Box<dyn InactivePoolBackend<T>> = match self.inactive_backend.take() {
+        let backend: Box<dyn InactiveIndex> = match self.inactive_backend.take() {
             Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
                 tracing::info!("Using HashMap for inactive pool");
                 Box::new(HashMapBackend::new(reuse_policy))

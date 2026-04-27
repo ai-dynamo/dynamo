@@ -22,9 +22,10 @@ pub mod tests;
 mod block_proptest;
 
 pub(crate) use active::ActivePool;
+pub(crate) use inactive::InactivePool;
 pub(crate) use inactive::backends;
-pub(crate) use inactive::{InactivePool, InactivePoolBackend};
 pub(crate) use reset::ResetPool;
+pub(crate) use store::InactiveIndex;
 
 // Re-export RAII guards from guards module
 use crate::blocks::{
