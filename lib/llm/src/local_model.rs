@@ -564,3 +564,88 @@ fn internal_endpoint(engine: &str) -> EndpointId {
         name: "generate".to_string(),
     }
 }
+
+// Wired in by registration when self_host_metadata is true; see
+// the §2.6 commit. Kept #[allow(dead_code)] for one commit so the
+// helper lands as its own reviewable change.
+#[allow(dead_code)]
+/// Build the base URL this worker advertises for the
+/// `/v1/metadata/...` route on its own `system_status_server`.
+///
+/// Uses the actual bound port from `system_status_server_info()`. The
+/// host comes from `RuntimeConfig::system_host` (the existing
+/// `DYN_SYSTEM_HOST` knob, read fresh from settings the same way the
+/// runtime itself reads it at startup), with [`detect_routable_ip`]
+/// substituted when the configured value is the unspecified bind
+/// sentinel (`0.0.0.0` / `::`) — which is unroutable from another
+/// pod.
+///
+/// Returns an error when the system_status_server is not running
+/// (`DYN_SYSTEM_PORT` unset). Self-hosted metadata requires the
+/// server, so failing here at registration is the correct behavior:
+/// publishing an unreachable URL would just produce a broken MDC.
+pub(crate) fn self_host_base_url(
+    drt: &dynamo_runtime::DistributedRuntime,
+) -> anyhow::Result<String> {
+    let info = drt.system_status_server_info().context(
+        "self_host_metadata=True requires DYN_SYSTEM_PORT to be set so the \
+         system_status_server is running",
+    )?;
+
+    let configured = dynamo_runtime::RuntimeConfig::from_settings()
+        .unwrap_or_default()
+        .system_host;
+    let host = match configured.as_str() {
+        "0.0.0.0" | "::" | "[::]" => detect_routable_ip(),
+        _ => configured,
+    };
+
+    Ok(format!("http://{host}:{}", info.port()))
+}
+
+/// Best-effort detection of a routable local IP. Uses the standard
+/// UDP-connect kernel-routing technique: bind a UDP socket, `connect`
+/// to a public address, then read the kernel-selected source IP via
+/// `local_addr`. `connect` on UDP does not transmit anything; the
+/// kernel just consults the routing table and binds the appropriate
+/// source interface, so this works air-gapped.
+///
+/// Falls back to `127.0.0.1` whenever any step fails (no usable
+/// interface, no default route, etc.). The fallback yields a loud
+/// connection-refused on the consumer rather than silently broken
+/// content.
+fn detect_routable_ip() -> String {
+    use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+
+    let loopback = || IpAddr::V4(Ipv4Addr::LOCALHOST).to_string();
+
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(_) => return loopback(),
+    };
+    if socket.connect("1.1.1.1:80").is_err() {
+        return loopback();
+    }
+    socket
+        .local_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| loopback())
+}
+
+#[cfg(test)]
+mod self_host_url_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    /// `detect_routable_ip` always returns something parseable as an
+    /// IP address, including the `127.0.0.1` fallback when no
+    /// network is reachable.
+    #[test]
+    fn detect_routable_ip_parses_as_ip() {
+        let s = detect_routable_ip();
+        assert!(
+            s.parse::<IpAddr>().is_ok(),
+            "expected a parseable IP, got: {s:?}"
+        );
+    }
+}
