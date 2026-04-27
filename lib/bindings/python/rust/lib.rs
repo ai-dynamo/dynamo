@@ -406,8 +406,13 @@ fn register_model<'p>(
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
-            .media_fetcher(media_fetcher.map(|m| m.inner))
-            .self_host_metadata(self_host_metadata.unwrap_or(false));
+            .media_fetcher(media_fetcher.map(|m| m.inner));
+        // Only flip the builder's flag when the caller passed an
+        // explicit kwarg. Absence falls through to the builder's
+        // default, which honors the DYN_SELF_HOST_METADATA env var.
+        if let Some(enabled) = self_host_metadata {
+            builder.self_host_metadata(enabled);
+        }
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
 

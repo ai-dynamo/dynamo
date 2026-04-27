@@ -33,6 +33,28 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
+/// Environment variable that flips the default for
+/// `LocalModelBuilder::self_host_metadata` from `false` to `true`.
+/// Recognized values (case-insensitive): `1`, `true`, `yes`, `on`.
+/// An explicit `.self_host_metadata(...)` setter call (or PyO3
+/// kwarg) always wins over the env-var default.
+pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
+
+/// Read the env-var default for `self_host_metadata`. Truthy values
+/// (`1`, `true`, `yes`, `on`, case-insensitive) flip the default to
+/// `true`; anything else stays `false`.
+fn env_self_host_metadata_default() -> bool {
+    std::env::var(ENV_SELF_HOST_METADATA)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
@@ -82,7 +104,7 @@ impl Default for LocalModelBuilder {
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
-            self_host_metadata: false,
+            self_host_metadata: env_self_host_metadata_default(),
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
@@ -704,5 +726,53 @@ mod self_host_url_tests {
             s.parse::<IpAddr>().is_ok(),
             "expected a parseable IP, got: {s:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod env_self_host_metadata_tests {
+    use super::*;
+
+    /// Truthy values flip the default to true. Tests are serialized
+    /// because they share a process-global env var.
+    #[serial_test::serial]
+    #[test]
+    fn truthy_values_flip_default() {
+        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
+            // SAFETY: serialized via serial_test.
+            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
+            assert!(
+                env_self_host_metadata_default(),
+                "expected truthy for {v:?}"
+            );
+            assert!(
+                LocalModelBuilder::default().self_host_metadata,
+                "builder default must follow env for {v:?}"
+            );
+        }
+        // SAFETY: serialized via serial_test.
+        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
+    }
+
+    /// Falsy values, garbage values, and an unset var leave the
+    /// default at false.
+    #[serial_test::serial]
+    #[test]
+    fn falsy_or_missing_keeps_default_off() {
+        // SAFETY: serialized via serial_test.
+        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
+        assert!(!env_self_host_metadata_default());
+        assert!(!LocalModelBuilder::default().self_host_metadata);
+
+        for v in ["0", "false", "no", "off", "", "garbage"] {
+            // SAFETY: serialized via serial_test.
+            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
+            assert!(
+                !env_self_host_metadata_default(),
+                "expected falsy for {v:?}"
+            );
+        }
+        // SAFETY: serialized via serial_test.
+        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 }
