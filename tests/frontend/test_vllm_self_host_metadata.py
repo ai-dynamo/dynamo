@@ -39,6 +39,7 @@ class SelfHostVllmWorkerProcess(ManagedProcess):
         *,
         frontend_port: int,
         system_port: int,
+        log_root: Path,
         worker_id: str = "vllm-worker-self-host",
     ):
         self.frontend_port = int(frontend_port)
@@ -60,7 +61,9 @@ class SelfHostVllmWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_SELF_HOST_METADATA"] = "true"
 
-        log_dir = f"{request.node.name}_{worker_id}"
+        # Logs under the pytest-managed tmp_path, not the repo tree —
+        # safe under xdist (per-worker tmp_path) and auto-cleaned.
+        log_dir = str(log_root / f"{request.node.name}_{worker_id}")
         try:
             shutil.rmtree(log_dir)
         except FileNotFoundError:
@@ -117,6 +120,7 @@ def start_self_host_services(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
+            log_root=tmp_path,
         ):
             yield dynamo_dynamic_ports, frontend_home
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 /// Cloning shares the underlying map.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MetadataArtifactRegistry {
     entries: Arc<RwLock<HashMap<(String, String), PathBuf>>>,
 }

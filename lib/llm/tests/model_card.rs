@@ -152,6 +152,43 @@ fn isolated_home() -> IsolatedHome {
     }
 }
 
+/// RAII guard for a single env var. Restores the previous value (or unsets)
+/// on drop, so a panicking test doesn't leak state into the next one.
+#[allow(dead_code)]
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+#[allow(dead_code)]
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: tests using this guard are serialized via serial_test.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: tests using this guard are serialized via serial_test.
+        unsafe { std::env::remove_var(key) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: tests using this guard are serialized via serial_test.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 /// Fresh MDC loaded from TinyLlama, with the typed CheckedFiles
 /// URL-backed (so `has_local_files()` returns false) but the
 /// `files` vector still carrying the original `file://` URIs that
@@ -193,18 +230,23 @@ async fn test_files_vector_populated_from_local_repo() {
         assert!(artifact.size > 0, "expected non-zero size for {artifact:?}");
     }
 
-    // Roles must be unique within the closed five-role set.
-    let roles: std::collections::HashSet<_> = mdc.files.iter().map(|a| a.role).collect();
-    for role in &roles {
-        assert!(matches!(
-            role,
-            ArtifactRole::Config
-                | ArtifactRole::Tokenizer
-                | ArtifactRole::TokenizerConfig
-                | ArtifactRole::ChatTemplate
-                | ArtifactRole::GenerationConfig
-        ));
-    }
+    // Each role appears at most once (a HashSet alone would dedupe
+    // and hide duplicates). Not every fixture has every role —
+    // TinyLlama_v1.1 ships no separate chat_template file — so this
+    // checks subset-of-valid + uniqueness, not exact equality.
+    let roles: Vec<_> = mdc.files.iter().map(|a| a.role).collect();
+    let unique: std::collections::HashSet<_> = roles.iter().copied().collect();
+    assert_eq!(roles.len(), unique.len(), "artifact roles should be unique");
+    let valid: std::collections::HashSet<_> = [
+        ArtifactRole::Config,
+        ArtifactRole::Tokenizer,
+        ArtifactRole::TokenizerConfig,
+        ArtifactRole::ChatTemplate,
+        ArtifactRole::GenerationConfig,
+    ]
+    .into_iter()
+    .collect();
+    assert!(unique.is_subset(&valid), "unexpected role(s) in {unique:?}");
 }
 
 #[serial_test::serial]
@@ -458,10 +500,9 @@ mod integration_tests {
     async fn worker_self_host_round_trip_via_drt() {
         // SAFETY: serialized within-binary; tempdir HOME + random
         // port + unique namespace handle cross-binary parallelism.
-        unsafe {
-            std::env::set_var("DYN_SYSTEM_PORT", "0");
-            std::env::remove_var("DYN_SELF_HOST_METADATA");
-        }
+        // RAII guards so a panic mid-test doesn't leak state.
+        let _system_port = EnvVarGuard::set("DYN_SYSTEM_PORT", "0");
+        let _self_host = EnvVarGuard::unset("DYN_SELF_HOST_METADATA");
         let _home = isolated_home();
         let test_namespace = format!(
             "self-host-it-{}-{}",
@@ -528,27 +569,29 @@ mod integration_tests {
 
         // Cache must be populated under the isolated HOME — the
         // only writer is `download_files`, so its presence proves
-        // the http path ran end-to-end.
+        // the http path ran end-to-end. Count by-slug links rather
+        // than blobs: blobs are content-addressed and could collapse
+        // for byte-identical artifacts.
         let blobs_dir = _home.path().join(".cache/dynamo/mdc/blobs");
+        let slug_dir = _home
+            .path()
+            .join(".cache/dynamo/mdc/by-slug")
+            .join(&want_slug);
         assert!(
             blobs_dir.exists(),
             "expected blobs dir at {}",
             blobs_dir.display()
         );
         let blobs: Vec<_> = std::fs::read_dir(&blobs_dir).unwrap().collect();
+        let links: Vec<_> = std::fs::read_dir(&slug_dir).unwrap().collect();
         assert!(!blobs.is_empty(), "expected at least one blob");
         assert_eq!(
             card.files.len(),
-            blobs.len(),
-            "blob count must match files vector length"
+            links.len(),
+            "by-slug entries must match files vector length"
         );
 
         let _tokenizer = card.tokenizer().expect("tokenizer should load");
-
-        // SAFETY: serialized.
-        unsafe {
-            std::env::remove_var("DYN_SYSTEM_PORT");
-        }
     }
 
     async fn poll_for_card(

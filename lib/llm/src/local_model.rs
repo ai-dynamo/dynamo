@@ -297,6 +297,7 @@ impl LocalModelBuilder {
                 migration_limit: self.migration_limit,
                 migration_max_seq_len: self.migration_max_seq_len,
                 self_host_metadata: self.self_host_metadata,
+                self_host_registry: None,
             });
         }
 
@@ -353,6 +354,7 @@ impl LocalModelBuilder {
             migration_limit: self.migration_limit,
             migration_max_seq_len: self.migration_max_seq_len,
             self_host_metadata: self.self_host_metadata,
+            self_host_registry: None,
         })
     }
 }
@@ -375,6 +377,18 @@ pub struct LocalModel {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     self_host_metadata: bool,
+    /// Set when `move_to_self_host` runs, so the `Drop` impl can
+    /// release the registry entries it inserted. `None` means
+    /// nothing was self-hosted for this LocalModel.
+    self_host_registry: Option<dynamo_runtime::metadata_registry::MetadataArtifactRegistry>,
+}
+
+impl Drop for LocalModel {
+    fn drop(&mut self) {
+        if let Some(registry) = self.self_host_registry.take() {
+            registry.unregister_model(self.card.slug().as_ref());
+        }
+    }
 }
 
 impl LocalModel {
@@ -461,8 +475,15 @@ impl LocalModel {
 
     /// Drop the LocalModel returning it's ModelDeploymentCard.
     /// For the case where we only need the card and don't want to clone it.
-    pub fn into_card(self) -> ModelDeploymentCard {
-        self.card
+    pub fn into_card(mut self) -> ModelDeploymentCard {
+        // Run the same cleanup the `Drop` impl would, then take the
+        // card out and skip Drop so we don't run it twice.
+        if let Some(registry) = self.self_host_registry.take() {
+            registry.unregister_model(self.card.slug().as_ref());
+        }
+        let card = std::mem::take(&mut self.card);
+        std::mem::forget(self);
+        card
     }
 
     /// Attach this model to the endpoint. This registers it on the network
@@ -572,7 +593,20 @@ impl LocalModel {
             base_url,
             "self-hosting model metadata artifacts"
         );
+        // Stash the registry handle so `Drop` can release these
+        // entries when the LocalModel goes away.
+        self.self_host_registry = Some(registry.clone());
         Ok(())
+    }
+
+    /// Drop all `(slug, filename)` entries this model registered in the
+    /// runtime's [`crate::model_card::ModelDeploymentCard`]-backing
+    /// `metadata_artifacts` registry. Idempotent. Safe to call when
+    /// `self_host_metadata` was never set; the underlying
+    /// `unregister_model` is a no-op for unknown slugs.
+    pub fn clear_self_hosted_artifacts(&self, drt: &dynamo_runtime::DistributedRuntime) {
+        drt.metadata_artifacts()
+            .unregister_model(self.card.slug().as_ref());
     }
 
     /// Helper associated function to detach a model from an endpoint
