@@ -1,15 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 doubleword.ai
 # SPDX-License-Identifier: MIT
 
-"""Public CLI entrypoint for the OpenAI-compatible backend launcher."""
+"""Explicit entrypoint guidance for engine-specific OpenAI backend launchers."""
 
 from collections.abc import Sequence
 
-from dynamo.openai_backend.launcher import launch_main
+
+MESSAGE = (
+    "Use 'python -m dynamo.openai_backend.sglang' or "
+    "'python -m dynamo.openai_backend.vllm'. "
+    "The generic 'dynamo.openai_backend' entrypoint is not engine-specific."
+)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    launch_main(argv)
+    del argv
+    raise SystemExit(MESSAGE)
 
 
 if __name__ == "__main__":

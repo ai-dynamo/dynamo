@@ -41,7 +41,6 @@ class Config:
     served_model_name: Optional[str]
     upstream_base_url: str
     upstream_health_path: str
-    upstream_api_key: Optional[str]
     connect_timeout_seconds: float
     write_timeout_seconds: float
 
@@ -219,11 +218,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--upstream-api-key",
-        default=None,
-        help="Optional API key to send to the upstream engine.",
-    )
-    parser.add_argument(
         "--connect-timeout-seconds",
         type=float,
         default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -246,7 +240,6 @@ def cmd_line_args(argv: Sequence[str] | None = None) -> Config:
         served_model_name=args.served_model_name,
         upstream_base_url=args.upstream_base_url,
         upstream_health_path=args.upstream_health_path,
-        upstream_api_key=args.upstream_api_key,
         connect_timeout_seconds=args.connect_timeout_seconds,
         write_timeout_seconds=args.write_timeout_seconds,
     )
@@ -258,12 +251,24 @@ def _normalize_chat_template_kwargs(request: dict[str, Any]) -> None:
         request["chat_template_kwargs"] = chat_template_args
 
 
+def _normalize_reasoning_content(payload: dict[str, Any]) -> None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return
+
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            reasoning = delta.pop("reasoning", None)
+            if reasoning is not None and "reasoning_content" not in delta:
+                delta["reasoning_content"] = reasoning
+
+
 class UpstreamClient:
     def __init__(self, config: Config):
-        headers = {}
-        if config.upstream_api_key:
-            headers["Authorization"] = f"Bearer {config.upstream_api_key}"
-
         timeout = httpx.Timeout(
             connect=config.connect_timeout_seconds,
             read=None,
@@ -276,7 +281,6 @@ class UpstreamClient:
         )
         self._config = config
         self._client = httpx.AsyncClient(
-            headers=headers,
             timeout=timeout,
             limits=limits,
         )
@@ -494,6 +498,7 @@ class UpstreamClient:
                 f"Upstream returned {type(decoded).__name__} in a streaming chunk; expected a JSON object.",
             )
 
+        _normalize_reasoning_content(decoded)
         return decoded
 
     async def _as_http_error(self, response: httpx.Response) -> HttpError:
