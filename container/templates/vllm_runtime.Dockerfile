@@ -112,7 +112,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
+        libnuma1 libnuma-dev librdmacm1 ibverbs-providers \
+        # numactl CLI for NUMA binding at runtime
+        numactl \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
         g++ \

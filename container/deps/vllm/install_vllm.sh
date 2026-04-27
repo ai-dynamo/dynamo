@@ -28,6 +28,8 @@ CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.8.post1"
 LMCACHE_REF="0.4.4"
 VLLM_OMNI_REF="release/v0.19.0rc1"
+TORCH_REF="2.11.0"
+TORCHVISION_REF="0.26.0"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -107,15 +109,28 @@ elif [ "$ARCH" = "aarch64" ]; then
 fi
 
 export MAX_JOBS=$MAX_JOBS
+CUDA_UV_ARGS=""
 if [ "$DEVICE" = "cuda" ]; then
     export CUDA_HOME=/usr/local/cuda
 
     # Derive torch backend from CUDA version (e.g., "12.9" -> "cu129")
     TORCH_BACKEND="cu$(echo $CUDA_VERSION | tr -d '.')"
     CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+    CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1)
+    if [[ "$TORCH_BACKEND" == "cu129" || "$TORCH_BACKEND" == "cu130" ]]; then
+        CUDA_UV_ARGS="--index-strategy=unsafe-best-match --torch-backend=${TORCH_BACKEND}"
+    else
+        echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
+        exit 1
+    fi
 
     echo "=== Installing prerequisites ==="
     uv pip install pip cuda-python
+    echo "Installing PyTorch ${TORCH_REF} for ${TORCH_BACKEND}..."
+    uv pip install ${CUDA_UV_ARGS} \
+        "torch==${TORCH_REF}+${TORCH_BACKEND}" \
+        "torchaudio==${TORCH_REF}+${TORCH_BACKEND}" \
+        "torchvision==${TORCHVISION_REF}+${TORCH_BACKEND}"
 fi
 
 if [ "$DEVICE" = "cuda" ]; then
@@ -141,12 +156,12 @@ echo "\n=== Installing vLLM-Omni ==="
 # vLLM should remain the final owner of the runtime stack in this environment.
 if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
     # Try PyPI first, fall back to building from source
-    if uv pip install vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+    if uv pip install ${CUDA_UV_ARGS} vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
     else
         echo "⚠ PyPI install failed, building from source..."
         git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
-        uv pip install $INSTALLATION_DIR/vllm-omni
+        uv pip install ${CUDA_UV_ARGS} $INSTALLATION_DIR/vllm-omni
         rm -rf $INSTALLATION_DIR/vllm-omni
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
     fi
@@ -166,18 +181,19 @@ if [ "$DEVICE" = "cuda" ]; then
     # vLLM 0.20.0 switches the default PyPI CUDA wheel to CUDA 13.0.
     # Ask uv for the torch backend explicitly so CUDA 12.9 builds resolve the
     # cu129 torch stack, while CUDA 13.0 builds use the new default wheel.
-    if [[ "$TORCH_BACKEND" == "cu129" || "$TORCH_BACKEND" == "cu130" ]]; then
-        EXTRA_PIP_ARGS="--index-strategy=unsafe-best-match"
-    else
-        echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
-        exit 1
-    fi
-
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
-    uv pip install ${EXTRA_PIP_ARGS} \
-        "vllm[flashinfer,runai,otel]==${VLLM_VER}" \
-        --torch-backend=${TORCH_BACKEND}
+    uv pip install ${CUDA_UV_ARGS} "vllm[flashinfer,runai,otel]==${VLLM_VER}"
     echo "✓ vLLM ${VLLM_VER} installed from PyPI"
+    python3 - <<PY
+import torch
+
+expected = "${CUDA_VERSION_MAJOR}.${CUDA_VERSION_MINOR}"
+if torch.version.cuda != expected:
+    raise RuntimeError(
+        f"PyTorch CUDA version {torch.version.cuda} does not match CUDA {expected}"
+    )
+print(f"✓ PyTorch CUDA version verified: {torch.version.cuda}")
+PY
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 fi
