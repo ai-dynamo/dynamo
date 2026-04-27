@@ -16,7 +16,11 @@ Release history in this document begins at v0.6.0.
 - **Docs:** [v1.0.2](https://docs.dynamo.nvidia.com/dynamo)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
-> **Experimental:** [v1.1.0-dev.3](#v110-dev3) *(partial)*, [v1.1.0-dev.2](#v110-dev2) *(partial)*, and [v1.1.0-dev.1](#v110-dev1) are available as experimental previews. Dev releases ship a subset of artifacts -- see [Pre-Release Artifacts](#pre-release-artifacts) for the exact images, wheels, and Helm charts published per version.
+**Pre-Releases**
+
+- **DeepSeek-V4:** [v1.2.0-sglang-deepseek-v4-dev.1](#v120-sglang-deepseek-v4-dev1) — SGLang container for DeepSeek-V4-Flash and V4-Pro on Blackwell (B200), based on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview. SGLang container only; no wheels, Helm charts, or TRT-LLM container.
+- **Nightlies:** daily `ai-dynamo` and `ai-dynamo-runtime` wheels only (no containers, no Helm charts) published from `main` to [pypi.nvidia.com](https://pypi.nvidia.com/), versioned `X.Y.Z.dev${YYYYMMDD}`. No QA validation. See [Nightly Wheels](#nightly-wheels).
+- **Experimental v1.1.0 previews:** [v1.1.0-dev.3](#v110-dev3) is the latest (partial: TRT-LLM container plus `ai-dynamo` and `ai-dynamo-runtime` wheels). Older: [v1.1.0-dev.2](#v110-dev2), [v1.1.0-dev.1](#v110-dev1). See [Pre-Release Artifacts](#pre-release-artifacts) for the full inventory per version.
 
 ### Container Images
 
@@ -166,6 +170,8 @@ For a complete list of known issues, refer to the release notes for each version
 
 ## Release History
 
+- **v1.2.0-sglang-deepseek-v4-dev.1** *(experimental, SGLang only)*: DeepSeek-V4 preview release on `release/1.2.0-sglang-deepseek-v4-dev.1`. Ships only `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` (built from `lmsysorg/sglang:deepseek-v4-blackwell`). No vLLM or TRT-LLM containers, no wheels, no Helm charts. Backend pins follow upstream DSv4 preview images, not standard Dynamo pins.
+- **Nightly Wheels** *(rolling, from `main`)*: Daily `ai-dynamo` and `ai-dynamo-runtime` wheels published to [pypi.nvidia.com](https://pypi.nvidia.com/) under `X.Y.Z.dev${YYYYMMDD}` versioning. The `X.Y.Z` is the next in-flight train, not yet shipped. No QA validation; intended for early integration testing only. See [Nightly Wheels](#nightly-wheels).
 - **v1.1.0-dev.3** *(experimental, partial)*: Preview release on `release/1.1.0-dev.3`. Ships only `tensorrtllm-runtime:1.1.0-dev.3` (TRT-LLM `v1.3.0rc11`) plus `ai-dynamo` and `ai-dynamo-runtime` wheels. No vLLM/SGLang containers, no other component containers, no Helm charts published. Not recommended for production use.
 - **v1.1.0-dev.2** *(experimental, partial)*: Preview release. Ships `sglang-runtime:1.1.0-dev.2` (SGLang `v0.5.9`) and `tensorrtllm-runtime:1.1.0-dev.2` (TRT-LLM `v1.3.0rc9`) plus `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels. No vLLM container, no other component containers, no Helm charts published. Not recommended for production use.
 - **v1.1.0-dev.1** *(experimental)*: Preview release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1`, vLLM `v0.17.1`, NIXL `v0.10.1`. Not recommended for production use.
@@ -185,6 +191,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 | Version | Release Date | GitHub | Docs | Notes |
 |---------|--------------|--------|------|-------|
+| `v1.2.0-sglang-deepseek-v4-dev.1` | Apr 25, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-sglang-deepseek-v4-dev.1) | — | Experimental (SGLang container only, DeepSeek-V4 preview) |
 | `v1.1.0-dev.3` | Apr 18, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3) | — | Experimental (partial: trtllm container + ai-dynamo wheels only) |
 | `v1.1.0-dev.2` | Apr 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.2) | — | Experimental (partial: sglang + trtllm containers, ai-dynamo wheels) |
 | `v1.1.0-dev.1` | Mar 17, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.1) | — | Experimental |
@@ -579,6 +586,73 @@ pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo==1.1.0.dev
 ```
 
 A GitHub or container tag `v1.1.0-dev.N` maps to a wheel version `1.1.0.devN` (for example `v1.1.0-dev.2` → `==1.1.0.dev2`). Optional extras such as `ai-dynamo[vllm]` use the same flags; pin the version you want from the sections below.
+
+### Nightly Wheels
+
+Date-stamped wheels built from `main` and published to [pypi.nvidia.com](https://pypi.nvidia.com/) under the version pattern `X.Y.Z.dev${YYYYMMDD}` (UTC). The `X.Y.Z` is the next in-flight train, not yet shipped. Nightlies do not go through QA and are intended only for early integration testing.
+
+Available packages:
+
+| Package | Wheel | Python | Arch |
+|---------|-------|--------|------|
+| `ai-dynamo` | `ai_dynamo-X.Y.Z.devYYYYMMDD-py3-none-any.whl` | `3.10`–`3.12` | any |
+| `ai-dynamo-runtime` | `ai_dynamo_runtime-X.Y.Z.devYYYYMMDD-cp310-abi3-manylinux_2_28_{x86_64,aarch64}.whl` | `3.10`+ (abi3) | x86_64, aarch64 |
+
+`kvbm` is not yet on the date-stamped nightly track.
+
+#### Install the latest nightly
+
+```bash
+LATEST=$(curl -s https://pypi.nvidia.com/ai-dynamo/ \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]{8}' | sort -u | tail -1)
+
+pip install --extra-index-url https://pypi.nvidia.com "ai-dynamo==${LATEST}"
+pip install --extra-index-url https://pypi.nvidia.com "ai-dynamo[vllm]==${LATEST}"
+pip install --extra-index-url https://pypi.nvidia.com "ai-dynamo[sglang]==${LATEST}"
+```
+
+The `[0-9]{8}` filter excludes named pre-releases like `1.2.0.dev1`. Quote the bracketed extras (`"ai-dynamo[vllm]==..."`) so zsh does not glob-expand the brackets.
+
+#### Pinned example
+
+```bash
+pip install --extra-index-url https://pypi.nvidia.com \
+  "ai-dynamo[vllm]==1.2.0.dev20260426" \
+  "ai-dynamo-runtime==1.2.0.dev20260426"
+```
+
+#### Sample wheel URLs
+
+```text
+https://pypi.nvidia.com/ai-dynamo/ai_dynamo-1.2.0.dev20260426-py3-none-any.whl
+https://pypi.nvidia.com/ai-dynamo-runtime/ai_dynamo_runtime-1.2.0.dev20260426-cp310-abi3-manylinux_2_28_x86_64.whl
+https://pypi.nvidia.com/ai-dynamo-runtime/ai_dynamo_runtime-1.2.0.dev20260426-cp310-abi3-manylinux_2_28_aarch64.whl
+```
+
+### v1.2.0-sglang-deepseek-v4-dev.1
+
+- **Branch:** [release/1.2.0-sglang-deepseek-v4-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.2.0-sglang-deepseek-v4-dev.1)
+- **GitHub Tag:** [v1.2.0-sglang-deepseek-v4-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-sglang-deepseek-v4-dev.1)
+- **Backend (shipped):** SGLang on `lmsysorg/sglang:deepseek-v4-blackwell` (CUDA `v12.9`, Python `3.12`); NIXL `v0.10.1`, UCX `v1.20.0` bundled. Backend pins follow the upstream DeepSeek-V4 preview, **not** standard Dynamo backend pins.
+- **Coverage:** SGLang container only. No vLLM or TRT-LLM containers, no `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels, no Helm charts. vLLM recipes for V4-Flash and V4-Pro are source-only and target the `vllm/vllm-openai:deepseekv4-cu130` image (built from vLLM PR #40760); users build locally per `recipes/deepseek-v4-{flash,pro}/container/README.md`.
+
+#### Container Images
+
+| Image:Tag | Backend | CUDA | Arch |
+|-----------|---------|------|------|
+| `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | SGLang (DSv4 Blackwell preview) | `v12.9` | AMD64/ARM64 |
+
+#### Python Wheels
+
+Not published for this dev release.
+
+#### Helm Charts
+
+Not published for this dev release. Use `v1.1.0-dev.1` charts or the latest stable (`v1.0.2`) for platform install.
+
+#### Rust Crates
+
+Not shipped for pre-release versions.
 
 ### v1.1.0-dev.3
 
