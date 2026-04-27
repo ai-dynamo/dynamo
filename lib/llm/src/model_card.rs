@@ -251,38 +251,25 @@ fn blake3_hex_of(checksum: &str) -> anyhow::Result<&str> {
 }
 
 /// Fetch `uri`, blake3-verify against `expected_checksum`, atomically
-/// write to `dest`. Schemes: `http(s)`, `file`, `hf`.
+/// write to `dest`. `expected_size` caps the body to prevent a misbehaving
+/// worker from wedging RAM with much-larger-than-expected bytes before
+/// verification fails. Schemes: `http(s)`, `file`, `hf`.
 async fn resolve_uri(
     client: &reqwest::Client,
     uri: &str,
     expected_checksum: &str,
+    expected_size: u64,
     dest: &Path,
 ) -> anyhow::Result<()> {
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
 
     let bytes: Vec<u8> = match parsed.scheme() {
-        "http" | "https" => {
-            let response = client
-                .get(uri)
-                .send()
-                .await
-                .with_context(|| format!("fetching {uri}"))?;
-            if !response.status().is_success() {
-                anyhow::bail!("fetching {uri} returned status {}", response.status());
-            }
-            response
-                .bytes()
-                .await
-                .with_context(|| format!("reading body from {uri}"))?
-                .to_vec()
-        }
+        "http" | "https" => fetch_http_bounded(client, uri, expected_size).await?,
         "file" => {
             let path = parsed
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
-            tokio::fs::read(&path)
-                .await
-                .with_context(|| format!("reading {}", path.display()))?
+            read_local_bounded(&path, expected_size).await?
         }
         "hf" => {
             let (repo, filename) = parse_hf_uri(uri)?;
@@ -290,9 +277,7 @@ async fn resolve_uri(
                 .await
                 .with_context(|| format!("hub::from_hf({repo})"))?;
             let path = snapshot.join(&filename);
-            tokio::fs::read(&path)
-                .await
-                .with_context(|| format!("reading {} from HF snapshot", path.display()))?
+            read_local_bounded(&path, expected_size).await?
         }
         scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
     };
@@ -310,6 +295,66 @@ async fn resolve_uri(
         .await
         .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
     Ok(())
+}
+
+/// HTTP body fetch with a hard size cap. Rejects responses whose
+/// `Content-Length` exceeds `expected_size`, and aborts streaming if
+/// the accumulated body exceeds it. Either way, never buffers more than
+/// `expected_size` bytes.
+async fn fetch_http_bounded(
+    client: &reqwest::Client,
+    uri: &str,
+    expected_size: u64,
+) -> anyhow::Result<Vec<u8>> {
+    use futures::StreamExt;
+
+    let response = client
+        .get(uri)
+        .send()
+        .await
+        .with_context(|| format!("fetching {uri}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("fetching {uri} returned status {}", response.status());
+    }
+    if let Some(content_length) = response.content_length()
+        && content_length > expected_size
+    {
+        anyhow::bail!(
+            "{uri} reports {content_length} bytes, exceeds expected size {expected_size}"
+        );
+    }
+
+    let cap = usize::try_from(expected_size).unwrap_or(usize::MAX);
+    let mut buf = Vec::with_capacity(cap);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading body from {uri}"))?;
+        if buf.len() + chunk.len() > cap {
+            anyhow::bail!("{uri} body exceeds expected size {expected_size}");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Read `path` with a hard size cap. Rejects files whose metadata size
+/// exceeds `expected_size` before the read; verifies the read matches the
+/// metadata size. Mirrors the http path's invariant for `file://` and `hf://`.
+async fn read_local_bounded(path: &Path, expected_size: u64) -> anyhow::Result<Vec<u8>> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("reading metadata for {}", path.display()))?;
+    if metadata.len() > expected_size {
+        anyhow::bail!(
+            "{} is {} bytes, exceeds expected size {}",
+            path.display(),
+            metadata.len(),
+            expected_size
+        );
+    }
+    tokio::fs::read(path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))
 }
 
 /// Parse an `hf://repo[@rev]/filename` URI into `(repo[@rev],
@@ -806,7 +851,14 @@ impl ModelDeploymentCard {
             let blob = blobs.join(blake3_hex);
 
             if !blob.exists() {
-                resolve_uri(&client, &artifact.uri, &artifact.checksum, &blob).await?;
+                resolve_uri(
+                    &client,
+                    &artifact.uri,
+                    &artifact.checksum,
+                    artifact.size,
+                    &blob,
+                )
+                .await?;
                 fetched += 1;
             }
 
@@ -1640,6 +1692,7 @@ mod tests {
             &reqwest::Client::new(),
             &url,
             "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            body.len() as u64,
             &dest,
         )
         .await;
@@ -1653,6 +1706,49 @@ mod tests {
         assert!(
             !dest.exists(),
             "no file should be written on checksum mismatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Oversize http body errors before the in-memory buffer can grow
+    /// past `expected_size`, so a misbehaving worker can't OOM the
+    /// frontend before blake3 verification fails.
+    #[tokio::test]
+    async fn resolve_uri_http_rejects_oversize_body() {
+        let mut server = mockito::Server::new_async().await;
+        let body = b"hello hello hello hello hello hello"; // 35 bytes
+        let _m = server
+            .mock("GET", "/big.txt")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let dir = std::env::temp_dir().join(format!("dynamo-mdc-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("big.txt");
+
+        let url = format!("{}/big.txt", server.url());
+        let result = super::resolve_uri(
+            &reqwest::Client::new(),
+            &url,
+            // Any blake3 will do — we error before verification
+            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            /* expected_size = */ 8,
+            &dest,
+        )
+        .await;
+
+        assert!(result.is_err(), "oversize body must error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("exceeds expected size"),
+            "expected size-cap error, got: {msg}"
+        );
+        assert!(
+            !dest.exists(),
+            "no file should be written on size-cap rejection"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

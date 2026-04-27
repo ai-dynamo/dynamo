@@ -643,6 +643,11 @@ fn internal_endpoint(engine: &str) -> EndpointId {
 /// `http://<host>:<port>` advertising this worker's
 /// `/v1/metadata/...` route. Errors if the system_status_server
 /// isn't running.
+///
+/// Host selection mirrors the request plane: when the bind address is
+/// a wildcard, defer to `ip_resolver::get_local_ip_for_advertise()`,
+/// which enumerates interfaces, picks IPv4 then IPv6, and brackets v6
+/// addresses for URL safety.
 pub(crate) fn self_host_base_url(
     drt: &dynamo_runtime::DistributedRuntime,
 ) -> anyhow::Result<String> {
@@ -655,46 +660,13 @@ pub(crate) fn self_host_base_url(
         .unwrap_or_default()
         .system_host;
     let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => detect_routable_ip(),
+        "0.0.0.0" | "::" | "[::]" => {
+            dynamo_runtime::utils::ip_resolver::get_local_ip_for_advertise()
+        }
         _ => configured,
     };
 
     Ok(format!("http://{host}:{}", info.port()))
-}
-
-/// Routable local IP via the UDP-connect-kernel-routing trick.
-/// Falls back to `127.0.0.1` if no interface is reachable.
-fn detect_routable_ip() -> String {
-    use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-
-    let loopback = || IpAddr::V4(Ipv4Addr::LOCALHOST).to_string();
-
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(_) => return loopback(),
-    };
-    if socket.connect("1.1.1.1:80").is_err() {
-        return loopback();
-    }
-    socket
-        .local_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|_| loopback())
-}
-
-#[cfg(test)]
-mod self_host_url_tests {
-    use super::*;
-    use std::net::IpAddr;
-
-    #[test]
-    fn detect_routable_ip_parses_as_ip() {
-        let s = detect_routable_ip();
-        assert!(
-            s.parse::<IpAddr>().is_ok(),
-            "expected a parseable IP, got: {s:?}"
-        );
-    }
 }
 
 #[cfg(test)]
