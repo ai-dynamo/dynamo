@@ -176,7 +176,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
-| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0" |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
@@ -404,7 +404,7 @@ _Appears in:_
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
-| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures GMS (GPU Memory Service) failover for this service.<br />For intraPod mode: the main container is cloned into two engine containers (active + standby).<br />For interPod mode: the operator creates a dedicated GMS weight server pod and<br />multiple engine pods per rank that share GPUs via DRA resource claims. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -448,7 +448,7 @@ _Appears in:_
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
-| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures GMS (GPU Memory Service) failover for this service.<br />For intraPod mode: the main container is cloned into two engine containers (active + standby).<br />For interPod mode: the operator creates a dedicated GMS weight server pod and<br />multiple engine pods per rank that share GPUs via DRA resource claims. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -809,8 +809,10 @@ _Appears in:_
 
 
 FailoverSpec configures active-passive failover for a worker component.
-Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
-annotation on the DGD.
+For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
+into engine containers (active + standby) within the same pod.
+For interPod mode: the operator creates a dedicated GMS weight server pod and
+multiple engine pods per rank that share GPUs via DRA resource claims.
 
 
 
@@ -820,9 +822,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled activates failover mode. The main container is cloned into two<br />engine containers (active + standby) sharing GPUs via DRA. The standby<br />acquires the flock when the active engine fails. |  |  |
-| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology. Must match gpuMemoryService.mode. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
-| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine containers per rank.<br />Reserved for future use — the operator currently creates exactly one shadow. | 1 | Maximum: 1 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled activates failover mode. |  |  |
+| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology.<br />intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).<br />interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove). | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
+| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine pods per rank.<br />Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).<br />NumShadows is only meaningful for mode=interPod; intraPod uses a fixed<br />1 primary + 1 shadow sidecar layout and any value other than 1 is<br />rejected at admission time. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### FrontendSidecarSpec
@@ -862,7 +864,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `intraPod` | GMSModeIntraPod runs GMS as a sidecar within the same pod.<br /> |
-| `interPod` | GMSModeInterPod runs GMS as a separate pod (not yet supported).<br /> |
+| `interPod` | GMSModeInterPod runs GMS as a separate weight server pod and one or more<br />engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared<br />hostPath volume for UDS sockets. Only valid on FailoverSpec; the<br />GPUMemoryServiceSpec sidecar always runs in intraPod mode.<br /> |
 
 
 #### GPUMemoryServiceSpec
@@ -1020,7 +1022,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
-| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0" |  | Required: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
 | `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
@@ -1484,7 +1486,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
-| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0". |  | Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2". |  | Optional: \{\} <br /> |
 | `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
@@ -1876,6 +1878,32 @@ _Appears in:_
 | `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration for legacy oci-based settings. |  |  |
 
 
+#### DRAConfiguration
+
+
+
+DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+
+NOTE: auto-detection here only verifies that the resource.k8s.io API group is
+registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
+installed, that its DeviceClass exists, or that node-level GPU drivers are
+compatible. An admin can use `enabled: false` to force-off DRA integration
+on clusters where the API is present but the GPU driver stack is not wired
+up — this makes the operator fail GMS / inter-pod failover admissions early
+with a clear error instead of letting pods Pend with a confusing
+"resourceclaim not found" at schedule time.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides auto-detection of the resource.k8s.io API group.<br />nil = auto-detect. Setting true requires detection to also succeed (the<br />operator will exit at startup otherwise). |  |  |
+
+
 #### DiscoveryBackend
 
 _Underlying type:_ _string_
@@ -1978,6 +2006,23 @@ _Appears in:_
 | `controllerClassName` _string_ | ControllerClassName is the ingress controller class name |  |  |
 | `controllerTLSSecretName` _string_ | ControllerTLSSecretName is the TLS secret for the ingress controller |  |  |
 | `hostSuffix` _string_ | HostSuffix is the suffix for ingress hostnames |  |  |
+
+
+#### IstioMeshConfiguration
+
+
+
+IstioMeshConfiguration holds Istio-specific mesh settings.
+
+
+
+_Appears in:_
+- [ServiceMeshConfiguration](#servicemeshconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").<br />Defaults to "SIMPLE". |  |  |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify skips TLS certificate verification in DestinationRules.<br />Defaults to true (matching upstream GAIE behavior with self-signed certs). |  |  |
 
 
 #### KaiSchedulerConfiguration
@@ -2137,8 +2182,10 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `leaderElection` _[LeaderElectionConfiguration](#leaderelectionconfiguration)_ | Leader election configuration |  |  |
 | `namespace` _[NamespaceConfiguration](#namespaceconfiguration)_ | Namespace configuration (restricted vs cluster-wide) |  |  |
 | `orchestrators` _[OrchestratorConfiguration](#orchestratorconfiguration)_ | Orchestrator configuration with optional overrides |  |  |
+| `dra` _[DRAConfiguration](#draconfiguration)_ | DRA (Dynamic Resource Allocation) settings with optional override |  |  |
 | `infrastructure` _[InfrastructureConfiguration](#infrastructureconfiguration)_ | Service mesh and infrastructure addresses |  |  |
 | `ingress` _[IngressConfiguration](#ingressconfiguration)_ | Ingress configuration |  |  |
+| `serviceMesh` _[ServiceMeshConfiguration](#servicemeshconfiguration)_ | ServiceMesh configures automatic generation of service-mesh resources<br />(e.g., Istio DestinationRules) for EPP components. |  |  |
 | `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  |  |
 | `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  |  |
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
@@ -2235,6 +2282,28 @@ _Appears in:_
 | `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:0.0.0.0 port:8080 secure:true \} |  |
 | `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:0.0.0.0 port:8081 \} |  |
 | `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} |  |
+
+
+#### ServiceMeshConfiguration
+
+
+
+ServiceMeshConfiguration holds service mesh integration settings.
+The operator uses this to generate mesh-specific resources (e.g., Istio
+DestinationRules) for EPP components so that sidecar proxies connect
+correctly without double-TLS issues.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `provider` _string_ | Provider selects the service mesh implementation. Supported: "istio", "".<br />Empty string disables service mesh resource generation. |  |  |
+| `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  |  |
+
+
 
 
 #### WebhookServer

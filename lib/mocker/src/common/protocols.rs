@@ -163,7 +163,6 @@ pub enum MoveBlock {
         Option<Vec<Vec<u32>>>,
         Option<UniqueBlock>,
     ),
-    Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
     Promote(
         Uuid,

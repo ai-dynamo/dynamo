@@ -32,7 +32,7 @@ class SweepConfig:
     request_rates: Optional[List[int]] = None
     concurrencies: Optional[List[int]] = None
     osl: int = 150
-    request_count: int = 1000
+    conversation_num: Optional[int] = None
     warmup_count: int = 5
     port: int = 8000
     timeout: int = 600
@@ -127,7 +127,7 @@ def load_config(
         request_rates=yaml_request_rates,
         concurrencies=yaml_concurrencies,
         osl=raw.get("osl", 150),
-        request_count=raw.get("request_count", 1000),
+        conversation_num=raw.get("conversation_num"),
         warmup_count=raw.get("warmup_count", 5),
         port=raw.get("port", 8000),
         timeout=raw.get("timeout", 600),

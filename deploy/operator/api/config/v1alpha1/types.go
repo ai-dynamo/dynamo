@@ -47,11 +47,18 @@ type OperatorConfiguration struct {
 	// Orchestrator configuration with optional overrides
 	Orchestrators OrchestratorConfiguration `json:"orchestrators"`
 
+	// DRA (Dynamic Resource Allocation) settings with optional override
+	DRA DRAConfiguration `json:"dra,omitempty"`
+
 	// Service mesh and infrastructure addresses
 	Infrastructure InfrastructureConfiguration `json:"infrastructure"`
 
 	// Ingress configuration
 	Ingress IngressConfiguration `json:"ingress"`
+
+	// ServiceMesh configures automatic generation of service-mesh resources
+	// (e.g., Istio DestinationRules) for EPP components.
+	ServiceMesh ServiceMeshConfiguration `json:"serviceMesh"`
 
 	// RBAC configuration for cross-namespace resource management (cluster-wide mode)
 	RBAC RBACConfiguration `json:"rbac"`
@@ -194,6 +201,24 @@ type KaiSchedulerConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+//
+// NOTE: auto-detection here only verifies that the resource.k8s.io API group is
+// registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+// GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
+// installed, that its DeviceClass exists, or that node-level GPU drivers are
+// compatible. An admin can use `enabled: false` to force-off DRA integration
+// on clusters where the API is present but the GPU driver stack is not wired
+// up — this makes the operator fail GMS / inter-pod failover admissions early
+// with a clear error instead of letting pods Pend with a confusing
+// "resourceclaim not found" at schedule time.
+type DRAConfiguration struct {
+	// Enabled overrides auto-detection of the resource.k8s.io API group.
+	// nil = auto-detect. Setting true requires detection to also succeed (the
+	// operator will exit at startup otherwise).
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 // InfrastructureConfiguration holds service mesh and backend addresses.
 type InfrastructureConfiguration struct {
 	// NATSAddress is the address of the NATS server
@@ -221,6 +246,41 @@ type IngressConfiguration struct {
 // UseVirtualService returns true if a VirtualService gateway is configured.
 func (i *IngressConfiguration) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
+}
+
+// ServiceMeshProvider enumerates the supported service mesh implementations.
+type ServiceMeshProvider string
+
+const (
+	// ServiceMeshProviderIstio selects Istio as the service mesh.
+	ServiceMeshProviderIstio ServiceMeshProvider = "istio"
+)
+
+// ServiceMeshConfiguration holds service mesh integration settings.
+// The operator uses this to generate mesh-specific resources (e.g., Istio
+// DestinationRules) for EPP components so that sidecar proxies connect
+// correctly without double-TLS issues.
+type ServiceMeshConfiguration struct {
+	// Provider selects the service mesh implementation. Supported: "istio", "".
+	// Empty string disables service mesh resource generation.
+	Provider string `json:"provider"`
+	// Istio holds Istio-specific settings. Only used when Provider is "istio".
+	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
+}
+
+// IsEnabled returns true if a supported service mesh provider is configured.
+func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
+}
+
+// IstioMeshConfiguration holds Istio-specific mesh settings.
+type IstioMeshConfiguration struct {
+	// TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").
+	// Defaults to "SIMPLE".
+	TLSMode string `json:"tlsMode"`
+	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
+	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
+	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // RBACConfiguration holds RBAC settings for cluster-wide mode.
