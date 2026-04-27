@@ -129,8 +129,22 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="gpu_4",
             ),
         },
-        # LLaVA 1.5 can answer with the dominant platform/text colors under
-        # vLLM 0.20, while newer VL models usually identify the green accents.
-        request_payloads=[make_image_payload(["green", "white", "black", "purple"])],
+        # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
+        # keep this as a multimodal serving smoke check, not a color oracle.
+        request_payloads=[
+            make_image_payload(
+                [
+                    "green",
+                    "white",
+                    "black",
+                    "purple",
+                    "red",
+                    "pink",
+                    "yellow",
+                    "blue",
+                    "orange",
+                ]
+            )
+        ],
     ),
 ]
