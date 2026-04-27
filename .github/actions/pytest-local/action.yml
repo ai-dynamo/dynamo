@@ -92,16 +92,28 @@ runs:
         print(f"GPU Name: {name}")
         if not available:
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
-    - name: Verify GPU visibility
+    - name: Verify local model cache
       if: inputs.gpu_tests == 'true'
       shell: bash
       run: |
         set +e
         if [[ -d "${{ inputs.local_models_dir }}" ]]; then
-          echo "📁Listing models directory: ${{ inputs.local_models_dir }}"
+          echo "🔍 Verifying local model cache: ${{ inputs.local_models_dir }}"
           echo "--------------------------------"
-          find "${{ inputs.local_models_dir }}" -maxdepth 2 -type d
+          FOUND=0; MISSING=0
+          for model_dir in "${{ inputs.local_models_dir }}"/models--*; do
+            [[ -d "$model_dir" ]] || continue
+            model_name=$(basename "$model_dir" | sed 's/^models--//' | tr -- '-' '/')
+            if [[ -d "$model_dir/snapshots" && -d "$model_dir/refs" ]]; then
+              echo "  ✅ $model_name"
+              FOUND=$((FOUND+1))
+            else
+              echo "  ⚠️  $model_name (incomplete — missing snapshots/ or refs/)"
+              MISSING=$((MISSING+1))
+            fi
+          done
           echo "--------------------------------"
+          echo "📊 Cache check: $FOUND complete, $MISSING incomplete"
         else
           echo "❌ Models directory not found: ${{ inputs.local_models_dir }}"
         fi
@@ -146,7 +158,9 @@ runs:
         for IMG_CACHE in /home/dynamo/.cache/huggingface /root/.cache/huggingface; do
           if [ -d "${IMG_CACHE}" ]; then
             echo "📦 Seeding HF cache: ${IMG_CACHE} → ${HF_HOME}"
+            _SEED_T0=$(date +%s)
             cp -rn "${IMG_CACHE}/." "${HF_HOME}/" 2>/dev/null || true
+            echo "📦 Cache seed complete in $(( $(date +%s) - _SEED_T0 ))s"
             break
           fi
         done
@@ -195,12 +209,26 @@ runs:
               ;;
           esac
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        umask 0022
+        cd "${CONTAINER_WORKSPACE}"
+
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          echo "▶️ Predownloading models (cwd=${CONTAINER_WORKSPACE}): ${PREDOWNLOAD_CMD}"
+          bash -c "${PREDOWNLOAD_CMD}"
+          PREDOWNLOAD_EXIT=$?
+          # Exit code 5 = no tests collected (predownload test not selected by this marker set, e.g. gpu_0 CPU runs)
+          if [[ ${PREDOWNLOAD_EXIT} -ne 0 && ${PREDOWNLOAD_EXIT} -ne 5 ]]; then
+            echo "❌ Model predownload failed with exit code ${PREDOWNLOAD_EXIT}"
+            echo "TEST_EXIT_CODE=${PREDOWNLOAD_EXIT}" >> $GITHUB_ENV
+            exit ${PREDOWNLOAD_EXIT}
+          fi
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
-        umask 0022
-        cd "${CONTAINER_WORKSPACE}"
         bash -c "${PYTEST_CMD}"
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV

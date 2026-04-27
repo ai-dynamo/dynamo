@@ -73,6 +73,11 @@ on:
         required: false
         type: string
         default: 'none'
+      debug_mode:
+        description: 'Prints useful debug information'
+        required: false
+        type: boolean
+        default: true
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -119,6 +124,13 @@ jobs:
           - 9000:9000
           - 9001:9001
     steps:
+      - name: Print Storage before Run
+        if: inputs.debug_mode
+        shell: bash
+        run: |
+          echo "--- Storage ---"
+          df -h
+          echo "--- End Storage ---"
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Run Sanity Check on Runtime Image
@@ -167,4 +179,10 @@ jobs:
           parallel_mode: ${{ inputs.gpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
           gpu_tests: 'true'
-          local_models_dir: ''
+      - name: Print Storage After Run to confirm nvme and models dir usage 
+        if: inputs.debug_mode
+        shell: bash
+        run: |
+          echo "--- Storage ---"
+          df -h
+          echo "--- End Storage ---"
