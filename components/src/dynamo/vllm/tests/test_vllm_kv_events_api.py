@@ -54,6 +54,10 @@ def _has_kv_cache_spec_kind(event_cls):
     return "kv_cache_spec_kind" in event_cls.__struct_fields__
 
 
+def _has_kv_cache_spec_sliding_window(event_cls):
+    return "kv_cache_spec_sliding_window" in event_cls.__struct_fields__
+
+
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -71,6 +75,7 @@ class TestVllmKvEventsApi:
         8. extra_keys (added in vLLM 0.17.0)
         9. group_idx (added for hybrid KV cache groups; optional for older vLLM)
         10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
+        11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -88,6 +93,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("group_idx")
         if _has_kv_cache_spec_kind(BlockStored):
             expected_fields.append("kv_cache_spec_kind")
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            expected_fields.append("kv_cache_spec_sliding_window")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -111,6 +118,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("group_idx")
         if _has_kv_cache_spec_kind(BlockRemoved):
             expected_fields.append("kv_cache_spec_kind")
+        if _has_kv_cache_spec_sliding_window(BlockRemoved):
+            expected_fields.append("kv_cache_spec_sliding_window")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__
@@ -192,6 +201,8 @@ class TestVllmKvEventsApi:
             event_kwargs["group_idx"] = 0
         if _has_kv_cache_spec_kind(BlockStored):
             event_kwargs["kv_cache_spec_kind"] = "full_attention"
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            event_kwargs["kv_cache_spec_sliding_window"] = 128
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
@@ -207,6 +218,7 @@ class TestVllmKvEventsApi:
             9
             + int(_has_group_idx(BlockStored))
             + int(_has_kv_cache_spec_kind(BlockStored))
+            + int(_has_kv_cache_spec_sliding_window(BlockStored))
         )
         assert len(decoded) == expected_len, (
             f"Expected {expected_len} elements, got {len(decoded)}.\n"
@@ -233,6 +245,11 @@ class TestVllmKvEventsApi:
             assert (
                 decoded[next_idx] == "full_attention"
             ), f"kv_cache_spec_kind at wrong position: {decoded[next_idx]}"
+            next_idx += 1
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            assert (
+                decoded[next_idx] == 128
+            ), f"kv_cache_spec_sliding_window at wrong position: {decoded[next_idx]}"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
@@ -253,6 +270,8 @@ class TestVllmKvEventsApi:
             event_kwargs["group_idx"] = 0
         if _has_kv_cache_spec_kind(BlockStored):
             event_kwargs["kv_cache_spec_kind"] = "full_attention"
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            event_kwargs["kv_cache_spec_sliding_window"] = 128
         event = BlockStored(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -269,6 +288,16 @@ class TestVllmKvEventsApi:
             assert (
                 decoded[kind_idx] == "full_attention"
             ), f"kv_cache_spec_kind at wrong position: {decoded[kind_idx]}"
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            window_idx = 9
+            if _has_group_idx(BlockStored):
+                window_idx += 1
+            if _has_kv_cache_spec_kind(BlockStored):
+                window_idx += 1
+            assert decoded[window_idx] == 128, (
+                "kv_cache_spec_sliding_window at wrong position: "
+                f"{decoded[window_idx]}"
+            )
 
     def test_block_removed_serialization_format(self):
         """Verify BlockRemoved serializes to expected msgpack array format."""
@@ -282,6 +311,8 @@ class TestVllmKvEventsApi:
             event_kwargs["group_idx"] = 0
         if _has_kv_cache_spec_kind(BlockRemoved):
             event_kwargs["kv_cache_spec_kind"] = "full_attention"
+        if _has_kv_cache_spec_sliding_window(BlockRemoved):
+            event_kwargs["kv_cache_spec_sliding_window"] = 128
         event = BlockRemoved(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -291,6 +322,7 @@ class TestVllmKvEventsApi:
             3
             + int(_has_group_idx(BlockRemoved))
             + int(_has_kv_cache_spec_kind(BlockRemoved))
+            + int(_has_kv_cache_spec_sliding_window(BlockRemoved))
         )
         assert len(decoded) == expected_len, (
             f"Expected {expected_len} elements, got {len(decoded)}.\n"
@@ -309,3 +341,8 @@ class TestVllmKvEventsApi:
             assert (
                 decoded[next_idx] == "full_attention"
             ), f"kv_cache_spec_kind at wrong position: {decoded[next_idx]}"
+            next_idx += 1
+        if _has_kv_cache_spec_sliding_window(BlockRemoved):
+            assert (
+                decoded[next_idx] == 128
+            ), f"kv_cache_spec_sliding_window at wrong position: {decoded[next_idx]}"
