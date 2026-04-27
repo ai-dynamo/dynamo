@@ -24,6 +24,7 @@ data:
       max_batch_size: 128
     disable_overlap_scheduler: false
     print_iter_log: false
+    # DEEPGEMM requires Blackwell (SM100+). Remove moe_config block to run on Hopper (SM90).
     moe_config:
       backend: DEEPGEMM
       max_num_tokens: 8192
@@ -54,7 +55,7 @@ spec:
                     - qwen3-235b-a22b-agg-frontend
               topologyKey: kubernetes.io/hostname
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           command:
@@ -96,7 +97,7 @@ spec:
               --max-num-tokens 8192 \
               --max-seq-len 8192 \
               --extra-engine-args "${ENGINE_ARGS}"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           workingDir: /workspace/components/backends/trtllm
           volumeMounts:
             - name: agg-config

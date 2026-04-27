@@ -30,6 +30,8 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      benchmarks: ${{ steps.changes.outputs.benchmarks }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -82,6 +84,17 @@ jobs:
       - name: Check all deploy test jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+
+  dynamo-status-check:
+    runs-on: ubuntu-slim
+    needs:
+      - changed-files
+      - dynamo-pipeline
+    if: always()
+    steps:
+      - name: Check all dynamo jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   # ============================================================================
   # Operator
@@ -371,7 +384,7 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
@@ -380,7 +393,31 @@ jobs:
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_parallel_mode: none
       cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: '2'
       run_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
+  # DYNAMO RUNTIME PIPELINE
+  # ============================================================================
+
+  dynamo-pipeline:
+    name: dynamo-runtime
+    needs: [changed-files]
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.planner == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.benchmarks == 'true'
+    uses: ./.github/workflows/dynamo-pipeline.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
   # ============================================================================
@@ -610,6 +647,7 @@ jobs:
       - sglang-multi-gpu-test
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
+      - dynamo-pipeline
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

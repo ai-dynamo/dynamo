@@ -54,6 +54,11 @@ on:
         required: false
         type: number
         default: 10
+      cpu_parallel_mode:
+        description: 'pytest-xdist mode for CPU-only tests: auto, none/0, or a worker count'
+        required: false
+        type: string
+        default: 'auto'
       run_gpu_tests:
         description: 'Whether to run GPU tests'
         required: false

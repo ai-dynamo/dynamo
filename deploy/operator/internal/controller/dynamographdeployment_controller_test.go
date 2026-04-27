@@ -770,7 +770,9 @@ func Test_reconcileGroveResources(t *testing.T) {
 		name                   string
 		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
 		existingGroveResources []client.Object
+		draEnabled             bool
 		wantReconcileResult    ReconcileResult
+		wantErrSubstring       string
 	}{
 		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
@@ -1038,6 +1040,25 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "inter-pod GMS failover requires DRA - returns clear error when DRA is disabled",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(1)),
+						Failover: &v1alpha1.FailoverSpec{
+							Enabled:    true,
+							Mode:       v1alpha1.GMSModeInterPod,
+							NumShadows: 1,
+						},
+					},
+				},
+			},
+			draEnabled:       false,
+			wantErrSubstring: "requires DRA",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1073,7 +1094,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: tt.draEnabled},
 				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
@@ -1083,6 +1104,11 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 
 			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+			if tt.wantErrSubstring != "" {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err.Error()).To(gomega.ContainSubstring(tt.wantErrSubstring))
+				return
+			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
@@ -2693,6 +2719,101 @@ func TestPropagateTopologyCondition(t *testing.T) {
 				eventCount++
 			}
 			g.Expect(eventCount).To(gomega.Equal(tt.wantEventCount))
+		})
+	}
+}
+
+func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+	tests := []struct {
+		name         string
+		obj          client.Object
+		wantRequests int
+		wantName     string
+		wantNs       string
+	}{
+		{
+			name: "PCSG with PodCliqueSet controller ownerRef returns DGD request",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dynamo-recipe-0-worker",
+					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			wantRequests: 1,
+			wantName:     "dynamo-recipe",
+			wantNs:       "mwieczorek-dsv32-trtllm-agg",
+		},
+		{
+			name: "PCSG with no ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "orphan-pcsg",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name: "PCSG with non-controller PodCliqueSet ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pcsg-with-non-controller-ref",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "some-pcs",
+							// Controller flag omitted: metav1.GetControllerOf must ignore this ref.
+						},
+					},
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name: "PCSG with non-PodCliqueSet ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "weird-pcsg",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "Deployment",
+							Name:       "not-a-pcs",
+						},
+					},
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name:         "non-PCSG object returns no requests",
+			obj:          &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default"}},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoGraphDeploymentReconciler{}
+			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
+
+			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
+			if tt.wantRequests == 1 {
+				g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
+				g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+			}
 		})
 	}
 }

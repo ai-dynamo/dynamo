@@ -35,6 +35,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 16x H100/H200 | ✅ | ✅ | MoE model, TP4×EP4 | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
@@ -68,6 +69,10 @@ These recipes are under active development and may require additional setup step
 |-------|-----------|------|------|------------|-------|
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill. Requires [custom container build](glm-5-nvfp4/). |
 | **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/trtllm/agg/nvidia/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling. Vision input not yet functional. |
+| **[DeepSeek-V4-Flash](deepseek-v4-flash/vllm/agg/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — MoE model (284B / 13B active), DP=4 + EP, FP8 KV cache, reasoning + tool calling. Requires [custom container build](deepseek-v4-flash/container/). |
+| **[DeepSeek-V4-Flash](deepseek-v4-flash/sglang/)** | SGLang | Aggregated | 4x B200 | ✅ | Text only — MoE model (284B / 13B active), TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available; optional [custom container build](deepseek-v4-flash/sglang/Dockerfile.dsv4-sglang). |
+| **[DeepSeek-V4-Pro](deepseek-v4-pro/vllm/agg/)** | vLLM | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8 + EP, FP4+FP8 mixed checkpoint, FP8 KV cache, CSA+HCA attention, tool calling. Thinking modes unstable on Day-0 — run with `thinking: false`. Requires [custom container build](deepseek-v4-pro/container/). |
+| **[DeepSeek-V4-Pro](deepseek-v4-pro/sglang/)** | SGLang | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4-flash/sglang/)). |
 
 ## Recipe Structure
 

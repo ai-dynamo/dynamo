@@ -493,6 +493,50 @@ class TestDisaggEasy:
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode == 2
 
+    def test_disagg_preserves_insufficient_data_when_both_sides_stuck(self):
+        # Both prefill and decode sub-decisions bail out with
+        # "insufficient_data" (missing capability data). The wrap-up used
+        # to overwrite this with "no_change"; the fix preserves the real
+        # reason so operators can see why scaling stalled.
+        caps = WorkerCapabilities(
+            prefill=EngineCapabilities(num_gpu=1),  # no context_length
+            decode=EngineCapabilities(num_gpu=1),  # no max_kv_tokens
+        )
+        core = _make_core(mode="disagg", optimization_target="throughput", caps=caps)
+        p_fpm = _make_fpm(queued_prefill_tokens=0)
+        d_fpm = _make_fpm(sum_decode_kv_tokens=0, queued_decode_kv_tokens=0)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(
+                prefill={("w1", 0): p_fpm},
+                decode={("w1", 0): d_fpm},
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1, ready_num_decode=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "insufficient_data"
+
+    def test_disagg_no_change_when_sub_decisions_return_clean_no_change(self):
+        # Both sub-decisions produce valid "no_change" — aggregate reason
+        # should still be "no_change" (not a stale null).
+        core = _make_core(mode="disagg", optimization_target="throughput")
+        # Single-worker topology with mid-range utilisation -> sub-decisions
+        # sit between scale-up and scale-down thresholds.
+        p_fpm = _make_fpm(queued_prefill_tokens=CONTEXT_LENGTH // 2)
+        d_fpm = _make_fpm(sum_decode_kv_tokens=MAX_KV_TOKENS // 2)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(
+                prefill={("w1", 0): p_fpm},
+                decode={("w1", 0): d_fpm},
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1, ready_num_decode=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "no_change"
+
 
 # ── Agg mode ─────────────────────────────────────────────────────────
 

@@ -80,6 +80,7 @@ impl PromptRegistry {
                 .store_chain(worker, lookup, store.parent, &store.hashes);
         }
         self.loads.insert(worker, load);
+        self.membership.maybe_cleanup();
     }
 
     pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
@@ -92,9 +93,11 @@ impl PromptRegistry {
         for worker in change.added {
             self.loads.entry(worker).or_default();
         }
+        self.membership.maybe_cleanup();
     }
 
     #[expect(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn project_loads_from_overlap(
         &self,
         query_len: usize,
@@ -133,6 +136,7 @@ impl PromptRegistry {
         (potential_blocks, potential_tokens)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn potential_blocks_and_tokens_with_prefill_tracking(
         &self,
         token_sequence: Option<&[SequenceHash]>,
