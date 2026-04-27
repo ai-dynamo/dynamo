@@ -187,7 +187,8 @@ if [ "$DEVICE" = "cuda" ]; then
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
     uv pip install ${VLLM_UV_ARGS} "vllm[flashinfer,runai,otel]==${VLLM_VER}"
     echo "✓ vLLM ${VLLM_VER} installed from PyPI"
-    python3 - <<PY
+    # Run outside /opt/vllm so Python imports the installed wheel, not the cloned source tree.
+    (cd / && python3 - <<PY
 import importlib
 from importlib import metadata
 
@@ -206,6 +207,7 @@ if "${TORCH_BACKEND}" == "cu129" and not vllm_version.endswith("+cu129"):
 importlib.import_module("vllm._C")
 print(f"✓ vLLM extension import verified: {vllm_version}")
 PY
+    )
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 fi
