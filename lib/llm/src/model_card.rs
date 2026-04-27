@@ -249,46 +249,107 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// Per-process scratch directory for MDC files downloaded from
-/// http(s) URIs. Lives under the OS tempdir, scoped by PID and slug
-/// so multiple models on the same process don't collide. Not
-/// persistent: the legacy `hub::from_hf` path delegates to HF Hub's
-/// own cache rather than maintaining its own, and this path
-/// follows the same posture — a process restart re-fetches the
-/// (~10 MiB) files, the OS cleans `tempdir` on reboot, and we don't
-/// own a long-running disk artifact in `$HOME`.
-fn files_download_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
-    let dir = std::env::temp_dir()
-        .join(format!("dynamo-mdc-{}", std::process::id()))
-        .join(slug.to_string());
+/// Root directory of the MDC files cache. Layout mirrors HF Hub's
+/// `~/.cache/huggingface/hub/`:
+///
+/// ```text
+/// $cache_root/
+///   blobs/<blake3-hex>           — actual bytes, content-addressed
+///   by-slug/<slug>/<filename>    — symlink to ../../blobs/<blake3-hex>
+/// ```
+///
+/// Content addressing makes "do I already have this file?" a single
+/// `Path::exists` check on the blob path. Multi-worker dedup falls
+/// out for free (same blake3 = one blob, N symlinks). Persistent
+/// across restarts; cleanup is user-managed (same posture as HF Hub).
+fn mdc_cache_root() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache/dynamo/mdc")
+}
+
+fn mdc_blobs_dir() -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root().join("blobs");
     std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating MDC files download dir {}", dir.display()))?;
+        .with_context(|| format!("creating MDC blobs dir {}", dir.display()))?;
     Ok(dir)
 }
 
-/// GET `uri`, blake3-verify the body against `expected_checksum`
-/// (`"blake3:<hex>"`), and atomically write the verified bytes to
-/// `dest`. Atomic write = `dest.tmp` then rename, so a partial
-/// download never leaves a corrupt file in place where a future
-/// reader would mmap it.
-async fn fetch_and_verify(
+fn mdc_slug_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root().join("by-slug").join(slug.to_string());
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating MDC slug dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Strip the `blake3:` prefix from a checksum string, returning the
+/// hex portion. Errors if the prefix is missing or the algorithm is
+/// anything else.
+fn blake3_hex_of(checksum: &str) -> anyhow::Result<&str> {
+    checksum
+        .strip_prefix("blake3:")
+        .with_context(|| format!("expected blake3 checksum, got: {checksum}"))
+}
+
+/// Resolve `uri` and write the blake3-verified bytes to `dest`.
+/// Dispatches by URI scheme:
+///
+/// - `http://` / `https://` — `reqwest` GET, body verified against
+///   `expected_checksum`.
+/// - `file://` — read the local path, verify, copy to `dest`.
+/// - `hf://repo[@rev]/filename` — call [`crate::hub::from_hf`] for
+///   the repo, locate the file in the snapshot, verify, copy to
+///   `dest`.
+///
+/// All schemes write atomically (`dest.tmp` then rename), so a
+/// partial transfer never leaves a corrupt file at `dest` where a
+/// future reader would mmap it. Checksum mismatch is a hard error,
+/// never a silent fallback.
+async fn resolve_uri(
     client: &reqwest::Client,
     uri: &str,
     expected_checksum: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let response = client
-        .get(uri)
-        .send()
-        .await
-        .with_context(|| format!("fetching {uri}"))?;
-    if !response.status().is_success() {
-        anyhow::bail!("fetching {uri} returned status {}", response.status());
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading body from {uri}"))?;
+    let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
+
+    let bytes: Vec<u8> = match parsed.scheme() {
+        "http" | "https" => {
+            let response = client
+                .get(uri)
+                .send()
+                .await
+                .with_context(|| format!("fetching {uri}"))?;
+            if !response.status().is_success() {
+                anyhow::bail!("fetching {uri} returned status {}", response.status());
+            }
+            response
+                .bytes()
+                .await
+                .with_context(|| format!("reading body from {uri}"))?
+                .to_vec()
+        }
+        "file" => {
+            let path = parsed
+                .to_file_path()
+                .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
+            tokio::fs::read(&path)
+                .await
+                .with_context(|| format!("reading {}", path.display()))?
+        }
+        "hf" => {
+            let (repo, filename) = parse_hf_uri(uri)?;
+            let snapshot = crate::hub::from_hf(&repo, /* ignore_weights = */ true)
+                .await
+                .with_context(|| format!("hub::from_hf({repo})"))?;
+            let path = snapshot.join(&filename);
+            tokio::fs::read(&path)
+                .await
+                .with_context(|| format!("reading {} from HF snapshot", path.display()))?
+        }
+        scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
+    };
 
     let actual = format!("blake3:{}", blake3::hash(&bytes));
     if actual != expected_checksum {
@@ -302,6 +363,38 @@ async fn fetch_and_verify(
     tokio::fs::rename(&tmp, dest)
         .await
         .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
+    Ok(())
+}
+
+/// Parse an `hf://repo[@rev]/filename` URI into `(repo[@rev],
+/// filename)`. The repo portion is whatever HF Hub recognizes via
+/// [`crate::hub::from_hf`]; the filename is the last path segment.
+fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
+    let body = uri
+        .strip_prefix("hf://")
+        .with_context(|| format!("expected hf:// scheme, got: {uri}"))?;
+    let (repo, filename) = body
+        .rsplit_once('/')
+        .with_context(|| format!("hf:// uri must end in /filename, got: {uri}"))?;
+    if repo.is_empty() || filename.is_empty() {
+        anyhow::bail!("malformed hf:// uri: {uri}");
+    }
+    Ok((repo.to_string(), filename.to_string()))
+}
+
+/// Materialize a symlink at `link` pointing at `target`. Replaces an
+/// existing symlink at `link` if present (idempotent).
+fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
+    if link.exists() || link.is_symlink() {
+        std::fs::remove_file(link).with_context(|| format!("removing {}", link.display()))?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link)
+        .with_context(|| format!("symlinking {} -> {}", link.display(), target.display()))?;
+    #[cfg(not(unix))]
+    std::fs::copy(target, link)
+        .map(|_| ())
+        .with_context(|| format!("copying {} -> {}", target.display(), link.display()))?;
     Ok(())
 }
 
@@ -747,13 +840,12 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
-        // Prefer the per-file artifact list when the MDC carries one
-        // with http(s) URIs (regardless of whether the worker chose
-        // to self-host or some other fronting service is publishing
-        // the URIs — the consumer side doesn't care). Falls through
-        // to the legacy HuggingFace fetch when the list is empty or
-        // none of the URIs are http(s).
-        if self.try_download_files().await? {
+        // Prefer the per-file artifact list when the MDC carries
+        // one. The consumer side is scheme-agnostic — it dispatches
+        // each `ArtifactRef.uri` through `resolve_uri`, which handles
+        // http/https, file, and hf alike. Falls through to the legacy
+        // bulk hub::from_hf path when `files` is empty (old workers).
+        if self.download_files().await? {
             return Ok(());
         }
 
@@ -764,55 +856,62 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
-    /// Attempt to populate the typed CheckedFile fields by fetching
-    /// each `http(s)://` artifact from the MDC's `files` vector. Each
-    /// download is blake3-verified against `ArtifactRef.checksum`
-    /// before the bytes are written to a per-slug cache dir. On
-    /// success, calls [`Self::update_dir`] so downstream consumers
-    /// (`tokenizer()`, `prompt_formatter()`, etc.) see local paths.
+    /// Materialize each entry in the MDC's `files` vector into the
+    /// content-addressed cache, then point the typed CheckedFile
+    /// fields at the per-slug symlink directory so downstream
+    /// consumers (`tokenizer()`, `prompt_formatter()`, ...) see local
+    /// paths.
     ///
-    /// The consumer side is scheme-agnostic: it doesn't know or care
-    /// whether the URIs point at the originating worker, a peer
-    /// holder, modelexpress, or some other front-cache. Only the URI
-    /// scheme drives the resolution path.
+    /// Layout (HF-Hub-style):
     ///
-    /// Returns `Ok(true)` when at least one http artifact was fetched
-    /// and the typed fields were rewritten. Returns `Ok(false)` to
-    /// signal the caller should fall back to its legacy resolution
-    /// path (no http entries present, or `files` is empty).
-    /// Returns an error on download failure or checksum mismatch —
-    /// those are loud failures, not silent fallbacks.
-    async fn try_download_files(&mut self) -> anyhow::Result<bool> {
+    /// ```text
+    /// ~/.cache/dynamo/mdc/blobs/<blake3-hex>          ← bytes
+    /// ~/.cache/dynamo/mdc/by-slug/<slug>/<filename>   ← symlink
+    /// ```
+    ///
+    /// Content addressing makes "do I already have this file?" a
+    /// `Path::exists` check on the blob path. Repeat registrations
+    /// of the same model (multiple worker replicas, frontend
+    /// restart, ...) hit the existing blob and skip the download.
+    /// Each artifact is fetched at most once per blake3.
+    ///
+    /// Returns `Ok(true)` when the typed fields were rewritten via
+    /// the artifact list. Returns `Ok(false)` to signal the caller
+    /// should fall back to its legacy resolution path (`files` is
+    /// empty). Returns an error on download failure or checksum
+    /// mismatch — those are loud failures, not silent fallbacks.
+    async fn download_files(&mut self) -> anyhow::Result<bool> {
         if self.files.is_empty() {
             return Ok(false);
         }
 
-        let http_artifacts: Vec<&ArtifactRef> = self
-            .files
-            .iter()
-            .filter(|a| a.uri.starts_with("http://") || a.uri.starts_with("https://"))
-            .collect();
-
-        if http_artifacts.is_empty() {
-            return Ok(false);
-        }
-
-        let dir = files_download_dir(&self.slug)?;
+        let blobs = mdc_blobs_dir()?;
+        let slug_dir = mdc_slug_dir(&self.slug)?;
         let client = reqwest::Client::new();
 
-        for artifact in &http_artifacts {
-            let dest = dir.join(&artifact.filename);
-            fetch_and_verify(&client, &artifact.uri, &artifact.checksum, &dest).await?;
+        let mut fetched = 0usize;
+        for artifact in &self.files {
+            let blake3_hex = blake3_hex_of(&artifact.checksum)?;
+            let blob = blobs.join(blake3_hex);
+
+            if !blob.exists() {
+                resolve_uri(&client, &artifact.uri, &artifact.checksum, &blob).await?;
+                fetched += 1;
+            }
+
+            let link = slug_dir.join(&artifact.filename);
+            symlink_force(&blob, &link)?;
         }
 
         tracing::info!(
             display_name = %self.display_name,
-            count = http_artifacts.len(),
-            dir = %dir.display(),
-            "fetched model metadata files",
+            artifact_count = self.files.len(),
+            fetched,
+            cache_root = %mdc_cache_root().display(),
+            "resolved model metadata files",
         );
 
-        self.update_dir(&dir);
+        self.update_dir(&slug_dir);
         Ok(true)
     }
 
@@ -880,6 +979,21 @@ impl ModelDeploymentCard {
                     .context(filename)?;
                 src_file.move_to_url(hf_url);
             }
+        }
+
+        // Keep the `files` vector consistent with the typed enums.
+        // Only rewrite entries whose current URI is `file://` — that
+        // way self-hosted entries (already rewritten to `http://` by
+        // `LocalModel::move_to_self_host`) and any other-scheme
+        // entries (`mx://`, ...) are preserved as-is.
+        for artifact in self.files.iter_mut() {
+            if !artifact.uri.starts_with("file://") {
+                continue;
+            }
+            let hf_url = url::Url::parse(base_url)
+                .and_then(|u| u.join(&artifact.filename))
+                .context(artifact.filename.clone())?;
+            artifact.uri = hf_url.to_string();
         }
         Ok(())
     }
@@ -1597,11 +1711,12 @@ mod tests {
         }
     }
 
-    /// `fetch_and_verify` must reject a payload whose blake3 doesn't
-    /// match `expected_checksum`. No partial file is left at `dest` —
-    /// the atomic-rename machinery never runs on a checksum mismatch.
+    /// `resolve_uri` must reject an http payload whose blake3
+    /// doesn't match `expected_checksum`. No partial file is left at
+    /// `dest` — the atomic-rename machinery never runs on a
+    /// checksum mismatch.
     #[tokio::test]
-    async fn fetch_and_verify_rejects_checksum_mismatch() {
+    async fn resolve_uri_http_rejects_checksum_mismatch() {
         let mut server = mockito::Server::new_async().await;
         let body = b"hello world";
         let _m = server
@@ -1616,7 +1731,7 @@ mod tests {
         let dest = dir.join("file.txt");
 
         let url = format!("{}/file.txt", server.url());
-        let result = super::fetch_and_verify(
+        let result = super::resolve_uri(
             &reqwest::Client::new(),
             &url,
             "blake3:0000000000000000000000000000000000000000000000000000000000000000",
@@ -1636,6 +1751,18 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `parse_hf_uri` round-trip — `hf://repo/filename` parses into
+    /// `(repo, filename)` and rejects malformed inputs.
+    #[test]
+    fn parse_hf_uri_roundtrip() {
+        let (repo, filename) = super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/tokenizer.json").unwrap();
+        assert_eq!(repo, "Qwen/Qwen3-0.6B");
+        assert_eq!(filename, "tokenizer.json");
+
+        assert!(super::parse_hf_uri("hf://just-a-name").is_err());
+        assert!(super::parse_hf_uri("https://example.com/x").is_err());
     }
 
     /// MDC bytes published by an old worker (no `files` field) must
