@@ -131,10 +131,66 @@ pub enum ExtraKeyItem {
 #[serde(untagged)]
 enum BlockStoredTrailingField {
     GroupIdx(u32),
+    KvCacheSpecKind(KvCacheSpecKind),
     BlockMmInfos(Vec<Option<BlockExtraInfo>>),
 }
 
-fn is_non_main_group(group_idx: Option<u32>) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KvCacheSpecKind {
+    FullAttention,
+    MlaAttention,
+    SlidingWindow,
+    SlidingWindowMla,
+    Mamba,
+    ChunkedLocalAttention,
+    SinkFullAttention,
+    EncoderOnlyAttention,
+    CrossAttention,
+    Unknown,
+}
+
+impl KvCacheSpecKind {
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "full_attention" => Self::FullAttention,
+            "mla_attention" => Self::MlaAttention,
+            "sliding_window" => Self::SlidingWindow,
+            "sliding_window_mla" => Self::SlidingWindowMla,
+            "mamba" => Self::Mamba,
+            "chunked_local_attention" => Self::ChunkedLocalAttention,
+            "sink_full_attention" => Self::SinkFullAttention,
+            "encoder_only_attention" => Self::EncoderOnlyAttention,
+            "cross_attention" => Self::CrossAttention,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn is_main_attention(self) -> bool {
+        matches!(
+            self,
+            Self::FullAttention | Self::MlaAttention | Self::SinkFullAttention
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for KvCacheSpecKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&value))
+    }
+}
+
+fn should_ignore_event(
+    group_idx: Option<u32>,
+    kv_cache_spec_kind: Option<KvCacheSpecKind>,
+) -> bool {
+    if let Some(kind) = kv_cache_spec_kind {
+        return !kind.is_main_attention();
+    }
+
     matches!(group_idx, Some(group_idx) if group_idx != 0)
 }
 
@@ -237,6 +293,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
         let mut group_idx: Option<Option<u32>> = None;
+        let mut kv_cache_spec_kind: Option<Option<KvCacheSpecKind>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -270,6 +327,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "group_idx" => {
                     group_idx = Some(map.next_value()?);
                 }
+                "kv_cache_spec_kind" => {
+                    kv_cache_spec_kind = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -295,7 +355,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 let medium = medium.unwrap_or(None);
-                if is_non_main_group(group_idx.unwrap_or(None)) {
+                if should_ignore_event(
+                    group_idx.unwrap_or(None),
+                    kv_cache_spec_kind.unwrap_or(None),
+                ) {
                     return Ok(RawKvEvent::Ignored);
                 }
                 let block_mm_infos = block_mm_infos
@@ -316,7 +379,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_hashes =
                     block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
                 let medium = medium.unwrap_or(None);
-                if is_non_main_group(group_idx.unwrap_or(None)) {
+                if should_ignore_event(
+                    group_idx.unwrap_or(None),
+                    kv_cache_spec_kind.unwrap_or(None),
+                ) {
                     return Ok(RawKvEvent::Ignored);
                 }
                 Ok(RawKvEvent::BlockRemoved {
@@ -366,13 +432,17 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     seq.next_element()?.unwrap_or(None);
                 let mut block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = None;
                 let mut group_idx: Option<u32> = None;
+                let mut kv_cache_spec_kind: Option<KvCacheSpecKind> = None;
 
-                for _ in 0..2 {
+                for _ in 0..3 {
                     let trailing: Option<BlockStoredTrailingField> =
                         seq.next_element()?.unwrap_or(None);
                     match trailing {
                         Some(BlockStoredTrailingField::GroupIdx(idx)) => {
                             group_idx = Some(idx);
+                        }
+                        Some(BlockStoredTrailingField::KvCacheSpecKind(kind)) => {
+                            kv_cache_spec_kind = Some(kind);
                         }
                         Some(BlockStoredTrailingField::BlockMmInfos(infos)) => {
                             block_mm_infos = Some(infos);
@@ -383,7 +453,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
-                if is_non_main_group(group_idx) {
+                if should_ignore_event(group_idx, kv_cache_spec_kind) {
                     return Ok(RawKvEvent::Ignored);
                 }
 
@@ -419,10 +489,12 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
                 let group_idx: Option<u32> = seq.next_element()?.unwrap_or(None);
+                let kv_cache_spec_kind: Option<KvCacheSpecKind> =
+                    seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
-                if is_non_main_group(group_idx) {
+                if should_ignore_event(group_idx, kv_cache_spec_kind) {
                     return Ok(RawKvEvent::Ignored);
                 }
 
@@ -701,9 +773,26 @@ mod tests {
         }
     }
 
-    fn block_stored_sequence_with_group_idx(group_idx: Option<u32>) -> Vec<u8> {
-        match group_idx {
-            Some(group_idx) => to_vec(&(
+    fn block_stored_sequence(
+        group_idx: Option<u32>,
+        kv_cache_spec_kind: Option<&'static str>,
+    ) -> Vec<u8> {
+        match (group_idx, kv_cache_spec_kind) {
+            (Some(group_idx), Some(kv_cache_spec_kind)) => to_vec(&(
+                "BlockStored",
+                vec![BlockHashValue::Unsigned(11)],
+                Option::<BlockHashValue>::None,
+                vec![10u32, 11],
+                2usize,
+                Option::<u64>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<u8>::None,
+                group_idx,
+                kv_cache_spec_kind,
+            ))
+            .unwrap(),
+            (Some(group_idx), None) => to_vec(&(
                 "BlockStored",
                 vec![BlockHashValue::Unsigned(11)],
                 Option::<BlockHashValue>::None,
@@ -716,7 +805,21 @@ mod tests {
                 group_idx,
             ))
             .unwrap(),
-            None => to_vec(&(
+            (None, Some(kv_cache_spec_kind)) => to_vec(&(
+                "BlockStored",
+                vec![BlockHashValue::Unsigned(11)],
+                Option::<BlockHashValue>::None,
+                vec![10u32, 11],
+                2usize,
+                Option::<u64>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<u8>::None,
+                Option::<u32>::None,
+                kv_cache_spec_kind,
+            ))
+            .unwrap(),
+            (None, None) => to_vec(&(
                 "BlockStored",
                 vec![BlockHashValue::Unsigned(11)],
                 Option::<BlockHashValue>::None,
@@ -730,16 +833,35 @@ mod tests {
         }
     }
 
-    fn block_removed_sequence_with_group_idx(group_idx: Option<u32>) -> Vec<u8> {
-        match group_idx {
-            Some(group_idx) => to_vec(&(
+    fn block_removed_sequence(
+        group_idx: Option<u32>,
+        kv_cache_spec_kind: Option<&'static str>,
+    ) -> Vec<u8> {
+        match (group_idx, kv_cache_spec_kind) {
+            (Some(group_idx), Some(kv_cache_spec_kind)) => to_vec(&(
+                "BlockRemoved",
+                vec![BlockHashValue::Unsigned(11)],
+                Option::<String>::None,
+                group_idx,
+                kv_cache_spec_kind,
+            ))
+            .unwrap(),
+            (Some(group_idx), None) => to_vec(&(
                 "BlockRemoved",
                 vec![BlockHashValue::Unsigned(11)],
                 Option::<String>::None,
                 group_idx,
             ))
             .unwrap(),
-            None => to_vec(&(
+            (None, Some(kv_cache_spec_kind)) => to_vec(&(
+                "BlockRemoved",
+                vec![BlockHashValue::Unsigned(11)],
+                Option::<String>::None,
+                Option::<u32>::None,
+                kv_cache_spec_kind,
+            ))
+            .unwrap(),
+            (None, None) => to_vec(&(
                 "BlockRemoved",
                 vec![BlockHashValue::Unsigned(11)],
                 Option::<String>::None,
@@ -750,8 +872,23 @@ mod tests {
 
     fn sequence_with_group_idx(event_kind: TestEventKind, group_idx: Option<u32>) -> Vec<u8> {
         match event_kind {
-            TestEventKind::BlockStored => block_stored_sequence_with_group_idx(group_idx),
-            TestEventKind::BlockRemoved => block_removed_sequence_with_group_idx(group_idx),
+            TestEventKind::BlockStored => block_stored_sequence(group_idx, None),
+            TestEventKind::BlockRemoved => block_removed_sequence(group_idx, None),
+        }
+    }
+
+    fn sequence_with_cache_spec_kind(
+        event_kind: TestEventKind,
+        group_idx: Option<u32>,
+        kv_cache_spec_kind: &'static str,
+    ) -> Vec<u8> {
+        match event_kind {
+            TestEventKind::BlockStored => {
+                block_stored_sequence(group_idx, Some(kv_cache_spec_kind))
+            }
+            TestEventKind::BlockRemoved => {
+                block_removed_sequence(group_idx, Some(kv_cache_spec_kind))
+            }
         }
     }
 
@@ -790,6 +927,34 @@ mod tests {
         let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, None)).unwrap();
 
         assert_parsed_event_kind(event, event_kind);
+    }
+
+    #[rstest]
+    #[case(TestEventKind::BlockStored)]
+    #[case(TestEventKind::BlockRemoved)]
+    fn test_deserialize_sequence_accepts_main_attention_kind_with_nonzero_group_idx(
+        #[case] event_kind: TestEventKind,
+    ) {
+        let event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+            event_kind,
+            Some(3),
+            "full_attention",
+        ))
+        .unwrap();
+
+        assert_parsed_event_kind(event, event_kind);
+    }
+
+    #[rstest]
+    #[case(TestEventKind::BlockStored)]
+    #[case(TestEventKind::BlockRemoved)]
+    fn test_deserialize_sequence_ignores_non_main_attention_kind_with_group_idx_zero(
+        #[case] event_kind: TestEventKind,
+    ) {
+        let event: RawKvEvent =
+            from_slice(&sequence_with_cache_spec_kind(event_kind, Some(0), "mamba")).unwrap();
+
+        assert!(matches!(event, RawKvEvent::Ignored));
     }
 
     #[test]
