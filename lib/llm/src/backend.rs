@@ -15,7 +15,11 @@
 //! Further post-processing can happen in the response stream. One example is the jailing mechanism for partial
 //! hidden stop condition matches, which can be handled in the response stream rather than the backend.
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
@@ -59,12 +63,14 @@ pub struct Backend {
 }
 
 /// Internal state for managing token decoding and stream processing
+/// Supports n>1 (multiple choices) by maintaining per-choice decoders.
 #[allow(dead_code)]
 struct DecoderUnfoldState {
     stream: ManyOut<ExecutionOutputStream>,
-    decoder: Decoder,
+    decoders: HashMap<u32, Decoder>,
+    finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
-    /// Set to true when a local stop condition is detected, causing the stream to end
+    /// Set to true when all expected choices are finished locally, causing the stream to end
     finished: bool,
 }
 
@@ -97,20 +103,30 @@ impl Backend {
         skip_special_tokens: bool,
         include_stop_str_in_output: bool,
         tracker: Option<Arc<RequestTracker>>,
+        n: u32,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
-        let decoder = Decoder::new(
-            tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
-            stop_conditions,
-            include_stop_str_in_output,
-            tracker,
-        );
+
+        // Pre-create one decoder per expected choice so interleaved n>1
+        // responses do not share tokenizer state.
+        let n = n.max(1);
+        let mut decoders = HashMap::with_capacity(n as usize);
+        for idx in 0..n {
+            let decoder = Decoder::new(
+                tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
+                stop_conditions.clone(),
+                include_stop_str_in_output,
+                tracker.clone(),
+            );
+            decoders.insert(idx, decoder);
+        }
 
         Ok(DecoderUnfoldState {
             stream,
-            decoder,
+            decoders,
+            finished_choices: HashSet::new(),
             validate_engine_decode: self.validate_engine_decode,
             finished: false,
         })
@@ -144,6 +160,7 @@ impl
             .include_stop_str_in_output
             .unwrap_or(false);
         let tracker = request.tracker.clone();
+        let n = request.sampling_options.n.unwrap_or(1) as u32;
 
         let next_stream = next.generate(request).await?;
 
@@ -155,6 +172,7 @@ impl
             skip_special_tokens,
             include_stop_str_in_output,
             tracker,
+            n,
         )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
@@ -178,17 +196,40 @@ impl
                         && data.text.is_some()
                         && !state.validate_engine_decode
                     {
+                        // Text already decoded; track finish for this choice
+                        if data.finish_reason.is_some() {
+                            let choice_idx = data.index.unwrap_or(0);
+                            state.finished_choices.insert(choice_idx);
+                        }
                         return Some((output, state));
                     }
 
                     let data = output.data.as_ref().unwrap();
+                    let choice_idx = data.index.unwrap_or(0);
 
-                    let result = match state.decoder.process_token_ids(&data.token_ids) {
+                    let Some(decoder) = state.decoders.get_mut(&choice_idx) else {
+                        tracing::error!(
+                            "engine emitted choice index {choice_idx}, but only {} choices were requested",
+                            state.decoders.len()
+                        );
+                        let mut output = output;
+                        if let Some(data) = &mut output.data {
+                            data.finish_reason = Some(FinishReason::Error(format!(
+                                "invalid choice index {choice_idx}"
+                            )));
+                        }
+                        return Some((output, state));
+                    };
+
+                    let result = match decoder.process_token_ids(&data.token_ids) {
                         Ok(result) => result,
                         Err(e) => {
-                            tracing::error!("Failed to process token_ids: {e}");
-                            state.stream.context().stop_generating();
-                            state.finished = true;
+                            tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
+                            state.finished_choices.insert(choice_idx);
+                            if state.finished_choices.len() >= state.decoders.len() {
+                                state.stream.context().stop_generating();
+                                state.finished = true;
+                            }
                             let mut output = output;
                             if let Some(data) = &mut output.data {
                                 data.finish_reason =
@@ -228,11 +269,14 @@ impl
                         None => (None, None),
                     };
 
-                    // If we detected a local stop condition, mark stream as finished
-                    // so we stop iterating (upstream may keep generating, but we ignore it)
+                    // If we detected a local stop condition, mark this choice as finished.
+                    // Once all expected choices are finished, stop the upstream generator.
                     if finish_reason.is_some() && data.finish_reason.is_none() {
-                        state.stream.context().stop_generating();
-                        state.finished = true;
+                        state.finished_choices.insert(choice_idx);
+                        if state.finished_choices.len() >= state.decoders.len() {
+                            state.stream.context().stop_generating();
+                            state.finished = true;
+                        }
                     }
 
                     let text = result.text;
