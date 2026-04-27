@@ -22,7 +22,9 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.workers import llm_worker
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from tensorrt_llm.llmapi.llm_args import LoadFormat, SleepConfig
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -43,6 +45,14 @@ pytestmark = [
 # Create TRTLLM-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_trtllm_cli = make_cli_args_fixture("dynamo.trtllm")
+
+
+def test_shadow_sleep_tags_default_uses_trtllm_failover_preset(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_SHADOW_SLEEP_TAGS", raising=False)
+
+    tags = llm_worker._shadow_sleep_tags()
+
+    assert tags == [SleepConfig.SHADOW_FAILOVER_PRESET]
 
 
 def test_custom_jinja_template_invalid_path(mock_trtllm_cli):
@@ -134,6 +144,15 @@ def test_config_multiple_connectors_fails(monkeypatch):
         match="TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`.",
     ):
         parse_args(["--connector", "none", "kvbm"])
+
+
+def test_parse_args_shadow_mode_requires_gms(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_GMS_SHADOW_MODE", raising=False)
+
+    with pytest.raises(
+        ValueError, match="--gms-shadow-mode requires --load-format gms"
+    ):
+        parse_args(["--gms-shadow-mode"])
 
 
 # ---- Tests for trtllm_utils.deep_update ----
@@ -264,6 +283,126 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             f"Expected max_batch_size=512 from YAML override, "
             f"got {engine_args['max_batch_size']}"
         )
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_sets_gms_mode_rw_for_shadow_primary(monkeypatch):
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/tmp/test-gms")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/test-failover.lock")
+
+    config = parse_args(
+        ["--model", "fake-model", "--load-format", "gms", "--gms-shadow-mode"]
+    )
+    fake_lock = mock.AsyncMock()
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
+            return_value=fake_lock,
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert engine_args["load_format"] == LoadFormat.GMS
+        assert engine_args["gms_mode"] == "rw"
+        assert isinstance(engine_args["sleep_config"], SleepConfig)
+        assert engine_args["env_overrides"]["GMS_SOCKET_DIR"] == "/tmp/test-gms"
+        assert engine_args["env_overrides"]["ENGINE_ID"] == "0"
+        assert (
+            engine_args["env_overrides"]["FAILOVER_LOCK_PATH"]
+            == "/tmp/test-failover.lock"
+        )
+        fake_lock.acquire.assert_awaited_once_with(engine_id="engine-0")
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_sets_gms_mode_ro_for_shadow_standby(monkeypatch):
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/tmp/test-gms")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/tmp/test-failover.lock")
+
+    config = parse_args(
+        ["--model", "fake-model", "--load-format", "gms", "--gms-shadow-mode"]
+    )
+
+    runtime = mock.MagicMock()
+    endpoint = mock.MagicMock()
+    standby_future = asyncio.Future()
+    endpoint.serve_endpoint.return_value = standby_future
+    runtime.endpoint.return_value = endpoint
+
+    # Record the order of events so the test asserts the standby starts
+    # TRTLLM/GMS RO initialization before it waits on the failover lock or
+    # publishes model discovery.
+    event_log: list[str] = []
+
+    fake_lock = mock.AsyncMock()
+
+    register_model_mock = mock.AsyncMock()
+
+    async def record_register_model(*args, **kwargs):
+        event_log.append("register_model")
+
+    register_model_mock.side_effect = record_register_model
+
+    def record_get_llm_engine(engine_args, *args, **kwargs):
+        event_log.append("get_llm_engine")
+        raise EngineArgsCaptured(engine_args)
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.register_model",
+            register_model_mock,
+        ),
+        mock.patch(
+            "gpu_memory_service.failover_lock.flock.FlockFailoverLock",
+            return_value=fake_lock,
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=record_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=runtime,
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert engine_args["load_format"] == LoadFormat.GMS
+        assert engine_args["gms_mode"] == "ro"
+        assert isinstance(engine_args["sleep_config"], SleepConfig)
+        assert engine_args["env_overrides"]["GMS_SOCKET_DIR"] == "/tmp/test-gms"
+        assert engine_args["env_overrides"]["ENGINE_ID"] == "1"
+        assert (
+            engine_args["env_overrides"]["FAILOVER_LOCK_PATH"]
+            == "/tmp/test-failover.lock"
+        )
+        assert event_log == ["get_llm_engine"]
+        register_model_mock.assert_not_awaited()
+        fake_lock.owner.assert_not_awaited()
+        fake_lock.acquire.assert_not_awaited()
 
 
 class MultimodalProcessorInstantiated(Exception):

@@ -58,18 +58,16 @@ def _iter_module_tensors(
             qualified = f"{prefix}{name}" if prefix else name
             yield (qualified, buf, "buffer")
 
-    # Other tensor attributes (not params/buffers/submodules)
+    # Other tensor attributes (not params/buffers/submodules). Only walk
+    # instance state: dir(module) also exposes computed descriptors/properties
+    # that may be read-only and cannot be replayed on the RO path.
     skip = (
         set(module._parameters.keys())
         | set(module._buffers.keys())
         | set(module._modules.keys())
     )
-    for attr_name in dir(module):
+    for attr_name, attr_val in vars(module).items():
         if attr_name in skip or attr_name.startswith("__"):
-            continue
-        try:
-            attr_val = getattr(module, attr_name, None)
-        except Exception:
             continue
 
         if torch.is_tensor(attr_val) and attr_val.is_cuda:

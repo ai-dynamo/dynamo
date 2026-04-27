@@ -177,6 +177,17 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "(e.g. '{\"gms_read_only\": true}')."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--gms-shadow-mode",
+            env_var="DYN_TRTLLM_GMS_SHADOW_MODE",
+            default=False,
+            help=(
+                "Enable single-node GMS shadow failover policy. ENGINE_ID=0 stays "
+                "the designated initial owner; other engines wait in standby until "
+                "the failover lock is released. Requires --load-format=gms."
+            ),
+        )
         add_argument(
             g,
             flag_name="--disaggregation-mode",
@@ -506,6 +517,7 @@ class DynamoTrtllmConfig(ConfigBase):
     disable_request_abort: bool
     load_format: str
     model_loader_extra_config: str
+    gms_shadow_mode: bool
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode

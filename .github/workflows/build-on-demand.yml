@@ -18,6 +18,14 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      trtllm_artifact_url:
+        description: 'Optional URL to a prebuilt TensorRT-LLM artifact tarball (e.g. from NVIDIA/TensorRT-LLM PR CI on urm.nvidia.com). When set, the trtllm pipeline downloads and extracts this instead of compiling the fork from source.'
+        type: string
+        default: ''
+      trtllm_artifact_gh200_url:
+        description: 'Optional URL to a GH200 (arm64+Grace) TensorRT-LLM artifact tarball. Used when the trtllm pipeline builds a linux/arm64 image.'
+        type: string
+        default: ''
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
@@ -88,13 +96,45 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: 'linux/amd64,linux/arm64'
+      # The Kimi K2.5 + Eagle3 proof pins a TensorRT-LLM fork commit that
+      # lives only on a feature branch of the fork, so this pipeline must
+      # build the TRTLLM wheel from source via container/build_trtllm_wheel.sh.
+      # That wheel build uses host docker and can only produce its native
+      # architecture per runner, so we limit this pipeline to linux/amd64.
+      # arm64 requires a separate pipeline running on an arm64 builder.
+      platform: 'linux/amd64'
       cuda_versions: '["13.1"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
+      # TRTLLM wheel-from-source on the 16-CPU / 48Gi BuildKit pod runs at
+      # -j 8 (higher parallelism OOMs; see container/build_trtllm_wheel.sh)
+      # which roughly doubles the wall-clock of a 24-CPU Jenkins build. Add
+      # the ~30-40 min Dynamo image build on top and pad generously.
+      build_timeout_minutes: 240
       push_image: true
       run_compliance_scan: false
       copy_to_acr: true
+      # Force a dedicated K8s BuildKit pod for this pipeline. We need a
+      # dedicated pod (not the shared remote pool) to:
+      #   1. Get a clean BuildKit cache scoped to this fork wheel build, so
+      #      the SM90-only cutlass compile can actually be reused via the
+      #      --cache-to/--cache-from registry cache wired up in
+      #      container/build_trtllm_wheel.sh.
+      #   2. Run the wheel build on the same node as dynamo's image build
+      #      so the local output directory handoff (--build-context
+      #      trtllm_wheel=/path) resolves against a buildx context that can
+      #      read that path.
+      #
+      # Sizing: the dynamo-builder-fallback node pool won't schedule pods
+      # at 64Gi or 40Gi (see runs 24856663726 and 24857358494, both hit
+      # "waiting for 1 pods to be ready, timeout: 2 minutes" x3). Stay
+      # inside the pool's default budget (12 CPU / 26Gi request / 29Gi
+      # limit). That is enough for the narrowed SM90-only wheel compile
+      # because container/build_trtllm_wheel.sh now defaults to
+      # TRTLLM_CUDA_ARCHS=90-real, which eliminates the multi-arch cutlass
+      # instantiation blowup that OOMed the pod in 24855398208.
+      fresh_builder: true
+      trtllm_artifact_url: ${{ inputs.trtllm_artifact_url }}
+      trtllm_artifact_gh200_url: ${{ inputs.trtllm_artifact_gh200_url }}
     secrets: inherit
 
   # ============================================================================

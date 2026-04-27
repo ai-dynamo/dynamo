@@ -918,6 +918,7 @@ class DynamoFrontendProcess(ManagedProcess):
         extra_env: Optional[dict[str, str]] = None,
         # Default to false so pytest-xdist workers don't kill each other's frontends.
         terminate_all_matching_process_names: bool = False,
+        log_dir: Optional[str] = None,
         display_name: Optional[str] = None,
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
@@ -956,7 +957,7 @@ class DynamoFrontendProcess(ManagedProcess):
         if extra_env:
             env.update(extra_env)
 
-        log_dir = f"{request.node.name}_frontend"
+        log_dir = log_dir or f"{request.node.name}_frontend"
 
         # Clean up any existing log directory from previous runs
         try:

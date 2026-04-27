@@ -62,6 +62,18 @@ class _TinyModule(torch.nn.Module):
         return torch.relu(y)
 
 
+class _ReadOnlyPropertyModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self._e_score_correction_bias = torch.arange(
+            1, 5, device="cuda", dtype=torch.float32
+        )
+
+    @property
+    def e_score_correction_bias(self) -> torch.Tensor:
+        return self._e_score_correction_bias
+
+
 @pytest.fixture
 def running_gms(tmp_path):
     socket_path = str(tmp_path / "gms.sock")
@@ -272,6 +284,40 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     _assert_exact_tensor_equal(
         baseline_weight,
         cast(torch.Tensor, materialized.linear.weight),
+    )
+
+    reader.close()
+
+
+def test_module_tensor_registration_skips_read_only_properties(running_gms):
+    socket_path = running_gms
+    baseline = _ReadOnlyPropertyModule().cuda()
+    gms_model = _ReadOnlyPropertyModule().cuda()
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+
+    baseline_bias = cast(torch.Tensor, baseline.e_score_correction_bias)
+    _, gms_bias = _make_gms_tensor(writer, baseline_bias, tag="weights")
+    gms_model._e_score_correction_bias = gms_bias
+
+    register_module_tensors(writer, gms_model)
+    metadata_keys = writer.metadata_list()
+    assert "_e_score_correction_bias" in metadata_keys
+    assert "e_score_correction_bias" not in metadata_keys
+    assert writer.commit()
+    del gms_bias
+    del gms_model
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    materialized = _ReadOnlyPropertyModule().cuda()
+    materialize_module_from_gms(reader, materialized, device_index=0)
+
+    _assert_exact_tensor_equal(
+        baseline_bias,
+        cast(torch.Tensor, materialized.e_score_correction_bias),
     )
 
     reader.close()

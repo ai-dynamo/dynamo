@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import sys
+import time
+from pathlib import Path
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -26,6 +28,7 @@ from tensorrt_llm.llmapi.llm_args import (
     TOKENIZER_ALIASES,
     KvCacheConnectorConfig,
     LoadFormat,
+    SleepConfig,
 )
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
@@ -79,6 +82,202 @@ except ImportError:
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
+def _shadow_sleep_tags() -> list[str]:
+    raw_tags = os.environ.get(
+        "DYN_TRTLLM_SHADOW_SLEEP_TAGS", SleepConfig.SHADOW_FAILOVER_PRESET
+    )
+    return [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
+
+
+def _shadow_prewarm_expected_standbys() -> int:
+    return int(os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_EXPECTED_STANDBYS", "0"))
+
+
+def _shadow_prewarm_dir(failover_lock_path: str) -> Path:
+    override = os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_DIR")
+    if override:
+        return Path(override)
+    return Path(failover_lock_path).with_suffix(".prewarm")
+
+
+def _shadow_prewarm_lock_path(failover_lock_path: str) -> str:
+    override = os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_LOCK_PATH")
+    if override:
+        return override
+    return f"{failover_lock_path}.prewarm"
+
+
+def _fmt_gib(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{int(value) / (1024**3):.2f} GiB"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _log_trtllm_shadow_control_result(method: str, result) -> None:
+    if not result:
+        return
+
+    rank_results = []
+    pending_results = result if isinstance(result, list) else [result]
+    for entry in pending_results:
+        if isinstance(entry, list):
+            rank_results.extend(entry)
+        else:
+            rank_results.append(entry)
+
+    for rank_result in rank_results:
+        if not isinstance(rank_result, dict):
+            logging.info("[Shadow] TRTLLM %s control result: %r", method, rank_result)
+            continue
+
+        before = rank_result.get("before") or {}
+        after = rank_result.get("after") or {}
+        timings = rank_result.get("timings") or {}
+        release_tag_stats = rank_result.get("release_tag_stats") or []
+        rank = after.get("rank", before.get("rank", "unknown"))
+        mode = after.get("gms_mode", before.get("gms_mode", "unknown"))
+        before_current = before.get("nvml_current_process")
+        after_current = after.get("nvml_current_process")
+        before_allocated = before.get("torch_allocated")
+        after_allocated = after.get("torch_allocated")
+        before_reserved = before.get("torch_reserved")
+        after_reserved = after.get("torch_reserved")
+        before_cached = before.get("torch_cached")
+        after_cached = after.get("torch_cached")
+        before_active = before.get("torch_active_bytes")
+        after_active = after.get("torch_active_bytes")
+        before_inactive = before.get("torch_inactive_split_bytes")
+        after_inactive = after.get("torch_inactive_split_bytes")
+        before_driver = before.get("driver_used")
+        after_driver = after.get("driver_used")
+        current_delta = (
+            after_current - before_current
+            if after_current is not None and before_current is not None
+            else None
+        )
+        reserved_delta = (
+            after_reserved - before_reserved
+            if after_reserved is not None and before_reserved is not None
+            else None
+        )
+        driver_delta = (
+            after_driver - before_driver
+            if after_driver is not None and before_driver is not None
+            else None
+        )
+
+        logging.info(
+            "[Shadow] TRTLLM %s memory rank=%s mode=%s "
+            "released_blobs=%s materialized_blobs=%s moe_release=%s moe_restore=%s "
+            "pools=%s graphs=%s cleared_buffers=%s cleared_buffer_bytes=%s "
+            "timings=%s "
+            "gms_mapping=%s "
+            "before(current=%s allocated=%s reserved=%s cached=%s active=%s "
+            "inactive=%s non_torch=%s driver=%s gms_weights=%s "
+            "moe_workspace=%s allreduce_workspace=%s buffers=%s "
+            "model_local_tensors=%s model_local_tensors_by_name=%s pools=%s) "
+            "after(current=%s allocated=%s reserved=%s cached=%s active=%s "
+            "inactive=%s non_torch=%s driver=%s gms_weights=%s "
+            "moe_workspace=%s allreduce_workspace=%s buffers=%s "
+            "model_local_tensors=%s model_local_tensors_by_name=%s pools=%s) "
+            "delta(current=%s reserved=%s driver=%s)",
+            method,
+            rank,
+            mode,
+            rank_result.get("released_blobs"),
+            rank_result.get("materialized_blobs"),
+            rank_result.get("released_moe_modules"),
+            rank_result.get("restored_moe_modules"),
+            rank_result.get("released_pools"),
+            rank_result.get("released_cuda_graphs"),
+            rank_result.get("cleared_memory_buffers"),
+            _fmt_gib(rank_result.get("cleared_memory_buffer_bytes")),
+            {
+                name: f"{float(value):.3f}s"
+                for name, value in timings.items()
+                if isinstance(value, (int, float))
+            },
+            _fmt_gib(rank_result.get("gms_mapping_bytes")),
+            _fmt_gib(before_current),
+            _fmt_gib(before_allocated),
+            _fmt_gib(before_reserved),
+            _fmt_gib(before_cached),
+            _fmt_gib(before_active),
+            _fmt_gib(before_inactive),
+            _fmt_gib(before.get("non_torch_current_vs_reserved")),
+            _fmt_gib(before_driver),
+            _fmt_gib(before.get("gms_weight_bytes")),
+            _fmt_gib(before.get("moe_workspace")),
+            _fmt_gib(before.get("allreduce_workspace")),
+            _fmt_gib(before.get("memory_buffer_bytes")),
+            _fmt_gib(before.get("model_local_tensor_bytes")),
+            before.get("model_local_tensors"),
+            before.get("vmm_pools"),
+            _fmt_gib(after_current),
+            _fmt_gib(after_allocated),
+            _fmt_gib(after_reserved),
+            _fmt_gib(after_cached),
+            _fmt_gib(after_active),
+            _fmt_gib(after_inactive),
+            _fmt_gib(after.get("non_torch_current_vs_reserved")),
+            _fmt_gib(after_driver),
+            _fmt_gib(after.get("gms_weight_bytes")),
+            _fmt_gib(after.get("moe_workspace")),
+            _fmt_gib(after.get("allreduce_workspace")),
+            _fmt_gib(after.get("memory_buffer_bytes")),
+            _fmt_gib(after.get("model_local_tensor_bytes")),
+            after.get("model_local_tensors"),
+            after.get("vmm_pools"),
+            _fmt_gib(current_delta),
+            _fmt_gib(reserved_delta),
+            _fmt_gib(driver_delta),
+        )
+        if release_tag_stats:
+            formatted_stats = []
+            for stat in release_tag_stats:
+                if not isinstance(stat, dict):
+                    continue
+                formatted_stats.append(
+                    {
+                        "tag": stat.get("tag"),
+                        "blobs": stat.get("released_blobs"),
+                        "pools": stat.get("released_pools"),
+                        "elapsed": f"{float(stat.get('elapsed_s', 0.0)):.3f}s",
+                        "current_delta": _fmt_gib(stat.get("delta_current")),
+                        "reserved_delta": _fmt_gib(stat.get("delta_reserved")),
+                        "before_current": _fmt_gib(stat.get("before_current")),
+                        "after_current": _fmt_gib(stat.get("after_current")),
+                    }
+                )
+            logging.info(
+                "[Shadow] TRTLLM %s release-by-tag rank=%s mode=%s %s",
+                method,
+                rank,
+                mode,
+                formatted_stats,
+            )
+
+
+async def _run_trtllm_shadow_control(engine, method: str, tags: list[str]) -> None:
+    if not tags:
+        return
+
+    start = time.monotonic()
+    result = await asyncio.to_thread(
+        engine.llm._collective_rpc, method, args=(tags,)
+    )
+    logging.info(
+        "[Shadow] TRTLLM %s completed for tags=%s in %.2fs",
+        method,
+        tags,
+        time.monotonic() - start,
+    )
+    _log_trtllm_shadow_control_result(method, result)
+
+
 def build_kv_connector_config(config: Config):
     if config.connector:
         if config.connector[0] == "kvbm":
@@ -110,42 +309,6 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                     old_val,
                     new_val,
                 )
-
-
-def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
-    """Parse --model-loader-extra-config into a dict. Accepts a dict or a JSON string."""
-    if raw is None or raw == "":
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Invalid JSON in --model-loader-extra-config: {exc}"
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("--model-loader-extra-config must decode to a JSON object")
-        return parsed
-    raise ValueError(
-        "--model-loader-extra-config must be a JSON object string or a dict"
-    )
-
-
-def _register_memory_routes(runtime, handler) -> None:
-    runtime.register_engine_route(
-        "release_memory_occupation",
-        handler.release_memory_occupation,
-    )
-    runtime.register_engine_route(
-        "resume_memory_occupation",
-        handler.resume_memory_occupation,
-    )
-    logging.info(
-        "Registered engine routes: "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
-    )
 
 
 async def init_llm_worker(
@@ -208,39 +371,19 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
-    try:
-        model_loader_extra_config = _parse_model_loader_extra_config(
-            config.model_loader_extra_config
-        )
-    except ValueError as exc:
-        logging.error("%s", exc)
-        sys.exit(1)
-
+    trtllm_load_format = config.load_format
     if config.load_format == "gms":
         try:
-            from gpu_memory_service.integrations.trtllm import setup_gms
-        except ImportError as exc:
+            trtllm_load_format = LoadFormat.GMS
+        except AttributeError as exc:
             raise RuntimeError(
-                "gpu-memory-service is required for --load-format gms. "
-                "Install or update the package."
+                "TensorRT-LLM load_format='gms' requires a TRT-LLM build with "
+                "the GMS load-format support landed."
             ) from exc
-        setup_gms(model_loader_extra_config)
-        logging.info(
-            "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config
-        )
 
-    # Resolve load_format for engine args. GMS patches are active regardless;
-    # fall back to "auto" if TRT-LLM doesn't recognise "gms" as a LoadFormat.
-    engine_load_format = config.load_format
-    if config.load_format == "gms":
-        try:
-            LoadFormat(config.load_format)
-        except (ValueError, KeyError):
-            logging.warning(
-                "TensorRT-LLM does not recognise load_format='gms'; "
-                "using 'auto' while GMS patches remain active."
-            )
-            engine_load_format = "auto"
+    shadow_engine_id = os.environ.get("ENGINE_ID", "0")
+    shadow_standby = config.gms_shadow_mode and shadow_engine_id != "0"
+    primary_shadow_owner = config.gms_shadow_mode and shadow_engine_id == "0"
 
     arg_map = {
         "model": model_path,
@@ -264,14 +407,15 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
-    arg_map["load_format"] = engine_load_format
+    arg_map["load_format"] = trtllm_load_format
+    if config.load_format == "gms" and shadow_standby:
+        arg_map["gms_mode"] = "ro"
+    elif config.load_format == "gms" and primary_shadow_owner:
+        arg_map["gms_mode"] = "rw"
 
-    # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
+    # Enable sleep_config when GMS manages weights. TRTLLM uses it to
+    # unmap/remap allocations during shadow failover.
     if config.load_format == "gms":
-        from tensorrt_llm.llmapi.llm_args import SleepConfig
-
         arg_map["sleep_config"] = SleepConfig()
 
     # Add guided decoding backend if specified
@@ -297,6 +441,15 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    if config.load_format == "gms":
+        env_overrides = dict(arg_map.get("env_overrides") or {})
+        for env_key in ("GMS_SOCKET_DIR", "ENGINE_ID", "FAILOVER_LOCK_PATH"):
+            env_value = os.environ.get(env_key)
+            if env_value is not None:
+                env_overrides.setdefault(env_key, env_value)
+        if env_overrides:
+            arg_map["env_overrides"] = env_overrides
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
@@ -448,262 +601,441 @@ async def init_llm_worker(
         component_name=config.component,
     )
 
-    async with get_llm_engine(
-        engine_args,
-        config.disaggregation_mode,
-        component_gauges=component_gauges,
-    ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
-        # The callback uses this to poll active request count during shutdown.
-        if engine_holder is not None:
-            engine_holder.append(engine)
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
 
-        endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.{config.endpoint}"
-        )
+    if shutdown_endpoints is not None:
+        shutdown_endpoints[:] = [endpoint]
 
-        if shutdown_endpoints is not None:
-            shutdown_endpoints[:] = [endpoint]
+    health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+    metrics_labels = None
+    if config.publish_events_and_metrics:
+        metrics_labels = [
+            (prometheus_names.labels.MODEL, model_name_for_metrics),
+            (prometheus_names.labels.MODEL_NAME, model_name_for_metrics),
+        ]
 
-        # should ideally call get_engine_runtime_config
-        # this is because we don't have a good way to
-        # get total_kv_blocks from the engine yet without calling get_stats_async
-        # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
-        # So for now, we just set the parsers from the config
-        # TODO: fix this once we have a better way to get total_kv_blocks
-        runtime_config = ModelRuntimeConfig()
+    # Build a config-derived ModelRuntimeConfig up front so shadow standby
+    # registration can happen immediately after the failover lock is acquired.
+    # All fields are static config values; total_kv_blocks is intentionally
+    # omitted (the post-lock path does not populate it either — `get_stats_async`
+    # requires active requests to return real numbers, so there is nothing the
+    # engine can contribute here that the config does not already provide).
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.max_num_seqs = arg_map["max_batch_size"]
+    runtime_config.max_num_batched_tokens = arg_map["max_num_tokens"]
+    runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.tool_call_parser = config.dyn_tool_call_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
+    runtime_config.enable_local_indexer = (
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
+    )
+    # Mirror TensorRTLLMEngine.get_attention_dp_size(): tensor_parallel_size
+    # when attention DP is enabled, else 1. This is a pure config read; the
+    # engine wrapper only checks the same two attributes.
+    runtime_config.data_parallel_size = (
+        arg_map["tensor_parallel_size"]
+        if arg_map.get("enable_attention_dp", False)
+        else 1
+    )
 
-        # Set values from config that are available immediately
-        # Note: We populate max_num_seqs and max_num_batched_tokens from config
-        # to ensure Prometheus metrics are available even without engine stats
+    failover_lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+    startup_lock = None
+    prewarm_lock = None
+    prewarm_lock_held = False
+    prewarm_expected_standbys = _shadow_prewarm_expected_standbys()
+    prewarm_enabled = (
+        config.gms_shadow_mode
+        and prewarm_expected_standbys > 0
+        and (primary_shadow_owner or shadow_standby)
+    )
+    prewarm_mark_dir = _shadow_prewarm_dir(failover_lock_path)
+    prewarm_tags = _shadow_sleep_tags()
 
-        # Naming clarification:
-        # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
-        # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
-        # Both parameters control the same thing: how many requests can be processed simultaneously
+    async def acquire_prewarm_lock() -> None:
+        nonlocal prewarm_lock, prewarm_lock_held
+        if not prewarm_enabled or prewarm_lock_held:
+            return
 
-        # Need to get max_num_seqs and max_num_batched_tokens from engine_args
-        # because they can be overridden by --extra-engine-args or --override-engine-args
-        runtime_config.max_num_seqs = engine_args["max_batch_size"]
-        runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
-        runtime_config.reasoning_parser = config.dyn_reasoning_parser
-        runtime_config.tool_call_parser = config.dyn_tool_call_parser
-        runtime_config.exclude_tools_when_tool_choice_none = (
-            config.exclude_tools_when_tool_choice_none
-        )
-        # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-        runtime_config.enable_local_indexer = (
-            config.enable_local_indexer
-            and config.disaggregation_mode != DisaggregationMode.DECODE
-        )
-        # Set data_parallel_size for attention DP mode
-        # This enables the router's scheduler to correctly iterate over all dp_ranks
-        # Need to name ADP as `data_parallel_size` for parity with other frameworks
-        attention_dp_size = engine.get_attention_dp_size()
-        runtime_config.data_parallel_size = attention_dp_size
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
-        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
+        prewarm_mark_dir.mkdir(parents=True, exist_ok=True)
+        if prewarm_lock is None:
+            prewarm_lock = FlockFailoverLock(
+                _shadow_prewarm_lock_path(failover_lock_path)
+            )
+        await prewarm_lock.acquire(engine_id=f"engine-{shadow_engine_id}-prewarm")
+        prewarm_lock_held = True
         logging.info(
-            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+            "[Shadow] Engine %s acquired prewarm lock for serialized init",
+            shadow_engine_id,
         )
-        logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
 
-        # The get_engine_runtime_config function exists but is not called here due to:
-        # 1. get_stats_async requires active requests to work properly
-        # 2. We need runtime config during registration, before any requests are made
-        # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
+    if primary_shadow_owner:
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
-        # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
-        # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
-        metrics_collector = None
-        additional_metrics = None
-        if config.publish_events_and_metrics:
-            try:
-                model_name_for_metrics = config.served_model_name or config.model
-                metrics_collector = MetricsCollector(
-                    {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
-                )
-                logging.info("TensorRT-LLM MetricsCollector initialized")
+        startup_lock = FlockFailoverLock(failover_lock_path)
+        await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+        await acquire_prewarm_lock()
+        logging.info("[Shadow] Primary acquired startup lock, starting engine init")
 
-                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
-                _metric_prefixes = ["trtllm_"]
+    if shadow_standby:
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
-                # Additional metrics (abort tracking, request types, KV transfer perf).
-                # Wrapped in try/except because AdditionalMetricsCollector depends on
-                # prometheus_names which may not be available in all packaging variants.
-                try:
-                    from dynamo.trtllm.metrics import AdditionalMetricsCollector
+        runtime.set_health_status(True)
+        logging.info(
+            "[Shadow] Standby startup probe now passing; "
+            "starting RO engine init before failover"
+        )
+        startup_lock = FlockFailoverLock(failover_lock_path)
+        await acquire_prewarm_lock()
 
-                    disagg_mode_str = (
-                        config.disaggregation_mode.value
-                        if hasattr(config.disaggregation_mode, "value")
-                        else str(config.disaggregation_mode)
-                    )
-                    additional_metrics = AdditionalMetricsCollector(
-                        labels={
-                            "model_name": model_name_for_metrics,
-                            "disaggregation_mode": disagg_mode_str,
-                            "engine_type": "trtllm",
-                        },
-                    )
-                    logging.info(
-                        "Additional metrics initialized (disagg_mode=%s)",
-                        disagg_mode_str,
-                    )
-                except Exception as e:
-                    logging.warning("Failed to initialize additional metrics: %s", e)
+    async def release_prewarm_lock(reason: str) -> None:
+        nonlocal prewarm_lock_held
+        if prewarm_lock is None or not prewarm_lock_held:
+            return
+        await prewarm_lock.release()
+        prewarm_lock_held = False
+        logging.info(
+            "[Shadow] Engine %s released prewarm lock after %s",
+            shadow_engine_id,
+            reason,
+        )
 
-                # Single callback for all Python-side metrics (trtllm_ + additional)
-                register_engine_metrics_callback(
-                    endpoint=endpoint,
-                    registry=REGISTRY,
-                    metric_prefix_filters=_metric_prefixes,
-                    namespace_name=config.namespace,
-                    component_name=config.component,
-                    endpoint_name="generate",
-                    model_name=model_name_for_metrics,
-                )
+    def write_prewarm_marker() -> None:
+        marker = prewarm_mark_dir / f"engine-{shadow_engine_id}.parked"
+        marker.write_text(str(time.time()), encoding="utf-8")
+
+    async def wait_for_prewarm_markers() -> None:
+        timeout_s = float(
+            os.environ.get("DYN_TRTLLM_SHADOW_PREWARM_TIMEOUT_SECONDS", "1800")
+        )
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            parked = list(prewarm_mark_dir.glob("engine-*.parked"))
+            if len(parked) >= prewarm_expected_standbys:
                 logging.info(
-                    "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
+                    "[Shadow] Primary observed %s/%s parked standbys",
+                    len(parked),
+                    prewarm_expected_standbys,
                 )
-            except Exception as e:
+                return
+            await asyncio.sleep(0.5)
+
+        parked = list(prewarm_mark_dir.glob("engine-*.parked"))
+        raise TimeoutError(
+            "Timed out waiting for shadow standby prewarm markers: "
+            f"{len(parked)}/{prewarm_expected_standbys} present in {prewarm_mark_dir}"
+        )
+
+    primary_prewarm_complete = False
+
+    async def prepare_primary_after_shadow_prewarm(engine) -> None:
+        nonlocal primary_prewarm_complete
+        if not (prewarm_enabled and primary_shadow_owner) or primary_prewarm_complete:
+            return
+
+        logging.info(
+            "[Shadow] Primary initialized; parking tags=%s before standby prewarm",
+            prewarm_tags,
+        )
+        await _run_trtllm_shadow_control(engine, "sleep", prewarm_tags)
+        await release_prewarm_lock("primary park")
+        await wait_for_prewarm_markers()
+        await _run_trtllm_shadow_control(engine, "wakeup", prewarm_tags)
+        primary_prewarm_complete = True
+        logging.info("[Shadow] Primary prewarm complete; starting serving path")
+
+    try:
+        async with get_llm_engine(
+            engine_args,
+            config.disaggregation_mode,
+            component_gauges=component_gauges,
+        ) as engine:
+            # Expose engine to the drain callback installed by main.py (#7319).
+            # The callback uses this to poll active request count during shutdown.
+            if engine_holder is not None:
+                engine_holder.append(engine)
+
+            # runtime_config was built from static engine args above so the
+            # standby can publish accurate MDC immediately after it acquires the
+            # failover lock. Cross-check `data_parallel_size` against the live
+            # engine in case extra-engine-args flipped `enable_attention_dp`.
+            attention_dp_size = engine.get_attention_dp_size()
+            try:
+                runtime_dp_size = runtime_config.data_parallel_size
+            except AttributeError:
+                runtime_dp_size = (
+                    arg_map["tensor_parallel_size"]
+                    if arg_map.get("enable_attention_dp", False)
+                    else 1
+                )
+            if runtime_dp_size != attention_dp_size:
                 logging.warning(
-                    f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
+                    "runtime_config.data_parallel_size=%s mismatches engine=%s; "
+                    "applying engine value",
+                    runtime_dp_size,
+                    attention_dp_size,
                 )
-
-        # Register callback for Dynamo component metrics using dedicated registry
-        register_engine_metrics_callback(
-            endpoint=endpoint,
-            registry=DYNAMO_COMPONENT_REGISTRY,
-        )
-        logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
-
-        # publisher will be set later if publishing is enabled.
-        handler_config = RequestHandlerConfig(
-            engine=engine,
-            default_sampling_params=default_sampling_params,
-            publisher=None,
-            disaggregation_mode=config.disaggregation_mode,
-            encode_client=encode_client,
-            multimodal_processor=multimodal_processor,
-            generate_endpoint=endpoint,
-            connector=connector,
-            runtime=runtime,  # Pass runtime for graceful shutdown
-            metrics_collector=metrics_collector,
-            kv_block_size=config.kv_block_size,
-            shutdown_event=shutdown_event,
-            encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-            disable_request_abort=config.disable_request_abort,
-            additional_metrics=additional_metrics,
-            max_seq_len=config.max_seq_len,
-            disagg_machine_id=int(endpoint.connection_id()) % 1021,
-        )
-
-        media_decoder = None
-        media_fetcher = None
-        if config.frontend_decoding:
-            if not MEDIA_DECODER_AVAILABLE:
-                raise RuntimeError(
-                    "--frontend-decoding requires MediaDecoder support. "
-                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-                )
-            assert MediaDecoder is not None and MediaFetcher is not None
-            media_decoder = MediaDecoder()
-            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-            media_fetcher = MediaFetcher()
-            media_fetcher.timeout_ms(30000)
-            media_fetcher.allow_direct_port(False)
-
-        # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
-        if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_model(
-                model_input,
-                model_type,
-                endpoint,
-                config.model,
-                config.served_model_name,
-                context_length=config.max_seq_len,
-                kv_cache_block_size=config.kv_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=config.custom_jinja_template,
-                media_decoder=media_decoder,
-                media_fetcher=media_fetcher,
+                runtime_config.data_parallel_size = attention_dp_size
+                runtime_dp_size = attention_dp_size
+            logging.info(
+                f"runtime config max_num_seqs={runtime_config.max_num_seqs} "
+                f"max_num_batched_tokens={runtime_config.max_num_batched_tokens} "
+                f"data_parallel_size={runtime_dp_size}"
             )
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
-
-        if config.publish_events_and_metrics:
-            # Initialize and pass in the publisher to the request handler to
-            # publish events and metrics.
-            # Use model as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model
-            metrics_labels = [
-                (
-                    prometheus_names.labels.MODEL,
-                    model_name_for_metrics,
-                ),  # OpenAI standard
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    model_name_for_metrics,
-                ),  # Native engine compatibility
-            ]
-
-            # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
-            consolidator_publisher = None
-            if consolidator_output_endpoint:
-                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_publisher = KvEventPublisher(
-                    endpoint=endpoint,
-                    kv_block_size=config.kv_block_size,
-                    zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",
-                )
-                logging.info(
-                    f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
-                )
-
-            async with get_publisher(
-                endpoint,
-                engine,
-                int(endpoint.connection_id()),
-                config.kv_block_size,
-                metrics_labels,
-                component_gauges=component_gauges,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
-                enable_local_indexer=config.enable_local_indexer,
-                metrics_collector=metrics_collector,
-            ) as publisher:
-                handler_config.publisher = publisher
-                handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.load_format == "gms":
-                    _register_memory_routes(runtime, handler)
-
-                encoder_cache = getattr(handler, "_encoder_cache", None)
-                if encoder_cache is not None:
-                    register_embedding_cache_metrics(
-                        endpoint=endpoint,
-                        cache=encoder_cache,
-                        model_name=model_name_for_metrics,
-                        component_name=config.component,
+            # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
+            # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
+            metrics_collector = None
+            additional_metrics = None
+            if config.publish_events_and_metrics:
+                try:
+                    model_name_for_metrics = config.served_model_name or config.model
+                    metrics_collector = MetricsCollector(
+                        {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
                     )
+                    logging.info("TensorRT-LLM MetricsCollector initialized")
+
+                    # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
+                    _metric_prefixes = ["trtllm_"]
+
+                    # Additional metrics (abort tracking, request types, KV transfer perf).
+                    # Wrapped in try/except because AdditionalMetricsCollector depends on
+                    # prometheus_names which may not be available in all packaging variants.
+                    try:
+                        from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+                        disagg_mode_str = (
+                            config.disaggregation_mode.value
+                            if hasattr(config.disaggregation_mode, "value")
+                            else str(config.disaggregation_mode)
+                        )
+                        additional_metrics = AdditionalMetricsCollector(
+                            labels={
+                                "model_name": model_name_for_metrics,
+                                "disaggregation_mode": disagg_mode_str,
+                                "engine_type": "trtllm",
+                            },
+                        )
+                        logging.info(
+                            "Additional metrics initialized (disagg_mode=%s)",
+                            disagg_mode_str,
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            "Failed to initialize additional metrics: %s", e
+                        )
+
+                    # Single callback for all Python-side metrics (trtllm_ + additional)
+                    register_engine_metrics_callback(
+                        endpoint=endpoint,
+                        registry=REGISTRY,
+                        metric_prefix_filters=_metric_prefixes,
+                        namespace_name=config.namespace,
+                        component_name=config.component,
+                        endpoint_name="generate",
+                        model_name=model_name_for_metrics,
+                    )
+                    logging.info(
+                        "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
+                    )
+                except Exception as e:
+                    logging.warning(
+                        f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
+                    )
+
+            # Register callback for Dynamo component metrics using dedicated registry
+            register_engine_metrics_callback(
+                endpoint=endpoint,
+                registry=DYNAMO_COMPONENT_REGISTRY,
+            )
+            logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
+
+            # publisher will be set later if publishing is enabled.
+            handler_config = RequestHandlerConfig(
+                engine=engine,
+                default_sampling_params=default_sampling_params,
+                publisher=None,
+                disaggregation_mode=config.disaggregation_mode,
+                encode_client=encode_client,
+                multimodal_processor=multimodal_processor,
+                generate_endpoint=endpoint,
+                connector=connector,
+                runtime=runtime,  # Pass runtime for graceful shutdown
+                metrics_collector=metrics_collector,
+                kv_block_size=config.kv_block_size,
+                shutdown_event=shutdown_event,
+                encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+                disable_request_abort=config.disable_request_abort,
+                additional_metrics=additional_metrics,
+                max_seq_len=config.max_seq_len,
+                disagg_machine_id=int(endpoint.connection_id()) % 1021,
+            )
+
+            async def serve_shadow_standby(handler) -> None:
+                assert startup_lock is not None
+
+                if prewarm_enabled:
+                    logging.info(
+                        "[Shadow] Standby initialized; parking tags=%s before failover",
+                        prewarm_tags,
+                    )
+                    await _run_trtllm_shadow_control(engine, "sleep", prewarm_tags)
+                    write_prewarm_marker()
+                    await release_prewarm_lock("standby park")
+                    logging.info("[Shadow] Standby parked for fast failover")
+
+                logging.info(
+                    "[Shadow] Standby engine initialized in RO mode; "
+                    "waiting for failover lock"
+                )
+                await startup_lock.acquire(engine_id=f"engine-{shadow_engine_id}")
+                if prewarm_enabled:
+                    await _run_trtllm_shadow_control(engine, "wakeup", prewarm_tags)
+                if config.disaggregation_mode != DisaggregationMode.ENCODE:
+                    await register_model(
+                        model_input,
+                        model_type,
+                        endpoint,
+                        config.model,
+                        config.served_model_name,
+                        context_length=config.max_seq_len,
+                        kv_cache_block_size=config.kv_block_size,
+                        runtime_config=runtime_config,
+                        custom_template_path=config.custom_jinja_template,
+                        media_decoder=media_decoder,
+                        media_fetcher=media_fetcher,
+                    )
+                    logging.info("[Shadow] MDC published; standby is now discoverable")
+                logging.info("[Shadow] Lock acquired, starting standby endpoint")
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
                     health_check_payload=health_check_payload,
                 )
 
-            # Shutdown consolidator publisher if it was created
-            if consolidator_publisher:
-                consolidator_publisher.shutdown()
-        else:
-            handler = RequestHandlerFactory().get_request_handler(handler_config)
-            if config.load_format == "gms":
-                _register_memory_routes(runtime, handler)
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
-            )
+            media_decoder = None
+            media_fetcher = None
+            if config.frontend_decoding:
+                if not MEDIA_DECODER_AVAILABLE:
+                    raise RuntimeError(
+                        "--frontend-decoding requires MediaDecoder support. "
+                        "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+                    )
+                assert MediaDecoder is not None and MediaFetcher is not None
+                media_decoder = MediaDecoder()
+                media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+                media_fetcher = MediaFetcher()
+                media_fetcher.timeout_ms(30000)
+                media_fetcher.allow_direct_port(False)
+
+            if config.publish_events_and_metrics:
+                # Initialize and pass in the publisher to the request handler to
+                # publish events and metrics.
+                # Use model as fallback if served_model_name is not provided
+                # Create worker-side publisher for consolidated events if consolidator is enabled
+                # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
+                consolidator_publisher = None
+                if consolidator_output_endpoint:
+                    # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
+                    consolidator_publisher = KvEventPublisher(
+                        endpoint=endpoint,
+                        kv_block_size=config.kv_block_size,
+                        zmq_endpoint=consolidator_output_connect_endpoint,
+                        zmq_topic="",
+                    )
+                    logging.info(
+                        f"Created worker-side publisher for consolidated events: "
+                        f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
+                    )
+
+                async with get_publisher(
+                    endpoint,
+                    engine,
+                    int(endpoint.connection_id()),
+                    config.kv_block_size,
+                    metrics_labels,
+                    component_gauges=component_gauges,
+                    zmq_endpoint=trtllm_zmq_bind_endpoint,
+                    enable_local_indexer=config.enable_local_indexer,
+                    metrics_collector=metrics_collector,
+                ) as publisher:
+                    handler_config.publisher = publisher
+                    handler = RequestHandlerFactory().get_request_handler(
+                        handler_config
+                    )
+                    await prepare_primary_after_shadow_prewarm(engine)
+
+                    if (
+                        config.disaggregation_mode != DisaggregationMode.ENCODE
+                        and not shadow_standby
+                    ):
+                        await register_model(
+                            model_input,
+                            model_type,
+                            endpoint,
+                            config.model,
+                            config.served_model_name,
+                            context_length=config.max_seq_len,
+                            kv_cache_block_size=config.kv_block_size,
+                            runtime_config=runtime_config,
+                            custom_template_path=config.custom_jinja_template,
+                            media_decoder=media_decoder,
+                            media_fetcher=media_fetcher,
+                        )
+
+                    encoder_cache = getattr(handler, "_encoder_cache", None)
+                    if encoder_cache is not None:
+                        register_embedding_cache_metrics(
+                            endpoint=endpoint,
+                            cache=encoder_cache,
+                            model_name=model_name_for_metrics,
+                            component_name=config.component,
+                        )
+                    if shadow_standby:
+                        await serve_shadow_standby(handler)
+                    else:
+                        await endpoint.serve_endpoint(
+                            handler.generate,
+                            metrics_labels=metrics_labels,
+                            health_check_payload=health_check_payload,
+                        )
+
+                # Shutdown consolidator publisher if it was created
+                if consolidator_publisher:
+                    consolidator_publisher.shutdown()
+            else:
+                handler = RequestHandlerFactory().get_request_handler(handler_config)
+                await prepare_primary_after_shadow_prewarm(engine)
+                if (
+                    config.disaggregation_mode != DisaggregationMode.ENCODE
+                    and not shadow_standby
+                ):
+                    await register_model(
+                        model_input,
+                        model_type,
+                        endpoint,
+                        config.model,
+                        config.served_model_name,
+                        context_length=config.max_seq_len,
+                        kv_cache_block_size=config.kv_block_size,
+                        runtime_config=runtime_config,
+                        custom_template_path=config.custom_jinja_template,
+                        media_decoder=media_decoder,
+                        media_fetcher=media_fetcher,
+                    )
+                if shadow_standby:
+                    await serve_shadow_standby(handler)
+                else:
+                    await endpoint.serve_endpoint(
+                        handler.generate, health_check_payload=health_check_payload
+                    )
+    finally:
+        await release_prewarm_lock("worker shutdown")
+        if startup_lock is not None:
+            await startup_lock.release()

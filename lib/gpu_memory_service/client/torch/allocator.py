@@ -180,6 +180,13 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
     if state.mem_pool is None:
         raise RuntimeError(f"GMS allocator tag={tag} does not have a mempool")
 
+    if (
+        isinstance(device, torch.device)
+        and device.type == "cuda"
+        and device.index is None
+    ):
+        device = torch.device("cuda", torch.cuda.current_device())
+
     token = _active_tag.set(tag)
     try:
         with torch.cuda.use_mem_pool(state.mem_pool, device=device):

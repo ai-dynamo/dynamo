@@ -56,8 +56,11 @@ func buildFailoverPod(
 	switch backendFramework {
 	case BackendFrameworkVLLM:
 		applyVLLMOverrides(podSpec, numberOfNodes)
+	case BackendFrameworkTRTLLM:
+		// Single-node TRT-LLM failover only needs the shared engine split and
+		// per-engine system ports from buildEngineContainer.
 	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		return fmt.Errorf("failover is not supported for backend %q (only vllm and trtllm)", backendFramework)
 	}
 
 	return nil

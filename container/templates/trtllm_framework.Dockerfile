@@ -125,8 +125,10 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
 RUN --mount=type=cache,target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
-        # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
-        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
+        # Download and run install_tensorrt.sh from the TensorRT-LLM fork pinned
+        # by context.yaml::trtllm.github_trtllm_commit. The Kimi K2.5 + Eagle3
+        # shadow-failover stack ships from galletas1712/TensorRT-LLM.
+        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/galletas1712/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
         # Modify the script to use virtual environment pip instead of system pip3
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \

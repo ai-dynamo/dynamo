@@ -84,6 +84,30 @@ inputs:
     description: 'Always create a fresh K8s BuildKit builder (skip remote worker routing)'
     required: false
     default: 'false'
+  builder_requests_cpu:
+    description: 'CPU requests for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  builder_requests_memory:
+    description: 'Memory requests for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  builder_limits_memory:
+    description: 'Memory limit for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  builder_ephemeral_storage:
+    description: 'Ephemeral storage request for the K8s BuildKit fallback pod (only applies when fresh_builder=true).'
+    required: false
+    default: ''
+  trtllm_artifact_url:
+    description: 'URL to a prebuilt TensorRT-LLM artifact tarball (amd64/x86). When set, the trtllm prebuild step downloads and extracts this tarball instead of compiling the fork from source.'
+    required: false
+    default: ''
+  trtllm_artifact_gh200_url:
+    description: 'URL to a prebuilt TensorRT-LLM artifact tarball for GH200 (arm64+Grace).'
+    required: false
+    default: ''
 outputs:
   target_tag_plain:
     description: 'Target tag (without registry prefix)'
@@ -164,6 +188,10 @@ runs:
         arch: ${{ inputs.platform }}
         cuda_version: ${{ steps.calculate-target-tag.outputs.builder_cuda_version }}
         fresh_builder: ${{ inputs.fresh_builder }}
+        requests_cpu: ${{ inputs.builder_requests_cpu != '' && inputs.builder_requests_cpu || '12' }}
+        requests_memory: ${{ inputs.builder_requests_memory != '' && inputs.builder_requests_memory || '26Gi' }}
+        limits_memory: ${{ inputs.builder_limits_memory != '' && inputs.builder_limits_memory || '29Gi' }}
+        ephemeral_storage: ${{ inputs.builder_ephemeral_storage != '' && inputs.builder_ephemeral_storage || '400Gi' }}
     - name: Calculate extra tags
       id: extra-tags
       shell: bash
@@ -219,6 +247,139 @@ runs:
             ${MAKE_EFA_FLAG} \
             --show-result \
             --output-short-filename
+    # The TRTLLM framework Dockerfile has a `COPY --from=trtllm_wheel /` that,
+    # when container/context.yaml::trtllm.has_trtllm_context is "1", expects
+    # the caller to provide a buildx named build context populated with a
+    # prebuilt TensorRT-LLM wheel. Build that wheel here using the pinned
+    # commit/URL from context.yaml, and then hand the output directory to
+    # docker-remote-build as trtllm_wheel_context_path.
+    # The TRTLLM framework Dockerfile has a `COPY --from=trtllm_wheel /` that,
+    # when container/context.yaml::trtllm.has_trtllm_context is "1", expects
+    # the caller to provide a buildx named build context populated with a
+    # prebuilt TensorRT-LLM wheel. This step produces that directory.
+    #
+    # Preferred source: a CI-built artifact tarball from NVIDIA/TensorRT-LLM
+    # PR CI (urm.nvidia.com/.../LLM/.../L0_MergeRequest_PR/<PR#>/) passed via
+    # the trtllm_artifact_url / trtllm_artifact_gh200_url inputs. This is
+    # orders of magnitude faster than compiling the fork from source on a
+    # Dynamo BuildKit pod (the from-source path OOMs the default pool at 29Gi
+    # when compiling the full cutlass_kernels arch matrix; see
+    # container/build_trtllm_wheel.sh).
+    #
+    # Fallback: compile the fork from source via container/build_trtllm_wheel.sh.
+    # Only kicks in when no artifact URL is supplied.
+    - name: Prebuild TensorRT-LLM wheel (if required by context)
+      id: prebuild-trtllm-wheel
+      if: ${{ inputs.framework == 'trtllm' }}
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        TRTLLM_ARTIFACT_URL: ${{ inputs.trtllm_artifact_url }}
+        TRTLLM_ARTIFACT_GH200_URL: ${{ inputs.trtllm_artifact_gh200_url }}
+        # Enable BuildKit registry caching for the fork wheel build so the
+        # expensive CUDA compile (cutlass kernels etc.) is reused across
+        # runs. Only applies to the from-source fallback path.
+        TRTLLM_WHEEL_CACHE_REF: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com/ai-dynamo/dynamo
+      run: |
+        set -euo pipefail
+        HAS_CONTEXT=$(python3 -c 'import yaml,sys; d=yaml.safe_load(open("container/context.yaml")); print(d.get("trtllm", {}).get("has_trtllm_context", "0"))')
+        if [ "${HAS_CONTEXT}" != "1" ]; then
+          echo "has_trtllm_context=${HAS_CONTEXT}; skipping TRTLLM wheel prebuild"
+          echo "wheel_dir=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Normalize platform -> ARCH.
+        case "${PLATFORM}" in
+          linux/amd64|amd64) ARCH=amd64 ;;
+          linux/arm64|arm64) ARCH=arm64 ;;
+          *)
+            echo "::error::Cannot prebuild TRTLLM wheel for multi-arch platform '${PLATFORM}'. Dispatch the trtllm pipeline per-arch."
+            exit 1
+            ;;
+        esac
+
+        OUTPUT_DIR="${GITHUB_WORKSPACE}/trtllm_wheel"
+        rm -rf "${OUTPUT_DIR}"
+        mkdir -p "${OUTPUT_DIR}"
+
+        # Pick the artifact URL appropriate for this arch.
+        case "${ARCH}" in
+          amd64) ARTIFACT_URL="${TRTLLM_ARTIFACT_URL}" ;;
+          arm64) ARTIFACT_URL="${TRTLLM_ARTIFACT_GH200_URL}" ;;
+        esac
+
+        if [ -n "${ARTIFACT_URL}" ]; then
+          echo "Fetching prebuilt TRTLLM artifact for ${ARCH}: ${ARTIFACT_URL}"
+          TARBALL="${RUNNER_TEMP:-/tmp}/trtllm-artifact.tar.gz"
+          rm -f "${TARBALL}"
+          # Artifactory supports anonymous reads for sw-tensorrt-generic (for
+          # public TRTLLM releases). For internal-only artifacts the runner
+          # must have been provisioned with a netrc / token ahead of time;
+          # curl will pick that up automatically from ~/.netrc.
+          AUTH_FLAGS=""
+          if [ -n "${URM_NVIDIA_TOKEN:-}" ]; then
+            AUTH_FLAGS="--header"
+            AUTH_FLAGS+=" Authorization:\ Bearer\ ${URM_NVIDIA_TOKEN}"
+          fi
+          # shellcheck disable=SC2086
+          curl -fsSL --retry 5 --retry-delay 10 --max-time 1200 \
+            ${AUTH_FLAGS} \
+            -o "${TARBALL}" "${ARTIFACT_URL}"
+          echo "Downloaded $(du -h "${TARBALL}" | cut -f1) to ${TARBALL}"
+
+          EXTRACT_DIR="${OUTPUT_DIR}/_extract"
+          mkdir -p "${EXTRACT_DIR}"
+          tar xzf "${TARBALL}" -C "${EXTRACT_DIR}"
+          echo "Tarball contents:"
+          find "${EXTRACT_DIR}" -maxdepth 3 -type f | head -30
+
+          # Locate the .whl inside the tarball and copy it both to
+          # OUTPUT_DIR/ (top-level glob in trtllm_framework.Dockerfile) and
+          # to OUTPUT_DIR/build/ (legacy location matching make-driven output).
+          mkdir -p "${OUTPUT_DIR}/build"
+          WHEEL_PATH="$(find "${EXTRACT_DIR}" -name 'tensorrt_llm-*.whl' -print -quit)"
+          if [ -z "${WHEEL_PATH}" ]; then
+            echo "::error::No tensorrt_llm-*.whl found inside ${ARTIFACT_URL}"
+            find "${EXTRACT_DIR}" -type f -name '*.whl' | head -10
+            exit 1
+          fi
+          cp -v "${WHEEL_PATH}" "${OUTPUT_DIR}/"
+          cp -v "${WHEEL_PATH}" "${OUTPUT_DIR}/build/"
+          rm -rf "${EXTRACT_DIR}" "${TARBALL}"
+
+          echo "TRTLLM wheel ready at ${OUTPUT_DIR}:"
+          ls -al "${OUTPUT_DIR}"
+          echo "wheel_dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "No trtllm_artifact_url provided for ${ARCH}; falling back to from-source build."
+
+        TRTLLM_COMMIT=$(python3 -c 'import yaml; d=yaml.safe_load(open("container/context.yaml")); print(d["trtllm"]["github_trtllm_commit"])')
+        if [ -z "${TRTLLM_COMMIT}" ]; then
+          echo "::error::github_trtllm_commit missing from container/context.yaml under trtllm"
+          exit 1
+        fi
+
+        # Allow context.yaml to pin the fork URL explicitly, otherwise fall
+        # back to the script's default (galletas1712/TensorRT-LLM).
+        TRTLLM_GIT_URL=$(python3 -c 'import yaml; d=yaml.safe_load(open("container/context.yaml")); print(d["trtllm"].get("github_trtllm_git_url", ""))')
+
+        echo "Building TRTLLM wheel from source: commit=${TRTLLM_COMMIT} arch=${ARCH} url=${TRTLLM_GIT_URL:-<default>}"
+        URL_FLAG=""
+        if [ -n "${TRTLLM_GIT_URL}" ]; then
+          URL_FLAG="-u ${TRTLLM_GIT_URL}"
+        fi
+        bash container/build_trtllm_wheel.sh -c "${TRTLLM_COMMIT}" -a "${ARCH}" -o "${OUTPUT_DIR}" ${URL_FLAG}
+
+        echo "TRTLLM wheel output:"
+        ls -al "${OUTPUT_DIR}"
+        if ! find "${OUTPUT_DIR}" -maxdepth 2 -name '*.whl' | grep -q .; then
+          echo "::error::No .whl produced under ${OUTPUT_DIR}"
+          exit 1
+        fi
+        echo "wheel_dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
     - name: Build and Push Image
       id: build-image
       uses: ./.github/actions/docker-remote-build
@@ -235,6 +396,7 @@ runs:
         extra_tags: ${{ steps.extra-tags.outputs.tags }}
         push_image: ${{ inputs.push_image }}
         no_load: ${{ inputs.no_load }}
+        trtllm_wheel_context_path: ${{ steps.prebuild-trtllm-wheel.outputs.wheel_dir }}
         extra_build_args: |
           DYNAMO_COMMIT_SHA=${{ github.sha }}
           ${{ inputs.extra_build_args }}
