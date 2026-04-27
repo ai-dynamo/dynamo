@@ -1,17 +1,22 @@
-# What It Took to Run Claude Code, Codex, and OpenClaw on Dynamo
+# Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo
 
-Agent harnesses ask for more than text. Claude Code expects Anthropic-shaped model metadata, stable prompt caching, streamed content blocks, and reasoning/tool replay that survives the next turn. Codex expects the Responses API shape to survive Dynamo's internal conversion path. OpenClaw keeps conversations alive across background loops and channels, so parser mistakes show up as long-lived user-facing failures.
+A turn in an agentic conversation is more than just a prompt followed by a completion. Inference engines are expected to produce correctly segmented API results that are directly consumable by the attached agentic harness i.e. the parsing of tool calls and reasoning falls on the engine and not the harness. Additionally, inference endpoints must stream back partial results, not just in terms of tokens, but also during tool calling. This post covers what broke when real agentic clients running against Dynamo, how we hardened our parsers and API coverage, and how the parsers have been abstracted into independent crates to make them reusable.
 
-Our [first post](./agentic-inference.md) focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. This post stays at the harness boundary: what broke when real clients ran against Dynamo, and what we changed when "OpenAI-compatible" or "Anthropic-compatible" was not specific enough.
+Our work here builds upon the performance considerations outline in our [first post](./agentic-inference.md) which focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. The focus of our fixes in this follow up blog was threefold: correctness, user-experience equivalence, as well as performance.
 
-The story starts with Claude Code and Codex, because they expose the protocol and cache problems quickly. Then OpenClaw exercises the same backend in a different mode: long-lived, multi-channel conversations where reasoning and tool parsers have to keep working after the terminal session is gone.
+New agentic harnesses are constantly coming onto the scene and existing ones evolving, maturing and adding more elaborate features. So the focus is on the core features of popular harnesses such as Claude Code and Codex and OpenClaw, in the hopes that any learnings will be useful and transferrable.
 
-All experiments in the Claude Code and Codex sections were run against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` on a single B200 in aggregated serving mode. Some of the strongest results below are correctness results with clear systems implications; others are quantitative.
 
 ## Harness-Facing Dynamo Settings
 
-For these experiments, the frontend exposed the Anthropic-compatible API and enabled the switches that preserve prompt, reasoning, and tool state.
+Our experiments used the newly released `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` model, thought they are applicable across different models, reasoning and tool calling parsers.
 
+To reproduce our results, the frontend must be configured with newly the exposed Anthropic-compatible API and enabled with the switches that preserve prompt, reasoning, and tool state:
+- `--enable-anthropic-api` so harnesses can talk to Dynamo over the Anthropic API. Most harnesses can fall back to the default Messages API but that leads to a degraded experience.
+- `--strip-anthropic-preamble` this looks for, and strps the Anthropic billing header that can cause kv-reuse instability.
+- `--enable-streaming-tool-dispatch` this *new* feature means tool calls can start executing as soon as they are decoded, rather than waiting till the end of turn.
+
+Putting all of this together:
 ```bash
 python -m dynamo.frontend \
   --http-port 8000 \
@@ -20,17 +25,8 @@ python -m dynamo.frontend \
   --enable-streaming-tool-dispatch
 ```
 
-If the frontend and worker are missing these switches, the deployment can benchmark well and still misbehave at the client boundary.
-
-On the frontend side, the key settings to watch for are:
-
-- `--enable-anthropic-api` so Claude Code and OpenClaw can talk to Dynamo over the Anthropic API. Using only the default Messages API leads to a degraded experience and is best avoided.
-- `DYN_STRIP_ANTHROPIC_PREAMBLE=1` so Claude Code's billing header does not destroy prefix stability.
-- `DYN_ENABLE_STREAMING_TOOL_DISPATCH=1` so tool readiness is emitted as structured stream state rather than inferred from deltas. This means that decoded tool calls can start executing as soon as they are decoded, rather than waiting till the end of turn.
-
 On the worker side, the important settings in this deployment are:
-
-- `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` so tool calls and reasoning blocks are reconstructed in the model-specific format the harness actually needs. For instance, a common pattern is to drop all reasoning tokens from previous turns. Parsers need to handle this correctly, as well as the case of not dropping reasoning tokens for turns with interleaved tool calls, where the reasoning provides crucial context.
+- `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` so tool calls and reasoning blocks are reconstructed in the model-specific format the harness actually needs. For instance, a common pattern is to drop all reasoning tokens from previous turns.
 
 ## Prompt Stability Is Key for Cache Reuse
 
@@ -43,7 +39,7 @@ You are Claude Code, an interactive CLI tool...
 
 These headers poison the KV cache and prevent it from being reused, even across sessions by the same user. A varying line at position zero means every new session starts from a different token prefix, so the stable instructions and tool definitions behind it never line up cleanly for reuse.
 
-That is why Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
+TO restore proper kv-cache hits, Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
 
 The measured impact was large. On a Dynamo B200 deployment with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill. That is about a `5x` reduction in TTFT for new users hitting the same deployment or for the same user opening a new session.
 
@@ -213,9 +209,9 @@ The measured impact was large. On a Dynamo B200 deployment with a 52K-token prom
 
 <p style="text-align:center;color:#6b7280;font-size:0.9em;margin-top:0.5em"><em>Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168–169 ms TTFT; a varying prefix jumps to ~911 ms.</em></p>
 
-## The Nuances of Reasoning Parsing
+## The Nuances of Reasoning and Tool Parsing
 
-Reasoning replay does not have one universal correct form. Some models intentionally drop prior thinking on ordinary assistant turns. Agentic turns with interleaved tool calls are different: there, the reasoning and tool sequence often needs to persist to the next turn in the same order. The real contract is model-specific and turn-specific.
+Carrying reasoning into the next turn does not have one universal correct form. Some models intentionally drop prior thinking on ordinary assistant turns. Agentic turns with interleaved tool calls are different: there, the reasoning and tool sequence often needs to persist to the next turn in the same order. The real contract is model-specific and turn-specific.
 
 Contemporary reasoning models tend to produce two different kinds of assistant turns:
 - reasoning followed by a direct response to the user
@@ -227,24 +223,24 @@ Agentic models are especially good at producing turns where many reasoning and t
 <think>reasoning_0</think> tool_call_0 <think>reasoning_1</think> tool_call_1
 ```
 
-That structure needs to remain intact on replay when the model is expected to remember why each tool was called. Dynamo now supports this interleaved format fully. Previously, the same turn could be reconstructed as:
+That structure matters on the next turn. Each reasoning span needs to stay attached to the tool call or tool result it explains. If the assistant turn is reconstructed as one generic reasoning block followed by one blob of tool state, the model still has tokens but loses the sequence that made them meaningful. Dynamo now supports this interleaved format fully. Previously, the same turn could be reconstructed as:
 
 ```text
 <think>reasoning_0 reasoning_1</think> tool_call_0 tool_call_1
 ```
-That older shape came from legacy models that emitted only a single reasoning span and a single tool-call pass per turn. Some models instead package the conclusion of each command into the tool response itself, which changes what needs to be replayed on the next turn.
+That older shape came from legacy models that emitted only a single reasoning span and a single tool-call pass per turn. Some models instead package the conclusion of each command into the tool response itself, which changes what needs to be carried into the next turn.
 
-In addition to the reordering bug, we also found that reasoning was often being dropped too aggressively on replay. For some models, dropping prior thinking on turns without tool calls is an established behavior and part of the model's fine-tuning. DeepSeek-R1 is the clearest example. But that same behavior is wrong for interleaved agentic turns where the prior reasoning explains the tool sequence. This issue was difficult to spot because users could see reasoning being decoded correctly in the outgoing response while it was still being silently malformed or dropped before the next turn.
+In addition to the reordering bug, we also found that reasoning was often being dropped too aggressively before the next turn. For some models, dropping prior thinking on turns without tool calls is an established behavior and part of the model's fine-tuning (DeepSeek-R1 is the clearest example). But that same behavior is wrong for interleaved agentic turns where the prior reasoning explains the tool sequence. This issue was difficult to spot because users could see reasoning being decoded correctly in the outgoing response while it was still being *silently malformed* or dropped before the next turn.
 
-This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The bug had three layers:
+This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The fix had three parts:
 
-1. **Double parsing**: the Anthropic streaming handler applied a second reasoning parser on top of the engine stream, which already had reasoning correctly split. The second parser re-classified all content as reasoning.
+1. **Single parser ownership**: the Anthropic streaming handler used to apply a second reasoning parser even when the engine stream had already split `reasoning_content` from normal `content`. That second pass could classify post-reasoning text as reasoning because the original `</think>` boundary had already been consumed. The fix makes the parser boundary explicit: once a backend path has produced structured reasoning deltas, the Anthropic converter consumes them as-is instead of parsing the text again.
 
-2. **Silent drop**: chat templates only reference `{{ message.content }}` — they ignore `reasoning_content`. Without explicit injection, the model never saw its own prior chain-of-thought. The fix injects `reasoning_content` back into `content` as `<think>` blocks before template rendering, on both the Rust preprocessor path (`ModelInput::Tokens`) and the Python worker path (`ModelInput::Text`). Templates that natively handle `reasoning_content` (Nemotron, Qwen3) are detected at load time and left alone.
+2. **Conditional next-turn reasoning**: the next prompt is no longer "always render reasoning" or "never render reasoning." Dynamo checks whether the active chat template knows how to read `reasoning_content`. If it does, as with Nemotron and Qwen3-style templates, the field is left intact and the template decides how to render it. If it does not, Dynamo injects the reasoning back into `content` as `<think>` blocks before template rendering. That fallback exists on both the Rust preprocessor path (`ModelInput::Tokens`) and the Python worker path (`ModelInput::Text`), and it removes the original field after injection so the same reasoning cannot be rendered twice.
 
-3. **Template truncation**: Nemotron's chat template defaults `truncate_history_thinking` to `true`, which strips `<think>` content from all assistant turns before the last user message. That is reasonable for ordinary chat, but wrong for agentic turns where prior reasoning explains why tools were called. Some parsers made this even harder to notice. For example, the DeepSeek-R1 parser preserves reasoning on tool-calling turns but drops it on turns without tool calls, which is exactly the wrong shape for a harness that needs the model to remember why those tool calls happened. NVIDIA's own SWE training pipeline sets `truncate_history_thinking: false`; the Anthropic handler now passes that flag automatically when a reasoning parser is configured.
+3. **Per-request thinking controls**: some templates can also decide whether the next assistant turn should think at all and whether older thinking should stay in the history. Nemotron's template, for example, defaults `truncate_history_thinking` to `true`, which saves context in ordinary chat but loses the reasoning that explains prior tool calls. The Anthropic path now sets `enable_thinking=true` and `truncate_history_thinking=false` only when a reasoning parser is configured and the client has not explicitly disabled thinking. That gives agentic next-turn prompts the context they need without forcing reasoning into requests or models that asked to run without it.
 
-Once the parser and template path were fixed, the expected behavior finally appeared. In our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, exact replay landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the replayed prefix. The point of that measurement is not that every model should preserve all prior reasoning. It is that, in the cases where reasoning remains part of the replayed prefix, mutating it has a measurable cost.
+Once the parser and template path were fixed, the expected behavior finally appeared. In our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, the unchanged next-turn prefix landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the next-turn prefix. The point of that measurement is not that every model should preserve all prior reasoning. It is that, in the cases where reasoning remains part of the next-turn prefix, mutating it has a measurable cost.
 
 The key takeaway is that the harness, parser, and template path must agree on each model's expected reasoning behavior. Dropping thinking on ordinary turns may be correct for one model and wrong for another. Preserving interleaved reasoning on tool-calling turns may be essential even when ordinary turns are allowed to strip it. In practice, you should not assume that the tokens produced on turn `N` will automatically arrive unchanged as the prefix of turn `N+1`. Whether that is true depends on the reasoning parser, tool parser, and chat template for the model you are serving.
 
@@ -279,9 +275,10 @@ Claude Code compatibility is more than text generation behind an Anthropic endpo
 - useful `input_tokens` in `message_start`
 - acceptance of `cache_control`
 
-Once the frontend is reachable, the client side is intentionally plain:
+Once the frontend is reachable, the client side is intentionally plain. For a local Dynamo endpoint, Claude Code needs only the endpoint, key, and model:
 
 ```bash
+ANTHROPIC_API_KEY=local-dev-token \
 ANTHROPIC_BASE_URL=http://localhost:8000 \
 ANTHROPIC_CUSTOM_MODEL_OPTION=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
 ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Dynamo NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" \
@@ -374,6 +371,8 @@ Because OpenClaw makes the event stream easy to inspect, it helped turn a parser
 Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
 
 In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, LLM, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, `dynamo-llm`, and `dynamo-tokens`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
+
+This is also the bridge to longer-running systems such as AutoResearch. The first post explained why agentic workloads stress the serving stack. This post shows the harness-facing contract needed to run those workloads correctly. A research loop is not a single chat completion; it is a sequence of searches, tool calls, intermediate claims, retries, and summaries.
 
 ## Closing the Loop
 
