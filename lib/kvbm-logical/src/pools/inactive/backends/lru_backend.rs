@@ -106,19 +106,19 @@ impl InactiveIndex for LruBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pools::tests::fixtures::*;
+    use crate::testing::{block_id_and_hash, tokens_for_id};
 
     #[test]
     fn test_lru_eviction_order() {
         let mut backend = LruBackend::new(NonZeroUsize::new(3).unwrap());
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
-        let (block3, hash3) = create_registered_block(3, &tokens_for_id(3));
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
+        let (id3, hash3) = block_id_and_hash(3, &tokens_for_id(3));
 
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
-        backend.insert(hash3, block3.block_id());
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
+        backend.insert(hash3, id3);
 
         assert_eq!(backend.len(), 3);
 
@@ -135,14 +135,13 @@ mod tests {
     fn test_lru_peek_doesnt_affect_order() {
         let mut backend = LruBackend::new(NonZeroUsize::new(3).unwrap());
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
 
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
         assert_eq!(backend.len(), 2);
 
-        // Peek at block1 (should not affect LRU order)
         assert!(backend.has(hash1));
         assert!(backend.has(hash2));
 
@@ -157,10 +156,10 @@ mod tests {
     fn test_lru_allocate_more_than_available() {
         let mut backend = LruBackend::new(NonZeroUsize::new(10).unwrap());
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
 
         let allocated = backend.allocate(5);
         assert_eq!(allocated.len(), 2);

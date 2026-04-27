@@ -9,13 +9,13 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
-use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
+use crate::{pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 
 use crate::{
-    blocks::{Block, BlockMetadata, state::Reset},
+    blocks::BlockMetadata,
     pools::{
-        BlockDuplicationPolicy, BlockStore, InactiveIndex, ReusePolicy, SequenceHash,
-        backends::{HashMapBackend, LruBackend, MultiLruBackend},
+        BlockDuplicationPolicy, BlockStore, InactiveIndex,
+        backends::{FifoReusePolicy, HashMapBackend, LruBackend, MultiLruBackend},
     },
     registry::BlockRegistry,
 };
@@ -53,17 +53,17 @@ impl FrequencyTrackingCapacity {
 
 /// Configuration for the inactive pool backend.
 pub enum InactiveBackendConfig {
-    /// HashMap with configurable reuse policy
-    HashMap { reuse_policy: Box<dyn ReusePolicy> },
-    /// Simple LRU - capacity automatically set to block_count
+    /// HashMap with FIFO reuse order.
+    HashMap,
+    /// Simple LRU — capacity automatically set to block_count.
     Lru,
-    /// Multi-level LRU with 4 fixed levels - capacity automatically set to block_count
+    /// Multi-level LRU with 4 fixed levels — capacity automatically set to block_count.
     MultiLru {
-        /// Frequency thresholds: [cold->warm, warm->hot, hot->very_hot]
-        /// Default: [3, 8, 15]
+        /// Frequency thresholds: [cold->warm, warm->hot, hot->very_hot].
+        /// Default: [3, 8, 15].
         frequency_thresholds: [u8; 3],
     },
-    /// Lineage backend
+    /// Lineage backend.
     Lineage,
 }
 
@@ -240,9 +240,9 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
-    /// Use HashMap backend with custom reuse policy.
-    pub fn with_hashmap_backend(mut self, reuse_policy: Box<dyn ReusePolicy>) -> Self {
-        self.inactive_backend = Some(InactiveBackendConfig::HashMap { reuse_policy });
+    /// Use HashMap backend with FIFO reuse order.
+    pub fn with_hashmap_backend(mut self) -> Self {
+        self.inactive_backend = Some(InactiveBackendConfig::HashMap);
         self
     }
 
@@ -328,17 +328,13 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         // Create metrics
         let metrics = Arc::new(BlockPoolMetrics::new(short_type_name::<T>()));
 
-        // Initial Reset blocks for the unified store.
-        let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
-            .map(|id| Block::new(id, block_size))
-            .collect();
         metrics.set_reset_pool_size(block_count as i64);
 
         // Create backend based on configuration
         let backend: Box<dyn InactiveIndex> = match self.inactive_backend.take() {
-            Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
+            Some(InactiveBackendConfig::HashMap) => {
                 tracing::info!("Using HashMap for inactive pool");
-                Box::new(HashMapBackend::new(reuse_policy))
+                Box::new(HashMapBackend::new(Box::new(FifoReusePolicy::new())))
             }
             Some(InactiveBackendConfig::Lru) => {
                 // Capacity automatically set to block_count
@@ -385,36 +381,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         };
 
         // Construct unified store
-        let store = Arc::new(BlockStore::new(
-            blocks,
-            block_size,
-            backend,
-            Some(metrics.clone()),
-        ));
-
-        // Create upgrade function that captures the necessary components
-        let registry_clone = registry.clone();
-        let store_for_upgrade = store.clone();
-        let return_fn_clone = store.inactive_return_fn();
-        let upgrade_fn = Arc::new(
-            move |seq_hash: SequenceHash| -> Option<Arc<dyn crate::blocks::RegisteredBlock<T>>> {
-                // Try active pool first with touch=false (using registry directly)
-                if let Some(handle) = registry_clone.match_sequence_hash(seq_hash, false)
-                    && let Some(block) = handle.try_get_block::<T>(return_fn_clone.clone())
-                {
-                    return Some(block);
-                }
-                // Then try inactive pool with touch=false
-                if let Some(block) = store_for_upgrade
-                    .find_inactive_blocks(&[seq_hash], false)
-                    .into_iter()
-                    .next()
-                {
-                    return Some(block);
-                }
-                None
-            },
-        );
+        let store = BlockStore::new(block_count, block_size, backend, Some(metrics.clone()));
 
         // Register with aggregator if provided
         if let Some(ref aggregator) = self.aggregator {
@@ -427,7 +394,6 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             duplication_policy: self
                 .duplication_policy
                 .unwrap_or(BlockDuplicationPolicy::Allow),
-            upgrade_fn,
             allocate_mutex: Mutex::new(()),
             total_blocks: block_count,
             block_size,

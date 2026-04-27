@@ -13,9 +13,7 @@ use crate::pools::{
     backends::{FifoReusePolicy, HashMapBackend},
 };
 
-use super::blocks::create_reset_blocks;
-
-/// Configuration for setting up test pools.
+/// Configuration for setting up a test [`BlockStore`].
 #[derive(Builder)]
 #[builder(pattern = "owned")]
 pub(crate) struct TestPoolSetup {
@@ -29,9 +27,8 @@ pub(crate) struct TestPoolSetup {
 impl TestPoolSetup {
     /// Build a unified [`BlockStore`] backed by a HashMap+FIFO inactive index.
     pub(crate) fn build_store<T: BlockMetadata + Sync>(&self) -> Arc<BlockStore<T>> {
-        let blocks = create_reset_blocks::<T>(self.block_count, self.block_size);
         let reuse_policy = Box::new(FifoReusePolicy::new());
         let backend = Box::new(HashMapBackend::new(reuse_policy));
-        Arc::new(BlockStore::new(blocks, self.block_size, backend, None))
+        BlockStore::new(self.block_count, self.block_size, backend, None)
     }
 }

@@ -184,7 +184,7 @@ impl InactiveIndex for MultiLruBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pools::tests::fixtures::*;
+    use crate::testing::{block_id_and_hash, tokens_for_id};
     use crate::tinylfu::TinyLFUTracker;
 
     impl MultiLruBackend {
@@ -202,10 +202,10 @@ mod tests {
         let mut backend =
             MultiLruBackend::new(NonZeroUsize::new(12).unwrap(), frequency_tracker.clone());
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
-        let (block3, hash3) = create_registered_block(3, &tokens_for_id(3));
-        let (block4, hash4) = create_registered_block(4, &tokens_for_id(4));
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
+        let (id3, hash3) = block_id_and_hash(3, &tokens_for_id(3));
+        let (id4, hash4) = block_id_and_hash(4, &tokens_for_id(4));
 
         frequency_tracker.touch(hash2.as_u128());
         frequency_tracker.touch(hash2.as_u128());
@@ -223,10 +223,10 @@ mod tests {
         assert_eq!(backend.calculate_priority_level(hash3), 2); // Hot
         assert_eq!(backend.calculate_priority_level(hash4), 3); // Very hot
 
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
-        backend.insert(hash3, block3.block_id());
-        backend.insert(hash4, block4.block_id());
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
+        backend.insert(hash3, id3);
+        backend.insert(hash4, id4);
 
         assert_eq!(backend.len(), 4);
         assert!(backend.has(hash1));
@@ -241,17 +241,17 @@ mod tests {
         let mut backend =
             MultiLruBackend::new(NonZeroUsize::new(8).unwrap(), frequency_tracker.clone());
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
-        let (block3, hash3) = create_registered_block(3, &tokens_for_id(3));
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
+        let (id3, hash3) = block_id_and_hash(3, &tokens_for_id(3));
 
         for _ in 0..6 {
             frequency_tracker.touch(hash3.as_u128());
         }
 
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
-        backend.insert(hash3, block3.block_id());
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
+        backend.insert(hash3, id3);
 
         let allocated = backend.allocate(2);
         assert_eq!(allocated.len(), 2);
@@ -273,9 +273,9 @@ mod tests {
         )
         .unwrap();
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
-        let (block3, hash3) = create_registered_block(3, &tokens_for_id(3));
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
+        let (id3, hash3) = block_id_and_hash(3, &tokens_for_id(3));
 
         for _ in 0..3 {
             frequency_tracker.touch(hash2.as_u128());
@@ -285,9 +285,9 @@ mod tests {
             frequency_tracker.touch(hash3.as_u128());
         }
 
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
-        backend.insert(hash3, block3.block_id());
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
+        backend.insert(hash3, id3);
 
         let matches = backend.find_matches(&[hash1, hash2, hash3], true);
         assert_eq!(matches.len(), 3);
@@ -304,10 +304,10 @@ mod tests {
         )
         .unwrap();
 
-        let (block1, hash1) = create_registered_block(1, &tokens_for_id(1));
-        let (block2, hash2) = create_registered_block(2, &tokens_for_id(2));
-        let (block3, hash3) = create_registered_block(3, &tokens_for_id(3));
-        let (block4, hash4) = create_registered_block(4, &tokens_for_id(4));
+        let (id1, hash1) = block_id_and_hash(1, &tokens_for_id(1));
+        let (id2, hash2) = block_id_and_hash(2, &tokens_for_id(2));
+        let (id3, hash3) = block_id_and_hash(3, &tokens_for_id(3));
+        let (id4, hash4) = block_id_and_hash(4, &tokens_for_id(4));
 
         for _ in 0..3 {
             frequency_tracker.touch(hash2.as_u128());
@@ -326,10 +326,10 @@ mod tests {
         assert_eq!(backend.calculate_priority_level(hash3), 2);
         assert_eq!(backend.calculate_priority_level(hash4), 3);
 
-        backend.insert(hash1, block1.block_id());
-        backend.insert(hash2, block2.block_id());
-        backend.insert(hash3, block3.block_id());
-        backend.insert(hash4, block4.block_id());
+        backend.insert(hash1, id1);
+        backend.insert(hash2, id2);
+        backend.insert(hash3, id3);
+        backend.insert(hash4, id4);
 
         assert_eq!(backend.len(), 4);
         assert!(backend.has(hash1));

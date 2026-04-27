@@ -15,12 +15,9 @@ mod reuse_policy;
 #[cfg(test)]
 mod tests;
 
-#[allow(unused_imports)]
-pub use fifo::FifoReusePolicy;
-
+pub(crate) use fifo::FifoReusePolicy;
 pub(crate) use hashmap_backend::HashMapBackend;
 pub(crate) use lineage::LineageBackend;
 pub(crate) use lru_backend::LruBackend;
 pub(crate) use multi_lru_backend::MultiLruBackend;
-
-pub use reuse_policy::{ReusePolicy, ReusePolicyError};
+pub(crate) use reuse_policy::ReusePolicy;

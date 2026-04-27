@@ -147,9 +147,7 @@ impl LineageBackend {
             let was_parent_leaf = parent_node.is_leaf();
             parent_node.children.insert(fragment);
 
-            if was_parent_leaf
-                && let LineageNodeData::Real { last_used, .. } = parent_node.data
-            {
+            if was_parent_leaf && let LineageNodeData::Real { last_used, .. } = parent_node.data {
                 self.leaf_queue.remove(&(last_used, p_pos, p_frag));
             }
         }
@@ -179,7 +177,10 @@ impl LineageBackend {
     }
 
     /// Remove a specific block by its lineage hash (cache-hit path).
-    fn remove_by_hash(&mut self, lineage_hash: &PositionalLineageHash) -> Option<(SequenceHash, BlockId)> {
+    fn remove_by_hash(
+        &mut self,
+        lineage_hash: &PositionalLineageHash,
+    ) -> Option<(SequenceHash, BlockId)> {
         let position = lineage_hash.position();
         let fragment = lineage_hash.current_hash_fragment();
 
@@ -368,18 +369,14 @@ impl InactiveIndex for LineageBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pools::tests::fixtures::BlockSequenceBuilder;
+    use crate::testing::BlockSequenceBuilder;
 
-    /// Build a chain of lineage hashes via the testing helpers and return
-    /// `(block_id, seq_hash)` pairs.
+    /// Build a chain of lineage hashes and return `(block_id, seq_hash)` pairs.
     fn create_chain(count: usize, offset: u32) -> Vec<(BlockId, SequenceHash)> {
         let tokens: Vec<u32> = (offset..offset + count as u32).collect();
         BlockSequenceBuilder::from_tokens(tokens)
             .with_block_size(1)
             .build()
-            .into_iter()
-            .map(|(block, hash)| (block.block_id(), hash))
-            .collect()
     }
 
     fn create_blocks(count: usize) -> Vec<(BlockId, SequenceHash)> {
@@ -387,12 +384,12 @@ mod tests {
     }
 
     fn create_block(id: u32) -> (BlockId, SequenceHash) {
-        let tokens = vec![id];
-        let blocks = BlockSequenceBuilder::from_tokens(tokens)
+        BlockSequenceBuilder::from_tokens(vec![id])
             .with_block_size(1)
-            .build();
-        let (block, hash) = blocks.into_iter().next().unwrap();
-        (block.block_id(), hash)
+            .build()
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     impl LineageBackend {
