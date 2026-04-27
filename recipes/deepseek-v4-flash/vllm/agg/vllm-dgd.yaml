@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeployment for deepseek-ai/DeepSeek-V4-Flash on vLLM,
+# aggregated serving (no prefill/decode disaggregation).
+#
+# Upstream vLLM recipe:
+#   https://github.com/vllm-project/recipes/blob/main/models/deepseek-ai/DeepSeek-V4-Flash.yaml
+#
+# Shape: 1 replica x 4 B200 GPUs, DP=4 + Expert Parallel, TP=1.
+#        Tested on 4 of 8 GPUs per B200 node.
+#
+# Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
+#        includes the DeepSeek-V4 stack. See `../../container/README.md`
+#        for the reference build -- it overlays dynamo on
+#        vllm/vllm-openai:deepseekv4-cu130.
+#
+# Weights: served from the `model-cache` PVC populated by
+#          `../../model-cache/model-download.yaml`.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-flash-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: HF_HOME
+              value: /opt/models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          # Up to ~60 min for first launch: weight load + FlashInfer autotune +
+          # cudagraph warmup. periodSeconds * failureThreshold = 10 * 360 = 3600s.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          env:
+            - name: SERVED_MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4-Flash
+            - name: MODEL_PATH
+              value: deepseek-ai/DeepSeek-V4-Flash
+            - name: HF_HOME
+              value: /opt/models
+            # Read weights from the PVC only; do not hit the HF Hub at startup.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            # Give the engine room to finish first-launch init.
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "3600"
+            # Stabilize DP dummy inputs (matches the DeepSeek-R1 vLLM recipe).
+            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+              value: "1"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --kv-cache-dtype fp8 \
+                --block-size 256 \
+                --tensor-parallel-size 1 \
+                --data-parallel-size 4 \
+                --enable-expert-parallel \
+                --tokenizer-mode deepseek_v4 \
+                --dyn-reasoning-parser deepseek_v4 \
+                --dyn-tool-call-parser deepseek_v4 \
+                --attention-config '{"use_fp4_indexer_cache":true}' \
+                --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+                --max-num-seqs 256
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

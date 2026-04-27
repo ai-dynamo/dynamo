@@ -334,6 +334,13 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             endpoint.get_metrics_registry(),
         );
 
+        // Register worker-pool saturation metrics (idempotent). These are
+        // process-global and shared across all endpoints attached to the
+        // same shared TCP server.
+        crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
+
         self.metrics
             .set(Arc::new(metrics))
             .map_err(|_| anyhow::anyhow!("Metrics already set"))

@@ -288,7 +288,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                         "Input event gap detected: raw events dropped before batching"
                     );
                     if let Some(metrics) = kv_publisher_metrics() {
-                        metrics.increment_engines_dropped_events(worker_id, gap);
+                        metrics.increment_engines_dropped_events(gap);
                     } else {
                         tracing::warn!(
                             worker_id,

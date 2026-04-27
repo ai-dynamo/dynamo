@@ -34,6 +34,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -697,6 +698,11 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
+        # Canary probe: use its pre-built disagg params (skip prefill_result decode
+        # and skip the mode-specific request_type overrides).
+        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
+            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if ep_disaggregated_params:
@@ -1210,21 +1216,27 @@ class HandlerBase(BaseGenerativeHandler):
 
                     # Record additional metrics on request finish once per iteration.
                     if res.finished and metrics_collector:
-                        output = res.outputs[0] if res.outputs else None
+                        output = next(
+                            (
+                                output
+                                for output in res.outputs
+                                if getattr(output, "finish_reason", None)
+                            ),
+                            None,
+                        )
                         if output is not None:
                             try:
                                 if output.request_perf_metrics is not None:
                                     tm = output.request_perf_metrics.timing_metrics
                                     if tm is not None:
-                                        recorded = (
-                                            metrics_collector.record_kv_transfer_perf(
-                                                tm
-                                            )
-                                        )
-                                        if (
-                                            recorded
-                                            and self.disaggregation_mode
-                                            == DisaggregationMode.PREFILL
+                                        # record_kv_transfer_perf() only returns True on
+                                        # the decode worker (the receiver), which observes
+                                        # non-zero kv_cache_transfer_{start,end} in timing
+                                        # metrics. Count the success counter on the same
+                                        # signal so it stays in lock-step with the sibling
+                                        # histograms' _count. DYN-2781.
+                                        if metrics_collector.record_kv_transfer_perf(
+                                            tm
                                         ):
                                             metrics_collector.record_kv_transfer_success()
                             except Exception as e:

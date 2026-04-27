@@ -96,19 +96,10 @@ async def main(runtime: DistributedRuntime, args):
         max_total_gpus=args.max_total_gpus,
     )
 
-    # Serve scale_request endpoint
     logger.info("Serving endpoints...")
     scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
-    await scale_endpoint.serve_endpoint(handler.scale_request)
-    logger.info("  ✓ scale_request - Receives scaling requests from Planners")
+    health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
 
-    # Serve health check endpoint.
-    # Passing health_check_payload registers this endpoint as a health-check
-    # target so the runtime's system status server flips to HealthStatus::Ready
-    # once the handler is registered. Without it, the operator-injected HTTP
-    # probes on :system/live and :system/health return 503 forever and the pod
-    # never becomes Ready. Mirrors the pool-Planner entrypoint pattern at
-    # components/src/dynamo/planner/__main__.py.
     async def health_check(request: HealthCheckRequest):
         """Health check endpoint for monitoring"""
         yield {
@@ -118,19 +109,30 @@ async def main(runtime: DistributedRuntime, args):
             "managed_namespaces": args.managed_namespaces or "all",
         }
 
-    health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
-    await health_endpoint.serve_endpoint(
-        health_check,
-        health_check_payload={"text": "health"},
-    )
+    logger.info("  ✓ scale_request - Receives scaling requests from Planners")
     logger.info("  ✓ health - Health check endpoint")
-
     logger.info("=" * 60)
     logger.info("GlobalPlanner is ready and waiting for scale requests")
     logger.info("=" * 60)
 
-    # Keep running forever (process scale requests as they come)
-    await asyncio.Event().wait()
+    # serve_endpoint is a long-running task — it only returns on shutdown.
+    # Awaiting them sequentially would block on scale_request forever and
+    # never register the health endpoint, so system_health would never flip
+    # to Ready and the operator-injected HTTP probes on :system/live and
+    # :system/health would 503 indefinitely. Run concurrently via
+    # asyncio.gather; pattern matches components/src/dynamo/planner/__main__.py.
+    #
+    # Passing health_check_payload to the health endpoint registers it as a
+    # health-check target so system_health flips to Ready once the endpoint
+    # is live. The payload shape matches HealthCheckRequest so if canary
+    # probing is ever enabled it can deserialize cleanly.
+    await asyncio.gather(
+        scale_endpoint.serve_endpoint(handler.scale_request),
+        health_endpoint.serve_endpoint(
+            health_check,
+            health_check_payload={"text": "health"},
+        ),
+    )
 
 
 if __name__ == "__main__":
