@@ -283,6 +283,7 @@ impl LocalModelBuilder {
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
                 migration_max_seq_len: self.migration_max_seq_len,
+                self_host_metadata: self.self_host_metadata,
             });
         }
 
@@ -338,6 +339,7 @@ impl LocalModelBuilder {
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
             migration_max_seq_len: self.migration_max_seq_len,
+            self_host_metadata: self.self_host_metadata,
         })
     }
 }
@@ -359,6 +361,11 @@ pub struct LocalModel {
     namespace_prefix: Option<String>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
+    /// Opt-in flag carried from the builder. When true, `attach()`
+    /// rewrites the MDC's `files` URIs to point at this worker's own
+    /// `system_status_server` route and registers the on-disk paths
+    /// so the route handler can serve them.
+    self_host_metadata: bool,
 }
 
 impl LocalModel {
@@ -483,6 +490,11 @@ impl LocalModel {
             suffix_for_log
         );
 
+        if self.self_host_metadata {
+            self.wire_self_hosted_artifacts(endpoint.drt())
+                .context("wire self-hosted metadata artifacts")?;
+        }
+
         let source_path = PathBuf::from(self.card.source_path());
         if !source_path.exists() {
             // The consumers of MDC (frontend) might not have the same local path as us, so
@@ -512,6 +524,52 @@ impl LocalModel {
         )?;
         let _instance = discovery.register(spec).await?;
 
+        Ok(())
+    }
+
+    /// Rewrite every `ArtifactRef.uri` in the MDC's `files` vector
+    /// to point at this worker's own `/v1/metadata/...` route, and
+    /// insert the on-disk path for each entry into the runtime's
+    /// metadata artifact registry so the route handler can serve
+    /// the bytes.
+    ///
+    /// Only entries whose current URI is a `file://` URL pointing at
+    /// a path on this worker's local disk are eligible. Entries with
+    /// other schemes (`hf://`, `mx://`, ...) are left as-is — the
+    /// worker can't self-host bytes it doesn't have locally.
+    fn wire_self_hosted_artifacts(
+        &mut self,
+        drt: &dynamo_runtime::DistributedRuntime,
+    ) -> anyhow::Result<()> {
+        let base_url = self_host_base_url(drt)?;
+        let model_slug = self.card.slug().to_string();
+        let registry = drt.metadata_artifacts();
+
+        let mut rewritten = 0usize;
+        for artifact in self.card.files.iter_mut() {
+            let url = match url::Url::parse(&artifact.uri) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            if url.scheme() != "file" {
+                continue;
+            }
+            let local_path = match url.to_file_path() {
+                Ok(p) => p,
+                Err(()) => continue,
+            };
+
+            registry.register(&model_slug, &artifact.filename, local_path);
+            artifact.uri = format!("{base_url}/v1/metadata/{model_slug}/{}", artifact.filename);
+            rewritten += 1;
+        }
+
+        tracing::info!(
+            model_slug,
+            rewritten,
+            base_url,
+            "self-hosting model metadata artifacts"
+        );
         Ok(())
     }
 
@@ -565,10 +623,6 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     }
 }
 
-// Wired in by registration when self_host_metadata is true; see
-// the §2.6 commit. Kept #[allow(dead_code)] for one commit so the
-// helper lands as its own reviewable change.
-#[allow(dead_code)]
 /// Build the base URL this worker advertises for the
 /// `/v1/metadata/...` route on its own `system_status_server`.
 ///
