@@ -249,6 +249,90 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+/// Build an [`ArtifactRef`] from a [`CheckedFile`] and its role.
+///
+/// Filename comes from the file's path (URL or disk). URI is
+/// `file://<absolute>` for local paths and the URL string for
+/// URL-backed files. Size comes from the local file's metadata when
+/// reachable; URL-backed files report `0` (consumers should treat
+/// `size` as informational and rely on `checksum` for verification).
+fn artifact_ref_from_checked_file(cf: &CheckedFile, role: ArtifactRole) -> Option<ArtifactRef> {
+    let (filename, uri, size) = if let Some(path) = cf.path() {
+        let filename = path.file_name()?.to_str()?.to_string();
+        let uri = url::Url::from_file_path(path).ok()?.to_string();
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        (filename, uri, size)
+    } else if let Some(url) = cf.url() {
+        let filename = url.path().rsplit('/').find(|s| !s.is_empty())?.to_string();
+        (filename, url.to_string(), 0)
+    } else {
+        return None;
+    };
+
+    Some(ArtifactRef {
+        filename,
+        uri,
+        checksum: cf.checksum().to_string(),
+        size,
+        role,
+    })
+}
+
+/// Collect the per-file [`ArtifactRef`] list from the typed artifact
+/// fields on a [`ModelDeploymentCard`]. Files for which no
+/// [`CheckedFile`] is reachable are silently skipped.
+fn artifacts_from_typed_fields(
+    model_info: Option<&ModelInfoType>,
+    tokenizer: Option<&TokenizerKind>,
+    prompt_formatter: Option<&PromptFormatterArtifact>,
+    chat_template_file: Option<&PromptFormatterArtifact>,
+    gen_config: Option<&GenerationConfig>,
+) -> Vec<ArtifactRef> {
+    let mut out = Vec::with_capacity(5);
+
+    if let Some(ModelInfoType::HfConfigJson(cf)) = model_info
+        && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::Config)
+    {
+        out.push(a);
+    }
+
+    if let Some(tk) = tokenizer {
+        let cf = match tk {
+            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => c,
+        };
+        if let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::Tokenizer) {
+            out.push(a);
+        }
+    }
+
+    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(cf)) = prompt_formatter
+        && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::TokenizerConfig)
+    {
+        out.push(a);
+    }
+
+    if let Some(ct) = chat_template_file {
+        let cf = match ct {
+            PromptFormatterArtifact::HfChatTemplateJinja { file, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file, .. } => Some(file),
+            PromptFormatterArtifact::HfTokenizerConfigJson(_) => None,
+        };
+        if let Some(cf) = cf
+            && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::ChatTemplate)
+        {
+            out.push(a);
+        }
+    }
+
+    if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = gen_config
+        && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::GenerationConfig)
+    {
+        out.push(a);
+    }
+
+    out
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -281,6 +365,20 @@ pub struct ModelDeploymentCard {
     /// Generation config - default sampling params
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gen_config: Option<GenerationConfig>,
+
+    /// Per-file artifact list describing every metadata file the
+    /// frontend may need (`config.json`, `tokenizer.json`, etc.).
+    /// Each entry carries filename, URI, blake3 checksum, byte size,
+    /// and role.
+    ///
+    /// Populated by new workers in addition to the typed
+    /// `model_info` / `tokenizer` / `prompt_formatter` /
+    /// `chat_template_file` / `gen_config` fields. New frontends
+    /// prefer this list; old frontends ignore it (deserialized as
+    /// empty when missing). Empty list → frontend falls back to the
+    /// legacy `download_config()` path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ArtifactRef>,
 
     /// Prompt Formatter Config
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -810,6 +908,14 @@ impl ModelDeploymentCard {
         // This gets replaced when we `set_name`
         let display_name = local_path.display().to_string();
 
+        let files = artifacts_from_typed_fields(
+            model_info.as_ref(),
+            tokenizer.as_ref(),
+            prompt_formatter.as_ref(),
+            chat_template_file.as_ref(),
+            gen_config.as_ref(),
+        );
+
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
@@ -819,6 +925,7 @@ impl ModelDeploymentCard {
             gen_config,
             prompt_formatter,
             chat_template_file,
+            files,
             prompt_context: None, // TODO - auto-detect prompt context
             context_length,
             kv_cache_block_size: 0, // set later
