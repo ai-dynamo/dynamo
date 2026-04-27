@@ -187,10 +187,11 @@ if [ "$DEVICE" = "cuda" ]; then
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
     uv pip install ${VLLM_UV_ARGS} "vllm[flashinfer,runai,otel]==${VLLM_VER}"
     echo "✓ vLLM ${VLLM_VER} installed from PyPI"
-    # Run outside /opt/vllm so Python imports the installed wheel, not the cloned source tree.
+    # Run outside /opt/vllm so Python inspects the installed wheel, not the cloned source tree.
     (cd / && python3 - <<PY
-import importlib
 from importlib import metadata
+from pathlib import Path
+import subprocess
 
 import torch
 
@@ -204,8 +205,31 @@ print(f"✓ PyTorch CUDA version verified: {torch.version.cuda}")
 vllm_version = metadata.version("vllm")
 if "${TORCH_BACKEND}" == "cu129" and not vllm_version.endswith("+cu129"):
     raise RuntimeError(f"Expected vLLM cu129 wheel, found vLLM {vllm_version}")
-importlib.import_module("vllm._C")
-print(f"✓ vLLM extension import verified: {vllm_version}")
+
+dist = metadata.distribution("vllm")
+extension_paths = [
+    Path(dist.locate_file(file))
+    for file in (dist.files or [])
+    if str(file).startswith("vllm/_C") and str(file).endswith(".so")
+]
+if not extension_paths:
+    raise RuntimeError(f"Could not find vLLM extension libraries in vLLM {vllm_version}")
+
+ldd_output = "\n".join(
+    subprocess.check_output(["ldd", str(path)], text=True)
+    for path in extension_paths
+)
+missing_cudart = [
+    line.strip()
+    for line in ldd_output.splitlines()
+    if "libcudart.so" in line and "not found" in line
+]
+if missing_cudart:
+    raise RuntimeError(
+        "vLLM extension is linked against a missing CUDA runtime: "
+        + "; ".join(missing_cudart)
+    )
+print(f"✓ vLLM extension CUDA runtime linkage verified: {vllm_version}")
 PY
     )
     uv pip install flashinfer-cubin==$FLASHINF_REF
