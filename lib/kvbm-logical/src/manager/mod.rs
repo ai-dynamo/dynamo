@@ -69,13 +69,12 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         let remaining_needed = count - blocks.len();
         match self.store.evict_to_mutable(remaining_needed) {
             Some((remaining, evicted)) => {
-                let eviction_count = remaining.len() as u64;
                 blocks.extend(remaining);
 
                 self.metrics.inc_allocations(blocks.len() as u64);
                 self.metrics
                     .inc_allocations_from_reset(from_reset_count as u64);
-                self.metrics.inc_evictions(eviction_count);
+                // `inc_evictions` is emitted inside `evict_to_mutable`.
 
                 Some((blocks, evicted))
             }
@@ -113,13 +112,8 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         let handle = self
             .block_registry
             .register_sequence_hash(block.sequence_hash());
-        let inner = handle.register_block(
-            block,
-            self.duplication_policy,
-            &self.store,
-            Some(self.metrics.as_ref()),
-        );
-        ImmutableBlock::from_inner(inner, Some(self.metrics.clone()))
+        let inner = handle.register_block(block, self.duplication_policy, &self.store);
+        ImmutableBlock::from_inner(inner)
     }
 
     /// Linear prefix match: walks `seq_hash` left-to-right, stopping on
@@ -139,7 +133,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         matched.extend(
             self.find_active_matches(seq_hash, true)
                 .into_iter()
-                .map(|inner| ImmutableBlock::from_inner(inner, Some(self.metrics.clone()))),
+                .map(ImmutableBlock::from_inner),
         );
 
         let active_matched = matched.len();
@@ -157,7 +151,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
             matched.extend(
                 inactive_found
                     .into_iter()
-                    .map(|inner| ImmutableBlock::from_inner(inner, Some(self.metrics.clone()))),
+                    .map(ImmutableBlock::from_inner),
             );
         }
 
@@ -182,10 +176,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
 
         let active_found = self.scan_active_matches(seq_hashes);
         for (hash, inner) in active_found {
-            result.insert(
-                hash,
-                ImmutableBlock::from_inner(inner, Some(self.metrics.clone())),
-            );
+            result.insert(hash, ImmutableBlock::from_inner(inner));
         }
 
         let remaining: Vec<SequenceHash> = seq_hashes
@@ -197,10 +188,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         if !remaining.is_empty() {
             let inactive_found = self.store.scan_inactive_primaries(&remaining, touch);
             for (hash, inner) in inactive_found {
-                result.insert(
-                    hash,
-                    ImmutableBlock::from_inner(inner, Some(self.metrics.clone())),
-                );
+                result.insert(hash, ImmutableBlock::from_inner(inner));
             }
         }
 

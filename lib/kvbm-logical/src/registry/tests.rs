@@ -52,7 +52,9 @@ fn test_type_tracking_enforcement() {
     let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
     let handle = registry.register_sequence_hash(seq_hash);
 
-    handle.attach_unique("unique_publisher".to_string()).unwrap();
+    handle
+        .attach_unique("unique_publisher".to_string())
+        .unwrap();
 
     let result = handle.attach("listener1".to_string());
     assert_eq!(
@@ -97,7 +99,10 @@ fn test_different_types_usage() {
         .unwrap();
 
     let publisher = handle.get::<EventPublisher>().with_unique(|p| p.clone());
-    assert_eq!(publisher, Some(EventPublisher("main_publisher".to_string())));
+    assert_eq!(
+        publisher,
+        Some(EventPublisher("main_publisher".to_string()))
+    );
 
     let listeners = handle
         .get::<EventListener>()
@@ -143,7 +148,9 @@ fn test_presence_tracking_lifecycle() {
     assert!(pre_handle.has_block::<TestMetadata>());
 
     // Force eviction by allocating until the inactive block is evicted.
-    let _evicted = manager.allocate_blocks(2).expect("allocate forces eviction");
+    let _evicted = manager
+        .allocate_blocks(2)
+        .expect("allocate forces eviction");
     assert!(!pre_handle.has_block::<TestMetadata>());
 }
 
@@ -331,13 +338,15 @@ fn test_with_all_mut_unique() {
     }
 
     handle.attach_unique(UniqueValue(10)).unwrap();
-    handle.get::<UniqueValue>().with_all_mut(|unique, multiple| {
-        assert!(unique.is_some());
-        assert_eq!(multiple.len(), 0);
-        if let Some(val) = unique {
-            val.increment();
-        }
-    });
+    handle
+        .get::<UniqueValue>()
+        .with_all_mut(|unique, multiple| {
+            assert!(unique.is_some());
+            assert_eq!(multiple.len(), 0);
+            if let Some(val) = unique {
+                val.increment();
+            }
+        });
     let value = handle.get::<UniqueValue>().with_unique(|v| v.0);
     assert_eq!(value, Some(11));
 }
@@ -358,13 +367,15 @@ fn test_with_all_mut_multiple() {
 
     handle.attach(MultipleValue(1)).unwrap();
     handle.attach(MultipleValue(2)).unwrap();
-    handle.get::<MultipleValue>().with_all_mut(|unique, multiple| {
-        assert!(unique.is_none());
-        assert_eq!(multiple.len(), 2);
-        for val in multiple {
-            val.increment();
-        }
-    });
+    handle
+        .get::<MultipleValue>()
+        .with_all_mut(|unique, multiple| {
+            assert!(unique.is_none());
+            assert_eq!(multiple.len(), 2);
+            for val in multiple {
+                val.increment();
+            }
+        });
     let total = handle
         .get::<MultipleValue>()
         .with_multiple(|vs| vs.iter().map(|v| v.0).sum::<i32>());

@@ -381,7 +381,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         };
 
         // Construct unified store
-        let store = BlockStore::new(block_count, block_size, backend, Some(metrics.clone()));
+        let store = BlockStore::new(block_count, block_size, backend, metrics.clone());
 
         // Register with aggregator if provided
         if let Some(ref aggregator) = self.aggregator {

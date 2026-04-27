@@ -8,10 +8,10 @@ mod backend_tests {
 
     use rstest::rstest;
 
+    use crate::BlockId;
     use crate::pools::store::InactiveIndex;
     use crate::testing::{block_id_and_hash, hash_for_tokens, tokens_for_id};
     use crate::tinylfu::TinyLFUTracker;
-    use crate::BlockId;
 
     use super::super::*;
 

@@ -129,7 +129,7 @@ pub(crate) struct BlockStore<T: BlockMetadata> {
     inner: Arc<Mutex<BlockStoreInner>>,
     block_size: usize,
     total_blocks: usize,
-    metrics: Option<Arc<BlockPoolMetrics>>,
+    metrics: Arc<BlockPoolMetrics>,
     _marker: PhantomData<T>,
 }
 
@@ -139,7 +139,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         total_blocks: usize,
         block_size: usize,
         inactive: Box<dyn InactiveIndex>,
-        metrics: Option<Arc<BlockPoolMetrics>>,
+        metrics: Arc<BlockPoolMetrics>,
     ) -> Arc<Self> {
         let mut slots = Vec::with_capacity(total_blocks);
         let mut free = VecDeque::with_capacity(total_blocks);
@@ -172,8 +172,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         self.total_blocks
     }
 
-    pub(crate) fn metrics(&self) -> Option<&Arc<BlockPoolMetrics>> {
-        self.metrics.as_ref()
+    pub(crate) fn metrics(&self) -> &Arc<BlockPoolMetrics> {
+        &self.metrics
     }
 
     pub(crate) fn reset_len(&self) -> usize {
@@ -202,16 +202,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         for _ in 0..take {
             let id = inner.free.pop_front().unwrap();
             inner.slots[id].state = SlotState::Mutable;
-            if let Some(ref m) = self.metrics {
-                m.dec_reset_pool_size();
-            }
+            self.metrics.dec_reset_pool_size();
+            self.metrics.inc_inflight_mutable();
             let block_size = inner.slots[id].block_size;
-            out.push(MutableBlock::from_store(
-                self.clone(),
-                id,
-                block_size,
-                self.metrics.clone(),
-            ));
+            out.push(MutableBlock::from_store(self.clone(), id, block_size));
         }
         out
     }
@@ -236,11 +230,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             }
             return None;
         }
-        if let Some(ref m) = self.metrics {
-            for _ in 0..count {
-                m.dec_inactive_pool_size();
-            }
+        for _ in 0..count {
+            self.metrics.dec_inactive_pool_size();
         }
+        self.metrics.inc_evictions(count as u64);
 
         let mut out = Vec::with_capacity(count);
         let mut evicted = Vec::with_capacity(count);
@@ -250,13 +243,9 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             inner.slots[block_id].state = SlotState::Mutable;
             evicted.push(seq_hash);
             handles.push(handle);
+            self.metrics.inc_inflight_mutable();
             let block_size = inner.slots[block_id].block_size;
-            out.push(MutableBlock::from_store(
-                self.clone(),
-                block_id,
-                block_size,
-                self.metrics.clone(),
-            ));
+            out.push(MutableBlock::from_store(self.clone(), block_id, block_size));
         }
         drop(inner);
         // mark_absent::<T> takes the registry attachments lock — invoke
@@ -272,10 +261,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let mut inner = self.inner.lock();
         let drained = inner.inactive.allocate_all();
         let count = drained.len();
-        if let Some(ref m) = self.metrics {
-            for _ in 0..count {
-                m.dec_inactive_pool_size();
-            }
+        for _ in 0..count {
+            self.metrics.dec_inactive_pool_size();
         }
         let mut handles = Vec::with_capacity(count);
         let mut out = Vec::with_capacity(count);
@@ -283,13 +270,9 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
             inner.slots[block_id].state = SlotState::Mutable;
             handles.push(handle);
+            self.metrics.inc_inflight_mutable();
             let block_size = inner.slots[block_id].block_size;
-            out.push(MutableBlock::from_store(
-                self.clone(),
-                block_id,
-                block_size,
-                self.metrics.clone(),
-            ));
+            out.push(MutableBlock::from_store(self.clone(), block_id, block_size));
         }
         drop(inner);
         for h in handles {
@@ -356,9 +339,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             let mut inner = self.inner.lock();
             let mut matched = inner.inactive.find_matches(&[seq_hash], touch);
             let (_, block_id) = matched.pop()?;
-            if let Some(ref m) = self.metrics {
-                m.dec_inactive_pool_size();
-            }
+            self.metrics.dec_inactive_pool_size();
             let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
             inner.slots[block_id].state = SlotState::Primary {
                 seq_hash,
@@ -384,10 +365,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         } else {
             inner.inactive.find_matches(hashes, touch)
         };
-        if let Some(ref m) = self.metrics {
-            for _ in 0..matched.len() {
-                m.dec_inactive_pool_size();
-            }
+        for _ in 0..matched.len() {
+            self.metrics.dec_inactive_pool_size();
         }
         matched
             .into_iter()
@@ -410,9 +389,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         debug_assert!(matches!(inner.slots[block_id].state, SlotState::Mutable));
         inner.slots[block_id].state = SlotState::Reset;
         inner.free.push_back(block_id);
-        if let Some(ref m) = self.metrics {
-            m.inc_reset_pool_size();
-        }
+        self.metrics.inc_reset_pool_size();
+        self.metrics.dec_inflight_mutable();
     }
 
     /// `Mutable` → `Staged` (MutableBlock::stage / ::complete).
@@ -420,6 +398,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let mut inner = self.inner.lock();
         debug_assert!(matches!(inner.slots[block_id].state, SlotState::Mutable));
         inner.slots[block_id].state = SlotState::Staged { seq_hash };
+        self.metrics.dec_inflight_mutable();
+        self.metrics.inc_stagings();
     }
 
     /// `Staged` → `Mutable` (CompleteBlock::reset).
@@ -430,6 +410,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             SlotState::Staged { .. }
         ));
         inner.slots[block_id].state = SlotState::Mutable;
+        self.metrics.inc_inflight_mutable();
     }
 
     /// `Staged` → `Reset` (CompleteBlock dropped without a transition).
@@ -441,9 +422,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         ));
         inner.slots[block_id].state = SlotState::Reset;
         inner.free.push_back(block_id);
-        if let Some(ref m) = self.metrics {
-            m.inc_reset_pool_size();
-        }
+        self.metrics.inc_reset_pool_size();
     }
 
     /// `Staged` → `Primary` (BlockManager::register_block, fresh primary).
@@ -493,6 +472,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                 seq_hash,
                 handle: handle.clone(),
             };
+            self.metrics.inc_duplicate_blocks();
         }
         ImmutableBlockInner::new_duplicate(
             self.clone(),
@@ -517,9 +497,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             handle: handle.clone(),
         };
         inner.inactive.insert(seq_hash, block_id);
-        if let Some(ref m) = self.metrics {
-            m.inc_inactive_pool_size();
-        }
+        self.metrics.inc_inactive_pool_size();
         tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
     }
 
@@ -535,9 +513,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             };
             slot.state = SlotState::Reset;
             inner.free.push_back(block_id);
-            if let Some(ref m) = self.metrics {
-                m.inc_reset_pool_size();
-            }
+            self.metrics.inc_reset_pool_size();
             handle
         };
         handle.mark_absent::<T>();

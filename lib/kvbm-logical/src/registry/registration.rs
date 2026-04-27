@@ -13,10 +13,7 @@ use std::sync::Arc;
 
 use super::handle::BlockRegistrationHandle;
 
-use crate::blocks::{
-    BlockDuplicationPolicy, BlockMetadata, CompleteBlock, ImmutableBlockInner,
-};
-use crate::metrics::BlockPoolMetrics;
+use crate::blocks::{BlockDuplicationPolicy, BlockMetadata, CompleteBlock, ImmutableBlockInner};
 use crate::pools::BlockStore;
 use crate::pools::store::upgrade_or_resurrect;
 
@@ -29,7 +26,6 @@ impl BlockRegistrationHandle {
         block: CompleteBlock<T>,
         duplication_policy: BlockDuplicationPolicy,
         store: &Arc<BlockStore<T>>,
-        metrics: Option<&BlockPoolMetrics>,
     ) -> Arc<ImmutableBlockInner<T>> {
         assert_eq!(
             block.sequence_hash(),
@@ -49,11 +45,9 @@ impl BlockRegistrationHandle {
             }
             match duplication_policy {
                 BlockDuplicationPolicy::Allow => {
-                    if let Some(m) = metrics {
-                        m.inc_duplicate_blocks();
-                    }
                     // Disarm the CompleteBlock guard — store will own the
-                    // slot via the new Duplicate state.
+                    // slot via the new Duplicate state. `transition_to_duplicate`
+                    // emits `inc_duplicate_blocks` inside its critical section.
                     let mut block = block;
                     block.armed = false;
                     drop(block);
@@ -65,9 +59,7 @@ impl BlockRegistrationHandle {
                     )
                 }
                 BlockDuplicationPolicy::Reject => {
-                    if let Some(m) = metrics {
-                        m.inc_registration_dedup();
-                    }
+                    store.metrics().inc_registration_dedup();
                     // Drop the CompleteBlock — it returns the slot to Reset.
                     drop(block);
                     existing_primary

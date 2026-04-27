@@ -24,7 +24,6 @@
 use std::sync::{Arc, Weak};
 
 use crate::blocks::{BlockId, BlockMetadata, BlockRegistrationHandle, SequenceHash};
-use crate::metrics::BlockPoolMetrics;
 use crate::pools::{BlockStore, store::upgrade_or_resurrect};
 
 /// Internal owner of a registered slot. Every clone of an
@@ -99,18 +98,12 @@ impl<T: BlockMetadata> Drop for ImmutableBlockInner<T> {
 /// `Reset` (duplicate).
 pub struct ImmutableBlock<T: BlockMetadata> {
     inner: Arc<ImmutableBlockInner<T>>,
-    metrics: Option<Arc<BlockPoolMetrics>>,
 }
 
 impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
-    pub(crate) fn from_inner(
-        inner: Arc<ImmutableBlockInner<T>>,
-        metrics: Option<Arc<BlockPoolMetrics>>,
-    ) -> Self {
-        if let Some(ref m) = metrics {
-            m.inc_inflight_immutable();
-        }
-        Self { inner, metrics }
+    pub(crate) fn from_inner(inner: Arc<ImmutableBlockInner<T>>) -> Self {
+        inner.store.metrics().inc_inflight_immutable();
+        Self { inner }
     }
 
     /// Creates a [`WeakBlock`] that does not prevent the block from being
@@ -121,7 +114,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
             inner: Arc::downgrade(&self.inner),
             handle: self.inner.handle.clone(),
             store: self.inner.store.clone(),
-            metrics: self.metrics.clone(),
         }
     }
 
@@ -149,12 +141,9 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
 
 impl<T: BlockMetadata + Sync> Clone for ImmutableBlock<T> {
     fn clone(&self) -> Self {
-        if let Some(ref m) = self.metrics {
-            m.inc_inflight_immutable();
-        }
+        self.inner.store.metrics().inc_inflight_immutable();
         Self {
             inner: self.inner.clone(),
-            metrics: self.metrics.clone(),
         }
     }
 }
@@ -162,9 +151,7 @@ impl<T: BlockMetadata + Sync> Clone for ImmutableBlock<T> {
 impl<T: BlockMetadata> Drop for ImmutableBlock<T> {
     #[inline]
     fn drop(&mut self) {
-        if let Some(ref m) = self.metrics {
-            m.dec_inflight_immutable();
-        }
+        self.inner.store.metrics().dec_inflight_immutable();
     }
 }
 
@@ -188,17 +175,16 @@ pub struct WeakBlock<T: BlockMetadata> {
     inner: Weak<ImmutableBlockInner<T>>,
     handle: BlockRegistrationHandle,
     store: Arc<BlockStore<T>>,
-    metrics: Option<Arc<BlockPoolMetrics>>,
 }
 
 impl<T: BlockMetadata + Sync> WeakBlock<T> {
     /// Attempt to upgrade this weak reference to a strong [`ImmutableBlock`].
     pub fn upgrade(&self) -> Option<ImmutableBlock<T>> {
         if let Some(strong) = self.inner.upgrade() {
-            return Some(ImmutableBlock::from_inner(strong, self.metrics.clone()));
+            return Some(ImmutableBlock::from_inner(strong));
         }
         let inner = upgrade_or_resurrect::<T>(&self.handle, &self.store)?;
-        Some(ImmutableBlock::from_inner(inner, self.metrics.clone()))
+        Some(ImmutableBlock::from_inner(inner))
     }
 
     /// Returns the [`SequenceHash`] for the block this weak reference
@@ -215,7 +201,6 @@ impl<T: BlockMetadata> Clone for WeakBlock<T> {
             inner: self.inner.clone(),
             handle: self.handle.clone(),
             store: self.store.clone(),
-            metrics: self.metrics.clone(),
         }
     }
 }

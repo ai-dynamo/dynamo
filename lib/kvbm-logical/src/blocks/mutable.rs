@@ -16,7 +16,6 @@ use dynamo_tokens::TokenBlock;
 
 use crate::KvbmSequenceHashProvider;
 use crate::blocks::{BlockError, BlockId, BlockMetadata, CompleteBlock, SequenceHash};
-use crate::metrics::BlockPoolMetrics;
 use crate::pools::BlockStore;
 
 /// RAII guard for a block in the **Reset** state.
@@ -27,13 +26,12 @@ use crate::pools::BlockStore;
 ///
 /// # Drop behaviour
 ///
-/// Dropping a `MutableBlock` returns the slot to the reset pool and
-/// decrements the `inflight_mutable` metric gauge.
+/// Dropping a `MutableBlock` returns the slot to the reset pool. The store's
+/// `release_mutable` updates the `inflight_mutable` gauge.
 pub struct MutableBlock<T: BlockMetadata> {
     store: Arc<BlockStore<T>>,
     block_id: BlockId,
     block_size: usize,
-    metrics: Option<Arc<BlockPoolMetrics>>,
     /// `false` once the guard has been consumed by a state-transition
     /// method (`stage` / `complete`); Drop becomes a no-op.
     armed: bool,
@@ -41,21 +39,17 @@ pub struct MutableBlock<T: BlockMetadata> {
 
 impl<T: BlockMetadata + Sync> MutableBlock<T> {
     /// Build a new `MutableBlock` for a slot the store has just transitioned
-    /// to `Mutable`. Increments the `inflight_mutable` metric.
+    /// to `Mutable`. The store has already incremented the `inflight_mutable`
+    /// gauge as part of the transition.
     pub(crate) fn from_store(
         store: Arc<BlockStore<T>>,
         block_id: BlockId,
         block_size: usize,
-        metrics: Option<Arc<BlockPoolMetrics>>,
     ) -> Self {
-        if let Some(ref m) = metrics {
-            m.inc_inflight_mutable();
-        }
         Self {
             store,
             block_id,
             block_size,
-            metrics,
             armed: true,
         }
     }
@@ -87,21 +81,14 @@ impl<T: BlockMetadata + Sync> MutableBlock<T> {
                 block: self,
             });
         }
-        if let Some(ref m) = self.metrics {
-            m.inc_stagings();
-        }
         self.store.transition_to_staged(self.block_id, seq_hash);
         let id = self.block_id;
         let bsize = self.block_size;
         let store = self.store.clone();
-        let metrics = self.metrics.clone();
         // Disarm so Drop is a no-op; the slot is now in Staged state.
         self.armed = false;
-        if let Some(ref m) = self.metrics {
-            m.dec_inflight_mutable();
-        }
         drop(self);
-        Ok(CompleteBlock::from_store(store, id, bsize, seq_hash, metrics))
+        Ok(CompleteBlock::from_store(store, id, bsize, seq_hash))
     }
 
     /// Transition from **Reset** to **Staged** by extracting the
@@ -128,9 +115,6 @@ impl<T: BlockMetadata> Drop for MutableBlock<T> {
     fn drop(&mut self) {
         if self.armed {
             self.store.release_mutable(self.block_id);
-            if let Some(ref m) = self.metrics {
-                m.dec_inflight_mutable();
-            }
         }
     }
 }

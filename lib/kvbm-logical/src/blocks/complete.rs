@@ -33,7 +33,6 @@ impl<T: BlockMetadata + Sync> CompleteBlock<T> {
         block_id: BlockId,
         block_size: usize,
         seq_hash: SequenceHash,
-        _metrics: Option<Arc<crate::metrics::BlockPoolMetrics>>,
     ) -> Self {
         Self {
             store,
@@ -63,12 +62,7 @@ impl<T: BlockMetadata + Sync> CompleteBlock<T> {
     pub fn reset(mut self) -> MutableBlock<T> {
         self.store.transition_back_to_mutable(self.block_id);
         self.armed = false;
-        MutableBlock::from_store(
-            self.store.clone(),
-            self.block_id,
-            self.block_size,
-            self.store.metrics().cloned(),
-        )
+        MutableBlock::from_store(self.store.clone(), self.block_id, self.block_size)
     }
 }
 
