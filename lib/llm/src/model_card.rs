@@ -249,6 +249,60 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+/// Per-slug cache directory under the user's home for self-host
+/// downloads. Stable across restarts so the same MDC doesn't re-fetch
+/// every process start. The slug already disambiguates per model.
+fn self_host_cache_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let dir = PathBuf::from(home)
+        .join(".cache/dynamo/self-host-metadata")
+        .join(slug.to_string());
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating self-host cache dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// GET `uri`, blake3-verify the body against `expected_checksum`
+/// (`"blake3:<hex>"`), and atomically write the verified bytes to
+/// `dest`. Atomic write = `dest.tmp` then rename, so a partial
+/// download never leaves a corrupt file in place where a future
+/// reader would mmap it.
+async fn fetch_and_verify(
+    client: &reqwest::Client,
+    uri: &str,
+    expected_checksum: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    let response = client
+        .get(uri)
+        .send()
+        .await
+        .with_context(|| format!("fetching {uri}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("fetching {uri} returned status {}", response.status());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("reading body from {uri}"))?;
+
+    let actual = format!("blake3:{}", blake3::hash(&bytes));
+    if actual != expected_checksum {
+        anyhow::bail!("checksum mismatch for {uri}: expected {expected_checksum}, got {actual}");
+    }
+
+    let tmp = dest.with_extension("tmp");
+    tokio::fs::write(&tmp, &bytes)
+        .await
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
+    Ok(())
+}
+
 /// Build an [`ArtifactRef`] from a [`CheckedFile`] and its role.
 ///
 /// Filename comes from the file's path (URL or disk). URI is
@@ -691,11 +745,66 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
+        // Prefer the worker-self-hosted path when the MDC carries an
+        // artifact list with http(s) URIs. Falls through to the
+        // legacy HuggingFace fetch when the list is empty or none of
+        // the URIs are http(s).
+        if self.try_self_host_download().await? {
+            return Ok(());
+        }
+
         let ignore_weights = true;
         let local_path = crate::hub::from_hf(self.source_path(), ignore_weights).await?;
 
         self.update_dir(&local_path);
         Ok(())
+    }
+
+    /// Attempt to populate the typed CheckedFile fields by fetching
+    /// each `http(s)://` artifact from the MDC's `files` vector. Each
+    /// download is blake3-verified against `ArtifactRef.checksum`
+    /// before the bytes are written to a per-slug cache dir. On
+    /// success, calls [`Self::update_dir`] so downstream consumers
+    /// (`tokenizer()`, `prompt_formatter()`, etc.) see local paths.
+    ///
+    /// Returns `Ok(true)` when at least one http artifact was fetched
+    /// and the typed fields were rewritten. Returns `Ok(false)` to
+    /// signal the caller should fall back to its legacy resolution
+    /// path (no http entries present, or `files` is empty).
+    /// Returns an error on download failure or checksum mismatch —
+    /// those are loud failures, not silent fallbacks.
+    async fn try_self_host_download(&mut self) -> anyhow::Result<bool> {
+        if self.files.is_empty() {
+            return Ok(false);
+        }
+
+        let http_artifacts: Vec<&ArtifactRef> = self
+            .files
+            .iter()
+            .filter(|a| a.uri.starts_with("http://") || a.uri.starts_with("https://"))
+            .collect();
+
+        if http_artifacts.is_empty() {
+            return Ok(false);
+        }
+
+        let cache_dir = self_host_cache_dir(&self.slug)?;
+        let client = reqwest::Client::new();
+
+        for artifact in &http_artifacts {
+            let dest = cache_dir.join(&artifact.filename);
+            fetch_and_verify(&client, &artifact.uri, &artifact.checksum, &dest).await?;
+        }
+
+        tracing::info!(
+            display_name = %self.display_name,
+            count = http_artifacts.len(),
+            cache_dir = %cache_dir.display(),
+            "fetched self-hosted metadata files",
+        );
+
+        self.update_dir(&cache_dir);
+        Ok(true)
     }
 
     /// Re-write all the local disk paths as a URL. Do this before publishing the MDC.
