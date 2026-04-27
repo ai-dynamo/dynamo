@@ -42,7 +42,13 @@ metadata:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
   isCA: true
-  commonName: {{ include "dynamo-operator.fullname" . }}-root-ca
+  # X.509 Common Name is capped at 64 bytes. Truncate the fullname to 56
+  # bytes before appending the 8-byte "-root-ca" suffix so the rendered CN
+  # never exceeds 64 bytes regardless of release/chart name length and the
+  # suffix is always preserved as a discriminator from the serving-cert CN
+  # below. The CN is not used for hostname verification (CA certificate),
+  # so a stable truncated identifier is sufficient.
+  commonName: {{ printf "%s-root-ca" (include "dynamo-operator.fullname" . | trunc 56 | trimSuffix "-") }}
   secretName: {{ include "dynamo-operator.fullname" . }}-root-ca-secret
   duration: {{ .Values.webhook.certManager.certificate.rootCA.duration }}
   renewBefore: {{ .Values.webhook.certManager.certificate.rootCA.renewBefore }}
@@ -83,7 +89,16 @@ spec:
   secretName: {{ .Values.webhook.certificateSecret.name }}
   duration: {{ .Values.webhook.certManager.certificate.duration }}
   renewBefore: {{ .Values.webhook.certManager.certificate.renewBefore }}
-  commonName: {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+  # X.509 Common Name is capped at 64 bytes; the FQDN form
+  # "<fullname>-webhook-service.<namespace>.svc" can exceed this for common
+  # release names (e.g. release `dynamo-platform` in namespace
+  # `dynamo-system` renders 65 bytes and trips cert-manager validation).
+  # Truncate the fullname to 56 bytes before appending the 8-byte
+  # "-webhook" suffix so the rendered CN never exceeds 64 bytes regardless
+  # of release/chart name length, and the suffix is always preserved as a
+  # discriminator from the root-CA CN above. Hostname verification uses
+  # the SAN dnsNames below (RFC 6125), not the CN, so this is safe.
+  commonName: {{ printf "%s-webhook" (include "dynamo-operator.fullname" . | trunc 56 | trimSuffix "-") }}
   dnsNames:
   - {{ include "dynamo-operator.fullname" . }}-webhook-service
   - {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
