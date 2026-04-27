@@ -293,15 +293,10 @@ jobs:
             NO_CACHE_ARG="--no-cache"
           fi
 
-          DOCKERFILE_ARGS="-f container/rendered.Dockerfile --target ${{ inputs.target }}_test"
-
           docker buildx build \
-            --progress=plain \
-            ${PUSH_ARGS} \
-            ${NO_CACHE_ARG} \
+            --progress=plain ${PUSH_ARGS} ${NO_CACHE_ARG} ${CACHE_ARGS} \
             --platform ${{ inputs.platform }} \
-            ${DOCKERFILE_ARGS} \
-            ${CACHE_ARGS} \
+            -f container/rendered.Dockerfile --target ${{ inputs.target }}_test \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash
