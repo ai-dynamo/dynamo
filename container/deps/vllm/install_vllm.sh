@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This script installs vLLM and its dependencies from PyPI (release versions only).
+# This script installs vLLM and its dependencies either from release wheels or from source.
 # Installation order:
 # 1. vLLM
 # 2. LMCache (built from source AFTER vLLM so c_ops.so is compiled against installed PyTorch)
@@ -12,8 +12,9 @@
 
 set -euo pipefail
 
-VLLM_VER="0.19.0"
-VLLM_REF="v${VLLM_VER}"
+VLLM_INSTALL_MODE="wheel"
+VLLM_VERSION="0.19.0"
+VLLM_SOURCE_REF=""
 DEVICE="cuda"
 
 # Basic Configurations
@@ -35,8 +36,16 @@ while [[ $# -gt 0 ]]; do
             DEVICE="$2"
             shift 2
             ;;
-        --vllm-ref)
-            VLLM_REF="$2"
+        --vllm-install-mode)
+            VLLM_INSTALL_MODE="$2"
+            shift 2
+            ;;
+        --vllm-version)
+            VLLM_VERSION="$2"
+            shift 2
+            ;;
+        --vllm-source-ref)
+            VLLM_SOURCE_REF="$2"
             shift 2
             ;;
         --max-jobs)
@@ -76,10 +85,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--device DEVICE] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--vllm-omni-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--device DEVICE] [--vllm-install-mode MODE] [--vllm-version VERSION] [--vllm-source-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--vllm-omni-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
             echo "  --device DEVICE     Device Selection (default: cuda)"
-            echo "  --vllm-ref REF      vLLM release version (default: ${VLLM_REF})"
+            echo "  --vllm-install-mode MODE  Install mode: wheel|source (default: ${VLLM_INSTALL_MODE})"
+            echo "  --vllm-version VERSION    vLLM release version for wheel installs (default: ${VLLM_VERSION})"
+            echo "  --vllm-source-ref REF     vLLM git ref for source installs (default: unset)"
             echo "  --max-jobs NUM      Maximum parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH         Architecture amd64|arm64 (default: auto-detect)"
             echo "  --installation-dir DIR  Install directory (default: ${INSTALLATION_DIR})"
@@ -97,6 +108,21 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "$VLLM_INSTALL_MODE" != "wheel" ] && [ "$VLLM_INSTALL_MODE" != "source" ]; then
+    echo "Unknown vLLM install mode: $VLLM_INSTALL_MODE"
+    exit 1
+fi
+
+if [ "$VLLM_INSTALL_MODE" = "wheel" ]; then
+    VLLM_CHECKOUT_REF="v${VLLM_VERSION}"
+else
+    if [ -z "$VLLM_SOURCE_REF" ]; then
+        echo "Source install mode requires --vllm-source-ref"
+        exit 1
+    fi
+    VLLM_CHECKOUT_REF="$VLLM_SOURCE_REF"
+fi
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
 if [ "$ARCH" = "x86_64" ]; then
@@ -126,11 +152,13 @@ fi
 
 if [ "$DEVICE" = "cuda" ]; then
     echo "\n=== Configuration Summary ==="
-    echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
+    echo "  VLLM_INSTALL_MODE=$VLLM_INSTALL_MODE | VLLM_VERSION=$VLLM_VERSION | VLLM_SOURCE_REF=${VLLM_SOURCE_REF:-unset}"
+    echo "  VLLM_CHECKOUT_REF=$VLLM_CHECKOUT_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
     echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
 elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then
     echo "\n=== Configuration Summary ==="
-    echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | INSTALLATION_DIR=$INSTALLATION_DIR"
+    echo "  VLLM_INSTALL_MODE=$VLLM_INSTALL_MODE | VLLM_VERSION=$VLLM_VERSION | VLLM_SOURCE_REF=${VLLM_SOURCE_REF:-unset}"
+    echo "  VLLM_CHECKOUT_REF=$VLLM_CHECKOUT_REF | ARCH=$ARCH | INSTALLATION_DIR=$INSTALLATION_DIR"
 fi
 
 echo "\n=== Cloning vLLM repository ==="
@@ -138,7 +166,7 @@ echo "\n=== Cloning vLLM repository ==="
 cd $INSTALLATION_DIR
 git clone https://github.com/vllm-project/vllm.git vllm
 cd vllm
-git checkout $VLLM_REF
+git checkout $VLLM_CHECKOUT_REF
 echo "✓ vLLM repository cloned"
 
 echo "\n=== Installing vLLM-Omni ==="
@@ -169,42 +197,59 @@ fi
 if [ "$DEVICE" = "cuda" ]; then
     echo "\n=== Installing vLLM & FlashInfer ==="
 
-    # Build GitHub release wheel URL per CUDA version
-    # CUDA 12 wheels have no +cu suffix and use manylinux_2_31
-    # CUDA 13 wheels have +cu130 suffix and use manylinux_2_35
-    if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-        VLLM_GITHUB_WHEEL="vllm-${VLLM_VER}-cp38-abi3-manylinux_2_31_${ALT_ARCH}.whl"
-        EXTRA_PIP_ARGS=""
-    elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
-        VLLM_GITHUB_WHEEL="vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl"
-        EXTRA_PIP_ARGS="--index-strategy=unsafe-best-match --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND}"
-    else
-        echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
-        exit 1
-    fi
-    VLLM_GITHUB_URL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/${VLLM_GITHUB_WHEEL}"
-
-    # Install vLLM wheel
-    # CUDA 12: Try PyPI first, fall back to GitHub release
-    # CUDA 13: Always use GitHub release (PyPI only has cu12 wheels, --torch-backend
-    #           does not prevent uv from resolving the cu12 variant)
-    echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
-    if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-        if uv pip install "vllm[flashinfer,runai,otel]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
-            echo "✓ vLLM ${VLLM_VER} installed from PyPI"
+    if [ "$VLLM_INSTALL_MODE" = "wheel" ]; then
+        # Build GitHub release wheel URL per CUDA version
+        # CUDA 12 wheels have no +cu suffix and use manylinux_2_31
+        # CUDA 13 wheels have +cu130 suffix and use manylinux_2_35
+        if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+            VLLM_GITHUB_WHEEL="vllm-${VLLM_VERSION}-cp38-abi3-manylinux_2_31_${ALT_ARCH}.whl"
+            EXTRA_PIP_ARGS=""
+        elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
+            VLLM_GITHUB_WHEEL="vllm-${VLLM_VERSION}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl"
+            EXTRA_PIP_ARGS="--index-strategy=unsafe-best-match --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND}"
         else
-            echo "⚠ PyPI install failed, installing from GitHub release..."
+            echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
+            exit 1
+        fi
+        VLLM_GITHUB_URL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/${VLLM_GITHUB_WHEEL}"
+
+        # Install vLLM wheel
+        # CUDA 12: Try PyPI first, fall back to GitHub release
+        # CUDA 13: Always use GitHub release (PyPI only has cu12 wheels, --torch-backend
+        #           does not prevent uv from resolving the cu12 variant)
+        echo "Installing vLLM ${VLLM_VERSION} from wheel (torch backend: $TORCH_BACKEND)..."
+        if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+            if uv pip install "vllm[flashinfer,runai,otel]==${VLLM_VERSION}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
+                echo "✓ vLLM ${VLLM_VERSION} installed from PyPI"
+            else
+                echo "⚠ PyPI install failed, installing from GitHub release..."
+                uv pip install ${EXTRA_PIP_ARGS} \
+                    "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
+                    --torch-backend=${TORCH_BACKEND}
+                echo "✓ vLLM ${VLLM_VERSION} installed from GitHub"
+            fi
+        else
+            echo "Installing vLLM from GitHub release (cu130 wheel not available on PyPI)..."
             uv pip install ${EXTRA_PIP_ARGS} \
                 "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
                 --torch-backend=${TORCH_BACKEND}
-            echo "✓ vLLM ${VLLM_VER} installed from GitHub"
+            echo "✓ vLLM ${VLLM_VERSION} installed from GitHub"
         fi
     else
-        echo "Installing vLLM from GitHub release (cu130 wheel not available on PyPI)..."
-        uv pip install ${EXTRA_PIP_ARGS} \
-            "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
+        EXTRA_PIP_ARGS="--index-strategy=unsafe-best-match --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND}"
+        echo "Installing vLLM from source checkout ${VLLM_CHECKOUT_REF} (torch backend: $TORCH_BACKEND)..."
+        # Source installs run without build isolation so we must satisfy key build requirements in-place.
+        uv pip install \
+            "setuptools>=77.0.3,<81.0.0" \
+            "setuptools-scm>=8.0"
+        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}" \
+               VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-$VLLM_CHECKOUT_REF}" \
+               VLLM_PRECOMPILED_WHEEL_VARIANT="${VLLM_PRECOMPILED_WHEEL_VARIANT:-$TORCH_BACKEND}"
+        uv pip install --verbose --no-build-isolation \
+            ".[flashinfer,runai,otel]" \
+            ${EXTRA_PIP_ARGS} \
             --torch-backend=${TORCH_BACKEND}
-        echo "✓ vLLM ${VLLM_VER} installed from GitHub"
+        echo "✓ vLLM installed from source checkout ${VLLM_CHECKOUT_REF}"
     fi
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
