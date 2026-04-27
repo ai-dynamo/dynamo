@@ -112,17 +112,17 @@ class OmniStageRouter:
             fmt_ctx["fps"] = nvext["fps"]
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
-        # Need to normalize the data_source and response_format (audio) to align with
-        # other modalities.
-        has_data_source = request.get("data_source") is not None
+        # If the request type is AUDIO_GENERATION,
+        # we need to normalize the data_source and response_format to
+        # align with other modalities.
         response_format = (
-            request["data_source"]
-            if has_data_source
+            request.get("data_source")
+            if request_type == RequestType.AUDIO_GENERATION
             else request.get("response_format")
         )
         output_format = (
-            request["response_format"]
-            if has_data_source
+            request.get("response_format")
+            if request_type == RequestType.AUDIO_GENERATION
             else request.get("output_format")
         )
         if response_format is not None:
