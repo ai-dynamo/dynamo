@@ -24,10 +24,8 @@
 //   - v1beta1:  spec.dgdRef is a DynamoGraphDeploymentComponentRef{Name, ComponentName}
 //
 // Replicas, status, and metadata are structurally identical, so this is a
-// loss-less straight copy with a single field rename. v1beta1 is currently
-// marked +kubebuilder:unservedversion, so the API server will not route
-// requests to this conversion path today; the wiring exists so a future MR
-// can promote v1beta1 to served by flipping a single annotation.
+// lossless straight copy with a single field rename. v1beta1 is served, and
+// conversion wiring routes cross-version requests through this path.
 
 package v1alpha1
 

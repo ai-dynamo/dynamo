@@ -1195,7 +1195,7 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-comp-worker-" + suffixCheckpointDisabl
+	key := "nvidia.com/dgd-comp-worker-" + suffixCheckpointDisabled
 	if v, ok := b.Annotations[key]; !ok || v != `{}` {
 		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
 	}

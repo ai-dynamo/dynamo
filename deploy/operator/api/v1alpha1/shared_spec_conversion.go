@@ -107,7 +107,7 @@ const (
 	suffixExperimentalOrig   = "experimental-origin"
 	suffixGMSDisabled        = "gms-disabled-payload"
 	suffixFailoverDisabled   = "failover-disabled-payload"
-	suffixCheckpointDisabl   = "checkpoint-disabled-payload"
+	suffixCheckpointDisabled = "checkpoint-disabled-payload"
 	suffixScalingDisabled    = "scaling-adapter-disabled"
 
 	// DCD-scoped annotation keys (standalone DCDs carry origin data on their
@@ -651,10 +651,10 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 			ensureExp().Checkpoint = checkpointToV1beta1(src.Checkpoint)
 		} else if !checkpointIsZeroPayload(src.Checkpoint) {
 			if data, err := json.Marshal(src.Checkpoint); err == nil {
-				c.set(suffixCheckpointDisabl, string(data))
+				c.set(suffixCheckpointDisabled, string(data))
 			}
 		} else {
-			c.set(suffixCheckpointDisabl, `{}`)
+			c.set(suffixCheckpointDisabled, `{}`)
 		}
 	}
 
@@ -706,14 +706,14 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 
 	if src.Experimental != nil && src.Experimental.Checkpoint != nil {
 		dst.Checkpoint = checkpointFromV1beta1(src.Experimental.Checkpoint, true)
-		c.del(suffixCheckpointDisabl)
-	} else if v, ok := c.get(suffixCheckpointDisabl); ok {
+		c.del(suffixCheckpointDisabled)
+	} else if v, ok := c.get(suffixCheckpointDisabled); ok {
 		var cp ServiceCheckpointConfig
 		if err := json.Unmarshal([]byte(v), &cp); err == nil {
 			cp.Enabled = false
 			dst.Checkpoint = &cp
 		}
-		c.del(suffixCheckpointDisabl)
+		c.del(suffixCheckpointDisabled)
 	}
 }
 
