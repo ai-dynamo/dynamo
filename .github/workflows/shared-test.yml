@@ -44,11 +44,6 @@ on:
         description: 'CPU-only pytest markers'
         required: false
         type: string
-      cpu_parallel_mode:
-        description: 'Parallelization mode for CPU-only tests (e.g. auto, none, or number of parallel workers)'
-        required: false
-        type: string
-        default: 'auto'
       cpu_only_test_timeout_minutes:
         description: 'Timeout in minutes for CPU tests'
         required: false
