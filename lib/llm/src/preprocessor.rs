@@ -1471,31 +1471,51 @@ impl
         );
 
         let final_stream = if dynamo_agents::trace::is_enabled()
-            && let (Some(agent_context), Some(tracker)) = (agent_context, request_tracker)
+            && let Some(agent_context) = agent_context
         {
-            let request_id = request_id.clone();
             let (stream, done_fut) =
                 dynamo_agents::trace::stream::notify_on_completion(final_stream);
             tokio::spawn(async move {
                 done_fut.await;
-                let worker = tracker.get_worker_info().map(|worker| WorkerInfo {
-                    prefill_worker_id: worker.prefill_worker_id,
-                    prefill_dp_rank: worker.prefill_dp_rank,
-                    decode_worker_id: worker.decode_worker_id,
-                    decode_dp_rank: worker.decode_dp_rank,
+                if request_tracker.is_none() {
+                    tracing::warn!(
+                        request_id,
+                        "agent_context present but request tracker is missing; emitting partial trace"
+                    );
+                }
+                let worker = request_tracker.as_ref().and_then(|tracker| {
+                    tracker.get_worker_info().map(|worker| WorkerInfo {
+                        prefill_worker_id: worker.prefill_worker_id,
+                        prefill_dp_rank: worker.prefill_dp_rank,
+                        decode_worker_id: worker.decode_worker_id,
+                        decode_dp_rank: worker.decode_dp_rank,
+                    })
                 });
                 dynamo_agents::trace::emit_request_end(
                     agent_context,
                     AgentRequestMetrics {
                         request_id,
                         model: request_model,
-                        input_tokens: tracker.isl_tokens().map(|v| v as u64),
-                        output_tokens: Some(tracker.osl_tokens()),
-                        cached_tokens: tracker.cached_tokens().map(|v| v as u64),
-                        request_received_ms: tracker.request_received_epoch_ms(),
-                        ttft_ms: tracker.ttft_ms(),
-                        total_time_ms: tracker.total_time_ms(),
-                        queue_depth: tracker.router_queue_depth(),
+                        input_tokens: request_tracker
+                            .as_ref()
+                            .and_then(|tracker| tracker.isl_tokens().map(|v| v as u64)),
+                        output_tokens: request_tracker.as_ref().map(|tracker| tracker.osl_tokens()),
+                        cached_tokens: request_tracker
+                            .as_ref()
+                            .and_then(|tracker| tracker.cached_tokens().map(|v| v as u64)),
+                        request_received_ms: request_tracker
+                            .as_ref()
+                            .map(|tracker| tracker.request_received_epoch_ms())
+                            .unwrap_or(0),
+                        ttft_ms: request_tracker
+                            .as_ref()
+                            .and_then(|tracker| tracker.ttft_ms()),
+                        total_time_ms: request_tracker
+                            .as_ref()
+                            .and_then(|tracker| tracker.total_time_ms()),
+                        queue_depth: request_tracker
+                            .as_ref()
+                            .and_then(|tracker| tracker.router_queue_depth().map(|v| v as u64)),
                         worker,
                     },
                 );

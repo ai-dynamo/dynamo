@@ -9,6 +9,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Dynamo agent context and telemetry primitives"
 
 [dependencies]
@@ -19,7 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras"] }
+utoipa = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -33,10 +33,16 @@ pub fn publish(rec: AgentTraceRecord) {
 pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetrics) {
     let event_time_unix_ms = request
         .total_time_ms
-        .map(|ms| {
-            request
-                .request_received_ms
-                .saturating_add(ms.round() as u64)
+        .and_then(|ms| {
+            if !ms.is_finite() {
+                tracing::debug!(total_time_ms = ms, "invalid agent trace total_time_ms");
+                return None;
+            }
+            Some(
+                request
+                    .request_received_ms
+                    .saturating_add(ms.max(0.0).round() as u64),
+            )
         })
         .unwrap_or(request.request_received_ms);
 
@@ -91,10 +97,16 @@ mod tests {
             },
         );
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .expect("sink should write output");
+        let mut content = String::new();
+        for _ in 0..100 {
+            content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            if content.contains("\"event_type\":\"request_end\"")
+                && content.contains("\"request_id\":\"req-123\"")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(content.contains("\"event_type\":\"request_end\""));
         assert!(content.contains("\"request_id\":\"req-123\""));
         assert!(content.contains("\"workflow_id\":\"run-1\""));

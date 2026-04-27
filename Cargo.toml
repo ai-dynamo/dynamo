@@ -139,6 +139,7 @@ opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
+utoipa = { version = "5.3", features = ["axum_extras"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }

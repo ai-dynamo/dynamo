@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::fs::{OpenOptions, create_dir_all};
 use tokio::io::AsyncWriteExt;
 
 use super::bus;
+
+static JSONL_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub async fn spawn_jsonl_worker(path: String) -> anyhow::Result<()> {
     if let Some(parent) = std::path::Path::new(&path).parent()
@@ -23,6 +26,11 @@ pub async fn spawn_jsonl_worker(path: String) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("opening agent trace jsonl sink at {path}"))?;
 
+    if JSONL_WORKER_STARTED.swap(true, Ordering::AcqRel) {
+        tracing::debug!(path, "Agent trace sink already started");
+        return Ok(());
+    }
+
     let mut rx = bus::subscribe();
     tokio::spawn(async move {
         let mut file = file;
@@ -33,6 +41,11 @@ pub async fn spawn_jsonl_worker(path: String) -> anyhow::Result<()> {
                         bytes.push(b'\n');
                         if let Err(e) = file.write_all(&bytes).await {
                             tracing::warn!("agent_trace: write failed: {e}");
+                            break;
+                        }
+                        if let Err(e) = file.flush().await {
+                            tracing::warn!("agent_trace: flush failed: {e}");
+                            break;
                         }
                     }
                     Err(e) => tracing::warn!("agent_trace: serialize failed: {e}"),

@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 type TraceStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 type DoneFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
-pub struct PassThroughWithCompletion<S> {
+struct PassThroughWithCompletion<S> {
     inner: S,
     done_tx: Option<oneshot::Sender<()>>,
 }
@@ -70,7 +70,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::stream;
+    use futures::{StreamExt, stream};
 
     use super::notify_on_completion;
 
@@ -78,6 +78,14 @@ mod tests {
     async fn notifies_when_stream_is_dropped_before_exhaustion() {
         let (wrapped, done) = notify_on_completion(stream::iter([1_u8]));
         drop(wrapped);
+        done.await;
+    }
+
+    #[tokio::test]
+    async fn notifies_when_stream_is_exhausted() {
+        let (mut wrapped, done) = notify_on_completion(stream::iter([1_u8]));
+        assert_eq!(wrapped.next().await, Some(1));
+        assert_eq!(wrapped.next().await, None);
         done.await;
     }
 }

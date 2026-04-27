@@ -98,7 +98,9 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
-    dynamo_agents::trace::init_from_env().await?;
+    if let Err(e) = dynamo_agents::trace::init_from_env().await {
+        tracing::warn!(error = %e, "Agent trace initialization failed; continuing without trace sink");
+    }
 
     // Initialize audit bus + sink workers (off hot path; fan-out supported)
     if crate::audit::config::policy().enabled {

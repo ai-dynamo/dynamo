@@ -11,9 +11,15 @@ static BUS: OnceLock<broadcast::Sender<AgentTraceRecord>> = OnceLock::new();
 
 pub fn init(capacity: usize) {
     let (tx, _rx) = broadcast::channel::<AgentTraceRecord>(capacity.max(1));
-    let _ = BUS.set(tx);
+    if BUS.set(tx).is_err() {
+        tracing::debug!(
+            capacity,
+            "agent trace bus already initialized; keeping existing sender"
+        );
+    }
 }
 
+/// Panics if the trace bus has not been initialized.
 pub fn subscribe() -> broadcast::Receiver<AgentTraceRecord> {
     BUS.get()
         .expect("agent trace bus not initialized")

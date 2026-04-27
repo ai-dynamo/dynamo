@@ -31,7 +31,7 @@ pub struct AgentRequestMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_time_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue_depth: Option<usize>,
+    pub queue_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<WorkerInfo>,
 }
