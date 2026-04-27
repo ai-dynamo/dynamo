@@ -5,8 +5,9 @@ import json
 
 import pytest
 
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.health_check import HEALTH_CHECK_KEY, TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 
 pytestmark = [
     pytest.mark.unit,

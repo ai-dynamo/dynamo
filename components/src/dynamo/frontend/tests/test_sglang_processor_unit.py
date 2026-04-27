@@ -11,12 +11,15 @@ Parallels test_vllm_unit.py for the vLLM backend.
 
 
 import json
+import sys
+import types
 
 import pytest
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
@@ -444,6 +447,85 @@ class TestBuildToolCallGuidedDecoding:
 
         assert isinstance(guided, dict)
         assert "json" in guided
+
+    def test_required_tool_choice_supports_older_sglang_constraint_signature(
+        self, monkeypatch
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        def old_get_json_schema_constraint(sglang_tools, tool_choice):
+            assert sglang_tools == tools
+            assert tool_choice == "required"
+            return {"type": "array", "items": {"type": "object"}}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "get_json_schema_constraint",
+            old_get_json_schema_constraint,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "parallel_tool_calls": False},
+            tool_call_parser_name=None,
+            sglang_tools=tools,
+        )
+
+        assert guided == {"json": {"type": "array", "items": {"type": "object"}}}
+
+    def test_auto_tool_choice_supports_older_structure_constraint_signature(
+        self, monkeypatch
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        class OldFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                self.tools = tools
+                self.tool_call_parser = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice):
+                assert tool_choice == "auto"
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            OldFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "parallel_tool_calls": False},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=tools,
+        )
+
+        assert guided == {"structural_tag": {"type": "object"}}
 
     def test_auto_strict_tools_can_build_structural_tag_guidance(self):
         tools = convert_tools(
@@ -989,6 +1071,240 @@ class TestPreprocessChatRequest:
             reasoning_parser_name=None,
         )
         assert len(with_system.prompt_token_ids) > len(without_system.prompt_token_ids)
+
+    def test_deepseek_v4_uses_sglang_encoder_when_chat_template_missing(
+        self, monkeypatch
+    ):
+        """DeepSeek-V4 uses SGLang's encoder instead of HF chat_template."""
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            captured["thinking_mode"] = thinking_mode
+            captured["reasoning_effort"] = reasoning_effort
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                assert prompt == "<dsv4-prompt>"
+                return [1, 2, 3]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {
+                "thinking": True,
+                "reasoning_effort": "max",
+            },
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek_v4",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["thinking_mode"] == "thinking"
+        assert captured["reasoning_effort"] == "max"
+        assert captured["messages"][0]["role"] == "system"
+        assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
+        assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [1]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather", "parameters": {}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "get_time", "parameters": {}},
+                },
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_time"},
+            },
+        }
+
+        preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek_v4",
+        )
+
+        tools = captured["messages"][0]["tools"]
+        assert [tool["function"]["name"] for tool in tools] == ["get_time"]
+
+    def test_deepseek_v4_respects_existing_chat_template(self, monkeypatch):
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            raise AssertionError("encoding_dsv4 should not be called")
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class TemplateTokenizer:
+            chat_template = (
+                "{% for message in messages %}{{ message.content }}{% endfor %}"
+            )
+
+            def apply_chat_template(self, messages, **kwargs):
+                assert kwargs["add_generation_prompt"] is True
+                assert kwargs["tokenize"] is True
+                return [4, 5, 6]
+
+            def encode(self, prompt):
+                raise AssertionError("encode should not be called")
+
+        result = preprocess_chat_request(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            tokenizer=TemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [4, 5, 6]
+
+    def test_deepseek_v4_normalizes_none_content_without_mutating_request(
+        self, monkeypatch
+    ):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [7]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "assistant", "content": None}],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [7]
+        assert captured["messages"] == [{"role": "assistant", "content": ""}]
+        assert request["messages"] == [{"role": "assistant", "content": None}]
+
+    def test_deepseek_v4_tool_choice_none_strips_encoder_tools(self, monkeypatch):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [8]
+
+        preprocess_chat_request(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "system", "content": "Stay terse."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "parameters": {}},
+                    }
+                ],
+                "tool_choice": "none",
+            },
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=True,
+        )
+
+        assert "tools" not in captured["messages"][0]
 
 
 # ---------------------------------------------------------------------------

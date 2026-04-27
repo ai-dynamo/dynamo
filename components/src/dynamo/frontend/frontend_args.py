@@ -74,7 +74,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
@@ -358,8 +358,10 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
-            default="nats",
-            help="Determines how events are published [nats|zmq]",
+            default=None,
+            help="Determines how events are published [nats|zmq]. If unset, "
+            "auto-detected from --discovery-backend (zmq for file/mem, nats "
+            "for etcd/kubernetes).",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(
