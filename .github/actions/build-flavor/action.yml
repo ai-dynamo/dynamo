@@ -261,7 +261,8 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         IMAGE_VARIANT="${{ steps.calculate-target-tag.outputs.image_variant_label }}"
-        NORMAL_CACHE_TAG="${{ inputs.framework }}-${IMAGE_VARIANT}-cache"
+        PLATFORM_SAFE=$(echo "${{ inputs.platform }}" | sed 's|linux/||g; s/,/-/g')
+        NORMAL_CACHE_TAG="${{ inputs.framework }}-${IMAGE_VARIANT}-${PLATFORM_SAFE}-cache"
         TEST_CACHE_TAG="test-${NORMAL_CACHE_TAG}"
         CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${NORMAL_CACHE_TAG}"
         CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${NORMAL_CACHE_TAG}"

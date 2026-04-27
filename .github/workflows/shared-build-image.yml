@@ -273,7 +273,12 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
+          PLATFORM_SAFE=$(echo "${{ inputs.platform }}" | sed 's|linux/||g; s/,/-/g')
+          CUDA_MAJOR="${{ matrix.cuda_version }}"
+          CUDA_MAJOR="${CUDA_MAJOR%%.*}"
+          PLAIN_TAG="${PLAIN_TAG}${CUDA_MAJOR:+-cuda${CUDA_MAJOR}}-${PLATFORM_SAFE}"
           TEST_CACHE_TAG="test-${PLAIN_TAG}-cache"
+          
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${TEST_CACHE_TAG}"
           CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${PLAIN_TAG}-cache"
           CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PLAIN_TAG}-cache"
