@@ -1227,8 +1227,9 @@ impl OpenAIPreprocessor {
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
     ///   or "force_nonempty_content": true.
-    /// For deepseek_r1: disabled when chat_template_args contains "thinking": false
-    ///   or "thinking_mode": "chat".
+    /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
+    ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
+    ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -1257,7 +1258,8 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("deepseek_r1") => {
+            Some("deepseek_r1") | Some("deepseek_v4") | Some("deepseek-v4")
+            | Some("deepseekv4") => {
                 if let Some(args) = chat_template_args {
                     if let Some(thinking) = args.get("thinking") {
                         return thinking == &serde_json::Value::Bool(false);
@@ -1828,6 +1830,50 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "nemotron_nano + empty args → enabled",
+            ),
+            // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
+            // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_false),
+                true,
+                "deepseek_v4 + thinking=false → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_true),
+                false,
+                "deepseek_v4 + thinking=true → enabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseek_v4 + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_mode_thinking),
+                false,
+                "deepseek_v4 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                None,
+                false,
+                "deepseek_v4 + no args → enabled",
+            ),
+            (
+                Some("deepseek-v4"),
+                Some(&thinking_false),
+                true,
+                "deepseek-v4 (hyphen alias) + thinking=false → disabled",
+            ),
+            (
+                Some("deepseekv4"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseekv4 (joined alias) + thinking_mode=chat → disabled",
             ),
         ];
 

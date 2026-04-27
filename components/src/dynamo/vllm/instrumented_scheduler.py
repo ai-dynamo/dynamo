@@ -269,7 +269,7 @@ class InstrumentedScheduler(AsyncScheduler):
             **kwargs,
         )
 
-        dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", 0) or 0
+        dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
         self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
         self._fpm_dp_rank = dp_rank
 
@@ -296,6 +296,21 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         self._bench_init(vllm_config)
+
+    @staticmethod
+    def _resolve_dp_rank(parallel_config) -> int:
+        # ``data_parallel_index`` always holds the true global DP rank of the
+        # engine process. For dense (non-MoE) models in external DP mode,
+        # vLLM resets ``data_parallel_rank`` to 0 in every child process but
+        # preserves ``data_parallel_index`` (see ``vllm/v1/engine/core.py``:
+        # ``parallel_config.data_parallel_index = dp_rank`` then
+        # ``parallel_config.data_parallel_rank = 0``). Reading the rank field
+        # would make every DP child compute ``base_port + 0`` and the second
+        # ``bind()`` would fail with "Address already in use".
+        dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_rank", 0) or 0
+        return dp_rank
 
     # ------------------------------------------------------------------
     # Overrides

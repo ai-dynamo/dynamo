@@ -12,6 +12,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `operator` | Kubernetes operator tests |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
+| `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `docs` | Nothing (classification only) |
 | `examples` | Nothing (classification only) |
 | `ignore` | Nothing (classification only) |

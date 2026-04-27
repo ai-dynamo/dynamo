@@ -11,6 +11,11 @@ import pytest
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+import dynamo.sglang._compat as sglang_compat
+from dynamo.sglang._compat import (
+    ensure_sglang_top_level_exports,
+    filter_supported_async_generate_kwargs,
+)
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -36,6 +41,99 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_compat_restores_sglang_top_level_exports():
+    """Dynamo supports SGLang builds that omit top-level Engine/ServerArgs."""
+    import sglang as sgl
+    from sglang.srt.entrypoints.engine import Engine
+    from sglang.srt.server_args import ServerArgs
+
+    missing = object()
+    original_engine = getattr(sgl, "Engine", missing)
+    original_server_args = getattr(sgl, "ServerArgs", missing)
+
+    try:
+        if hasattr(sgl, "Engine"):
+            delattr(sgl, "Engine")
+        if hasattr(sgl, "ServerArgs"):
+            delattr(sgl, "ServerArgs")
+
+        ensure_sglang_top_level_exports()
+
+        assert sgl.Engine is Engine
+        assert sgl.ServerArgs is ServerArgs
+    finally:
+        if original_engine is missing:
+            if hasattr(sgl, "Engine"):
+                delattr(sgl, "Engine")
+        else:
+            sgl.Engine = original_engine
+
+        if original_server_args is missing:
+            if hasattr(sgl, "ServerArgs"):
+                delattr(sgl, "ServerArgs")
+        else:
+            sgl.ServerArgs = original_server_args
+
+
+def test_compat_filters_async_generate_kwargs_for_older_engines():
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    kwargs = {
+        "input_ids": [1, 2, 3],
+        "return_routed_experts": True,
+    }
+
+    assert filter_supported_async_generate_kwargs(OldEngine(), kwargs) == {
+        "input_ids": [1, 2, 3]
+    }
+
+
+def test_compat_keeps_async_generate_kwargs_for_newer_engines():
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    kwargs = {"return_routed_experts": True}
+
+    assert filter_supported_async_generate_kwargs(NewEngine(), kwargs) == kwargs
+
+
+def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
+    class VariadicEngine:
+        async def async_generate(self, **kwargs):
+            return None
+
+    kwargs = {"return_routed_experts": True}
+
+    assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+def test_compat_caches_async_generate_signature_inspection(monkeypatch):
+    class CachedEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
+    calls = 0
+    original_signature = sglang_compat.inspect.signature
+
+    def counting_signature(obj):
+        nonlocal calls
+        calls += 1
+        return original_signature(obj)
+
+    monkeypatch.setattr(sglang_compat.inspect, "signature", counting_signature)
+
+    kwargs = {"return_routed_experts": True}
+    assert filter_supported_async_generate_kwargs(CachedEngine(), kwargs) == kwargs
+    assert filter_supported_async_generate_kwargs(CachedEngine(), kwargs) == kwargs
+    assert calls == 1
+
+    sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
 
 
 @pytest.mark.asyncio

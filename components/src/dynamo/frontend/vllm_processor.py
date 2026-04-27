@@ -43,7 +43,12 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
-from .utils import extract_mm_urls, random_uuid
+from .utils import (
+    extract_mm_urls,
+    handle_engine_error,
+    make_internal_error,
+    random_uuid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -535,13 +540,7 @@ class VllmProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    logger.error("No outputs from engine for request %s", request_id)
-                    yield {
-                        "error": {
-                            "message": f"Invalid engine response for request {request_id}",
-                            "type": "internal_error",
-                        }
-                    }
+                    yield handle_engine_error(engine_response, request_id, logger)
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -583,6 +582,9 @@ class VllmProcessor:
 
                     yield dynamo_out
             _nvtx.end_range(rng_stream)
+        except Exception as e:
+            logger.exception("Error generating response for request %s", request_id)
+            yield make_internal_error(request_id, str(e))
         finally:
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(

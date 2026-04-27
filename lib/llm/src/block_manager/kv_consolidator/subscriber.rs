@@ -246,5 +246,7 @@ fn process_event(
             tracing::debug!("Processing AllBlocksCleared");
             tracker.handle_clear_all();
         }
+
+        RawKvEvent::Ignored => {}
     }
 }

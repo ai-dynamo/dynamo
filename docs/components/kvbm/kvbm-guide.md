@@ -37,7 +37,7 @@ Pick one of the following to get a Dynamo vLLM container with KVBM built in. The
 **Option A: Pre-built NGC container (recommended for quick start)**
 
 ```bash
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
 ```
 
 See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
@@ -103,7 +103,7 @@ Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built
 **Option A: Pre-built NGC container (recommended for quick start)**
 
 ```bash
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
 ```
 
 See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
