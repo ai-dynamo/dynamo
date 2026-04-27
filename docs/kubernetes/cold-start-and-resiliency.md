@@ -31,8 +31,8 @@ Blank cells indicate "not started" or "not supported".
 
 | Backend | [GPU Memory Service](#gpu-memory-service-gms) | [Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover) | [Dynamo Snapshot](#dynamo-snapshot-chrek) |
 | :--- | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ | 🚧 |
-| **SGLang** | ✅ | 🚧 | 🚧 |
+| **vLLM** | ✅ | ✅ | ✅ |
+| **SGLang** | ✅ | 🚧 | ✅ |
 | **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
 
 See the per-feature sections below for detailed per-backend status.
@@ -79,8 +79,19 @@ See the per-feature sections below for detailed per-backend status.
 2. **KV-Cache Reuse**: whether KV cache is remapped across engines on failover (preserving in-flight requests) rather than each shadow starting from a fresh allocation.
 3. **Hardware Fault Tolerance**: whether shadow engines are placed on disjoint hardware from the primary, so GPU/node failures are recoverable rather than taking out primary and shadow together.
 
-### Dynamo Snapshot (ChReK)
+### Dynamo Snapshot
 
-Dynamo Snapshot (internal name: **ChReK**, *Checkpoint Restore in Kubernetes*) uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a worker's initialized state once (including GPU memory and CUDA contexts) and restore subsequent workers from that checkpoint, reducing cold starts from roughly a minute to roughly ten seconds for large LLMs.
+Dynamo Snapshot uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a worker's initialized state once (including GPU memory and CUDA contexts) and restore subsequent workers from that checkpoint, reducing cold starts from minutes to seconds for large LLMs. This feature is enabled via the DynamoCheckpoint custom resource and is natively supported via the Dynamo Graph Deployments (DGDs).
+
+#### Status
+
+| Backend | Single GPU | Multi-GPU, Single Node| Multinode | 
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **vLLM** | ✅ | ✅ | 🚧 |
+| **SGLang** |  ✅ | 🚧 | 🚧 | 🚧 |
+| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
+
+**Notes:**
+1. Dynamo Snapshot and GMS integration prevents double-buffering and allows weights to be restored from various sources in parallel with the main process tree restoration, reducing startup time even further for large models. It is not yet available due to CUDA driver limitations.
 
 See [Dynamo Snapshot](snapshot.md) for usage.
