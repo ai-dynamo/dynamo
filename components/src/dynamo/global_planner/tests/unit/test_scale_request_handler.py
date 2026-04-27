@@ -235,6 +235,87 @@ def test_managed_dgd_names_mismatched_prefix(mock_runtime):
     assert names == {"model-b"}
 
 
+def test_calculate_total_gpus_uses_planner_gpu_weights_when_limits_absent(mock_runtime):
+    """GPU budgeting should fall back to planner config for mocker-style DGDs."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=None,
+        k8s_namespace="default",
+        max_total_gpus=-1,
+    )
+
+    def make_connector(graph_deployment):
+        connector = MagicMock()
+        connector.parent_dgd_name = graph_deployment["metadata"]["name"]
+        connector.kube_api = MagicMock()
+        connector.kube_api.get_graph_deployment.return_value = graph_deployment
+        return connector
+
+    handler.connectors = {
+        "default/gp-agg-0": make_connector(
+            {
+                "metadata": {"name": "gp-agg-0"},
+                "spec": {
+                    "services": {
+                        "MockerWorker": {
+                            "subComponentType": "decode",
+                            "replicas": 1,
+                        },
+                        "Planner": {
+                            "componentType": "planner",
+                            "extraPodSpec": {
+                                "mainContainer": {
+                                    "args": [
+                                        "--config",
+                                        '{"mode":"agg","decode_engine_num_gpu":1}',
+                                    ]
+                                }
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+        "default/gp-agg-1": make_connector(
+            {
+                "metadata": {"name": "gp-agg-1"},
+                "spec": {
+                    "services": {
+                        "MockerWorker": {
+                            "subComponentType": "decode",
+                            "replicas": 1,
+                        },
+                        "Planner": {
+                            "componentType": "planner",
+                            "extraPodSpec": {
+                                "mainContainer": {
+                                    "args": [
+                                        "--config",
+                                        '{"mode":"agg","decode_engine_num_gpu":2}',
+                                    ]
+                                }
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+    }
+
+    request = ScaleRequest(
+        caller_namespace="default-gp-agg-1",
+        graph_deployment_name="gp-agg-1",
+        k8s_namespace="default",
+        target_replicas=[
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE, desired_replicas=2
+            )
+        ],
+    )
+
+    assert handler._calculate_total_gpus_after_request(request) == 5
+
+
 @pytest.mark.asyncio
 async def test_populate_connectors_explicit_mode(mock_runtime):
     """Test _populate_k8s_connectors only creates connectors for managed DGDs."""

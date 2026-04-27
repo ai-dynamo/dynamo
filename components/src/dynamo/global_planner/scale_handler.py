@@ -4,6 +4,7 @@
 """Handler for scale_request endpoint in GlobalPlanner."""
 
 import asyncio
+import json
 import logging
 
 from dynamo.planner import KubernetesConnector
@@ -144,6 +145,62 @@ class ScaleRequestHandler:
         except Exception as e:
             logger.warning(f"Failed to discover existing DGDs: {e}")
 
+    @staticmethod
+    def _extract_planner_config(services: dict) -> dict:
+        """Best-effort parse of the planner --config JSON for a DGD."""
+        for svc_spec in services.values():
+            if svc_spec.get("componentType") != "planner":
+                continue
+            args = (
+                svc_spec.get("extraPodSpec", {})
+                .get("mainContainer", {})
+                .get("args", [])
+            )
+            for idx, arg in enumerate(args):
+                if arg == "--config" and idx + 1 < len(args):
+                    raw = args[idx + 1]
+                    if not isinstance(raw, str):
+                        continue
+                    raw = raw.strip()
+                    if not raw.startswith("{"):
+                        continue
+                    try:
+                        parsed = json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        logger.warning(f"Failed to parse planner config JSON: {exc}")
+                        return {}
+                    if isinstance(parsed, dict):
+                        return parsed
+        return {}
+
+    @staticmethod
+    def _infer_gpu_per_replica(svc_spec: dict, planner_config: dict) -> int:
+        """Infer the simulated GPU weight for a service.
+
+        Budgeting prefers explicit service GPU limits when present. For mocker
+        benchmarks, those limits are often absent because setting them would
+        make the pods request real GPUs. In that case, fall back to the
+        planner's configured engine GPU weight.
+        """
+        gpu_per_replica = int(
+            svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+        )
+        if gpu_per_replica > 0:
+            return gpu_per_replica
+
+        sub_type = svc_spec.get("subComponentType", "")
+        if not sub_type:
+            return 0
+
+        mode = planner_config.get("mode")
+        if mode == "agg":
+            return int(planner_config.get("decode_engine_num_gpu") or 0)
+        if sub_type == "decode":
+            return int(planner_config.get("decode_engine_num_gpu") or 0)
+        if sub_type == "prefill":
+            return int(planner_config.get("prefill_engine_num_gpu") or 0)
+        return 0
+
     def _calculate_total_gpus_after_request(self, request: ScaleRequest) -> int:
         """Calculate total GPUs across all managed DGDs if this request is granted.
 
@@ -167,14 +224,15 @@ class ScaleRequestHandler:
                 continue
 
             services = deployment.get("spec", {}).get("services", {})
+            planner_config = self._extract_planner_config(services)
 
             for svc_spec in services.values():
                 sub_type = svc_spec.get("subComponentType", "")
                 if not sub_type:
                     continue
 
-                gpu_per_replica = int(
-                    svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+                gpu_per_replica = self._infer_gpu_per_replica(
+                    svc_spec, planner_config
                 )
                 if gpu_per_replica == 0:
                     continue

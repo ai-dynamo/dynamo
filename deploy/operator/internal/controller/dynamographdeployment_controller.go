@@ -1675,15 +1675,21 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 					CreateFunc: func(ce event.CreateEvent) bool { return false },
 					DeleteFunc: func(de event.DeleteEvent) bool { return false },
 					UpdateFunc: func(ue event.UpdateEvent) bool {
-						// Only trigger on status changes (readyReplicas or replicas)
+						// Trigger on PodClique status transitions that affect DGD readiness.
 						oldPC, okOld := ue.ObjectOld.(*grovev1alpha1.PodClique)
 						newPC, okNew := ue.ObjectNew.(*grovev1alpha1.PodClique)
 						if !okOld || !okNew {
 							return false
 						}
-						// Trigger if readyReplicas or replicas changed
+
 						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
-							oldPC.Spec.Replicas != newPC.Spec.Replicas
+							oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
+							oldPC.Status.Replicas != newPC.Status.Replicas ||
+							oldPC.Spec.Replicas != newPC.Spec.Replicas ||
+							(oldPC.Status.ObservedGeneration == nil) != (newPC.Status.ObservedGeneration == nil) ||
+							(oldPC.Status.ObservedGeneration != nil &&
+								newPC.Status.ObservedGeneration != nil &&
+								*oldPC.Status.ObservedGeneration != *newPC.Status.ObservedGeneration)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),

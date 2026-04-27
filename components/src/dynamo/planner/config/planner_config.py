@@ -48,6 +48,11 @@ class PlannerConfig(BaseModel):
         description='Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
     )
 
+    no_operation: bool = Field(
+        default=False,
+        description="When True, the planner skips deployment validation, readiness waits, and scaling actions. Used by tests and benchmarking to exercise planner internals without touching a real deployment.",
+    )
+
     environment: Literal[
         "kubernetes", "virtual", "global-planner"
     ] = SLAPlannerDefaults.environment

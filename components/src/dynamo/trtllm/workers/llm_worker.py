@@ -23,10 +23,10 @@ from tensorrt_llm.llmapi import (
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_args import (
-    TOKENIZER_ALIASES,
     KvCacheConnectorConfig,
     LoadFormat,
 )
+from tensorrt_llm.tokenizers import TOKENIZER_ALIASES
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector

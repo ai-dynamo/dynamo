@@ -15,6 +15,8 @@ enforces shared scaling policy across multiple DGDs.
 | `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
 | `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
 | `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
+| `single-pool-priority-benchmark.yaml` | Single-endpoint, single-pool | Mocker | 1 Frontend with KV routing + 1 agg worker pool + local Planner autoscaling |
+| `run_priority_benchmark_in_cluster.sh` | In-cluster benchmark runner | Mocker | Creates a ConfigMap from `benchmarks/router/global_router_priority_benchmark.py` and runs it as a Kubernetes Job against `gp-ctrl-frontend` |
 
 ## Deployment Patterns
 
@@ -96,6 +98,51 @@ export K8S_NAMESPACE=my-ns
 export DYNAMO_IMAGE=<dynamo-image>
 
 envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+```
+
+### Single-Pool Priority Benchmark Baseline
+
+```bash
+export K8S_NAMESPACE=my-ns
+export DYNAMO_IMAGE=<dynamo-image>
+
+envsubst < single-pool-priority-benchmark.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+```
+
+## Running The Priority Benchmark In Cluster
+
+The priority benchmark script can be run as a Kubernetes `Job` in the same namespace as
+the control DGD. This avoids `kubectl port-forward` bottlenecks at very high concurrency.
+Both the single-pool and global-router benchmark manifests expose the same
+frontend service name, `gp-ctrl-frontend`, so the same benchmark invocation can
+be reused across the two deployment shapes.
+
+```bash
+export K8S_NAMESPACE=jthomson-bench
+export DYNAMO_IMAGE=<dynamo-image>
+export BENCHMARK_EXTRA_ARGS="--num-batches 1 --prompts-per-batch 32 --generations-per-prompt 8 --lag 2"
+
+./run_priority_benchmark_in_cluster.sh
+```
+
+Useful knobs:
+
+- `JOB_NAME`: Job name to create. Default: `gp-priority-benchmark`
+- `BENCHMARK_URL`: In-cluster frontend URL. Default: `http://gp-ctrl-frontend:8000`
+- `BENCHMARK_EXTRA_ARGS`: Extra CLI flags passed to `global_router_priority_benchmark.py`
+- `LOCAL_OUTPUT_DIR`: Local directory for copied artifacts. Defaults to `examples/global_planner/benchmark_artifacts/<job-name>-<timestamp>`
+- `BENCHMARK_NODE_NAME`: Optional node pin if you want to reuse a node that already has the image cached
+- `IMAGE_PULL_SECRET_NAME`: Optional pull secret name. Set it to an empty string for public images
+- `POST_RUN_HOLD_SECONDS`: How long the pod stays alive after the benchmark finishes so `kubectl cp` can pull artifacts. Defaults to `300`
+- `FOLLOW_LOGS=0`: Launch without attaching to the Job logs
+
+Example with a heavier workload and local artifact copy:
+
+```bash
+export BENCHMARK_EXTRA_ARGS="--num-batches 3 --prompts-per-batch 64 --generations-per-prompt 12 --lag 3 --straggler-fraction 1.0 --straggler-turns 16 --straggler-osl-mean 2200 --straggler-osl-std 400 --base-isl 1600 --user-tokens-per-turn 300"
+export LOCAL_OUTPUT_DIR=./benchmark_artifacts/gp-priority-benchmark-results
+
+./run_priority_benchmark_in_cluster.sh
 ```
 
 ## Verifying
