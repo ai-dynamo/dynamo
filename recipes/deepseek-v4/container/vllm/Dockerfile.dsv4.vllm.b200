@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DYNAMO_SRC_IMAGE=dynamo:latest-vllm-runtime
-ARG DSV4_BASE_IMAGE=vllm/vllm-openai:deepseekv4-cu130
-
+ARG DSV4_BASE_IMAGE=vllm/vllm-openai:v0.20.0-cu130-ubuntu2404@sha256:23b77772a3e2b11a573d74980b5330c6eed9b0389212d003b02b8b399b52bd9c
 FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
 
 FROM ${DSV4_BASE_IMAGE}
@@ -16,11 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates jq curl \
     && apt list --upgradable 2>/dev/null | tail -n +2 | grep 'jammy-' | awk -F/ '{print $1}' | xargs -r apt-get install -y --only-upgrade \
     && rm -rf /var/lib/apt/lists/*
-
-# Patch vLLM sparse attn indexer (drop unsupported topk=1024). Remove once
-# https://github.com/vllm-project/vllm/pull/40760 lands in the base image.
-RUN sed -i 's/(512, 1024, 2048)/(512, 2048)/' \
-      /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer.py
 
 COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
