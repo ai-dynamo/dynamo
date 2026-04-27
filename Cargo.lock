@@ -2350,6 +2350,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-hashing"
+version = "1.2.0"
+dependencies = [
+ "dynamo-tokens",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "1.2.0"
 dependencies = [

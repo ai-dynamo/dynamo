@@ -91,7 +91,11 @@ impl<T: BlockMetadata> LineageBackend<T> {
     pub fn insert(&mut self, block: Block<T, Registered>) {
         let lineage_hash = block.sequence_hash();
         let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
+        // Key this node by the same fragment width its children will store as their
+        // `parent_hash_fragment`, so child→parent lookups match exactly. PLH carries
+        // the full u64 current sequence hash; we truncate here to the child mode's
+        // parent-fragment width (54/46/38 bits depending on `position + 1`).
+        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
         let full_hash = lineage_hash.as_u128();
         let parent_fragment = if position > 0 {
             Some(lineage_hash.parent_hash_fragment())
@@ -209,7 +213,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     /// Removes a specific block by its lineage hash (for cache hits).
     pub fn remove(&mut self, lineage_hash: &PositionalLineageHash) -> Option<Block<T, Registered>> {
         let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
+        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
 
         let node_data = self
             .nodes
@@ -383,7 +387,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LineageBackend<T> {
 
     fn has_block(&self, seq_hash: PositionalLineageHash) -> bool {
         let position = seq_hash.position();
-        let fragment = seq_hash.current_hash_fragment();
+        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
 
         self.nodes
             .get(&position)
