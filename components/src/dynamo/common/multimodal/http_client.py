@@ -47,7 +47,6 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
 
     - ``DYN_MM_HTTP_CONNECT_TIMEOUT`` (default 5s)
     - ``DYN_MM_HTTP_READ_TIMEOUT`` (default: value of ``timeout`` argument)
-    - ``DYN_MM_HTTP_WRITE_TIMEOUT`` (default 10s)
     - ``DYN_MM_HTTP_POOL_TIMEOUT`` (default 60s) — decoupled from read so a
       saturated pool surfaces quickly instead of waiting the read timeout.
     - ``DYN_MM_HTTP_MAX_CONNECTIONS`` (default 100)
@@ -58,7 +57,6 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
     if _global_http_client is None or _global_http_client.is_closed:
         connect_timeout = _env_float("DYN_MM_HTTP_CONNECT_TIMEOUT", 5.0)
         read_timeout = _env_float("DYN_MM_HTTP_READ_TIMEOUT", timeout)
-        write_timeout = _env_float("DYN_MM_HTTP_WRITE_TIMEOUT", 10.0)
         pool_timeout = _env_float("DYN_MM_HTTP_POOL_TIMEOUT", 60.0)
         max_connections = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 100)
         max_keepalive = _env_int("DYN_MM_HTTP_MAX_KEEPALIVE", 20)
@@ -67,7 +65,7 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
             timeout=httpx.Timeout(
                 connect=connect_timeout,
                 read=read_timeout,
-                write=write_timeout,
+                write=None,
                 pool=pool_timeout,
             ),
             follow_redirects=False,
@@ -78,11 +76,10 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
         )
         logger.info(
             "Shared HTTP client initialized ("
-            "connect=%ss, read=%ss, write=%ss, pool=%ss, "
+            "connect=%ss, read=%ss, write=None, pool=%ss, "
             "max_connections=%d, max_keepalive=%d, follow_redirects=False)",
             connect_timeout,
             read_timeout,
-            write_timeout,
             pool_timeout,
             max_connections,
             max_keepalive,
