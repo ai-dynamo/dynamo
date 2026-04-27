@@ -31,6 +31,8 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
+import os
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -493,8 +495,12 @@ class GMSClientMemoryManager:
         Checks layout hash for staleness. Validates each allocation still
         exists and size matches before remapping.
         """
+        log_timings = os.environ.get("GMS_LOG_REMAP_TIMINGS") == "1"
+        start_s = time.perf_counter()
+        hash_start_s = time.perf_counter()
         # Stale layout check
         current_hash = self.get_memory_layout_hash()
+        hash_s = time.perf_counter() - hash_start_s
         if (
             self._last_memory_layout_hash
             and current_hash != self._last_memory_layout_hash
@@ -505,12 +511,20 @@ class GMSClientMemoryManager:
 
         assert self._granted_lock_type is not None
 
+        list_start_s = time.perf_counter()
         allocations_by_slot = {
             int(info.layout_slot): info for info in self.list_handles()
         }
+        list_s = time.perf_counter() - list_start_s
 
         remapped_count = 0
         total_bytes = 0
+        export_s = 0.0
+        import_s = 0.0
+        map_s = 0.0
+        access_s = 0.0
+        sync_s = 0.0
+        validate_s = 0.0
         for va, mapping in sorted(
             self._mappings.items(), key=lambda item: item[1].layout_slot
         ):
@@ -533,14 +547,26 @@ class GMSClientMemoryManager:
                     f"{mapping.tag} vs {alloc_info.tag}"
                 )
 
+            op_start_s = time.perf_counter()
             fd = self.export_handle(alloc_info.allocation_id)
+            export_s += time.perf_counter() - op_start_s
+            op_start_s = time.perf_counter()
             handle = cumem_import_from_shareable_handle_close_fd(fd)
+            import_s += time.perf_counter() - op_start_s
+            op_start_s = time.perf_counter()
             cumem_map(va, mapping.aligned_size, handle)
+            map_s += time.perf_counter() - op_start_s
+            op_start_s = time.perf_counter()
             cumem_set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type
             )
+            access_s += time.perf_counter() - op_start_s
+            op_start_s = time.perf_counter()
             cuda_synchronize()
+            sync_s += time.perf_counter() - op_start_s
+            op_start_s = time.perf_counter()
             cuda_validate_pointer(va)
+            validate_s += time.perf_counter() - op_start_s
 
             if mapping.allocation_id != alloc_info.allocation_id:
                 self._inverse_mapping.pop(mapping.allocation_id, None)
@@ -552,6 +578,7 @@ class GMSClientMemoryManager:
             remapped_count += 1
             total_bytes += mapping.aligned_size
 
+        total_s = time.perf_counter() - start_s
         self._va_preserved = False
         self._unmapped = False
         logger.info(
@@ -561,6 +588,36 @@ class GMSClientMemoryManager:
             remapped_count,
             total_bytes / (1 << 30),
         )
+        if log_timings:
+            accounted_s = (
+                hash_s
+                + list_s
+                + export_s
+                + import_s
+                + map_s
+                + access_s
+                + sync_s
+                + validate_s
+            )
+            logger.info(
+                "[GPU Memory Service] Remap timing on device %d: "
+                "allocations=%d bytes=%.2f GiB total=%.3fs hash=%.3fs "
+                "list=%.3fs export=%.3fs import=%.3fs map=%.3fs "
+                "set_access=%.3fs sync=%.3fs validate=%.3fs other=%.3fs",
+                self.device,
+                remapped_count,
+                total_bytes / (1 << 30),
+                total_s,
+                hash_s,
+                list_s,
+                export_s,
+                import_s,
+                map_s,
+                access_s,
+                sync_s,
+                validate_s,
+                max(0.0, total_s - accounted_s),
+            )
 
     def reallocate_all_handles(self, tag: str = "default") -> None:
         """Allocate fresh server handles for all preserved VAs (no mapping).
