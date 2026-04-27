@@ -31,8 +31,16 @@ pub(crate) fn request_metrics(
             .as_ref()
             .map(|timing| timing.request_received_ms)
             .unwrap_or(0),
+        prefill_wait_time_ms: timing
+            .as_ref()
+            .and_then(|timing| timing.prefill_wait_time_ms),
+        prefill_time_ms: timing.as_ref().and_then(|timing| timing.prefill_time_ms),
         ttft_ms: timing.as_ref().and_then(|timing| timing.ttft_ms),
         total_time_ms: timing.as_ref().and_then(|timing| timing.total_time_ms),
+        kv_hit_rate: timing.as_ref().and_then(|timing| timing.kv_hit_rate),
+        kv_transfer_estimated_latency_ms: timing
+            .as_ref()
+            .and_then(|timing| timing.kv_transfer_estimated_latency_ms),
         queue_depth: timing
             .as_ref()
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
@@ -52,10 +60,16 @@ mod tests {
     fn test_request_metrics_from_tracker() {
         let tracker = RequestTracker::new();
         tracker.record_isl(128, Some(32));
+        tracker.record_kv_hit(4.0, 8);
         tracker.record_osl(5);
         tracker.record_router_queue_depth(3);
         tracker.record_worker(17, Some(2), WORKER_TYPE_DECODE);
+        tracker.record_prefill_start();
+        thread::sleep(Duration::from_millis(1));
         tracker.record_first_token();
+        tracker.record_prefill_complete();
+        thread::sleep(Duration::from_millis(1));
+        tracker.record_decode_first_token();
         thread::sleep(Duration::from_millis(1));
         tracker.record_finish();
 
@@ -71,8 +85,12 @@ mod tests {
         assert_eq!(metrics.output_tokens, Some(5));
         assert_eq!(metrics.cached_tokens, Some(32));
         assert!(metrics.request_received_ms > 0);
+        assert!(metrics.prefill_wait_time_ms.is_some());
+        assert!(metrics.prefill_time_ms.is_some());
         assert!(metrics.ttft_ms.is_some());
         assert!(metrics.total_time_ms.is_some());
+        assert_eq!(metrics.kv_hit_rate, Some(0.5));
+        assert!(metrics.kv_transfer_estimated_latency_ms.is_some());
         assert_eq!(metrics.queue_depth, Some(3));
         let worker = metrics.worker.expect("worker info should be set");
         assert_eq!(worker.prefill_worker_id, Some(17));
@@ -91,8 +109,12 @@ mod tests {
         assert_eq!(metrics.output_tokens, None);
         assert_eq!(metrics.cached_tokens, None);
         assert_eq!(metrics.request_received_ms, 0);
+        assert_eq!(metrics.prefill_wait_time_ms, None);
+        assert_eq!(metrics.prefill_time_ms, None);
         assert_eq!(metrics.ttft_ms, None);
         assert_eq!(metrics.total_time_ms, None);
+        assert_eq!(metrics.kv_hit_rate, None);
+        assert_eq!(metrics.kv_transfer_estimated_latency_ms, None);
         assert_eq!(metrics.queue_depth, None);
         assert!(metrics.worker.is_none());
     }

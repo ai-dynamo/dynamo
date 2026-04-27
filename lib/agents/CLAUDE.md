@@ -23,6 +23,7 @@ Current contract:
 
 - Near term: passive request/tool traces, profile extraction, and simple workflow/program correlation.
 - Next: workflow profiles that can drive scheduling hints without changing request behavior.
+- Follow-up telemetry: add routing decision details once Dynamo has a stable source of truth for candidate workers, selected worker, routing policy, and routing cost/breakdown. Keep this out of v1 unless it can be sourced without coupling `dynamo-agents` to router internals.
 - Later: program lifecycle APIs for admission, pause/resume at tool boundaries, KV prewarm, and cache demotion.
 
 ## Guardrails

@@ -89,8 +89,12 @@ dropped.
     "output_tokens": 512,
     "cached_tokens": 3584,
     "request_received_ms": 1777312800000,
+    "prefill_wait_time_ms": 12.3,
+    "prefill_time_ms": 70.1,
     "ttft_ms": 82.4,
     "total_time_ms": 1000.1,
+    "kv_hit_rate": 0.875,
+    "kv_transfer_estimated_latency_ms": 3.2,
     "queue_depth": 3,
     "worker": {
       "prefill_worker_id": 1,

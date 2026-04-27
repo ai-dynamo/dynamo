@@ -45,9 +45,17 @@ pub struct AgentRequestMetrics {
     pub cached_tokens: Option<u64>,
     pub request_received_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_wait_time_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_time_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_time_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_hit_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_estimated_latency_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
