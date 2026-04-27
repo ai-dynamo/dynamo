@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -69,6 +70,8 @@ const (
 	// Resources.{Requests,Limits}.GPU without specifying GPUType.
 	defaultGPUResourceName = corev1.ResourceName("nvidia.com/gpu")
 
+	annotationTrue = "true"
+
 	// DGD-scoped (DGD spec-level + per-component) annotation keys.
 	annDGDPVCs       = "nvidia.com/dgd-pvcs"
 	annDGDCompPrefix = "nvidia.com/dgd-comp-"
@@ -91,12 +94,17 @@ const (
 	suffixAnnotations      = "annotations"
 	suffixLabels           = "labels"
 	suffixSharedMemOrigin  = "shared-memory-origin"
+	suffixResourcesOrigin  = "resources-origin"
+	suffixVolumeMountsOrig = "volume-mounts-origin"
+	suffixPodTemplateOrig  = "pod-template-origin"
+	suffixPodMetadataOrig  = "pod-metadata-origin"
 	suffixFrontendSidecar  = "frontend-sidecar-origin"
 	// suffixFrontendSidecarRef is used for v1beta1-first inputs that set
 	// FrontendSidecar to a container name without a v1alpha1 origin. The
 	// referenced container flows through ExtraPodSpec.PodSpec.Containers
 	// as a regular user sidecar on the v1alpha1 side.
 	suffixFrontendSidecarRef = "frontend-sidecar-ref"
+	suffixExperimentalOrig   = "experimental-origin"
 	suffixGMSDisabled        = "gms-disabled-payload"
 	suffixFailoverDisabled   = "failover-disabled-payload"
 	suffixCheckpointDisabl   = "checkpoint-disabled-payload"
@@ -278,39 +286,7 @@ func convertSharedSpecTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.
 	}
 
 	// Autoscaling -> annotation (deprecated, removed in v1beta1).
-	if src.Autoscaling != nil {
-		if data, err := json.Marshal(src.Autoscaling); err == nil {
-			c.set(suffixAutoscaling, string(data))
-		}
-	}
-
-	// Ingress -> annotation (removed in v1beta1).
-	if src.Ingress != nil {
-		if data, err := json.Marshal(src.Ingress); err == nil {
-			c.set(suffixIngress, string(data))
-		}
-	}
-
-	// EnvFromSecret -> podTemplate.containers[main].envFrom; the pointer string
-	// itself is also preserved on the carrier so ConvertFrom can distinguish
-	// "v1alpha1 set this via EnvFromSecret" from "v1beta1 set it via envFrom".
-	if src.EnvFromSecret != nil {
-		c.set(suffixEnvFromSecret, *src.EnvFromSecret)
-	}
-
-	// Per-service Annotations / Labels: stash verbatim; they do not merge
-	// into podTemplate.metadata because they also apply to Service/Ingress
-	// objects at the v1alpha1 reconcile layer.
-	if len(src.Annotations) > 0 {
-		if data, err := json.Marshal(src.Annotations); err == nil {
-			c.set(suffixAnnotations, string(data))
-		}
-	}
-	if len(src.Labels) > 0 {
-		if data, err := json.Marshal(src.Labels); err == nil {
-			c.set(suffixLabels, string(data))
-		}
-	}
+	preserveV1Alpha1OnlySharedFields(src, c)
 
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
 	if err := convertSharedMemoryTo(src.SharedMemory, dst, c); err != nil {
@@ -337,6 +313,52 @@ func convertSharedSpecTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.
 
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
 	return buildPodTemplateTo(src, dst, c)
+}
+
+func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	// Autoscaling -> annotation (deprecated, removed in v1beta1).
+	if src.Autoscaling != nil {
+		if data, err := json.Marshal(src.Autoscaling); err == nil {
+			c.set(suffixAutoscaling, string(data))
+		}
+	}
+	// Ingress -> annotation (removed in v1beta1).
+	if src.Ingress != nil {
+		if data, err := json.Marshal(src.Ingress); err == nil {
+			c.set(suffixIngress, string(data))
+		}
+	}
+	// EnvFromSecret -> podTemplate.containers[main].envFrom; preserve the
+	// pointer string so ConvertFrom can distinguish it from native envFrom.
+	if src.EnvFromSecret != nil {
+		c.set(suffixEnvFromSecret, *src.EnvFromSecret)
+	}
+	// Per-service Annotations / Labels apply beyond podTemplate.metadata.
+	if len(src.Annotations) > 0 {
+		if data, err := json.Marshal(src.Annotations); err == nil {
+			c.set(suffixAnnotations, string(data))
+		}
+	}
+	if len(src.Labels) > 0 {
+		if data, err := json.Marshal(src.Labels); err == nil {
+			c.set(suffixLabels, string(data))
+		}
+	}
+	if src.ExtraPodMetadata != nil && len(src.ExtraPodMetadata.Annotations) == 0 && len(src.ExtraPodMetadata.Labels) == 0 {
+		if data, err := json.Marshal(src.ExtraPodMetadata); err == nil {
+			c.set(suffixPodMetadataOrig, string(data))
+		}
+	}
+	if src.Resources != nil && !reflect.DeepEqual(src.Resources, resourcesFromNative(resourcesToNative(src.Resources))) {
+		if data, err := json.Marshal(src.Resources); err == nil {
+			c.set(suffixResourcesOrigin, string(data))
+		}
+	}
+	if len(src.VolumeMounts) > 0 && !volumeMountsRoundTripThroughHub(src.VolumeMounts) {
+		if data, err := json.Marshal(src.VolumeMounts); err == nil {
+			c.set(suffixVolumeMountsOrig, string(data))
+		}
+	}
 }
 
 // convertSharedSpecFrom performs the inverse: v1beta1 -> v1alpha1.
@@ -446,6 +468,11 @@ func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDe
 	// equivalent; stash via annotation to preserve the explicit pointer.
 	if src.Disabled {
 		dst.SharedMemorySize = ptr.To(resource.MustParse("0"))
+		if !src.Size.IsZero() {
+			if data, err := json.Marshal(src); err == nil {
+				c.set(suffixSharedMemOrigin, string(data))
+			}
+		}
 		return nil
 	}
 	// Not disabled, with a set size -> copy verbatim.
@@ -473,6 +500,11 @@ func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploym
 			// canonical zero form directly so reapplies are idempotent.
 			// See convertSharedMemoryFrom(disabled) for the twin case.
 			dst.SharedMemory = &SharedMemorySpec{Size: resource.MustParse("0")}
+			return
+		}
+		var sharedMemory SharedMemorySpec
+		if err := json.Unmarshal([]byte(v), &sharedMemory); err == nil {
+			dst.SharedMemory = &sharedMemory
 			return
 		}
 	}
@@ -546,7 +578,7 @@ func convertScalingAdapterTo(src *ScalingAdapter, dst *v1beta1.DynamoComponentDe
 	// fields on v1alpha1 ScalingAdapter) but we still record presence so the
 	// v1alpha1 -> v1beta1 -> v1alpha1 round-trip preserves the caller's
 	// explicit "&ScalingAdapter{Enabled:false}" pointer.
-	c.set(suffixScalingDisabled, "true")
+	c.set(suffixScalingDisabled, annotationTrue)
 }
 
 func convertScalingAdapterFrom(src *v1beta1.ScalingAdapter, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
@@ -575,6 +607,10 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 			exp = &v1beta1.ExperimentalSpec{}
 		}
 		return exp
+	}
+	if _, ok := c.get(suffixExperimentalOrig); ok {
+		ensureExp()
+		c.del(suffixExperimentalOrig)
 	}
 
 	if src.GPUMemoryService != nil {
@@ -630,6 +666,12 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 	// drop any stale "*-disabled-payload" annotation: v1beta1 is
 	// authoritative in this direction and an enabled v1beta1 entry must
 	// not resurrect a previous Enabled:false on the next round-trip.
+	if src.Experimental != nil &&
+		src.Experimental.GPUMemoryService == nil &&
+		src.Experimental.Failover == nil &&
+		src.Experimental.Checkpoint == nil {
+		c.set(suffixExperimentalOrig, annotationTrue)
+	}
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{
 			Enabled:         true,
@@ -747,51 +789,27 @@ func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool)
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
 // over dedicated fields, except for env which is additive.
 func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
-	hasAny := src.Resources != nil ||
-		len(src.Envs) > 0 ||
-		src.EnvFromSecret != nil ||
-		len(src.VolumeMounts) > 0 ||
-		src.LivenessProbe != nil ||
-		src.ReadinessProbe != nil ||
-		src.ExtraPodSpec != nil ||
-		src.ExtraPodMetadata != nil ||
-		src.FrontendSidecar != nil
-
-	if !hasAny {
+	_, podTemplateOrigin := c.get(suffixPodTemplateOrig)
+	frontendSidecarRef, hasFrontendSidecarRef := c.get(suffixFrontendSidecarRef)
+	if hasFrontendSidecarRef && !hasPodTemplateContent(src, podTemplateOrigin) {
+		dst.FrontendSidecar = ptr.To(frontendSidecarRef)
+		c.del(suffixFrontendSidecarRef)
 		return nil
 	}
+	if !shouldBuildPodTemplate(src, podTemplateOrigin, hasFrontendSidecarRef) {
+		return nil
+	}
+	c.del(suffixPodTemplateOrig)
 
-	podTpl := &corev1.PodTemplateSpec{}
-	if src.ExtraPodMetadata != nil {
-		if len(src.ExtraPodMetadata.Annotations) > 0 {
-			podTpl.Annotations = maps.Clone(src.ExtraPodMetadata.Annotations)
-		}
-		if len(src.ExtraPodMetadata.Labels) > 0 {
-			podTpl.Labels = maps.Clone(src.ExtraPodMetadata.Labels)
-		}
-	}
-	if src.ExtraPodSpec != nil && src.ExtraPodSpec.PodSpec != nil {
-		podTpl.Spec = *src.ExtraPodSpec.PodSpec.DeepCopy()
-	}
+	podTpl := buildBasePodTemplate(src)
 
 	// Main container: base from dedicated fields.
 	mainBase := buildMainContainerFromDedicated(src)
 
 	// Merge ExtraPodSpec.MainContainer on top (mergo.WithOverride), except for
 	// Env which is additive (dedicated first + mainContainer second).
-	if src.ExtraPodSpec != nil && src.ExtraPodSpec.MainContainer != nil {
-		main := src.ExtraPodSpec.MainContainer.DeepCopy()
-		baseEnvs := mainBase.Env
-		// Name must be "main" regardless of what MainContainer carried.
-		main.Name = mainContainerName
-		if err := mergo.Merge(&mainBase, *main, mergo.WithOverride); err != nil {
-			return fmt.Errorf("merge main container: %w", err)
-		}
-		mainBase.Env = mergeEnvs(baseEnvs, main.Env)
-		// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
-		if main.StartupProbe != nil {
-			mainBase.StartupProbe = main.StartupProbe
-		}
+	if err := mergeExtraPodSpecMainContainer(src, &mainBase); err != nil {
+		return err
 	}
 	mainBase.Name = mainContainerName
 
@@ -807,6 +825,68 @@ func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.D
 	// FrontendSidecar: full container spec -> name reference. Append the
 	// container to podTemplate.containers (as a user sidecar) if not already
 	// present, and set FrontendSidecar to its name.
+	applyFrontendSidecarToPodTemplate(src, dst, podTpl, c)
+
+	if !podTemplateOrigin {
+		c.set(suffixPodTemplateOrig, "generated")
+	}
+	dst.PodTemplate = podTpl
+	return nil
+}
+
+func hasPodTemplateContent(src *DynamoComponentDeploymentSharedSpec, podTemplateOrigin bool) bool {
+	return src.Resources != nil ||
+		len(src.Envs) > 0 ||
+		src.EnvFromSecret != nil ||
+		hasPodTemplateVolumeMounts(src.VolumeMounts) ||
+		src.LivenessProbe != nil ||
+		src.ReadinessProbe != nil ||
+		!extraPodSpecIsZero(src.ExtraPodSpec) ||
+		src.ExtraPodMetadata != nil ||
+		src.FrontendSidecar != nil ||
+		podTemplateOrigin
+}
+
+func shouldBuildPodTemplate(src *DynamoComponentDeploymentSharedSpec, podTemplateOrigin, hasFrontendSidecarRef bool) bool {
+	return hasPodTemplateContent(src, podTemplateOrigin) || hasFrontendSidecarRef
+}
+
+func buildBasePodTemplate(src *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
+	podTpl := &corev1.PodTemplateSpec{}
+	if src.ExtraPodMetadata != nil {
+		if len(src.ExtraPodMetadata.Annotations) > 0 {
+			podTpl.Annotations = maps.Clone(src.ExtraPodMetadata.Annotations)
+		}
+		if len(src.ExtraPodMetadata.Labels) > 0 {
+			podTpl.Labels = maps.Clone(src.ExtraPodMetadata.Labels)
+		}
+	}
+	if src.ExtraPodSpec != nil && src.ExtraPodSpec.PodSpec != nil {
+		podTpl.Spec = *src.ExtraPodSpec.PodSpec.DeepCopy()
+	}
+	return podTpl
+}
+
+func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, mainBase *corev1.Container) error {
+	if src.ExtraPodSpec == nil || src.ExtraPodSpec.MainContainer == nil {
+		return nil
+	}
+	main := src.ExtraPodSpec.MainContainer.DeepCopy()
+	baseEnvs := mainBase.Env
+	// Name must be "main" regardless of what MainContainer carried.
+	main.Name = mainContainerName
+	if err := mergo.Merge(mainBase, *main, mergo.WithOverride); err != nil {
+		return fmt.Errorf("merge main container: %w", err)
+	}
+	mainBase.Env = mergeEnvs(baseEnvs, main.Env)
+	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
+	if main.StartupProbe != nil {
+		mainBase.StartupProbe = main.StartupProbe
+	}
+	return nil
+}
+
+func applyFrontendSidecarToPodTemplate(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, podTpl *corev1.PodTemplateSpec, c *annCarrier) {
 	if src.FrontendSidecar != nil {
 		appendFrontendSidecar(podTpl, src.FrontendSidecar)
 		// Stash origin so ConvertFrom can reproduce the full spec on the
@@ -818,16 +898,15 @@ func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.D
 		// Drop any stale v1beta1-first ref annotation; the origin annotation
 		// is authoritative in this direction.
 		c.del(suffixFrontendSidecarRef)
-	} else if v, ok := c.get(suffixFrontendSidecarRef); ok {
+		return
+	}
+	if v, ok := c.get(suffixFrontendSidecarRef); ok {
 		// v1beta1-first input: the named container is already present in
 		// podTpl.Spec.Containers (via ExtraPodSpec.PodSpec.Containers).
 		// Restore the pointer without duplicating the container.
 		dst.FrontendSidecar = ptr.To(v)
 		c.del(suffixFrontendSidecarRef)
 	}
-
-	dst.PodTemplate = podTpl
-	return nil
 }
 
 // buildMainContainerFromDedicated collects the v1alpha1 flat fields into a
@@ -866,6 +945,13 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 // decomposePodTemplate inverts buildPodTemplateTo.
 func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
 	if src.PodTemplate == nil {
+		if v, ok := c.get(suffixPodMetadataOrig); ok {
+			var meta ExtraPodMetadata
+			if err := json.Unmarshal([]byte(v), &meta); err == nil {
+				dst.ExtraPodMetadata = &meta
+			}
+			c.del(suffixPodMetadataOrig)
+		}
 		// Restore FrontendSidecar from origin annotation even if there is no
 		// podTemplate (uncommon but possible for manual edits).
 		if v, ok := c.get(suffixFrontendSidecar); ok {
@@ -875,13 +961,30 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 			}
 			c.del(suffixFrontendSidecar)
 		}
+		if src.FrontendSidecar != nil {
+			c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
+		}
 		return nil
 	}
 
 	podTpl := src.PodTemplate.DeepCopy()
+	if v, ok := c.get(suffixPodTemplateOrig); ok {
+		c.del(suffixPodTemplateOrig)
+		if v != "generated" {
+			c.set(suffixPodTemplateOrig, annotationTrue)
+		}
+	} else {
+		c.set(suffixPodTemplateOrig, annotationTrue)
+	}
 
 	// ExtraPodMetadata from podTemplate.metadata.
-	if len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0 {
+	if v, ok := c.get(suffixPodMetadataOrig); ok {
+		var meta ExtraPodMetadata
+		if err := json.Unmarshal([]byte(v), &meta); err == nil {
+			dst.ExtraPodMetadata = &meta
+		}
+		c.del(suffixPodMetadataOrig)
+	} else if len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0 {
 		dst.ExtraPodMetadata = &ExtraPodMetadata{
 			Annotations: maps.Clone(podTpl.Annotations),
 			Labels:      maps.Clone(podTpl.Labels),
@@ -932,7 +1035,12 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 		}
 	}
 
-	// Put everything non-main into ExtraPodSpec.
+	restoreDedicatedFieldsFromMain(main, dst, c)
+
+	// Put everything non-main into ExtraPodSpec. The main-container fields
+	// that v1alpha1 can represent directly have already been moved into their
+	// dedicated fields and cleared from main, so ExtraPodSpec only carries the
+	// true escape-hatch remainder.
 	podSpecCopy := podTpl.Spec.DeepCopy()
 	podSpecCopy.Containers = other
 	// The forward path (buildPodTemplateTo) always emits a "main" container,
@@ -960,6 +1068,70 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	}
 
 	return nil
+}
+
+func restoreDedicatedFieldsFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	if main == nil {
+		restoreDedicatedOriginFields(dst, c)
+		return
+	}
+
+	if v, ok := c.get(suffixResourcesOrigin); ok {
+		var resources Resources
+		if err := json.Unmarshal([]byte(v), &resources); err == nil {
+			dst.Resources = &resources
+			main.Resources = corev1.ResourceRequirements{}
+		}
+		c.del(suffixResourcesOrigin)
+	} else if resources := resourcesFromNative(main.Resources); resources != nil {
+		dst.Resources = resources
+		main.Resources = corev1.ResourceRequirements{}
+	}
+
+	if v, ok := c.get(suffixVolumeMountsOrig); ok {
+		var volumeMounts []VolumeMount
+		if err := json.Unmarshal([]byte(v), &volumeMounts); err == nil {
+			dst.VolumeMounts = volumeMounts
+			main.VolumeMounts = nil
+		}
+		c.del(suffixVolumeMountsOrig)
+	} else if len(main.VolumeMounts) > 0 {
+		dst.VolumeMounts = appendMissingVolumeMounts(dst.VolumeMounts, volumeMountsFromNative(main.VolumeMounts))
+		main.VolumeMounts = nil
+	}
+
+	if len(main.Env) > 0 {
+		dst.Envs = slices.Clone(main.Env)
+		main.Env = nil
+	}
+	if dst.EnvFromSecret != nil && envFromSecretMatches(main.EnvFrom, *dst.EnvFromSecret) {
+		main.EnvFrom = nil
+	}
+	if main.LivenessProbe != nil {
+		dst.LivenessProbe = main.LivenessProbe.DeepCopy()
+		main.LivenessProbe = nil
+	}
+	if main.ReadinessProbe != nil {
+		dst.ReadinessProbe = main.ReadinessProbe.DeepCopy()
+		main.ReadinessProbe = nil
+	}
+}
+
+func restoreDedicatedOriginFields(dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	if v, ok := c.get(suffixResourcesOrigin); ok {
+		var resources Resources
+		if err := json.Unmarshal([]byte(v), &resources); err == nil {
+			dst.Resources = &resources
+		}
+		c.del(suffixResourcesOrigin)
+	}
+	if v, ok := c.get(suffixVolumeMountsOrig); ok {
+		var volumeMounts []VolumeMount
+		if err := json.Unmarshal([]byte(v), &volumeMounts); err == nil {
+			dst.VolumeMounts = volumeMounts
+		}
+		c.del(suffixVolumeMountsOrig)
+	}
 }
 
 // containerIsEmpty reports whether c has no user-visible fields set. Used by
@@ -1043,6 +1215,13 @@ func podSpecIsZero(p *corev1.PodSpec) bool {
 	return apiequality.Semantic.DeepEqual(*p, corev1.PodSpec{})
 }
 
+func extraPodSpecIsZero(eps *ExtraPodSpec) bool {
+	if eps == nil {
+		return true
+	}
+	return podSpecIsZero(eps.PodSpec) && containerIsEmpty(eps.MainContainer)
+}
+
 // ---------------------------------------------------------------------------
 // Resources <-> corev1.ResourceRequirements
 // ---------------------------------------------------------------------------
@@ -1059,6 +1238,18 @@ func resourcesToNative(r *Resources) corev1.ResourceRequirements {
 	}
 	if r.Limits != nil {
 		out.Limits = itemToResourceList(r.Limits)
+	}
+	return out
+}
+
+func resourcesFromNative(r corev1.ResourceRequirements) *Resources {
+	out := &Resources{
+		Requests: resourceItemFromList(r.Requests),
+		Limits:   resourceItemFromList(r.Limits),
+		Claims:   slices.Clone(r.Claims),
+	}
+	if out.Requests == nil && out.Limits == nil && len(out.Claims) == 0 {
+		return nil
 	}
 	return out
 }
@@ -1096,6 +1287,93 @@ func itemToResourceList(item *ResourceItem) corev1.ResourceList {
 		return nil
 	}
 	return out
+}
+
+func resourceItemFromList(list corev1.ResourceList) *ResourceItem {
+	if len(list) == 0 {
+		return nil
+	}
+	out := &ResourceItem{}
+	for name, q := range list {
+		value := q.String()
+		switch name {
+		case corev1.ResourceCPU:
+			out.CPU = value
+		case corev1.ResourceMemory:
+			out.Memory = value
+		case defaultGPUResourceName:
+			out.GPU = value
+		default:
+			if out.Custom == nil {
+				out.Custom = map[string]string{}
+			}
+			out.Custom[string(name)] = value
+		}
+	}
+	return out
+}
+
+func volumeMountsFromNative(mounts []corev1.VolumeMount) []VolumeMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		out = append(out, VolumeMount{
+			Name:       mount.Name,
+			MountPoint: mount.MountPath,
+		})
+	}
+	return out
+}
+
+func volumeMountsRoundTripThroughHub(mounts []VolumeMount) bool {
+	if len(mounts) == 0 {
+		return true
+	}
+	compilationCacheMounts := 0
+	for _, mount := range mounts {
+		if mount.UseAsCompilationCache {
+			compilationCacheMounts++
+		}
+	}
+	return compilationCacheMounts <= 1
+}
+
+func hasPodTemplateVolumeMounts(mounts []VolumeMount) bool {
+	for _, mount := range mounts {
+		if !mount.UseAsCompilationCache {
+			return true
+		}
+	}
+	return false
+}
+
+func appendMissingVolumeMounts(dst []VolumeMount, mounts []VolumeMount) []VolumeMount {
+	for _, mount := range mounts {
+		exists := false
+		for _, existing := range dst {
+			if existing.Name == mount.Name && existing.MountPoint == mount.MountPoint {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			dst = append(dst, mount)
+		}
+	}
+	return dst
+}
+
+func envFromSecretMatches(envFrom []corev1.EnvFromSource, name string) bool {
+	if len(envFrom) != 1 {
+		return false
+	}
+	source := envFrom[0]
+	if source.Prefix != "" || source.ConfigMapRef != nil || source.SecretRef == nil {
+		return false
+	}
+	return source.SecretRef.Name == name
 }
 
 // ---------------------------------------------------------------------------

@@ -21,12 +21,20 @@
 package v1alpha1
 
 import (
+	"encoding/json"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+)
+
+const (
+	annDCDHubSpec     = "nvidia.com/dcd-hub-spec"
+	annDCDSpokeSpec   = "nvidia.com/dcd-spoke-spec"
+	annDCDSpokeStatus = "nvidia.com/dcd-spoke-status"
+	annDCDHubOrigin   = "nvidia.com/dcd-hub-origin"
 )
 
 // ConvertTo converts this DynamoComponentDeployment (v1alpha1) into the hub
@@ -38,11 +46,23 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	dst.Spec.BackendFramework = src.Spec.BackendFramework
+	restoredHubSpec := false
 
+	if raw, ok := dst.ObjectMeta.Annotations[annDCDHubSpec]; ok && raw != "" {
+		if spec, ok := restoreDCDHubSpec(raw); ok {
+			dst.Spec = spec
+			restoredHubSpec = true
+			delAnnFromObj(&dst.ObjectMeta, annDCDHubSpec)
+		}
+	}
+	hubOrigin := restoredHubSpec || dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue
+	delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
+
+	var semantic v1beta1.DynamoComponentDeploymentSpec
+	semantic.BackendFramework = src.Spec.BackendFramework
 	carrier := newDCDCarrier(&dst.ObjectMeta)
 	if err := convertSharedSpecTo(&src.Spec.DynamoComponentDeploymentSharedSpec,
-		&dst.Spec.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
+		&semantic.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
 		return err
 	}
 
@@ -53,12 +73,50 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	// schema-valid. The deferred defaulting webhook (see DEP #8069) will
 	// own the same defaulting at admission time once v1beta1 is the storage
 	// version.
-	if dst.Spec.ComponentName == "" {
-		dst.Spec.ComponentName = dst.ObjectMeta.Name
+	if semantic.ComponentName == "" && !hubOrigin {
+		semantic.ComponentName = dst.ObjectMeta.Name
+	}
+	if restoredHubSpec {
+		overlayDCDHubSpec(&dst.Spec, &semantic)
+	} else {
+		dst.Spec = semantic
 	}
 
+	if !hubOrigin {
+		if data, err := marshalDCDSpokeSpec(&src.Spec); err == nil {
+			if dst.ObjectMeta.Annotations == nil {
+				dst.ObjectMeta.Annotations = map[string]string{}
+			}
+			dst.ObjectMeta.Annotations[annDCDSpokeSpec] = string(data)
+		}
+		if data, err := json.Marshal(src.Status); err == nil {
+			if dst.ObjectMeta.Annotations == nil {
+				dst.ObjectMeta.Annotations = map[string]string{}
+			}
+			dst.ObjectMeta.Annotations[annDCDSpokeStatus] = string(data)
+		}
+	} else {
+		scrubDCDAnnotations(&dst.ObjectMeta)
+	}
 	convertDCDStatusTo(&src.Status, &dst.Status)
 	return nil
+}
+
+func overlayDCDHubSpec(base *v1beta1.DynamoComponentDeploymentSpec, semantic *v1beta1.DynamoComponentDeploymentSpec) {
+	hubPodTemplate := base.PodTemplate
+	hubFrontendSidecar := base.FrontendSidecar
+	hubExperimental := base.Experimental
+
+	*base = *semantic.DeepCopy()
+	if hubPodTemplate != nil {
+		base.PodTemplate = hubPodTemplate
+	}
+	if base.FrontendSidecar == nil {
+		base.FrontendSidecar = hubFrontendSidecar
+	}
+	if base.Experimental == nil {
+		base.Experimental = hubExperimental
+	}
 }
 
 // ConvertFrom converts from the hub (v1beta1) DynamoComponentDeployment into
@@ -72,6 +130,21 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 	dst.Spec.BackendFramework = src.Spec.BackendFramework
 
+	if raw, ok := dst.ObjectMeta.Annotations[annDCDSpokeSpec]; ok && raw != "" {
+		if spec, ok := restoreDCDSpokeSpec(raw); ok {
+			dst.Spec = spec
+			if rawStatus, ok := dst.ObjectMeta.Annotations[annDCDSpokeStatus]; ok && rawStatus != "" {
+				_ = json.Unmarshal([]byte(rawStatus), &dst.Status)
+			} else {
+				convertDCDStatusFrom(&src.Status, &dst.Status)
+			}
+			scrubDCDAnnotations(&dst.ObjectMeta)
+			delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
+			return nil
+		}
+	}
+
+	generatedPodTemplate := src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
 	carrier := newDCDCarrier(&dst.ObjectMeta)
 	if err := convertSharedSpecFrom(&src.Spec.DynamoComponentDeploymentSharedSpec,
 		&dst.Spec.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
@@ -80,7 +153,66 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 
 	convertDCDStatusFrom(&src.Status, &dst.Status)
 	scrubDCDAnnotations(&dst.ObjectMeta)
+	if dcdNeedsHubSpecPreservation(&src.Spec, generatedPodTemplate) {
+		data, err := marshalDCDHubSpec(&src.Spec)
+		if err != nil {
+			return nil
+		}
+		if dst.ObjectMeta.Annotations == nil {
+			dst.ObjectMeta.Annotations = map[string]string{}
+		}
+		dst.ObjectMeta.Annotations[annDCDHubSpec] = string(data)
+	} else {
+		if dst.ObjectMeta.Annotations == nil {
+			dst.ObjectMeta.Annotations = map[string]string{}
+		}
+		dst.ObjectMeta.Annotations[annDCDHubOrigin] = annotationTrue
+	}
 	return nil
+}
+
+func marshalDCDHubSpec(src *v1beta1.DynamoComponentDeploymentSpec) ([]byte, error) {
+	return marshalPreservedSpec(*src.DeepCopy(), func(spec *v1beta1.DynamoComponentDeploymentSpec, records *[]preservedRawJSON) {
+		if spec.EPPConfig != nil {
+			preserveEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
+		}
+	})
+}
+
+func restoreDCDHubSpec(raw string) (v1beta1.DynamoComponentDeploymentSpec, bool) {
+	return restorePreservedSpec(raw, func(spec *v1beta1.DynamoComponentDeploymentSpec, records []preservedRawJSON) {
+		if spec.EPPConfig != nil {
+			restoreEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
+		}
+	})
+}
+
+func marshalDCDSpokeSpec(src *DynamoComponentDeploymentSpec) ([]byte, error) {
+	return marshalPreservedSpec(*src.DeepCopy(), func(spec *DynamoComponentDeploymentSpec, records *[]preservedRawJSON) {
+		if spec.EPPConfig != nil {
+			preserveEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
+		}
+	})
+}
+
+func restoreDCDSpokeSpec(raw string) (DynamoComponentDeploymentSpec, bool) {
+	return restorePreservedSpec(raw, func(spec *DynamoComponentDeploymentSpec, records []preservedRawJSON) {
+		if spec.EPPConfig != nil {
+			restoreEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
+		}
+	})
+}
+
+func dcdNeedsHubSpecPreservation(src *v1beta1.DynamoComponentDeploymentSpec, generatedPodTemplate bool) bool {
+	if generatedPodTemplate {
+		return false
+	}
+	return src.FrontendSidecar != nil ||
+		src.PodTemplate != nil ||
+		(src.Experimental != nil &&
+			src.Experimental.GPUMemoryService == nil &&
+			src.Experimental.Failover == nil &&
+			src.Experimental.Checkpoint == nil)
 }
 
 func convertDCDStatusTo(src *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeploymentStatus) {

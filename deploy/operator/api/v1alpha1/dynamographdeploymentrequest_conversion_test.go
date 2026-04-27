@@ -217,8 +217,8 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 
 	// EnableGPUDiscovery → annotation
-	if dst.Annotations[annDGDREnableGPUDisc] != "true" {
-		t.Errorf("annDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[annDGDREnableGPUDisc], "true")
+	if dst.Annotations[annDGDREnableGPUDisc] != annotationTrue {
+		t.Errorf("annDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[annDGDREnableGPUDisc], annotationTrue)
 	}
 
 	// OutputPVC → annotation
@@ -346,11 +346,7 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 
 	// --- Status checks ---
-	// Phase is intentionally lossy: DGDRPhaseDeployed → Ready → Ready
-	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
-		t.Errorf("Status.Phase: got %q, want %q (Deployed→Ready is lossy)", restored.Status.Phase, v1beta1.DGDRPhaseReady)
-	}
-	if diff := cmp.Diff(original.Status, restored.Status, cmpopts.IgnoreFields(v1beta1.DynamoGraphDeploymentRequestStatus{}, "Phase")); diff != "" {
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
 		t.Errorf("Status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 	// GeneratedDeployment round-trip via ProfilingResults.SelectedConfig
@@ -359,15 +355,41 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 }
 
-// TestConvertTo_InvalidProfilingConfigJSON verifies that malformed JSON in ProfilingConfig.Config
-// returns an error rather than silently producing an incomplete conversion.
+// TestConvertTo_InvalidProfilingConfigJSON verifies that malformed or arbitrary
+// RawExtension bytes in ProfilingConfig.Config are preserved rather than
+// rejected. The v1alpha1 field is an opaque extension point; typed v1beta1
+// fields are projected only when the payload is a legacy JSON object we
+// understand.
 func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 	src := newV1alpha1DGDR()
 	src.Spec.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(`{not valid json`)}
 
 	dst := &v1beta1.DynamoGraphDeploymentRequest{}
-	err := src.ConvertTo(dst)
-	if err == nil {
-		t.Fatal("ConvertTo() expected error for invalid JSON, got nil")
+	if err := src.ConvertTo(dst); err != nil {
+		t.Fatalf("ConvertTo() unexpected error = %v", err)
+	}
+	if got := dst.Annotations[annDGDRProfilingConfig]; got != `{not valid json` {
+		t.Fatalf("profiling config annotation = %q, want raw payload", got)
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(dst); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Spec.ProfilingConfig.Config == nil || string(spoke.Spec.ProfilingConfig.Config.Raw) != `{not valid json` {
+		t.Fatalf("ProfilingConfig.Config raw = %v, want preserved invalid payload", spoke.Spec.ProfilingConfig.Config)
+	}
+}
+
+func TestConvertTo_EmptyProfilingConfigRawDoesNotError(t *testing.T) {
+	src := newV1alpha1DGDR()
+	src.Spec.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte{}}
+
+	dst := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(dst); err != nil {
+		t.Fatalf("ConvertTo() unexpected error = %v", err)
+	}
+	if _, ok := dst.Annotations[annDGDRProfilingConfig]; ok {
+		t.Fatalf("empty profiling config raw should not emit annotation, got %v", dst.Annotations)
 	}
 }

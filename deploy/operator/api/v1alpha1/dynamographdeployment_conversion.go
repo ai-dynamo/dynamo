@@ -46,6 +46,13 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
+const (
+	annDGDNilServices = "nvidia.com/dgd-nil-services"
+	annDGDHubSpec     = "nvidia.com/dgd-hub-spec"
+	annDGDSpokeSpec   = "nvidia.com/dgd-spoke-spec"
+	annDGDHubOrigin   = "nvidia.com/dgd-hub-origin"
+)
+
 // ConvertTo converts this DynamoGraphDeployment (v1alpha1) into the hub
 // version (v1beta1).
 func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
@@ -55,16 +62,28 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
+	restoredHubSpec := false
+	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDHubSpec); ok && raw != "" {
+		if spec, ok := restoreDGDHubSpec(raw); ok {
+			dst.Spec = spec
+			restoredHubSpec = true
+			delAnnFromObj(&dst.ObjectMeta, annDGDHubSpec)
+			scrubDGDInternalAnnotations(&dst.ObjectMeta)
+		}
+	}
+	hubOrigin := restoredHubSpec || dst.ObjectMeta.Annotations[annDGDHubOrigin] == annotationTrue
+	delAnnFromObj(&dst.ObjectMeta, annDGDHubOrigin)
 
-	dst.Spec.Annotations = maps.Clone(src.Spec.Annotations)
-	dst.Spec.Labels = maps.Clone(src.Spec.Labels)
-	dst.Spec.BackendFramework = src.Spec.BackendFramework
+	var semanticSpec v1beta1.DynamoGraphDeploymentSpec
+	semanticSpec.Annotations = maps.Clone(src.Spec.Annotations)
+	semanticSpec.Labels = maps.Clone(src.Spec.Labels)
+	semanticSpec.BackendFramework = src.Spec.BackendFramework
 
 	if src.Spec.Restart != nil {
-		dst.Spec.Restart = convertRestartTo(src.Spec.Restart)
+		semanticSpec.Restart = convertRestartTo(src.Spec.Restart)
 	}
 	if src.Spec.TopologyConstraint != nil {
-		dst.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{
+		semanticSpec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{
 			TopologyProfile: src.Spec.TopologyConstraint.TopologyProfile,
 			PackDomain:      v1beta1.TopologyDomain(src.Spec.TopologyConstraint.PackDomain),
 		}
@@ -72,7 +91,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 
 	// DGD.spec.envs -> DGD.spec.env.
 	if len(src.Spec.Envs) > 0 {
-		dst.Spec.Env = slices.Clone(src.Spec.Envs)
+		semanticSpec.Env = slices.Clone(src.Spec.Envs)
 	}
 
 	// DGD.spec.pvcs has no v1beta1 equivalent -- users now declare PVC volumes
@@ -84,6 +103,11 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		}
 		setAnnOnObj(&dst.ObjectMeta, annDGDPVCs, string(data))
 	}
+	if !hubOrigin {
+		if data, err := marshalDGDSpokeSpec(&src.Spec); err == nil {
+			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeSpec, string(data))
+		}
+	}
 
 	// Components: v1alpha1 map -> v1beta1 list. Sort by name for a deterministic
 	// emission order; the unordered map cannot faithfully represent the
@@ -91,10 +115,12 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	// This is called out in the golden-file test fixtures.
 	if len(src.Spec.Services) > 0 {
 		names := slices.Sorted(maps.Keys(src.Spec.Services))
-		dst.Spec.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
+		semanticSpec.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
+		nilServices := make([]string, 0)
 		for _, name := range names {
 			compSrc := src.Spec.Services[name]
 			if compSrc == nil {
+				nilServices = append(nilServices, name)
 				continue
 			}
 			carrier := newDGDComponentCarrier(&dst.ObjectMeta, name)
@@ -113,12 +139,49 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 			if compSrc.ServiceName != "" && compSrc.ServiceName != name {
 				carrier.set(suffixServiceName, compSrc.ServiceName)
 			}
-			dst.Spec.Components = append(dst.Spec.Components, compDst)
+			semanticSpec.Components = append(semanticSpec.Components, compDst)
+		}
+		if len(nilServices) > 0 {
+			if data, err := json.Marshal(nilServices); err == nil {
+				setAnnOnObj(&dst.ObjectMeta, annDGDNilServices, string(data))
+			}
 		}
 	}
 
+	if restoredHubSpec {
+		overlayDGDHubSpec(&dst.Spec, &semanticSpec)
+	} else {
+		dst.Spec = semanticSpec
+	}
+	if hubOrigin {
+		scrubDGDInternalAnnotations(&dst.ObjectMeta)
+	}
 	convertDGDStatusTo(&src.Status, &dst.Status)
 	return nil
+}
+
+func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta1.DynamoGraphDeploymentSpec) {
+	hubComponents := make(map[string]v1beta1.DynamoComponentDeploymentSharedSpec, len(base.Components))
+	for _, comp := range base.Components {
+		hubComponents[comp.ComponentName] = comp
+	}
+
+	*base = *semantic.DeepCopy()
+	for i := range base.Components {
+		hubComp, ok := hubComponents[base.Components[i].ComponentName]
+		if !ok {
+			continue
+		}
+		if hubComp.PodTemplate != nil {
+			base.Components[i].PodTemplate = hubComp.PodTemplate.DeepCopy()
+		}
+		if base.Components[i].FrontendSidecar == nil && hubComp.FrontendSidecar != nil {
+			base.Components[i].FrontendSidecar = ptr.To(*hubComp.FrontendSidecar)
+		}
+		if base.Components[i].Experimental == nil && hubComp.Experimental != nil {
+			base.Components[i].Experimental = hubComp.Experimental.DeepCopy()
+		}
+	}
 }
 
 // ConvertFrom converts from the hub (v1beta1) DynamoGraphDeployment into this
@@ -130,6 +193,15 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
+
+	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec); ok && raw != "" {
+		if spec, ok := restoreDGDSpokeSpec(raw); ok {
+			dst.Spec = spec
+			scrubDGDInternalAnnotations(&dst.ObjectMeta)
+			convertDGDStatusFrom(&src.Status, &dst.Status)
+			return nil
+		}
+	}
 
 	dst.Spec.Annotations = maps.Clone(src.Spec.Annotations)
 	dst.Spec.Labels = maps.Clone(src.Spec.Labels)
@@ -189,10 +261,106 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			dst.Spec.Services[compSrc.ComponentName] = compDst
 		}
 	}
+	if v, ok := getAnnFromObj(&dst.ObjectMeta, annDGDNilServices); ok {
+		var nilServices []string
+		if err := json.Unmarshal([]byte(v), &nilServices); err == nil {
+			if dst.Spec.Services == nil {
+				dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(nilServices))
+			}
+			for _, name := range nilServices {
+				if _, exists := dst.Spec.Services[name]; !exists {
+					dst.Spec.Services[name] = nil
+				}
+			}
+		}
+		delAnnFromObj(&dst.ObjectMeta, annDGDNilServices)
+	}
 
 	convertDGDStatusFrom(&src.Status, &dst.Status)
 	scrubStaleDGDAnnotations(&dst.ObjectMeta, dst.Spec.Services)
+	if dgdNeedsHubSpecPreservation(&src.Spec) {
+		if data, err := marshalDGDHubSpec(&src.Spec); err == nil {
+			setAnnOnObj(&dst.ObjectMeta, annDGDHubSpec, string(data))
+		}
+	} else if !hasDGDInternalAnnotations(src.ObjectMeta.Annotations) {
+		setAnnOnObj(&dst.ObjectMeta, annDGDHubOrigin, annotationTrue)
+	}
 	return nil
+}
+
+func marshalDGDHubSpec(src *v1beta1.DynamoGraphDeploymentSpec) ([]byte, error) {
+	return marshalPreservedSpec(*src.DeepCopy(), func(spec *v1beta1.DynamoGraphDeploymentSpec, records *[]preservedRawJSON) {
+		for i := range spec.Components {
+			if spec.Components[i].EPPConfig != nil {
+				preserveEPPPluginParameters(spec.Components[i].EPPConfig.Config, fmt.Sprintf("components/%d/eppConfig/config", i), records)
+			}
+		}
+	})
+}
+
+func restoreDGDHubSpec(raw string) (v1beta1.DynamoGraphDeploymentSpec, bool) {
+	return restorePreservedSpec(raw, func(spec *v1beta1.DynamoGraphDeploymentSpec, records []preservedRawJSON) {
+		for i := range spec.Components {
+			if spec.Components[i].EPPConfig != nil {
+				restoreEPPPluginParameters(spec.Components[i].EPPConfig.Config, fmt.Sprintf("components/%d/eppConfig/config", i), records)
+			}
+		}
+	})
+}
+
+func marshalDGDSpokeSpec(src *DynamoGraphDeploymentSpec) ([]byte, error) {
+	return marshalPreservedSpec(*src.DeepCopy(), func(spec *DynamoGraphDeploymentSpec, records *[]preservedRawJSON) {
+		for name, svc := range spec.Services {
+			if svc != nil && svc.EPPConfig != nil {
+				preserveEPPPluginParameters(svc.EPPConfig.Config, fmt.Sprintf("services/%s/eppConfig/config", name), records)
+			}
+		}
+	})
+}
+
+func restoreDGDSpokeSpec(raw string) (DynamoGraphDeploymentSpec, bool) {
+	return restorePreservedSpec(raw, func(spec *DynamoGraphDeploymentSpec, records []preservedRawJSON) {
+		for name, svc := range spec.Services {
+			if svc != nil && svc.EPPConfig != nil {
+				restoreEPPPluginParameters(svc.EPPConfig.Config, fmt.Sprintf("services/%s/eppConfig/config", name), records)
+			}
+		}
+	})
+}
+
+func dgdNeedsHubSpecPreservation(src *v1beta1.DynamoGraphDeploymentSpec) bool {
+	for i := range src.Components {
+		if src.Components[i].PodTemplate != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDGDInternalAnnotations(annotations map[string]string) bool {
+	for key := range annotations {
+		if key == annDGDPVCs ||
+			key == annDGDNilServices ||
+			key == annDGDHubSpec ||
+			key == annDGDSpokeSpec ||
+			strings.HasPrefix(key, annDGDCompPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func scrubDGDInternalAnnotations(obj metav1.Object) {
+	for _, key := range []string{
+		annDGDPVCs,
+		annDGDNilServices,
+		annDGDHubSpec,
+		annDGDSpokeSpec,
+		annDGDHubOrigin,
+	} {
+		delAnnFromObj(obj, key)
+	}
+	scrubAnnotationsByPrefix(obj, annDGDCompPrefix)
 }
 
 // convertRestartTo / convertRestartFrom handle the Restart struct pair, which

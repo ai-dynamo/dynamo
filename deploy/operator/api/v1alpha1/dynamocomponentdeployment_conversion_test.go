@@ -115,6 +115,47 @@ func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	}
 }
 
+func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "pt-overlay", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "pt-overlay",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Name: "hub-only-template-name"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "worker:old"}},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	spoke.Spec.BackendFramework = backendFrameworkSGLang
+	spoke.Spec.ComponentType = string(v1beta1.ComponentTypePlanner)
+
+	got := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	if got.Spec.BackendFramework != backendFrameworkSGLang {
+		t.Fatalf("expected v1alpha1 backendFramework edit to win, got %q", got.Spec.BackendFramework)
+	}
+	if got.Spec.ComponentType != v1beta1.ComponentTypePlanner {
+		t.Fatalf("expected v1alpha1 componentType edit to win, got %q", got.Spec.ComponentType)
+	}
+	if got.Spec.PodTemplate == nil || got.Spec.PodTemplate.Name != "hub-only-template-name" {
+		t.Fatalf("expected hub-only podTemplate metadata to be preserved, got %#v", got.Spec.PodTemplate)
+	}
+}
+
 func TestDCD_RoundTrip_Experimental(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
@@ -282,6 +323,65 @@ func TestDCD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
+	}
+}
+
+func TestDCD_FromV1alpha1_PodTemplateDedicatedFields(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-dedicated", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				ComponentType: "worker",
+				ServiceName:   "pod-dedicated",
+				Resources: &Resources{
+					Requests: &ResourceItem{CPU: "2", Memory: "4Gi", GPU: "1"},
+				},
+				VolumeMounts: []VolumeMount{{Name: "model-pvc", MountPoint: "/models"}},
+			},
+		},
+	}
+
+	b := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(b); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(b); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+	if got.Spec.ExtraPodSpec != nil {
+		t.Fatalf("dedicated Resources/VolumeMounts should not come back as ExtraPodSpec: %#v", got.Spec.ExtraPodSpec)
+	}
+}
+
+func TestDCD_FromV1alpha1_EmptyExtraPodSpecDoesNotMaterializePodTemplate(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-extra", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				ComponentType: "worker",
+				ServiceName:   "empty-extra",
+				ExtraPodSpec:  &ExtraPodSpec{},
+			},
+		},
+	}
+
+	b := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(b); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if b.Spec.PodTemplate != nil {
+		t.Fatalf("empty ExtraPodSpec should not materialize podTemplate, got %#v", b.Spec.PodTemplate)
+	}
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(b); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
 
