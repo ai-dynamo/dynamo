@@ -11,7 +11,7 @@
 //! so that requests with the same image at the same global token position can still
 //! share the prefix blocks before the image.
 
-use dynamo_tokens::{SaltHash, compute_hash_v2};
+use dynamo_tokens::{SaltHash, compute_salt_hash_from_bytes};
 use serde::Serialize;
 
 use crate::error::KvHashingError;
@@ -46,5 +46,5 @@ pub(crate) fn compute_salt_hash(
     let lora_name = lora_name.filter(|s| !s.is_empty());
     let payload = SaltPayload { salt, lora_name };
     let bytes = serde_json::to_vec(&payload)?;
-    Ok(compute_hash_v2(&bytes, 0))
+    Ok(compute_salt_hash_from_bytes(&bytes))
 }

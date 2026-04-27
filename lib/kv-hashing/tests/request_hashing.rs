@@ -5,7 +5,7 @@
 
 use dynamo_kv_hashing::{
     KvHashingError, Request, RequestMmObjectInfo, SaltHash, Token, TokenBlockMmInfo,
-    compute_hash_v2,
+    compute_block_hash,
 };
 use dynamo_tokens::{TokenBlockSequence, Tokens};
 
@@ -15,13 +15,13 @@ fn req(
     salt: Option<&str>,
     mm: Vec<RequestMmObjectInfo>,
 ) -> Request {
-    Request::new(
-        tokens,
-        lora.map(|s| s.to_string()),
-        salt.map(|s| s.to_string()),
-        mm,
-    )
-    .expect("test fixture mm_info should validate")
+    Request::builder()
+        .tokens(tokens)
+        .lora_name(lora.map(|s| s.to_string()))
+        .salt(salt.map(|s| s.to_string()))
+        .mm_info(mm)
+        .build()
+        .expect("test fixture mm_info should validate")
 }
 
 const BS: u32 = 4;
@@ -182,7 +182,7 @@ fn mm_full_block() {
         expected.extend_from_slice(&0xDEADBEEF_DEADBEEFu64.to_le_bytes());
     }
     assert_eq!(expected.len(), 16 * 13);
-    let expected_block_hash = compute_hash_v2(&expected, salt);
+    let expected_block_hash = compute_block_hash(&expected, salt);
 
     let blocks = request.into_blocks(block_size).unwrap();
     assert_eq!(blocks.len(), 2);
@@ -307,8 +307,18 @@ fn request_new_rejects_invalid_mm_info() {
             length: 5,
         },
     ];
-    let err = Request::new(vec![0u32; 10], None, None, bad).unwrap_err();
+    let err = Request::builder()
+        .tokens(vec![0u32; 10])
+        .mm_info(bad)
+        .build()
+        .unwrap_err();
     assert!(matches!(err, KvHashingError::MmInfo(_)));
+}
+
+#[test]
+fn request_builder_requires_tokens() {
+    let err = Request::builder().build().unwrap_err();
+    assert!(matches!(err, KvHashingError::MissingField("tokens")));
 }
 
 // Sanity: TokenBlockMmInfo ↔ RequestMmObjectInfo conversions.

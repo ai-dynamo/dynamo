@@ -13,6 +13,7 @@ repository.workspace = true
 
 [dependencies]
 dynamo-tokens = { workspace = true }
+derive_builder = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
