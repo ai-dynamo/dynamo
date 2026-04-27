@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Dynamo vLLM runtime overlaid on the official DeepSeek-V4 vLLM image.
+# Shared image for all DeepSeek-V4 recipes (Flash, Pro, ...).
+#
+# Base: vllm/vllm-openai:deepseekv4-cu130 — ships vLLM from PR #40760
+# (zyongye/vllm:dsv4) with the DeepSeek-V4 kernels, tokenizer_mode, tool+reasoning
+# parsers, hybrid CSA+HCA attention, MTP speculative decoding, and FP4 indexer.
+#
+# We take pre-built dynamo artifacts (wheels, nats, etcd, NIXL, UCX, dynamo.vllm
+# python worker) from a locally-built Dynamo vLLM runtime image (produced via
+# <repo_root>/container/README.md) and layer them on top of the dsv4 vLLM image
+# without touching the vLLM install.
+#
+# Build (run from the repo root):
+#   docker build -f recipes/deepseek-v4-pro/container/Dockerfile.dsv4 \
+#     -t <your-registry>/vllm-dsv4:<tag> .
+#
+# See recipes/deepseek-v4-pro/container/README.md for build args and
+# troubleshooting.
+#
+# Both base images must be Python 3.12 (verified).
+
+# Default to the local tag produced by `container/render.py --framework vllm
+# --target runtime` + `docker build -t dynamo:latest-vllm-runtime ...`. Override
+# with --build-arg DYNAMO_SRC_IMAGE=... to use a published release tag instead.
+ARG DYNAMO_SRC_IMAGE=dynamo:latest-vllm-runtime
+ARG DSV4_BASE_IMAGE=vllm/vllm-openai:deepseekv4-cu130
+
+FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
+
+FROM ${DSV4_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Runtime deps dynamo needs that aren't in the vLLM image (etcd/nats are static
+# binaries we COPY; libibverbs/rdma-core are needed for NIXL's UCX transport).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        ca-certificates jq curl \
+    && apt list --upgradable 2>/dev/null | tail -n +2 | grep 'jammy-' | awk -F/ '{print $1}' | xargs -r apt-get install -y --only-upgrade \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- patch vLLM: drop unsupported topk=1024 from sparse attn indexer ---
+# from https://github.com/vllm-project/vllm/pull/40760/changes/3602f14f0e146b234be911d916e381b4e6a4dc0c
+# TODO: remove once https://github.com/vllm-project/vllm/pull/40760 lands in the base image.
+RUN sed -i 's/(512, 1024, 2048)/(512, 2048)/' \
+      /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer.py
+
+# --- static binaries ---
+COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
+ENV PATH=/usr/local/bin/etcd:${PATH}
+
+# --- UCX ---
+COPY --from=dynamo_src /usr/local/ucx /usr/local/ucx
+ENV PATH=/usr/local/ucx/bin:${PATH}
+
+# --- NIXL (C++ libs for KV transfer) ---
+COPY --from=dynamo_src /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+
+# --- install dynamo python wheels into the dsv4 image's system python ---
+# The dsv4 image uses system python3.12 with pip at /usr/local/lib/python3.12/dist-packages.
+# ai_dynamo_runtime is abi3 (cp310+), compatible with cp312.
+COPY --from=dynamo_src /opt/dynamo/wheelhouse /opt/dynamo/wheelhouse
+RUN pip install --no-cache-dir \
+        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl
+
+# --- dynamo python source (dynamo.vllm worker + common + mocker) ---
+# Bring the worker entrypoint tree so `python -m dynamo.vllm` resolves.
+COPY --from=dynamo_src /workspace/components/src/dynamo /workspace/components/src/dynamo
+ENV PYTHONPATH=/workspace/components/src:${PYTHONPATH:-}
+
+WORKDIR /workspace
+
+# --- dynamo runtime env tweaks ---
+# Keep vLLM's flashinfer sampler (enabled by default in 0.20+ but explicit here).
+ENV VLLM_USE_FLASHINFER_SAMPLER=1
+
+# Default to bash so the Dynamo CRD operator can exec `python3 -m dynamo.vllm`
+# via the manifest command/args rather than the vLLM api_server entrypoint.
+ENTRYPOINT []
+CMD ["bash"]

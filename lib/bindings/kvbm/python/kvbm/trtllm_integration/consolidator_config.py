@@ -8,21 +8,27 @@ Helper functions for KV Event Consolidator configuration for TensorRT-LLM.
 import logging
 import os
 
+from kvbm.utils import get_consolidator_mode, is_truthy
+
+__all__ = [
+    "get_consolidator_endpoints",
+    "get_consolidator_mode",
+    "is_truthy",
+    "should_enable_consolidator",
+]
+
 logger = logging.getLogger(__name__)
 
 
-def is_truthy(val: str) -> bool:
-    """
-    Check if a string represents a truthy value.
-    Truthy values: "1", "true", "on", "yes" (case-insensitive)
+def _get_connector_module(kv_connector_config) -> str | None:
+    """Extract connector_module from either a dict or a TRT-LLM config object."""
+    if kv_connector_config is None:
+        return None
 
-    Args:
-        val: The string value to check
+    if isinstance(kv_connector_config, dict):
+        return kv_connector_config.get("connector_module")
 
-    Returns:
-        True if the value is truthy, False otherwise
-    """
-    return val.lower() in ("1", "true", "on", "yes")
+    return getattr(kv_connector_config, "connector_module", None)
 
 
 def should_enable_consolidator(arg_map) -> bool:
@@ -48,22 +54,18 @@ def should_enable_consolidator(arg_map) -> bool:
         )
         return False
 
-    # Check if KVBM connector is enabled by extracting connector_module
-    # from kv_connector_config (works whether arg_map holds raw dicts or typed objects)
-    kv_connector_config = (
-        arg_map.get("kv_connector_config") if isinstance(arg_map, dict) else None
-    )
-    if kv_connector_config is None:
-        logger.warning(
-            "KV Event Consolidator is not enabled: no kv_connector_config found"
-        )
+    # Check if KVBM connector is enabled
+    if not isinstance(arg_map, dict):
+        logger.warning("KV Event Consolidator is not enabled: arg_map is not a dict")
         return False
 
-    if isinstance(kv_connector_config, dict):
-        connector_module = kv_connector_config.get("connector_module", "")
-    else:
-        # Access directly so AttributeError surfaces if the contract changes
-        connector_module = kv_connector_config.connector_module or ""
+    kv_connector_config = arg_map.get("kv_connector_config")
+    connector_module = _get_connector_module(kv_connector_config) or ""
+    if not connector_module:
+        logger.warning(
+            "KV Event Consolidator is not enabled: kv_connector_config has no connector_module"
+        )
+        return False
 
     has_kvbm_connector = "kvbm.trtllm_integration.connector" in connector_module
 

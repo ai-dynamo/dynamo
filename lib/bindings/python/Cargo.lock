@@ -522,24 +522,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.70.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
-dependencies = [
- "bitflags 2.11.1",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex",
- "syn",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
@@ -550,6 +532,24 @@ dependencies = [
  "itertools 0.13.0",
  "log",
  "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.2",
+ "shlex",
+ "syn",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1498,14 +1498,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -1566,9 +1566,9 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-protocols",
  "dynamo-runtime",
+ "dynamo-tokenizers",
  "dynamo-tokens",
  "either",
- "fastokens",
  "ffmpeg-next",
  "flate2",
  "futures",
@@ -1576,6 +1576,7 @@ dependencies = [
  "galil-seiferas",
  "hf-hub",
  "image",
+ "ipnet",
  "json-five",
  "memfile",
  "minijinja",
@@ -1595,7 +1596,6 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmp-serde",
- "rustc-hash 1.1.0",
  "rustls",
  "serde",
  "serde_json",
@@ -1603,7 +1603,6 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror 2.0.18",
- "tiktoken-rs",
  "tmq",
  "tokenizers",
  "tokio",
@@ -1625,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1641,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -1669,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dynamo-protocols",
@@ -1686,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1701,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1732,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1800,8 +1799,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-tokenizers"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fastokens",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "strum",
+ "tiktoken-rs",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-tokens"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2082,9 +2098,9 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-next"
-version = "7.1.0"
+version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da02698288e0275e442a47fc12ca26d50daf0d48b15398ba5906f20ac2e2a9f9"
+checksum = "f7c4bd5ab1ac61f29c634df1175d350ded29cf74c3c6d4f7030431a5ae3c7d5d"
 dependencies = [
  "bitflags 2.11.1",
  "ffmpeg-sys-next",
@@ -2093,11 +2109,11 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-sys-next"
-version = "7.1.3"
+version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad"
+checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
 dependencies = [
- "bindgen 0.70.1",
+ "bindgen 0.72.1",
  "cc",
  "libc",
  "num_cpus",
@@ -3321,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -7506,9 +7522,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "video-rs"
-version = "0.10.5"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "859aad7261bac267f90f9635ec9addba3b4bcb4bbb2edb03fec3e6b765657bee"
+checksum = "2633ec4c2a8aeb7c0e970f75ba99122a75841e9f7b34d5225366d0e61a870a8c"
 dependencies = [
  "ffmpeg-next",
  "tracing",

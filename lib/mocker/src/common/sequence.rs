@@ -164,12 +164,8 @@ impl ActiveSequence {
 
     /// Positional lineage hashes for all fully-tokenised blocks in the sequence.
     /// Mirrors `block_hashes()` but returns the PLH identity used by kvbm-logical.
-    pub fn positional_lineage_hashes(&self) -> Vec<PositionalLineageHash> {
-        self.tokens
-            .blocks()
-            .iter()
-            .map(|block| block.positional_lineage_hash())
-            .collect()
+    pub fn positional_lineage_hashes(&self) -> &[PositionalLineageHash] {
+        &self.plhs
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
@@ -325,7 +321,7 @@ impl ActiveSequence {
             .rev()
             .map(|block| match block {
                 UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Destroy(vec![UniqueBlock::PartialBlock(*uuid)])
+                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
                 }
                 UniqueBlock::FullBlock(hash) => {
                     MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
@@ -425,13 +421,13 @@ mod tests {
         }
     }
 
-    fn assert_destroy_partial(signal: &MoveBlock) {
+    fn assert_deref_partial(signal: &MoveBlock) {
         match signal {
-            MoveBlock::Destroy(blocks) => {
+            MoveBlock::Deref(blocks) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
-            _ => panic!("Expected MoveBlock::Destroy for partial block"),
+            _ => panic!("Expected MoveBlock::Deref for partial block"),
         }
     }
 
@@ -587,12 +583,12 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Destroy and Deref signals
+        // Generate last token - we reach max_output_tokens, should trigger Deref signals
         let signals_last = seq.generate();
         assert_eq!(signals_last.len(), 2);
 
-        // First signal should be Destroy for the partial block
-        assert_destroy_partial(&signals_last[0]);
+        // First signal should be Deref for the partial block
+        assert_deref_partial(&signals_last[0]);
 
         // Second signal should be Deref for the full block
         assert_deref_full(&signals_last[1]);

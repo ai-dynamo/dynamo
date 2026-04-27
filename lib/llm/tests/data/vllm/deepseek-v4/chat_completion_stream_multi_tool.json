@@ -1,0 +1,18 @@
+{
+  "request_id": "deepseek-v4-multi-tool-test",
+  "expected_output": {"normal_content": "", "reasoning_content": "The user wants to check the weather in Beijing and Shanghai, I need to call the get_current_weather tool to get this information.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_current_weather", "arguments": "{\"location\": \"Beijing\", \"format\": \"celsius\"}"}}, {"id": "call_2", "type": "function", "function": {"name": "get_current_weather", "arguments": "{\"location\": \"Shanghai\", \"format\": \"celsius\"}"}}]},
+  "input_stream": [
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<think>The user wants to check the weather in Beijing and Shanghai, I need to call the get_current_weather tool to get this information.</think>","role":"assistant","reasoning_content":"The user wants to check the weather in Beijing and Shanghai, I need to call the get_current_weather tool to get this information."}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜tool_calls>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜invoke name=\"get_current_weather\">\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"location\" string=\"true\">Beijing</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"format\" string=\"true\">celsius</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜invoke>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜invoke name=\"get_current_weather\">\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"location\" string=\"true\">Shanghai</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"format\" string=\"true\">celsius</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜invoke>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜tool_calls>","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-multi-tool","choices":[{"index":0,"delta":{"content":null,"role":"assistant"},"finish_reason":"tool_calls"}]}}
+  ]
+}
