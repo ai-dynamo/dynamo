@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 pub use crate::protocols::common::timing::TimingInfo;
+pub use dynamo_agents::context::AgentContext;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
@@ -325,6 +326,12 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
+
+    /// Agent-provided request identity metadata.
+    /// This describes what workflow/program the request belongs to.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<AgentContext>,
 
     /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
     #[builder(default, setter(strip_option))]
@@ -686,6 +693,40 @@ mod tests {
             "token_ids": [11u32, 22u32, 33u32],
             "routed_experts": {"layer_0": [1, 3]},
         })
+    }
+
+    #[test]
+    fn test_agent_context_serde() {
+        let json = r#"{
+            "agent_context": {
+                "workflow_type_id": "deep_research:v1",
+                "workflow_id": "run-123",
+                "program_id": "run-123:researcher-0",
+                "parent_program_id": "run-123:orchestrator"
+            }
+        }"#;
+
+        let nvext: NvExt = serde_json::from_str(json).unwrap();
+        let agent_context = nvext.agent_context.expect("agent_context should parse");
+        assert_eq!(agent_context.workflow_type_id, "deep_research:v1");
+        assert_eq!(agent_context.workflow_id, "run-123");
+        assert_eq!(agent_context.program_id, "run-123:researcher-0");
+        assert_eq!(
+            agent_context.parent_program_id.as_deref(),
+            Some("run-123:orchestrator")
+        );
+    }
+
+    #[test]
+    fn test_agent_context_missing_required_field_fails() {
+        let json = r#"{
+            "agent_context": {
+                "workflow_type_id": "deep_research:v1",
+                "program_id": "run-123:researcher-0"
+            }
+        }"#;
+
+        assert!(serde_json::from_str::<NvExt>(json).is_err());
     }
 
     // ---------------------------------------------------------------------

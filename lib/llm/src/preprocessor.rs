@@ -45,6 +45,7 @@ use crate::protocols::common::preprocessor::{
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
+use dynamo_agents::trace::{AgentRequestMetrics, WorkerInfo};
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
@@ -318,6 +319,7 @@ impl OpenAIPreprocessor {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
+            builder.agent_context(nvext.agent_context.clone());
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -1395,6 +1397,9 @@ impl
             .preprocess_request(&request, tracker.as_deref())
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
+        let agent_context = common_request.agent_context.clone();
+        let request_model = common_request.model.clone();
+        let request_tracker = tracker.clone();
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1464,6 +1469,41 @@ impl
             &self.formatter,
             &self.tokenizer,
         );
+
+        let final_stream = if dynamo_agents::trace::is_enabled()
+            && let (Some(agent_context), Some(tracker)) = (agent_context, request_tracker)
+        {
+            let request_id = request_id.clone();
+            let (stream, done_fut) =
+                dynamo_agents::trace::stream::notify_on_completion(final_stream);
+            tokio::spawn(async move {
+                done_fut.await;
+                let worker = tracker.get_worker_info().map(|worker| WorkerInfo {
+                    prefill_worker_id: worker.prefill_worker_id,
+                    prefill_dp_rank: worker.prefill_dp_rank,
+                    decode_worker_id: worker.decode_worker_id,
+                    decode_dp_rank: worker.decode_dp_rank,
+                });
+                dynamo_agents::trace::emit_request_end(
+                    agent_context,
+                    AgentRequestMetrics {
+                        request_id,
+                        model: request_model,
+                        input_tokens: tracker.isl_tokens().map(|v| v as u64),
+                        output_tokens: Some(tracker.osl_tokens()),
+                        cached_tokens: tracker.cached_tokens().map(|v| v as u64),
+                        request_received_ms: tracker.request_received_epoch_ms(),
+                        ttft_ms: tracker.ttft_ms(),
+                        total_time_ms: tracker.total_time_ms(),
+                        queue_depth: tracker.router_queue_depth(),
+                        worker,
+                    },
+                );
+            });
+            stream
+        } else {
+            final_stream
+        };
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);

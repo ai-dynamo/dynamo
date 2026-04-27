@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "lib/agents",
     "lib/llm",
     "lib/runtime",
     "lib/config",
@@ -37,6 +38,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
+dynamo-agents = { path = "lib/agents", version = "1.1.0" }
 dynamo-runtime = { path = "lib/runtime", version = "1.1.0" }
 dynamo-llm = { path = "lib/llm", version = "1.1.0" }
 dynamo-config = { path = "lib/config", version = "1.1.0" }

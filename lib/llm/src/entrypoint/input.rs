@@ -98,6 +98,8 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
+    dynamo_agents::trace::init_from_env().await?;
+
     // Initialize audit bus + sink workers (off hot path; fan-out supported)
     if crate::audit::config::policy().enabled {
         let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
