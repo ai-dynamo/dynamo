@@ -41,6 +41,11 @@ impl RoutingOccupancyState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        let _guard = self.exact_selection_lock.lock().await;
+        instance_ids.iter().min_by_key(|&&id| self.load(id)).copied()
+    }
+
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
         let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;

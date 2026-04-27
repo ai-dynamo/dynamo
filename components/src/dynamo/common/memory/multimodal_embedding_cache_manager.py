@@ -104,6 +104,10 @@ class MultimodalEmbeddingCacheManager:
         self._hits += 1
         return self._cache[key]
 
+    def keys(self) -> list[str]:
+        """Return the current cache keys in LRU order."""
+        return list(self._cache.keys())
+
     def set(self, key: str, entry: CachedEmbedding) -> bool:
         """
         Store a cached embedding in the cache.

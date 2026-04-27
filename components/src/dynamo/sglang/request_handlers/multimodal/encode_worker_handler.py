@@ -26,6 +26,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang._compat import mm_encode
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -69,10 +70,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         self,
         config: Config,
         pd_worker_client: Client,
+        cache_publisher: MultimodalEmbeddingCachePublisher | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
+        self._cache_publisher = cache_publisher
         self.model = config.server_args.model_path
 
         if MMEncoder is None:
@@ -138,6 +141,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             capacity_bytes = int(capacity_gb * 1024**3)
             self._embedding_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
             logger.info("Multimodal embedding cache enabled: %.2f GB", capacity_gb)
+
+    def _publish_cache_snapshot(self) -> None:
+        if self._embedding_cache is None or self._cache_publisher is None:
+            return
+        self._cache_publisher.publish(self._embedding_cache.keys())
 
     def cleanup(self) -> None:
         pass
@@ -248,6 +256,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 )
                 self._embedding_cache.set(self._url_hash(url), entry)
                 new_entries[orig_idx] = entry
+            self._publish_cache_snapshot()
 
         # Reassemble results in original URL order
         all_grid_thw: list = []

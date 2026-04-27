@@ -441,6 +441,35 @@ class WorkerMetricsPublisher:
         """
         ...
 
+class MultimodalEmbeddingCachePublisher:
+    """
+    A publisher for multimodal encode-worker cache state.
+    """
+
+    ...
+
+    def __init__(self) -> None:
+        """
+        Create a `MultimodalEmbeddingCachePublisher` object.
+        """
+
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
+        """
+        Initialize the NATS endpoint for publishing multimodal cache state.
+
+        Args:
+            endpoint: The endpoint to extract component information from.
+        """
+
+    def publish(self, cache_keys: list[str]) -> None:
+        """
+        Publish a full snapshot of cache keys currently held by the worker.
+
+        Args:
+            cache_keys: Full list of worker-local cache keys.
+        """
+        ...
+
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information
