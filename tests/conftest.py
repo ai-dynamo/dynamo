@@ -451,18 +451,22 @@ def predownload_models(pytestconfig, _models_dir_env):
                 m,
             )
         t_lock = time.perf_counter()
+        original_cache = pytestconfig._original_hf_hub_cache
+        models_dir = pytestconfig._models_dir_value
         with FileLock(_download_lock_path):
             if missing:
-                original_cache = pytestconfig._original_hf_hub_cache
-                models_dir = pytestconfig._models_dir_value
                 logging.info(
                     f"Downloading {len(missing)} models missing from --models-dir cache "
                     f"to writable cache {original_cache}\nModels: {missing}"
                 )
                 download_models(model_list=missing, cache_dir=original_cache)
-                if original_cache != os.environ.get("HF_HUB_CACHE"):
-                    _merge_models_dir_into_writable_cache(models_dir, original_cache)
-                    os.environ["HF_HUB_CACHE"] = original_cache
+            # Always redirect HF_HUB_CACHE to the writable NVMe cache and symlink
+            # the S3 models into it, even when all models are already present.
+            # HF hub writes revision pointers (e.g. refs/<commit-sha>) at request
+            # time even in offline mode; those writes fail on a read-only S3 mount.
+            if original_cache != os.environ.get("HF_HUB_CACHE"):
+                _merge_models_dir_into_writable_cache(models_dir, original_cache)
+                os.environ["HF_HUB_CACHE"] = original_cache
         lock_elapsed = time.perf_counter() - t_lock
         print(
             f"[predownload_models] Download phase complete in {lock_elapsed:.1f}s "

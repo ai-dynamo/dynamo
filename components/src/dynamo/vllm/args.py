@@ -9,6 +9,8 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
+import huggingface_hub
+
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 
@@ -117,6 +119,40 @@ def parse_args(argv: list[str] | None = None) -> Config:
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
+
+    # In offline mode, rewrite the HF repo ID to the local snapshot path so vLLM's
+    # create_model_config() does not call snapshot_download() with local_files_only=True
+    # (which requires refs/main and raises LocalEntryNotFoundError when it is absent).
+    # Mirrors the same rewrite done in omni/args.py for multimodal workers.
+    if (
+        huggingface_hub.constants.HF_HUB_OFFLINE
+        and dynamo_config.model
+        and not os.path.exists(dynamo_config.model)
+    ):
+        try:
+            from vllm.transformers_utils.repo_utils import get_model_path
+
+            model_id = dynamo_config.model
+            local_path = get_model_path(
+                model_id, getattr(engine_config, "revision", None)
+            )
+            if local_path != model_id:
+                if dynamo_config.served_model_name is None:
+                    dynamo_config.served_model_name = model_id
+                dynamo_config.model = local_path
+                dynamo_config.engine_args.model = local_path
+                logger.info(
+                    "HF_HUB_OFFLINE is True; replaced model_id [%s] with local snapshot path [%s]",
+                    model_id,
+                    local_path,
+                )
+        except Exception as exc:
+            logger.warning(
+                "HF_HUB_OFFLINE is True but could not resolve local snapshot path for '%s': %s",
+                dynamo_config.model,
+                exc,
+            )
+
     return dynamo_config
 
 

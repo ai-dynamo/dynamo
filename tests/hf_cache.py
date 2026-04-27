@@ -224,6 +224,15 @@ def _is_complete_in_hf_cache(model_dir: Path) -> bool:
 
     A directory that exists but lacks snapshots/ (e.g. from a partial download or
     a broken cache seed) would pass a plain .exists() check yet fail at load time.
+    refs/ must also be present: snapshot_download() resolves the "main" revision by
+    reading refs/main; without it, local_files_only=True raises LocalEntryNotFoundError.
     """
     snapshots = model_dir / "snapshots"
-    return model_dir.is_dir() and snapshots.is_dir() and any(snapshots.iterdir())
+    refs = model_dir / "refs"
+    return (
+        model_dir.is_dir()
+        and snapshots.is_dir()
+        and any(snapshots.iterdir())
+        and refs.is_dir()
+        and any(refs.iterdir())
+    )
