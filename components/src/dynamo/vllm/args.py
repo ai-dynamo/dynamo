@@ -38,7 +38,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     custom_jinja_template: Optional[str] = None
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     enable_local_indexer: bool = True
     use_kv_events: bool
 
