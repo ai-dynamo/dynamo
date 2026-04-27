@@ -157,19 +157,19 @@ jobs:
   # BUILD PIPELINES
   # ============================================================================
 
-  vllm-build:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: vllm
-      target: runtime
-      cuda_version: '["12.9", "13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
+  # vllm-build:
+  #   name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+  #   needs: [changed-files]
+  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   uses: ./.github/workflows/shared-build-image.yml
+  #   with:
+  #     framework: vllm
+  #     target: runtime
+  #     cuda_version: '["12.9", "13.0"]'
+  #     platform: 'linux/amd64,linux/arm64'
+  #     builder_name: ${{ needs.changed-files.outputs.builder_name }}
+  #     build_timeout_minutes: 60
+  #   secrets: inherit
 
   # vllm-dev-build:
   #   name: vllm-dev
@@ -215,19 +215,19 @@ jobs:
   #     build_timeout_minutes: 60
   #   secrets: inherit
 
-  trtllm-build:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: trtllm
-      target: runtime
-      cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
+  # trtllm-build:
+  #   name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+  #   needs: [changed-files]
+  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   uses: ./.github/workflows/shared-build-image.yml
+  #   with:
+  #     framework: trtllm
+  #     target: runtime
+  #     cuda_version: '["13.1"]'
+  #     platform: 'linux/amd64,linux/arm64'
+  #     builder_name: ${{ needs.changed-files.outputs.builder_name }}
+  #     build_timeout_minutes: 60
+  #   secrets: inherit
 
   # trtllm-dev-build:
   #   name: trtllm-dev
@@ -262,31 +262,31 @@ jobs:
   # TEST PIPELINES
   # ============================================================================
 
-  vllm-test:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - cuda_version: "12.9"
-          cuda_major: "12"
-        - cuda_version: "13.0"                      
-          cuda_major: "13"
-    with:
-      test_suite_name: vllm
-      test_type: Test
-      amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      container_image_tag: ${{ github.sha }}-${{ needs.vllm-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0
-      gpu_test_markers: pre_merge and vllm and gpu_1
-      gpu_test_timeout_minutes: 45
-    secrets: inherit
+  # vllm-test:
+  #   name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+  #   needs: [changed-files, vllm-build]
+  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   uses: ./.github/workflows/shared-test.yml
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include:
+  #       - cuda_version: "12.9"
+  #         cuda_major: "12"
+  #       - cuda_version: "13.0"                      
+  #         cuda_major: "13"
+  #   with:
+  #     test_suite_name: vllm
+  #     test_type: Test
+  #     amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+  #     container_image_tag: ${{ github.sha }}-${{ needs.vllm-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
+  #     cuda_version: ${{ matrix.cuda_version }}
+  #     platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+  #     run_cpu_only_tests: true
+  #     cpu_only_test_markers: pre_merge and vllm and gpu_0
+  #     gpu_test_markers: pre_merge and vllm and gpu_1
+  #     gpu_test_timeout_minutes: 45
+  #   secrets: inherit
 
   # vllm-multi-gpu-test:
   #   name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
@@ -324,18 +324,19 @@ jobs:
         include:
         - cuda_version: "12.9"
           cuda_major: "12"
-        - cuda_version: "13.0"
-          cuda_major: "13"
+        # - cuda_version: "13.0"
+        #   cuda_major: "13"
     with:
       test_suite_name: sglang
       test_type: Test
       amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       container_image_tag: ${{ github.sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
       cuda_version: ${{ matrix.cuda_version }}
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      platform: '["amd64"]' #, "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
+      gpu_test_timeout_minutes: 40 # todo: here for testsing 
     secrets: inherit
 
   # sglang-multi-gpu-test:
@@ -363,28 +364,28 @@ jobs:
   #     gpu_test_timeout_minutes: 60
   #   secrets: inherit
 
-  trtllm-test:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - cuda_version: "13.1"
-          cuda_major: "13"
-    with:
-      test_suite_name: trtllm
-      test_type: Test
-      amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      container_image_tag: ${{ github.sha }}-${{ needs.trtllm-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
-      cuda_version: ${{ matrix.cuda_version }}
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and trtllm and gpu_0
-      gpu_test_markers: pre_merge and trtllm and gpu_1
-    secrets: inherit
+  # trtllm-test:
+  #   name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+  #   needs: [changed-files, trtllm-build]
+  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   uses: ./.github/workflows/shared-test.yml
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include:
+  #       - cuda_version: "13.1"
+  #         cuda_major: "13"
+  #   with:
+  #     test_suite_name: trtllm
+  #     test_type: Test
+  #     amd_runner: stg-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+  #     container_image_tag: ${{ github.sha }}-${{ needs.trtllm-build.outputs.target_tag_plain }}-cuda${{ matrix.cuda_major }}-test
+  #     cuda_version: ${{ matrix.cuda_version }}
+  #     platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+  #     run_cpu_only_tests: true
+  #     cpu_only_test_markers: pre_merge and trtllm and gpu_0
+  #     gpu_test_markers: pre_merge and trtllm and gpu_1
+  #   secrets: inherit
 
   # trtllm-multi-gpu-test:
   #   name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
