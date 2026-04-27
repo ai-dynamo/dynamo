@@ -13,6 +13,7 @@
 mod active;
 mod inactive;
 mod reset;
+mod store;
 
 #[cfg(test)]
 pub mod tests;
