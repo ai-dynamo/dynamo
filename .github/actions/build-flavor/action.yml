@@ -260,11 +260,12 @@ runs:
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
-        TEST_CACHE_TAG="test-${PLAIN_TAG}-cache"
-        CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${TEST_CACHE_TAG}"
-        CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${PLAIN_TAG}-cache"
-        CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PLAIN_TAG}-cache"
+        IMAGE_VARIANT="${{ steps.calculate-target-tag.outputs.image_variant_label }}"
+        NORMAL_CACHE_TAG="${{ inputs.framework }}-${IMAGE_VARIANT}-cache"
+        TEST_CACHE_TAG="test-${NORMAL_CACHE_TAG}"
+        CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${NORMAL_CACHE_TAG}"
+        CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${NORMAL_CACHE_TAG}"
+        CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${TEST_CACHE_TAG}"
         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
           CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${TEST_CACHE_TAG},mode=max"
         fi
