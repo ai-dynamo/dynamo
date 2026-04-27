@@ -75,6 +75,16 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
+# The upstream lmsysorg/sglang v0.5.10.post1 runtime image bundles the mooncake
+# python engine (`.so`) but does not declare its runtime apt dep libjsoncpp25,
+# so `from mooncake.engine import TransferEngine` fails with
+# `ImportError: libjsoncpp.so.25: cannot open shared object file`.
+# TODO: re-check whether this apt install is still needed after upgrading sglang
+# past v0.5.10.post1 — upstream may fix the packaging.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libjsoncpp25 && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
