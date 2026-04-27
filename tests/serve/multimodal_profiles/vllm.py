@@ -32,6 +32,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=340,
                 single_gpu=True,
+                num_system_ports=2,
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
@@ -124,6 +125,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=340,
                 gpu_marker="gpu_4",
+                num_system_ports=2,
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],

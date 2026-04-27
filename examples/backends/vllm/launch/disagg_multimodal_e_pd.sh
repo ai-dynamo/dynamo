@@ -94,9 +94,14 @@ else
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
 fi
 
+# Each worker needs a unique DYN_SYSTEM_PORT so the Rust system status server
+# can bind without collision. In CI the test framework supplies DYN_SYSTEM_PORT1/2;
+# fallback values keep the script usable outside the test framework.
+unset DYN_SYSTEM_PORT
+
 # Start encode worker
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
-CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
   --enable-multimodal \
@@ -106,7 +111,7 @@ python -m dynamo.vllm \
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
 echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)..."
-CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
   --enable-multimodal \
