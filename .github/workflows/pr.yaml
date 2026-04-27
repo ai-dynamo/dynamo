@@ -70,6 +70,7 @@ jobs:
       - trtllm-copy-to-acr
       - planner-build
       - planner-test
+      - frontend-build
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -391,7 +392,6 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
-      cpu_parallel_mode: none
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: '2'
       run_gpu_tests: false

@@ -526,7 +526,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: always() && failure()
+    if: always()
     needs: [vllm-test, sglang-test, trtllm-test, vllm-multi-gpu-test, sglang-multi-gpu-test, trtllm-multi-gpu-test]
     permissions:
       contents: read
