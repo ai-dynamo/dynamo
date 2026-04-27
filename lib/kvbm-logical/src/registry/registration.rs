@@ -13,7 +13,7 @@ use crate::blocks::{
     state::{Registered, Reset, Staged},
 };
 use crate::metrics::BlockPoolMetrics;
-use crate::pools::InactivePool;
+use crate::pools::BlockStore;
 
 use std::any::TypeId;
 use std::sync::{Arc, Weak};
@@ -23,7 +23,7 @@ impl BlockRegistrationHandle {
         &self,
         mut block: CompleteBlock<T>,
         duplication_policy: BlockDuplicationPolicy,
-        inactive_pool: &InactivePool<T>,
+        store: &BlockStore<T>,
         metrics: Option<&BlockPoolMetrics>,
     ) -> Arc<dyn RegisteredBlock<T>> {
         assert_eq!(
@@ -42,7 +42,7 @@ impl BlockRegistrationHandle {
             block_id,
             reset_return_fn,
             duplication_policy,
-            inactive_pool,
+            store,
             metrics,
         )
     }
@@ -82,18 +82,18 @@ fn register_block_inner<T: BlockMetadata + Sync>(
     block_id: crate::BlockId,
     reset_return_fn: Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
     duplication_policy: BlockDuplicationPolicy,
-    inactive_pool: &InactivePool<T>,
+    store: &BlockStore<T>,
     metrics: Option<&BlockPoolMetrics>,
 ) -> Arc<dyn RegisteredBlock<T>> {
-    let pool_return_fn = inactive_pool.return_fn();
+    let pool_return_fn = store.inactive_return_fn();
 
     // CRITICAL: Check for existing blocks BEFORE registering.
-    // register()/register_with_handle() calls mark_present::<T>() which would make
+    // register_with_handle() calls mark_present::<T>() which would make
     // has_block::<T>() always return true.
     let attachments = handle.inner.attachments.lock();
 
     // Check for existing block (handles race condition with retry loop)
-    if let Some(existing_primary) = try_find_existing_block(handle, inactive_pool, &attachments) {
+    if let Some(existing_primary) = try_find_existing_block(handle, store, &attachments) {
         // Check if same block_id (shouldn't happen)
         if existing_primary.block_id() == block_id {
             panic!("Attempted to register block with same block_id as existing");
@@ -124,7 +124,7 @@ fn register_block_inner<T: BlockMetadata + Sync>(
         }
     }
 
-    // No existing block - register and create new primary
+    // No existing block — register and create new primary
     drop(attachments);
     let registered_block = block.register_with_handle(handle.clone());
     let primary_arc = PrimaryBlock::new_attached(Arc::new(registered_block), pool_return_fn);
@@ -133,10 +133,10 @@ fn register_block_inner<T: BlockMetadata + Sync>(
 }
 
 /// Try to find an existing block with the same sequence hash.
-/// Handles race conditions where block may be transitioning between pools.
+/// Handles race conditions where the block may be transitioning between pools.
 fn try_find_existing_block<T: BlockMetadata + Sync>(
     handle: &BlockRegistrationHandle,
-    inactive_pool: &InactivePool<T>,
+    store: &BlockStore<T>,
     attachments: &AttachmentStore,
 ) -> Option<Arc<PrimaryBlock<T>>> {
     let type_id = TypeId::of::<Weak<Block<T, Registered>>>();
@@ -169,10 +169,11 @@ fn try_find_existing_block<T: BlockMetadata + Sync>(
             return Some(existing_primary);
         }
 
-        // Try inactive pool - this acquires the inactive pool lock.
-        // find_block_as_primary uses new_unattached because we hold the attachments lock.
-        // The caller (register_block_inner) calls store_weak_refs after dropping the lock.
-        if let Some(promoted) = inactive_pool.find_block_as_primary(handle.seq_hash(), false) {
+        // Try inactive pool — this acquires the store lock.
+        // find_inactive_as_primary uses new_unattached because we hold the
+        // attachments lock. The caller (register_block_inner) calls
+        // store_weak_refs after dropping the lock.
+        if let Some(promoted) = store.find_inactive_as_primary(handle.seq_hash(), false) {
             tracing::debug!(
                 seq_hash = %handle.seq_hash(),
                 block_id = promoted.block_id(),
@@ -181,7 +182,7 @@ fn try_find_existing_block<T: BlockMetadata + Sync>(
             return Some(promoted);
         }
 
-        // Block is present but not found in either pool - it's transitioning.
+        // Block is present but not found in either pool — it's transitioning.
         retry_count += 1;
         if retry_count >= MAX_RETRIES {
             tracing::warn!(
@@ -192,7 +193,6 @@ fn try_find_existing_block<T: BlockMetadata + Sync>(
             return None;
         }
 
-        // Brief yield to allow other thread to complete transition
         std::hint::spin_loop();
     }
 }

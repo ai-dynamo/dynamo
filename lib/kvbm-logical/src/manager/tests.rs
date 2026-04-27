@@ -1757,8 +1757,8 @@ mod capacity_lifecycle_tests {
 
         // Allocate, complete, register all 32
         let immutable = allocate_complete_register_all(&manager, 32, 5000);
-        assert_eq!(manager.inactive_pool.len(), 0);
-        assert_eq!(manager.reset_pool.len(), 0);
+        assert_eq!(manager.store.inactive_len(), 0);
+        assert_eq!(manager.store.reset_len(), 0);
 
         let snap = manager.metrics.snapshot();
         assert_eq!(snap.reset_pool_size, 0);
@@ -1766,8 +1766,8 @@ mod capacity_lifecycle_tests {
 
         // Drop all ImmutableBlocks → should all land in inactive pool
         drop(immutable);
-        assert_eq!(manager.inactive_pool.len(), 32);
-        assert_eq!(manager.reset_pool.len(), 0);
+        assert_eq!(manager.store.inactive_len(), 32);
+        assert_eq!(manager.store.reset_len(), 0);
 
         // Check metrics
         let snap = manager.metrics.snapshot();
@@ -1801,13 +1801,13 @@ mod capacity_lifecycle_tests {
 
         // Allocate, register all 16
         let immutable = allocate_complete_register_all(&manager, 16, 6000);
-        assert_eq!(manager.reset_pool.len(), 0);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 0);
+        assert_eq!(manager.store.inactive_len(), 0);
 
         // Drop all → inactive pool
         drop(immutable);
-        assert_eq!(manager.inactive_pool.len(), 16);
-        assert_eq!(manager.reset_pool.len(), 0);
+        assert_eq!(manager.store.inactive_len(), 16);
+        assert_eq!(manager.store.reset_len(), 0);
 
         let snap = manager.metrics.snapshot();
         assert_eq!(snap.inactive_pool_size, 16);
@@ -1815,8 +1815,8 @@ mod capacity_lifecycle_tests {
 
         // Allocate 16 again (evicts from inactive)
         let mutable = manager.allocate_blocks(16).expect("second allocate failed");
-        assert_eq!(manager.inactive_pool.len(), 0);
-        assert_eq!(manager.reset_pool.len(), 0);
+        assert_eq!(manager.store.inactive_len(), 0);
+        assert_eq!(manager.store.reset_len(), 0);
 
         let snap = manager.metrics.snapshot();
         assert_eq!(snap.inactive_pool_size, 0);
@@ -1824,8 +1824,8 @@ mod capacity_lifecycle_tests {
 
         // Drop mutable blocks → reset pool
         drop(mutable);
-        assert_eq!(manager.reset_pool.len(), 16);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 16);
+        assert_eq!(manager.store.inactive_len(), 0);
 
         // Check metrics
         let snap = manager.metrics.snapshot();
@@ -1844,13 +1844,13 @@ mod capacity_lifecycle_tests {
         let manager = create_backend_manager(16, |b| b.with_lru_backend());
 
         let mutable = manager.allocate_blocks(16).expect("allocate failed");
-        assert_eq!(manager.reset_pool.len(), 0);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 0);
+        assert_eq!(manager.store.inactive_len(), 0);
 
         // Drop all mutable blocks → reset pool
         drop(mutable);
-        assert_eq!(manager.reset_pool.len(), 16);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 16);
+        assert_eq!(manager.store.inactive_len(), 0);
 
         let snap = manager.metrics.snapshot();
         assert_eq!(snap.inflight_mutable, 0);
@@ -1874,12 +1874,12 @@ mod capacity_lifecycle_tests {
                 mb.complete(&tb).expect("complete failed")
             })
             .collect();
-        assert_eq!(manager.reset_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 0);
 
         // Drop all CompleteBlocks (not registered) → reset pool
         drop(complete);
-        assert_eq!(manager.reset_pool.len(), 16);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 16);
+        assert_eq!(manager.store.inactive_len(), 0);
 
         let snap = manager.metrics.snapshot();
         assert_eq!(snap.stagings, 16);
@@ -1910,7 +1910,7 @@ mod capacity_lifecycle_tests {
             let group_a: Vec<_> = mutable_iter.by_ref().take(8).collect();
             drop(group_a);
         }
-        assert_eq!(manager.reset_pool.len(), 8);
+        assert_eq!(manager.store.reset_len(), 8);
         assert_eq!(manager.metrics.snapshot().reset_pool_size, 8);
 
         // Group B (8): complete, drop as CompleteBlocks
@@ -1926,7 +1926,7 @@ mod capacity_lifecycle_tests {
                 .collect();
             drop(group_b);
         }
-        assert_eq!(manager.reset_pool.len(), 16);
+        assert_eq!(manager.store.reset_len(), 16);
         assert_eq!(manager.metrics.snapshot().reset_pool_size, 16);
 
         // Group C (8): complete, register, hold ImmutableBlocks
@@ -1938,12 +1938,12 @@ mod capacity_lifecycle_tests {
             })
             .collect();
         let group_c_immutable = manager.register_blocks(group_c_complete);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.inactive_len(), 0);
 
         // Drop Group C → inactive pool
         drop(group_c_immutable);
-        assert_eq!(manager.inactive_pool.len(), 8);
-        assert_eq!(manager.reset_pool.len(), 16);
+        assert_eq!(manager.store.inactive_len(), 8);
+        assert_eq!(manager.store.reset_len(), 16);
 
         // Check totals
         assert_eq!(manager.available_blocks(), 24);
@@ -1973,7 +1973,7 @@ mod capacity_lifecycle_tests {
         // Drop all → all go to level 0 (cold). With old div_ceil(4)=16
         // per-level capacity this would panic at block 17.
         drop(immutable);
-        assert_eq!(manager.inactive_pool.len(), 64);
+        assert_eq!(manager.store.inactive_len(), 64);
 
         let snap = manager.metrics.snapshot();
         assert_eq!(snap.evictions, 0);
@@ -2022,11 +2022,11 @@ mod capacity_lifecycle_tests {
 
         // Drop all → distributed across 4 levels
         drop(immutable);
-        assert_eq!(manager.inactive_pool.len(), 32);
+        assert_eq!(manager.store.inactive_len(), 32);
 
         // Allocate 32 again → evicts from all levels
         let mutable = manager.allocate_blocks(32).expect("eviction allocate");
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.inactive_len(), 0);
         drop(mutable);
 
         let snap = manager.metrics.snapshot();
@@ -2056,7 +2056,7 @@ mod capacity_lifecycle_tests {
             let immutable = allocate_complete_register_all(&manager, 16, 11000);
             drop(immutable);
         }
-        assert_eq!(manager.inactive_pool.len(), 16);
+        assert_eq!(manager.store.inactive_len(), 16);
         let snap = m.snapshot();
         assert_eq!(snap.inactive_pool_size, 16);
         assert_eq!(snap.reset_pool_size, 0);
@@ -2071,8 +2071,8 @@ mod capacity_lifecycle_tests {
 
             drop(mutable);
         }
-        assert_eq!(manager.reset_pool.len(), 16);
-        assert_eq!(manager.inactive_pool.len(), 0);
+        assert_eq!(manager.store.reset_len(), 16);
+        assert_eq!(manager.store.inactive_len(), 0);
         let snap = m.snapshot();
         assert_eq!(snap.reset_pool_size, 16);
         assert_eq!(snap.inactive_pool_size, 0);
@@ -2082,7 +2082,7 @@ mod capacity_lifecycle_tests {
             let immutable = allocate_complete_register_all(&manager, 16, 12000);
             drop(immutable);
         }
-        assert_eq!(manager.inactive_pool.len(), 16);
+        assert_eq!(manager.store.inactive_len(), 16);
 
         // Check metrics
         let snap = m.snapshot();
@@ -2128,7 +2128,7 @@ mod scan_matches_tests {
         }
 
         // All 3 should be in inactive pool
-        assert_eq!(manager.inactive_pool.len(), 3);
+        assert_eq!(manager.store.inactive_len(), 3);
         let snap = m.snapshot();
         assert_eq!(snap.inactive_pool_size, 3);
         assert_eq!(snap.reset_pool_size, 7);

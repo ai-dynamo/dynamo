@@ -10,7 +10,7 @@ use crate::blocks::{
     Block, BlockMetadata, CompleteBlock, PrimaryBlock, RegisteredBlock,
     state::{Registered, Staged},
 };
-use crate::pools::InactivePool;
+use crate::pools::BlockStore;
 use crate::testing::{
     self, MetadataA, MetadataB, MetadataC, TestMeta, TestPoolSetupBuilder, create_staged_block,
 };
@@ -487,8 +487,6 @@ fn test_with_all_mut_multiple() {
 
 #[test]
 fn test_concurrent_try_get_block_and_drop() {
-    use crate::pools::backends::{FifoReusePolicy, HashMapBackend};
-    use crate::pools::*;
     use std::sync::Barrier;
     use std::thread;
 
@@ -499,11 +497,7 @@ fn test_concurrent_try_get_block_and_drop() {
     let seq_hash = token_block.kvbm_sequence_hash();
     let handle = registry.register_sequence_hash(seq_hash);
 
-    let reset_blocks: Vec<_> = (0..10).map(|i| Block::new(i, 4)).collect();
-    let reset_pool = ResetPool::new(reset_blocks, 4, None);
-    let reuse_policy = Box::new(FifoReusePolicy::new());
-    let backend = Box::new(HashMapBackend::new(reuse_policy));
-    let registered_pool = InactivePool::new(backend, &reset_pool, None);
+    let store = create_test_block_store();
 
     // Create barriers for synchronization
     let barrier1 = Arc::new(Barrier::new(2));
@@ -512,11 +506,11 @@ fn test_concurrent_try_get_block_and_drop() {
     let barrier2_clone = barrier2.clone();
 
     // Create custom return function that holds the Arc at barriers
-    let registered_pool_clone = registered_pool.clone();
+    let store_clone = store.clone();
     let pool_return_fn = Arc::new(move |block: Arc<Block<TestMetadata, Registered>>| {
         barrier1_clone.wait();
         barrier2_clone.wait();
-        (registered_pool_clone.return_fn())(block);
+        (store_clone.inactive_return_fn())(block);
     }) as Arc<dyn Fn(Arc<Block<TestMetadata, Registered>>) + Send + Sync>;
 
     let complete_block = Block::<TestMetadata, _>::new(0, 4).stage(seq_hash);
@@ -526,8 +520,8 @@ fn test_concurrent_try_get_block_and_drop() {
     let immutable_block = primary_arc as Arc<dyn RegisteredBlock<TestMetadata>>;
 
     let handle_clone = handle.clone();
-    let real_return_fn = registered_pool.return_fn();
-    let registered_pool_clone2 = registered_pool.clone();
+    let real_return_fn = store.inactive_return_fn();
+    let store_for_assert = store.clone();
 
     let upgrade_thread = thread::spawn(move || {
         barrier1.wait();
@@ -551,20 +545,18 @@ fn test_concurrent_try_get_block_and_drop() {
     let _held_block = upgraded_block;
 
     assert_eq!(
-        registered_pool_clone2.len(),
+        store_for_assert.inactive_len(),
         0,
         "Block should not be in inactive pool because Arc refcount was >= 2"
     );
 }
 
-/// Test helper to create an inactive pool with test infrastructure
-fn create_test_inactive_pool() -> (
-    crate::pools::ResetPool<TestMetadata>,
-    InactivePool<TestMetadata>,
-) {
-    let setup = TestPoolSetupBuilder::default().build().unwrap();
-    let (inactive_pool, reset_pool) = setup.build_pools::<TestMetadata>();
-    (reset_pool, inactive_pool)
+/// Test helper to create a unified BlockStore for registry tests.
+fn create_test_block_store() -> Arc<BlockStore<TestMetadata>> {
+    TestPoolSetupBuilder::default()
+        .build()
+        .unwrap()
+        .build_store::<TestMetadata>()
 }
 
 #[test]
@@ -572,7 +564,7 @@ fn test_attach_block_ref_called_on_inactive_promotion_allow_policy() {
     use crate::pools::*;
 
     let registry = BlockRegistry::new();
-    let (reset_pool, inactive_pool) = create_test_inactive_pool();
+    let store = create_test_block_store();
 
     let tokens = vec![1u32, 2, 3, 4];
     let token_block = create_test_token_block(&tokens);
@@ -584,23 +576,23 @@ fn test_attach_block_ref_called_on_inactive_promotion_allow_policy() {
         .complete(&token_block)
         .expect("Block size should match");
 
-    let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
+    let complete_block1 = CompleteBlock::new(complete_block1, store.reset_return_fn());
 
     let registered1 = handle.register_block(
         complete_block1,
         BlockDuplicationPolicy::Allow,
-        &inactive_pool,
+        &store,
         None,
     );
 
     drop(registered1);
 
     assert!(
-        inactive_pool.has_block(seq_hash),
+        store.has_inactive(seq_hash),
         "Block should be in inactive pool after drop"
     );
 
-    let before_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+    let before_result = handle.try_get_block::<TestMetadata>(store.inactive_return_fn());
     assert!(
         before_result.is_none(),
         "try_get_block should return None before re-promotion (weak ref expired)"
@@ -610,16 +602,16 @@ fn test_attach_block_ref_called_on_inactive_promotion_allow_policy() {
         .complete(&token_block)
         .expect("Block size should match");
 
-    let complete_block2 = CompleteBlock::new(complete_block2, reset_pool.return_fn());
+    let complete_block2 = CompleteBlock::new(complete_block2, store.reset_return_fn());
 
     let registered2 = handle.register_block(
         complete_block2,
         BlockDuplicationPolicy::Allow,
-        &inactive_pool,
+        &store,
         None,
     );
 
-    let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+    let after_result = handle.try_get_block::<TestMetadata>(store.inactive_return_fn());
     assert!(
         after_result.is_some(),
         "try_get_block should succeed after promotion - attach_block_ref must have been called"
@@ -634,7 +626,7 @@ fn test_attach_block_ref_called_on_inactive_promotion_reject_policy() {
     use crate::pools::*;
 
     let registry = BlockRegistry::new();
-    let (reset_pool, inactive_pool) = create_test_inactive_pool();
+    let store = create_test_block_store();
 
     let tokens = vec![5u32, 6, 7, 8];
     let token_block = create_test_token_block(&tokens);
@@ -646,36 +638,36 @@ fn test_attach_block_ref_called_on_inactive_promotion_reject_policy() {
         .complete(&token_block)
         .expect("Block size should match");
 
-    let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
+    let complete_block1 = CompleteBlock::new(complete_block1, store.reset_return_fn());
 
     let registered1 = handle.register_block(
         complete_block1,
         BlockDuplicationPolicy::Reject,
-        &inactive_pool,
+        &store,
         None,
     );
 
     drop(registered1);
 
-    assert!(inactive_pool.has_block(seq_hash));
+    assert!(store.has_inactive(seq_hash));
 
-    let before_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+    let before_result = handle.try_get_block::<TestMetadata>(store.inactive_return_fn());
     assert!(before_result.is_none());
 
     let complete_block2 = Block::<TestMetadata, _>::new(200, 4)
         .complete(&token_block)
         .expect("Block size should match");
 
-    let complete_block2 = CompleteBlock::new(complete_block2, reset_pool.return_fn());
+    let complete_block2 = CompleteBlock::new(complete_block2, store.reset_return_fn());
 
     let registered2 = handle.register_block(
         complete_block2,
         BlockDuplicationPolicy::Reject,
-        &inactive_pool,
+        &store,
         None,
     );
 
-    let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+    let after_result = handle.try_get_block::<TestMetadata>(store.inactive_return_fn());
     assert!(
         after_result.is_some(),
         "try_get_block should succeed after Reject policy promotion"

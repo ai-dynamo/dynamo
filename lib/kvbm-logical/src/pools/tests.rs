@@ -46,19 +46,12 @@ pub(crate) mod fixtures {
         testing::create_registered_block::<TestData>(id, tokens)
     }
 
-    pub fn create_test_reset_pool(count: usize) -> ResetPool<TestData> {
+    pub fn create_test_block_store(count: usize) -> Arc<BlockStore<TestData>> {
         testing::TestPoolSetupBuilder::default()
             .block_count(count)
             .build()
             .unwrap()
-            .build_reset_pool::<TestData>()
-    }
-
-    pub fn create_test_registered_pool() -> (InactivePool<TestData>, ResetPool<TestData>) {
-        testing::TestPoolSetupBuilder::default()
-            .build()
-            .unwrap()
-            .build_pools::<TestData>()
+            .build_store::<TestData>()
     }
 
     /// Type alias for TestBlockBuilder specialized to TestData
@@ -167,8 +160,8 @@ fn test_block_sequence_custom_block_size() {
 fn test_mutable_block_complete_error_returns_block() {
     use crate::blocks::BlockError;
 
-    let reset_pool = create_test_reset_pool(5);
-    let mut mutable_blocks = reset_pool.allocate_blocks(1);
+    let store = create_test_block_store(5);
+    let mut mutable_blocks = store.allocate_reset_blocks(1);
     let mutable_block = mutable_blocks.pop().unwrap();
     let original_block_id = mutable_block.block_id();
 
@@ -187,7 +180,8 @@ fn test_mutable_block_complete_error_returns_block() {
             assert_eq!(expected, 4);
             assert_eq!(actual, 8);
             // Block is recoverable from the error
-            assert_eq!(recovered_block.block_id(), original_block_id);
+            let recovered: MutableBlock<TestData> = recovered_block;
+            assert_eq!(recovered.block_id(), original_block_id);
         }
         _ => panic!("Expected BlockSizeMismatch error"),
     }
@@ -195,8 +189,8 @@ fn test_mutable_block_complete_error_returns_block() {
 
 #[test]
 fn test_mutable_block_stage_and_debug() {
-    let reset_pool = create_test_reset_pool(5);
-    let mut mutable_blocks = reset_pool.allocate_blocks(1);
+    let store = create_test_block_store(5);
+    let mut mutable_blocks = store.allocate_reset_blocks(1);
     let mutable_block = mutable_blocks.pop().unwrap();
 
     // Exercise Debug for MutableBlock
@@ -215,8 +209,8 @@ fn test_mutable_block_stage_and_debug() {
 
 #[test]
 fn test_complete_block_reset() {
-    let reset_pool = create_test_reset_pool(5);
-    let mut mutable_blocks = reset_pool.allocate_blocks(1);
+    let store = create_test_block_store(5);
+    let mut mutable_blocks = store.allocate_reset_blocks(1);
     let mutable_block = mutable_blocks.pop().unwrap();
     let original_block_id = mutable_block.block_id();
 

@@ -14,8 +14,7 @@ use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 use crate::{
     blocks::{Block, BlockMetadata, state::Reset},
     pools::{
-        ActivePool, BlockDuplicationPolicy, InactiveIndex, InactivePool, ResetPool,
-        ReusePolicy, SequenceHash,
+        BlockDuplicationPolicy, BlockStore, InactiveIndex, ReusePolicy, SequenceHash,
         backends::{HashMapBackend, LruBackend, MultiLruBackend},
     },
     registry::BlockRegistry,
@@ -329,11 +328,10 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         // Create metrics
         let metrics = Arc::new(BlockPoolMetrics::new(short_type_name::<T>()));
 
-        // Create reset pool
+        // Initial Reset blocks for the unified store.
         let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
             .map(|id| Block::new(id, block_size))
             .collect();
-        let reset_pool = ResetPool::new(blocks, block_size, Some(metrics.clone()));
         metrics.set_reset_pool_size(block_count as i64);
 
         // Create backend based on configuration
@@ -386,14 +384,18 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             }
         };
 
-        // Create pools
-        let inactive_pool = InactivePool::new(backend, &reset_pool, Some(metrics.clone()));
-        let active_pool = ActivePool::new(registry.clone(), inactive_pool.return_fn());
+        // Construct unified store
+        let store = Arc::new(BlockStore::new(
+            blocks,
+            block_size,
+            backend,
+            Some(metrics.clone()),
+        ));
 
         // Create upgrade function that captures the necessary components
         let registry_clone = registry.clone();
-        let inactive_pool_clone = inactive_pool.clone();
-        let return_fn_clone = inactive_pool.return_fn();
+        let store_for_upgrade = store.clone();
+        let return_fn_clone = store.inactive_return_fn();
         let upgrade_fn = Arc::new(
             move |seq_hash: SequenceHash| -> Option<Arc<dyn crate::blocks::RegisteredBlock<T>>> {
                 // Try active pool first with touch=false (using registry directly)
@@ -403,8 +405,8 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                     return Some(block);
                 }
                 // Then try inactive pool with touch=false
-                if let Some(block) = inactive_pool_clone
-                    .find_blocks(&[seq_hash], false)
+                if let Some(block) = store_for_upgrade
+                    .find_inactive_blocks(&[seq_hash], false)
                     .into_iter()
                     .next()
                 {
@@ -420,9 +422,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         }
 
         Ok(BlockManager {
-            reset_pool,
-            active_pool,
-            inactive_pool,
+            store,
             block_registry: registry,
             duplication_policy: self
                 .duplication_policy

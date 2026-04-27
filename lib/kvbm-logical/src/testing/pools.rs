@@ -3,11 +3,13 @@
 
 //! Test pool setup builder.
 
+use std::sync::Arc;
+
 use derive_builder::Builder;
 
 use crate::blocks::BlockMetadata;
 use crate::pools::{
-    InactivePool, ResetPool,
+    BlockStore,
     backends::{FifoReusePolicy, HashMapBackend},
 };
 
@@ -25,18 +27,11 @@ pub(crate) struct TestPoolSetup {
 }
 
 impl TestPoolSetup {
-    /// Build a reset pool with the configured settings.
-    pub(crate) fn build_reset_pool<T: BlockMetadata>(&self) -> ResetPool<T> {
+    /// Build a unified [`BlockStore`] backed by a HashMap+FIFO inactive index.
+    pub(crate) fn build_store<T: BlockMetadata + Sync>(&self) -> Arc<BlockStore<T>> {
         let blocks = create_reset_blocks::<T>(self.block_count, self.block_size);
-        ResetPool::new(blocks, self.block_size, None)
-    }
-
-    /// Build both inactive and reset pools with the configured settings.
-    pub(crate) fn build_pools<T: BlockMetadata>(&self) -> (InactivePool<T>, ResetPool<T>) {
-        let reset_pool = self.build_reset_pool::<T>();
         let reuse_policy = Box::new(FifoReusePolicy::new());
         let backend = Box::new(HashMapBackend::new(reuse_policy));
-        let inactive_pool = InactivePool::new(backend, &reset_pool, None);
-        (inactive_pool, reset_pool)
+        Arc::new(BlockStore::new(blocks, self.block_size, backend, None))
     }
 }

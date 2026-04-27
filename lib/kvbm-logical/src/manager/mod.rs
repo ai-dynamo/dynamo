@@ -1,19 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Block lifecycle orchestration across reset, active, and inactive pools.
+//! Block lifecycle orchestration over the unified [`BlockStore`].
 //!
-//! [`BlockManager`] is the top-level owner of the three pool tiers and the
-//! block registry. It exposes allocation, registration, matching, and scanning
-//! operations while keeping all pool transitions behind a single API surface.
+//! [`BlockManager`] owns a single [`BlockStore`] (which holds reset and
+//! inactive pool bookkeeping under one mutex) plus the [`BlockRegistry`].
+//! It exposes allocation, registration, matching, and scanning operations
+//! while keeping all pool transitions behind a single API surface.
 //!
 //! Construction uses a builder pattern — see [`BlockManagerConfigBuilder`].
-//!
-//! # Re-exported configuration types
-//!
-//! - [`FrequencyTrackingCapacity`] — TinyLFU tracker sizing
-//! - [`InactiveBackendConfig`] — inactive pool backend selection
-//! - [`BlockManagerBuilderError`] / [`BlockManagerResetError`] — error types
 
 mod builder;
 
@@ -30,45 +25,31 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::blocks::{BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, UpgradeFn};
+use crate::blocks::{BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, RegisteredBlock, UpgradeFn};
 use crate::metrics::BlockPoolMetrics;
-use crate::pools::{ActivePool, BlockDuplicationPolicy, InactivePool, ResetPool, SequenceHash};
+use crate::pools::{BlockDuplicationPolicy, BlockStore, SequenceHash};
 use crate::registry::BlockRegistry;
 
-/// Manages the full block lifecycle across three pool tiers:
-/// reset (free), active (in-use), and inactive (cached, evictable).
+/// Manages the full block lifecycle over the unified [`BlockStore`].
 ///
-/// Thread-safe: allocation is serialised via an internal [`Mutex`]; individual
-/// pools use their own internal locking.
+/// Thread-safe: allocation is serialised via an internal [`Mutex`] for the
+/// reset+evict combination; the underlying [`BlockStore`] uses a single
+/// internal mutex for all pool bookkeeping.
 ///
 /// Construct via [`BlockManager::builder()`].
 pub struct BlockManager<T: BlockMetadata> {
-    reset_pool: ResetPool<T>,
-    active_pool: ActivePool<T>,
-    inactive_pool: InactivePool<T>,
-    block_registry: BlockRegistry,
-    duplication_policy: BlockDuplicationPolicy,
-    upgrade_fn: UpgradeFn<T>,
-    allocate_mutex: Mutex<()>,
-    total_blocks: usize,
-    block_size: usize,
-    metrics: Arc<BlockPoolMetrics>,
+    pub(crate) store: Arc<BlockStore<T>>,
+    pub(crate) block_registry: BlockRegistry,
+    pub(crate) duplication_policy: BlockDuplicationPolicy,
+    pub(crate) upgrade_fn: UpgradeFn<T>,
+    pub(crate) allocate_mutex: Mutex<()>,
+    pub(crate) total_blocks: usize,
+    pub(crate) block_size: usize,
+    pub(crate) metrics: Arc<BlockPoolMetrics>,
 }
 
-impl<T: BlockMetadata> BlockManager<T> {
+impl<T: BlockMetadata + Sync> BlockManager<T> {
     /// Create a new builder for BlockManager.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
-    /// let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
-    ///
-    /// let manager = BlockManager::builder()
-    ///     .block_count(1000)
-    ///     .registry(registry)
-    ///     .with_multi_lru_backend()
-    ///     .build()?;
-    /// ```
     pub fn builder() -> BlockManagerConfigBuilder<T> {
         BlockManagerConfigBuilder::default()
     }
@@ -83,22 +64,18 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     /// Like [`allocate_blocks`](Self::allocate_blocks) but also reports the
-    /// [`SequenceHash`] of each block evicted from the inactive pool to
-    /// satisfy the allocation. Callers maintaining a shadow view of which
-    /// registrations are alive (e.g. the mocker's router-event bridge) can
-    /// translate these hashes into cache-invalidation events directly,
-    /// avoiding an O(N) presence scan over the registry.
+    /// [`SequenceHash`] of each block evicted from the inactive pool.
     pub fn allocate_blocks_with_evictions(
         &self,
         count: usize,
     ) -> Option<(Vec<MutableBlock<T>>, Vec<SequenceHash>)> {
         let _guard = self.allocate_mutex.lock();
-        let from_reset = self.reset_pool.allocate_blocks(count);
+        let from_reset = self.store.allocate_reset_blocks(count);
         let from_reset_count = from_reset.len();
         let mut blocks = from_reset;
 
         let remaining_needed = count - blocks.len();
-        match self.inactive_pool.allocate_blocks(remaining_needed) {
+        match self.store.evict_to_reset(remaining_needed) {
             Some((remaining, evicted)) => {
                 let eviction_count = remaining.len() as u64;
                 blocks.extend(remaining);
@@ -115,22 +92,11 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     /// Drain the inactive pool, returning all blocks to the reset pool.
-    ///
-    /// 1. Acquires the inactive pool lock and allocates all blocks.
-    /// 2. Releases the lock.
-    /// 3. Drops the allocated blocks (RAII returns them to reset).
-    /// 4. Verifies the reset pool contains the expected total.
-    ///
-    /// Returns an error under contention when blocks are in active use.
     pub fn reset_inactive_pool(&self) -> Result<(), BlockManagerResetError> {
-        // 1. Allocate all blocks from inactive pool (acquires lock internally)
-        let blocks = self.inactive_pool.allocate_all_blocks();
-
-        // 2. Drop blocks - RAII returns them to reset pool
+        let blocks = self.store.drain_inactive_to_reset();
         drop(blocks);
 
-        // 3. Verify block count (may fail under contention - that's OK)
-        let reset_count = self.reset_pool.len();
+        let reset_count = self.store.reset_len();
         if reset_count != self.total_blocks {
             return Err(BlockManagerResetError::BlockCountMismatch {
                 expected: self.total_blocks,
@@ -150,8 +116,6 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     /// Register a single completed block and return an immutable handle.
-    ///
-    /// Deduplication is governed by the configured [`BlockDuplicationPolicy`].
     pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
         self.metrics.inc_registrations();
         let handle = self
@@ -160,7 +124,7 @@ impl<T: BlockMetadata> BlockManager<T> {
         let registered_block = handle.register_block(
             block,
             self.duplication_policy,
-            &self.inactive_pool,
+            &self.store,
             Some(self.metrics.as_ref()),
         );
         ImmutableBlock::new(
@@ -172,22 +136,22 @@ impl<T: BlockMetadata> BlockManager<T> {
 
     /// Linear prefix match: walks `seq_hash` left-to-right, stopping on first miss.
     ///
-    /// Checks the active pool first, then the inactive pool for remaining hashes.
+    /// Checks the active pool first (via the registry's weak refs), then the
+    /// inactive pool for remaining hashes.
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         self.metrics
             .inc_match_hashes_requested(seq_hash.len() as u64);
 
         tracing::debug!(
             num_hashes = seq_hash.len(),
-            inactive_pool_len = self.inactive_pool.len(),
+            inactive_pool_len = self.store.inactive_len(),
             "match_blocks called"
         );
 
-        // First try to match against active blocks
+        // First try to match against active blocks via the registry
         let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
         matched.extend(
-            self.active_pool
-                .find_matches(seq_hash, true)
+            self.find_active_matches(seq_hash, true)
                 .into_iter()
                 .map(|block| {
                     ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
@@ -200,7 +164,7 @@ impl<T: BlockMetadata> BlockManager<T> {
         // If we didn't match all hashes, try inactive blocks for the remaining ones
         let remaining_hashes = &seq_hash[matched.len()..];
         if !remaining_hashes.is_empty() {
-            let inactive_found: Vec<_> = self.inactive_pool.find_blocks(remaining_hashes, true);
+            let inactive_found: Vec<_> = self.store.find_inactive_blocks(remaining_hashes, true);
             let inactive_matched = inactive_found.len();
             tracing::debug!(
                 remaining_to_check = remaining_hashes.len(),
@@ -220,8 +184,6 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     /// Scatter-gather scan: finds all blocks matching any hash, without stopping on misses.
-    ///
-    /// Returns a map of found hashes to immutable handles.
     pub fn scan_matches(
         &self,
         seq_hashes: &[SequenceHash],
@@ -232,8 +194,8 @@ impl<T: BlockMetadata> BlockManager<T> {
 
         let mut result = HashMap::new();
 
-        // 1. Check active pool for all hashes (read-only, no touch needed)
-        let active_found = self.active_pool.scan_matches(seq_hashes);
+        // 1. Check active pool for all hashes (via registry, no touch)
+        let active_found = self.scan_active_matches(seq_hashes);
         for (hash, block) in active_found {
             result.insert(
                 hash,
@@ -248,9 +210,9 @@ impl<T: BlockMetadata> BlockManager<T> {
             .copied()
             .collect();
 
-        // 3. Scan inactive pool for remaining (acquires blocks, may touch)
+        // 3. Scan inactive pool for remaining
         if !remaining.is_empty() {
-            let inactive_found = self.inactive_pool.scan_blocks(&remaining, touch);
+            let inactive_found = self.store.scan_inactive_blocks(&remaining, touch);
             for (hash, block) in inactive_found {
                 result.insert(
                     hash,
@@ -264,6 +226,51 @@ impl<T: BlockMetadata> BlockManager<T> {
         result
     }
 
+    /// Find currently-active registered blocks for the given hashes via the
+    /// registry's weak references. Stops on first miss.
+    ///
+    /// Replaces the deleted `ActivePool::find_matches`.
+    fn find_active_matches(
+        &self,
+        hashes: &[SequenceHash],
+        touch: bool,
+    ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
+        let return_fn = self.store.inactive_return_fn();
+        let mut matches = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            if let Some(handle) = self.block_registry.match_sequence_hash(*hash, touch) {
+                if let Some(block) = handle.try_get_block::<T>(return_fn.clone()) {
+                    matches.push(block);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        matches
+    }
+
+    /// Scan-style version of [`find_active_matches`] — does not stop on miss.
+    fn scan_active_matches(
+        &self,
+        hashes: &[SequenceHash],
+    ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
+        let return_fn = self.store.inactive_return_fn();
+        hashes
+            .iter()
+            .filter_map(|hash| {
+                self.block_registry
+                    .match_sequence_hash(*hash, false)
+                    .and_then(|handle| {
+                        handle
+                            .try_get_block::<T>(return_fn.clone())
+                            .map(|block| (*hash, block))
+                    })
+            })
+            .collect()
+    }
+
     /// Total number of blocks managed (constant after construction).
     pub fn total_blocks(&self) -> usize {
         self.total_blocks
@@ -271,7 +278,7 @@ impl<T: BlockMetadata> BlockManager<T> {
 
     /// Blocks available for allocation (reset + inactive pools).
     pub fn available_blocks(&self) -> usize {
-        self.reset_pool.len() + self.inactive_pool.len()
+        self.store.reset_len() + self.store.inactive_len()
     }
 
     /// Tokens per block (constant after construction).

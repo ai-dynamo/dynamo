@@ -7,7 +7,8 @@
 //! using property-based testing with proptest. The focus is on the state transitions
 //! and block size validation logic.
 
-use super::{super::blocks::*, tests::*, *};
+use super::tests::*;
+use crate::blocks::{state::Reset, *};
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -79,8 +80,9 @@ pub(crate) mod tests {
                     if let Err(BlockError::BlockSizeMismatch { expected, actual, block: returned_block }) = result {
                         prop_assert_eq!(expected, block_size);
                         prop_assert_eq!(actual, actual_token_size);
-                        prop_assert_eq!(returned_block.block_size(), block_size);
-                        prop_assert_eq!(returned_block.block_id(), block_id);
+                        let returned: Block<TestData, Reset> = returned_block;
+                        prop_assert_eq!(returned.block_size(), block_size);
+                        prop_assert_eq!(returned.block_id(), block_id);
                     }
                 }
             }
