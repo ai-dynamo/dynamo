@@ -121,6 +121,9 @@ struct IsolatedHome {
 }
 
 impl IsolatedHome {
+    // Only called from the integration_tests module, gated behind the
+    // `integration` feature flag.
+    #[allow(dead_code)]
     fn path(&self) -> &std::path::Path {
         self._tempdir.path()
     }
