@@ -4,11 +4,12 @@
 
 # This script installs vLLM and its dependencies from PyPI (release versions only).
 # Installation order:
-# 1. vLLM
-# 2. LMCache (built from source AFTER vLLM so c_ops.so is compiled against installed PyTorch)
-# 3. vLLM-Omni
-# 4. DeepGEMM
-# 5. EP kernels
+# 1. PyTorch for the requested CUDA backend
+# 2. vLLM-Omni
+# 3. vLLM
+# 4. LMCache (built from source AFTER vLLM so c_ops.so is compiled against installed PyTorch)
+# 5. DeepGEMM
+# 6. EP kernels
 
 set -euo pipefail
 
@@ -109,7 +110,8 @@ elif [ "$ARCH" = "aarch64" ]; then
 fi
 
 export MAX_JOBS=$MAX_JOBS
-CUDA_UV_ARGS=""
+TORCH_UV_ARGS=""
+VLLM_UV_ARGS=""
 if [ "$DEVICE" = "cuda" ]; then
     export CUDA_HOME=/usr/local/cuda
 
@@ -118,16 +120,17 @@ if [ "$DEVICE" = "cuda" ]; then
     CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
     CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1)
     if [[ "$TORCH_BACKEND" == "cu129" || "$TORCH_BACKEND" == "cu130" ]]; then
-        CUDA_UV_ARGS="--index-strategy=unsafe-best-match --torch-backend=${TORCH_BACKEND}"
+        TORCH_UV_ARGS="--index-url https://pypi.org/simple --index-strategy=unsafe-best-match --torch-backend=${TORCH_BACKEND}"
+        VLLM_UV_ARGS="${TORCH_UV_ARGS} --extra-index-url https://wheels.vllm.ai/${VLLM_VER}/${TORCH_BACKEND}"
     else
         echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
         exit 1
     fi
 
     echo "=== Installing prerequisites ==="
-    uv pip install pip cuda-python
+    uv pip install ${TORCH_UV_ARGS} pip cuda-python
     echo "Installing PyTorch ${TORCH_REF} for ${TORCH_BACKEND}..."
-    uv pip install ${CUDA_UV_ARGS} \
+    uv pip install ${TORCH_UV_ARGS} \
         "torch==${TORCH_REF}+${TORCH_BACKEND}" \
         "torchaudio==${TORCH_REF}+${TORCH_BACKEND}" \
         "torchvision==${TORCHVISION_REF}+${TORCH_BACKEND}"
@@ -156,12 +159,12 @@ echo "\n=== Installing vLLM-Omni ==="
 # vLLM should remain the final owner of the runtime stack in this environment.
 if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
     # Try PyPI first, fall back to building from source
-    if uv pip install ${CUDA_UV_ARGS} vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+    if uv pip install ${VLLM_UV_ARGS} vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
     else
         echo "⚠ PyPI install failed, building from source..."
         git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
-        uv pip install ${CUDA_UV_ARGS} $INSTALLATION_DIR/vllm-omni
+        uv pip install ${VLLM_UV_ARGS} $INSTALLATION_DIR/vllm-omni
         rm -rf $INSTALLATION_DIR/vllm-omni
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
     fi
@@ -179,12 +182,15 @@ if [ "$DEVICE" = "cuda" ]; then
     echo "\n=== Installing vLLM & FlashInfer ==="
 
     # vLLM 0.20.0 switches the default PyPI CUDA wheel to CUDA 13.0.
-    # Ask uv for the torch backend explicitly so CUDA 12.9 builds resolve the
-    # cu129 torch stack, while CUDA 13.0 builds use the new default wheel.
+    # Use the release wheel variant index for CUDA-specific vLLM binaries,
+    # and ask uv for the matching torch backend for the PyTorch stack.
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
-    uv pip install ${CUDA_UV_ARGS} "vllm[flashinfer,runai,otel]==${VLLM_VER}"
+    uv pip install ${VLLM_UV_ARGS} "vllm[flashinfer,runai,otel]==${VLLM_VER}"
     echo "✓ vLLM ${VLLM_VER} installed from PyPI"
     python3 - <<PY
+import importlib
+from importlib import metadata
+
 import torch
 
 expected = "${CUDA_VERSION_MAJOR}.${CUDA_VERSION_MINOR}"
@@ -193,6 +199,12 @@ if torch.version.cuda != expected:
         f"PyTorch CUDA version {torch.version.cuda} does not match CUDA {expected}"
     )
 print(f"✓ PyTorch CUDA version verified: {torch.version.cuda}")
+
+vllm_version = metadata.version("vllm")
+if "${TORCH_BACKEND}" == "cu129" and not vllm_version.endswith("+cu129"):
+    raise RuntimeError(f"Expected vLLM cu129 wheel, found vLLM {vllm_version}")
+importlib.import_module("vllm._C")
+print(f"✓ vLLM extension import verified: {vllm_version}")
 PY
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
