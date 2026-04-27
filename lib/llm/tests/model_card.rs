@@ -602,7 +602,7 @@ mod integration_tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
         loop {
             for card in manager.get_model_cards() {
-                if card.slug().to_string() == slug {
+                if card.slug().as_ref() == slug {
                     return card;
                 }
             }
