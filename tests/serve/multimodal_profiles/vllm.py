@@ -129,6 +129,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="gpu_4",
             ),
         },
-        request_payloads=[make_image_payload(["green"])],
+        # LLaVA 1.5 can answer with the dominant platform/text colors under
+        # vLLM 0.20, while newer VL models usually identify the green accents.
+        request_payloads=[make_image_payload(["green", "white", "black", "purple"])],
     ),
 ]
