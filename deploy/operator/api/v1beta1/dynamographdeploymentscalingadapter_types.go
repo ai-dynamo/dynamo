@@ -61,8 +61,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// replicas is the current number of replicas for the target component.
 	// This is synced from the DGD's component replicas and is required for
 	// the scale subresource.
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
+	Replicas int32 `json:"replicas"`
 
 	// selector is a label selector string for the pods managed by this
 	// adapter. Required for HPA compatibility via the scale subresource.

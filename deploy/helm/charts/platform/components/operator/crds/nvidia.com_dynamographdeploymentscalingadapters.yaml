@@ -227,6 +227,8 @@ spec:
                     selector is a label selector string for the pods managed by this
                     adapter. Required for HPA compatibility via the scale subresource.
                   type: string
+              required:
+                - replicas
               type: object
           type: object
       served: false
