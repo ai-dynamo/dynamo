@@ -22,6 +22,7 @@ members = [
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
+    "lib/compass",
 ]
 resolver = "3"
 
@@ -47,6 +48,7 @@ dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["metrics", "runtime-protocols"] }
 dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
 dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
+dynamo-compass = { path = "lib/compass", version = "1.2.0" }
 fastokens = { version = "0.1.0" }
 
 

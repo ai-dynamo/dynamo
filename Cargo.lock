@@ -2343,6 +2343,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-compass"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap 4.6.0",
+ "ordered-float 4.6.0",
+ "prometheus",
+ "rand 0.9.2",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-config"
 version = "1.2.0"
 dependencies = [

@@ -1,0 +1,316 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Compass: System-Level Bottleneck Attribution for Dynamo Inference",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "title": "Verdict",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 4 }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 1 },
+      "id": 2,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "title": "KVBM Allocate Floor Ratio (observed/theoretical)",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_allocate_ms_bucket{phase=\"total\"}[$__rate_interval])) / histogram_quantile(0.99, rate(dynamo_compass_kvbm_hash_ms_bucket[$__rate_interval]))",
+          "legendFormat": "kvbm.allocate floor ratio"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" }
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 1 },
+      "id": 3,
+      "title": "Per-Component p99 Contribution (ms)",
+      "type": "barchart",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_allocate_ms_bucket{phase=\"total\"}[$__rate_interval]))",
+          "legendFormat": "kvbm.allocate"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_router_dispatch_ms_bucket[$__rate_interval]))",
+          "legendFormat": "router.dispatch"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_lookup_ms_bucket[$__rate_interval]))",
+          "legendFormat": "kvbm.lookup"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "id": 4,
+      "panels": [],
+      "title": "Saturation Map",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "continuous-GrYlRd" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 5,
+      "title": "Component Utilization",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(dynamo_compass_kvbm_allocate_ms_sum{phase=\"lock_wait\"}[$__rate_interval]) / rate(dynamo_compass_kvbm_allocate_ms_sum{phase=\"total\"}[$__rate_interval])",
+          "legendFormat": "kvbm lock contention ratio"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 6,
+      "title": "Queue Depth Trend",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "dynamo_router_pending_queue_size",
+          "legendFormat": "router pending queue"
+        },
+        {
+          "expr": "dynamo_kvbm_num_free_blocks",
+          "legendFormat": "kvbm free blocks"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 7,
+      "panels": [],
+      "title": "Sub-Component Breakdown",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 30,
+            "stacking": { "mode": "normal" },
+            "lineWidth": 1
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "id": 8,
+      "title": "KVBM Phase Breakdown (p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_hash_ms_bucket[$__rate_interval]))",
+          "legendFormat": "hash"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_lookup_ms_bucket[$__rate_interval]))",
+          "legendFormat": "lookup"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_allocate_ms_bucket{phase=\"on_cpu\"}[$__rate_interval]))",
+          "legendFormat": "allocate (on_cpu)"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_allocate_ms_bucket{phase=\"lock_wait\"}[$__rate_interval]))",
+          "legendFormat": "allocate (lock_wait)"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_evict_ms_bucket[$__rate_interval]))",
+          "legendFormat": "evict"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_return_ms_bucket[$__rate_interval]))",
+          "legendFormat": "return"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 30,
+            "stacking": { "mode": "normal" },
+            "lineWidth": 1
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "id": 9,
+      "title": "Router Phase Breakdown (p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_router_cost_compute_ms_bucket[$__rate_interval]))",
+          "legendFormat": "cost_compute"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_router_kv_overlap_score_ms_bucket[$__rate_interval]))",
+          "legendFormat": "kv_overlap_score"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_router_worker_select_ms_bucket[$__rate_interval]))",
+          "legendFormat": "worker_select"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_router_dispatch_ms_bucket[$__rate_interval]))",
+          "legendFormat": "dispatch"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "id": 10,
+      "panels": [],
+      "title": "Sensitivity & Floor",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 2 },
+              { "color": "red", "value": 4 }
+            ]
+          },
+          "mappings": [],
+          "unit": "x"
+        }
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 26 },
+      "id": 11,
+      "title": "Floor Ratio by Component (observed / theoretical minimum)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_kvbm_allocate_ms_bucket{phase=\"total\"}[$__rate_interval])) / 0.08",
+          "legendFormat": "kvbm.allocate"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(dynamo_compass_router_dispatch_ms_bucket[$__rate_interval])) / 0.30",
+          "legendFormat": "router.dispatch"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["compass", "attribution", "dynamo", "bottleneck"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(dynamo_compass_kvbm_hash_ms_count, job)",
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "job",
+        "query": { "query": "label_values(dynamo_compass_kvbm_hash_ms_count, job)" },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Compass Attribution",
+  "uid": "compass-attribution",
+  "version": 1
+}
