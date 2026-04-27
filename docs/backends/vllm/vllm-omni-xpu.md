@@ -20,14 +20,14 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 uv pip uninstall vllm-omni
 
-git clone -b v0.17.0rc1 https://github.com/vllm-project/vllm-omni
+git clone -b release/v0.17.0rc1 https://github.com/vllm-project/vllm-omni
 cd vllm-omni
 
 uv pip install --no-cache-dir ".[dev]" --no-build-isolation
 
 # fix triton
 uv pip uninstall triton triton-xpu
-uv pip install triton-xpu==3.6.0
+uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/test/xpu
 
 # remove torch bundled oneccl to avoid conflicts
 uv pip uninstall oneccl oneccl-devel
@@ -86,7 +86,7 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-This script uses a custom stage config (`stage_configs/single_stage_llm.yaml`) that configures the thinker stage for text generation. See [Stage Configuration](#stage-configuration) for details.
+This script uses a custom stage config (`examples/backends/vllm/launch/stage_configs/single_stage_llm_xpu.yaml`) that configures the thinker stage for text generation. See [Stage Configuration](`#stage-configuration`) for details.
 
 ## Text-to-Image
 

@@ -176,7 +176,6 @@ vllm_omni_configs = {
         script_args=[
             "--vae-use-slicing",
             "--vae-use-tiling",
-            "--enforce-eager",
         ],
         marks=[
             pytest.mark.gpu_1,
