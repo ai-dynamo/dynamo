@@ -112,7 +112,8 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+        )
+        .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
     }
 
@@ -149,14 +150,16 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
         let lora_out = convert_event(
             lora_evt,
             2,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
 
         let base_hash = match &base_out.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
@@ -205,14 +208,16 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
         let out2 = convert_event(
             evt2,
             2,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
 
         let hash1 = match &out1.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
@@ -297,7 +302,8 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+        )
+        .unwrap();
 
         assert!(matches!(out.event.data, KvCacheEventData::Removed(_)));
     }
@@ -312,7 +318,8 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+        )
+        .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
     }
 

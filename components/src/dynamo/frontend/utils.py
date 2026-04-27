@@ -3,6 +3,7 @@
 
 """Shared utilities for frontend chat processors (vLLM, SGLang)."""
 
+import logging
 import uuid
 from typing import Any
 
@@ -75,3 +76,46 @@ def extract_mm_urls(
                 mm_data.setdefault(part_type, []).append({"Url": url})
 
     return mm_data or None
+
+
+def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:
+    """Build an OpenAI-style error dict, guarding against None/missing message."""
+    backend_msg = engine_response.get("message") or "unknown backend error"
+    return {
+        "error": {
+            "message": backend_msg,
+            "type": "backend_error",
+        }
+    }
+
+
+def make_internal_error(request_id: str, detail: str | None = None) -> dict[str, Any]:
+    """Build an OpenAI-style internal error dict with request-specific fallback."""
+    message = detail or f"Invalid engine response for request {request_id}"
+    return {
+        "error": {
+            "message": message,
+            "type": "internal_error",
+        }
+    }
+
+
+def handle_engine_error(
+    engine_response: Any,
+    request_id: str,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Classify an invalid engine response and return an OpenAI-style error dict.
+
+    Called when engine_response is None or missing 'token_ids'.
+    """
+    if isinstance(engine_response, dict) and engine_response.get("status") == "error":
+        err = make_backend_error(engine_response)
+        logger.error(
+            "Backend error for request %s: %s", request_id, err["error"]["message"]
+        )
+        return err
+    logger.error(
+        "No outputs from engine for request %s: %s", request_id, engine_response
+    )
+    return make_internal_error(request_id)
