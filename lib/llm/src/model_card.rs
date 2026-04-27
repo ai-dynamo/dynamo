@@ -32,58 +32,25 @@ use crate::protocols::TokenIdType;
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
-/// Role of a metadata artifact in the model card. The frontend uses
-/// `role` to look up a specific file by what it represents rather than
-/// by filename, since filenames vary across models.
-///
-/// Closed enum: only the five files the frontend consumes today.
-/// Adding a sixth role is a non-breaking schema bump only when a new
-/// consumer is wired in.
+/// Role a metadata artifact plays in the model card.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactRole {
-    /// `config.json` — model architecture and hyperparameters.
     Config,
-    /// `tokenizer.json`, `tokenizer.model`, or `*.tiktoken` — the
-    /// tokenizer payload itself.
     Tokenizer,
-    /// `tokenizer_config.json` — special tokens, optional embedded
-    /// chat template, and tokenizer auxiliary settings.
     TokenizerConfig,
-    /// `chat_template.jinja` or `chat_template.json` — separate chat
-    /// template file when not embedded in `tokenizer_config.json`.
     ChatTemplate,
-    /// `generation_config.json` — default sampling parameters.
     GenerationConfig,
 }
 
-/// One entry in the MDC's `files` artifact list. Specifies the
-/// location, identity, and role of one metadata file the frontend
-/// needs for preprocessing.
-///
-/// `uri` is an opaque string. Today's recognized schemes:
-/// `http://...`, `hf://...`, `file://...`, `mx://...`. Future schemes
-/// layer on without contract change. Frontend verifies the file's
-/// blake3 against `checksum` on receipt regardless of transport.
+/// One entry in the MDC's `files` list. `uri` is opaque; the
+/// resolver dispatches by scheme. `checksum` is `blake3:<hex>`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArtifactRef {
-    /// Filename used to identify the file in URLs (e.g. the route
-    /// path under `/v1/metadata/{slug}/{filename}`) and in logs.
     pub filename: String,
-
-    /// URI describing how to reach the file. The scheme determines
-    /// the resolution path; verification is checksum-based.
     pub uri: String,
-
-    /// `blake3:<hex>` of the file bytes. Verified on receipt by the
-    /// consumer.
     pub checksum: String,
-
-    /// Byte size of the file. Informational; consumers MAY use it as
-    /// a sanity check or for cache budgeting.
     pub size: u64,
-
-    /// What this file represents in the model.
     pub role: ArtifactRole,
 }
 
@@ -249,19 +216,7 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// Root directory of the MDC files cache. Layout mirrors HF Hub's
-/// `~/.cache/huggingface/hub/`:
-///
-/// ```text
-/// $cache_root/
-///   blobs/<blake3-hex>           — actual bytes, content-addressed
-///   by-slug/<slug>/<filename>    — symlink to ../../blobs/<blake3-hex>
-/// ```
-///
-/// Content addressing makes "do I already have this file?" a single
-/// `Path::exists` check on the blob path. Multi-worker dedup falls
-/// out for free (same blake3 = one blob, N symlinks). Persistent
-/// across restarts; cleanup is user-managed (same posture as HF Hub).
+/// MDC files cache root: `blobs/<blake3>` + `by-slug/<slug>/<filename>` symlinks.
 fn mdc_cache_root() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -283,29 +238,14 @@ fn mdc_slug_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Strip the `blake3:` prefix from a checksum string, returning the
-/// hex portion. Errors if the prefix is missing or the algorithm is
-/// anything else.
 fn blake3_hex_of(checksum: &str) -> anyhow::Result<&str> {
     checksum
         .strip_prefix("blake3:")
         .with_context(|| format!("expected blake3 checksum, got: {checksum}"))
 }
 
-/// Resolve `uri` and write the blake3-verified bytes to `dest`.
-/// Dispatches by URI scheme:
-///
-/// - `http://` / `https://` — `reqwest` GET, body verified against
-///   `expected_checksum`.
-/// - `file://` — read the local path, verify, copy to `dest`.
-/// - `hf://repo[@rev]/filename` — call [`crate::hub::from_hf`] for
-///   the repo, locate the file in the snapshot, verify, copy to
-///   `dest`.
-///
-/// All schemes write atomically (`dest.tmp` then rename), so a
-/// partial transfer never leaves a corrupt file at `dest` where a
-/// future reader would mmap it. Checksum mismatch is a hard error,
-/// never a silent fallback.
+/// Fetch `uri`, blake3-verify against `expected_checksum`, atomically
+/// write to `dest`. Schemes: `http(s)`, `file`, `hf`.
 async fn resolve_uri(
     client: &reqwest::Client,
     uri: &str,
@@ -398,21 +338,10 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build an [`ArtifactRef`] from a [`CheckedFile`] and its role.
-///
-/// Filename comes from the file's path (URL or disk). URI is
-/// `file://<absolute>` for local paths and the URL string for
-/// URL-backed files. Size comes from the local file's metadata when
-/// reachable; URL-backed files report `0` (consumers should treat
-/// `size` as informational and rely on `checksum` for verification).
 fn artifact_ref_from_checked_file(cf: &CheckedFile, role: ArtifactRole) -> Option<ArtifactRef> {
     let (filename, uri, size) = if let Some(path) = cf.path() {
         let filename = path.file_name()?.to_str()?.to_string();
-        // `Url::from_file_path` requires an absolute path, so
-        // canonicalize before building the URI. This matters for
-        // tests and any other caller that loads an MDC from a
-        // relative path; the production worker path goes through
-        // `LocalModelBuilder::build` which already canonicalizes.
+        // `Url::from_file_path` requires an absolute path.
         let absolute = std::fs::canonicalize(path).ok()?;
         let uri = url::Url::from_file_path(&absolute).ok()?.to_string();
         let size = std::fs::metadata(&absolute).map(|m| m.len()).unwrap_or(0);
@@ -433,9 +362,6 @@ fn artifact_ref_from_checked_file(cf: &CheckedFile, role: ArtifactRole) -> Optio
     })
 }
 
-/// Collect the per-file [`ArtifactRef`] list from the typed artifact
-/// fields on a [`ModelDeploymentCard`]. Files for which no
-/// [`CheckedFile`] is reachable are silently skipped.
 fn artifacts_from_typed_fields(
     model_info: Option<&ModelInfoType>,
     tokenizer: Option<&TokenizerKind>,
@@ -521,17 +447,9 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gen_config: Option<GenerationConfig>,
 
-    /// Per-file artifact list describing every metadata file the
-    /// frontend may need (`config.json`, `tokenizer.json`, etc.).
-    /// Each entry carries filename, URI, blake3 checksum, byte size,
-    /// and role.
-    ///
-    /// Populated by new workers in addition to the typed
-    /// `model_info` / `tokenizer` / `prompt_formatter` /
-    /// `chat_template_file` / `gen_config` fields. New frontends
-    /// prefer this list; old frontends ignore it (deserialized as
-    /// empty when missing). Empty list → frontend falls back to the
-    /// legacy `download_config()` path.
+    /// Per-file artifact list (filename, URI, blake3, size, role).
+    /// Populated alongside the typed fields above; consumers prefer
+    /// this list, falling back when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<ArtifactRef>,
 
@@ -846,11 +764,8 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
-        // Prefer the per-file artifact list when the MDC carries
-        // one. The consumer side is scheme-agnostic — it dispatches
-        // each `ArtifactRef.uri` through `resolve_uri`, which handles
-        // http/https, file, and hf alike. Falls through to the legacy
-        // bulk hub::from_hf path when `files` is empty (old workers).
+        // Prefer the per-file artifact list; fall through to the legacy
+        // hub::from_hf path when `files` is empty.
         if self.download_files().await? {
             return Ok(());
         }
@@ -862,30 +777,10 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
-    /// Materialize each entry in the MDC's `files` vector into the
-    /// content-addressed cache, then point the typed CheckedFile
-    /// fields at the per-slug symlink directory so downstream
-    /// consumers (`tokenizer()`, `prompt_formatter()`, ...) see local
-    /// paths.
-    ///
-    /// Layout (HF-Hub-style):
-    ///
-    /// ```text
-    /// ~/.cache/dynamo/mdc/blobs/<blake3-hex>          ← bytes
-    /// ~/.cache/dynamo/mdc/by-slug/<slug>/<filename>   ← symlink
-    /// ```
-    ///
-    /// Content addressing makes "do I already have this file?" a
-    /// `Path::exists` check on the blob path. Repeat registrations
-    /// of the same model (multiple worker replicas, frontend
-    /// restart, ...) hit the existing blob and skip the download.
-    /// Each artifact is fetched at most once per blake3.
-    ///
-    /// Returns `Ok(true)` when the typed fields were rewritten via
-    /// the artifact list. Returns `Ok(false)` to signal the caller
-    /// should fall back to its legacy resolution path (`files` is
-    /// empty). Returns an error on download failure or checksum
-    /// mismatch — those are loud failures, not silent fallbacks.
+    /// Resolve each entry in `files` into the content-addressed cache,
+    /// then update the typed CheckedFile paths to point at the per-slug
+    /// symlink directory. Returns `Ok(false)` when `files` is empty so
+    /// the caller falls back to the legacy path.
     async fn download_files(&mut self) -> anyhow::Result<bool> {
         if self.files.is_empty() {
             return Ok(false);
@@ -987,11 +882,8 @@ impl ModelDeploymentCard {
             }
         }
 
-        // Keep the `files` vector consistent with the typed enums.
-        // Only rewrite entries whose current URI is `file://` — that
-        // way self-hosted entries (already rewritten to `http://` by
-        // `LocalModel::move_to_self_host`) and any other-scheme
-        // entries (`mx://`, ...) are preserved as-is.
+        // Keep `files` consistent. Only rewrite `file://` entries so
+        // already-rewritten `http://` (self-host) and other schemes are preserved.
         for artifact in self.files.iter_mut() {
             if !artifact.uri.starts_with("file://") {
                 continue;
@@ -1717,10 +1609,7 @@ mod tests {
         }
     }
 
-    /// `resolve_uri` must reject an http payload whose blake3
-    /// doesn't match `expected_checksum`. No partial file is left at
-    /// `dest` — the atomic-rename machinery never runs on a
-    /// checksum mismatch.
+    /// blake3 mismatch errors and writes nothing.
     #[tokio::test]
     async fn resolve_uri_http_rejects_checksum_mismatch() {
         let mut server = mockito::Server::new_async().await;
@@ -1771,15 +1660,8 @@ mod tests {
         assert!(super::parse_hf_uri("https://example.com/x").is_err());
     }
 
-    /// MDC bytes published by an old worker (no `files` field) must
-    /// deserialize cleanly into a card with `files` defaulted to an
-    /// empty vector. This is the cross-version compatibility guarantee
-    /// for new frontends reading old workers' MDCs.
-    ///
-    /// Construction goes through `Default::default()` then serialize-
-    /// then-strip-the-`files`-field, which mirrors the wire-level
-    /// shape an old worker would emit: every other field present, no
-    /// `files` field at all.
+    /// Old MDC bytes (no `files` field) deserialize with empty
+    /// `files`, preserving cross-version compat.
     #[test]
     fn mdc_without_files_deserializes_to_empty_vec() {
         let card = ModelDeploymentCard {

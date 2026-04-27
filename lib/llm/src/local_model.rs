@@ -33,16 +33,11 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Environment variable that flips the default for
-/// `LocalModelBuilder::self_host_metadata` from `false` to `true`.
-/// Recognized values (case-insensitive): `1`, `true`, `yes`, `on`.
-/// An explicit `.self_host_metadata(...)` setter call (or PyO3
-/// kwarg) always wins over the env-var default.
+/// Env var flipping the default for `LocalModelBuilder::self_host_metadata`.
+/// Truthy: `1` / `true` / `yes` / `on` (case-insensitive). Explicit setter
+/// calls win.
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
-/// Read the env-var default for `self_host_metadata`. Truthy values
-/// (`1`, `true`, `yes`, `on`, case-insensitive) flip the default to
-/// `true`; anything else stays `false`.
 fn env_self_host_metadata_default() -> bool {
     std::env::var(ENV_SELF_HOST_METADATA)
         .ok()
@@ -166,13 +161,9 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in to self-hosting model metadata files at registration time.
-    ///
-    /// When `true`, the runtime rewrites every `ArtifactRef.uri` in the
-    /// MDC's `files` list to point at this worker's own
-    /// `system_status_server` (`http://<host>:<port>/v1/metadata/<slug>/<filename>`)
-    /// and registers the on-disk paths so the route can serve them.
-    /// Default is `false`; opt-out workers behave identically to today.
+    /// Opt in to self-hosting MDC artifacts on this worker's
+    /// `system_status_server`. Default `false` (or via
+    /// [`ENV_SELF_HOST_METADATA`]).
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -383,10 +374,6 @@ pub struct LocalModel {
     namespace_prefix: Option<String>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
-    /// Opt-in flag carried from the builder. When true, `attach()`
-    /// rewrites the MDC's `files` URIs to point at this worker's own
-    /// `system_status_server` route and registers the on-disk paths
-    /// so the route handler can serve them.
     self_host_metadata: bool,
 }
 
@@ -549,19 +536,9 @@ impl LocalModel {
         Ok(())
     }
 
-    /// Rewrite every `ArtifactRef.uri` in the MDC's `files` vector
-    /// to point at this worker's own `/v1/metadata/...` route, and
-    /// insert the on-disk path for each entry into the runtime's
-    /// metadata artifact registry so the route handler can serve
-    /// the bytes. Mirrors the existing
-    /// [`ModelDeploymentCard::move_to_url`] pair (same shape, same
-    /// in-place mutation across the typed artifact fields, opposite
-    /// direction).
-    ///
-    /// Only entries whose current URI is a `file://` URL pointing at
-    /// a path on this worker's local disk are eligible. Entries with
-    /// other schemes (`hf://`, `mx://`, ...) are left as-is — the
-    /// worker can't self-host bytes it doesn't have locally.
+    /// Rewrite `file://` entries in `card.files` to point at this
+    /// worker's `/v1/metadata/...` route and register their on-disk
+    /// paths. Other schemes are preserved.
     fn move_to_self_host(
         &mut self,
         drt: &dynamo_runtime::DistributedRuntime,
@@ -648,21 +625,9 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     }
 }
 
-/// Build the base URL this worker advertises for the
-/// `/v1/metadata/...` route on its own `system_status_server`.
-///
-/// Uses the actual bound port from `system_status_server_info()`. The
-/// host comes from `RuntimeConfig::system_host` (the existing
-/// `DYN_SYSTEM_HOST` knob, read fresh from settings the same way the
-/// runtime itself reads it at startup), with [`detect_routable_ip`]
-/// substituted when the configured value is the unspecified bind
-/// sentinel (`0.0.0.0` / `::`) — which is unroutable from another
-/// pod.
-///
-/// Returns an error when the system_status_server is not running
-/// (`DYN_SYSTEM_PORT` unset). Self-hosted metadata requires the
-/// server, so failing here at registration is the correct behavior:
-/// publishing an unreachable URL would just produce a broken MDC.
+/// `http://<host>:<port>` advertising this worker's
+/// `/v1/metadata/...` route. Errors if the system_status_server
+/// isn't running.
 pub(crate) fn self_host_base_url(
     drt: &dynamo_runtime::DistributedRuntime,
 ) -> anyhow::Result<String> {
@@ -682,17 +647,8 @@ pub(crate) fn self_host_base_url(
     Ok(format!("http://{host}:{}", info.port()))
 }
 
-/// Best-effort detection of a routable local IP. Uses the standard
-/// UDP-connect kernel-routing technique: bind a UDP socket, `connect`
-/// to a public address, then read the kernel-selected source IP via
-/// `local_addr`. `connect` on UDP does not transmit anything; the
-/// kernel just consults the routing table and binds the appropriate
-/// source interface, so this works air-gapped.
-///
-/// Falls back to `127.0.0.1` whenever any step fails (no usable
-/// interface, no default route, etc.). The fallback yields a loud
-/// connection-refused on the consumer rather than silently broken
-/// content.
+/// Routable local IP via the UDP-connect-kernel-routing trick.
+/// Falls back to `127.0.0.1` if no interface is reachable.
 fn detect_routable_ip() -> String {
     use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 
@@ -716,9 +672,6 @@ mod self_host_url_tests {
     use super::*;
     use std::net::IpAddr;
 
-    /// `detect_routable_ip` always returns something parseable as an
-    /// IP address, including the `127.0.0.1` fallback when no
-    /// network is reachable.
     #[test]
     fn detect_routable_ip_parses_as_ip() {
         let s = detect_routable_ip();
@@ -733,8 +686,6 @@ mod self_host_url_tests {
 mod env_self_host_metadata_tests {
     use super::*;
 
-    /// Truthy values flip the default to true. Tests are serialized
-    /// because they share a process-global env var.
     #[serial_test::serial]
     #[test]
     fn truthy_values_flip_default() {
@@ -754,8 +705,6 @@ mod env_self_host_metadata_tests {
         unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 
-    /// Falsy values, garbage values, and an unset var leave the
-    /// default at false.
     #[serial_test::serial]
     #[test]
     fn falsy_or_missing_keeps_default_off() {

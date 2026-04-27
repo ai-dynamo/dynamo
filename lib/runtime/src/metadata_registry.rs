@@ -1,50 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process-local registry for self-hosted model metadata files.
-//!
-//! When a worker registers a model with `self_host_metadata=true`,
-//! the runtime inserts one entry per artifact mapping
-//! `(model_slug, filename)` to the on-disk path of that file. The
-//! `system_status_server`'s `/v1/metadata/{model_slug}/{filename}`
-//! handler reads from this registry, opens the file, and serves the
-//! bytes; misses return 404.
+//! Process-local `(model_slug, filename) -> PathBuf` registry backing
+//! the system_status_server's `/v1/metadata/{model_slug}/{filename}`
+//! handler.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-/// Process-local map from `(model_slug, filename)` → on-disk path of
-/// a metadata artifact registered for self-hosting. Cloning the
-/// registry shares the same underlying map.
+/// Cloning shares the underlying map.
 #[derive(Clone, Default)]
 pub struct MetadataArtifactRegistry {
     entries: Arc<RwLock<HashMap<(String, String), PathBuf>>>,
 }
 
 impl MetadataArtifactRegistry {
-    /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Register one artifact for self-hosting. Inserts (or replaces)
-    /// the on-disk path the route handler will open when serving
-    /// `GET /v1/metadata/{model_slug}/{filename}`.
     pub fn register(&self, model_slug: &str, filename: &str, path: PathBuf) {
         let mut entries = self.entries.write().unwrap();
         entries.insert((model_slug.to_string(), filename.to_string()), path);
-        tracing::debug!(
-            model_slug,
-            filename,
-            "registered metadata artifact for self-host"
-        );
+        tracing::debug!(model_slug, filename, "registered metadata artifact");
     }
 
-    /// Look up the on-disk path for a `(model_slug, filename)` pair.
-    /// Returns `None` if no such entry has been registered.
     pub fn get(&self, model_slug: &str, filename: &str) -> Option<PathBuf> {
         let entries = self.entries.read().unwrap();
         entries
@@ -52,20 +35,16 @@ impl MetadataArtifactRegistry {
             .cloned()
     }
 
-    /// Remove all entries for a given `model_slug`. Called when a
-    /// model is deregistered so stale paths don't accumulate.
+    /// Drop all entries for a model.
     pub fn unregister_model(&self, model_slug: &str) {
         let mut entries = self.entries.write().unwrap();
         entries.retain(|(slug, _), _| slug != model_slug);
     }
 
-    /// Number of registered `(model_slug, filename)` entries.
-    /// Intended for tests and observability.
     pub fn len(&self) -> usize {
         self.entries.read().unwrap().len()
     }
 
-    /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.read().unwrap().is_empty()
     }

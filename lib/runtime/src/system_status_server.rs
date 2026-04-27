@@ -216,9 +216,7 @@ pub async fn spawn_system_status_server(
             );
     }
 
-    // Self-hosted model metadata files. The route is mounted
-    // unconditionally; the handler returns 404 unless a worker has
-    // opted in via `self_host_metadata` and registered the file.
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
     app = app.route(
         "/v1/metadata/{model_slug}/{*filename}",
         get({
@@ -487,16 +485,8 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
     }
 }
 
-/// Serve a self-hosted model metadata file.
-///
-/// Looks up `(model_slug, filename)` in the process-local
-/// [`MetadataArtifactRegistry`](crate::metadata_registry::MetadataArtifactRegistry).
-/// Returns 404 when the pair isn't registered (worker didn't opt in,
-/// model wasn't registered, or the filename isn't one the worker
-/// advertised). Returns 500 on a local read error. Successful
-/// responses serve the raw file bytes; the consumer is responsible
-/// for blake3-verifying against the MDC entry, so the transport is
-/// untrusted by construction.
+/// `GET /v1/metadata/{model_slug}/{filename}` — 404 on miss,
+/// 500 on read error, raw bytes on hit. Consumer blake3-verifies.
 async fn metadata_file_handler(
     State(state): State<Arc<SystemStatusState>>,
     Path((model_slug, filename)): Path<(String, String)>,
