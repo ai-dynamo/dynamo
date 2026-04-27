@@ -52,6 +52,7 @@ pub struct LocalModelBuilder {
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
+    self_host_metadata: bool,
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
@@ -81,6 +82,7 @@ impl Default for LocalModelBuilder {
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
+            self_host_metadata: false,
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
@@ -139,6 +141,18 @@ impl LocalModelBuilder {
 
     pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
         self.http_metrics_port = port;
+        self
+    }
+
+    /// Opt in to self-hosting model metadata files at registration time.
+    ///
+    /// When `true`, the runtime rewrites every `ArtifactRef.uri` in the
+    /// MDC's `files` list to point at this worker's own
+    /// `system_status_server` (`http://<host>:<port>/v1/metadata/<slug>/<filename>`)
+    /// and registers the on-disk paths so the route can serve them.
+    /// Default is `false`; opt-out workers behave identically to today.
+    pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
+        self.self_host_metadata = enabled;
         self
     }
 
