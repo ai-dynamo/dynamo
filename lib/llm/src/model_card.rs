@@ -408,8 +408,14 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 fn artifact_ref_from_checked_file(cf: &CheckedFile, role: ArtifactRole) -> Option<ArtifactRef> {
     let (filename, uri, size) = if let Some(path) = cf.path() {
         let filename = path.file_name()?.to_str()?.to_string();
-        let uri = url::Url::from_file_path(path).ok()?.to_string();
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        // `Url::from_file_path` requires an absolute path, so
+        // canonicalize before building the URI. This matters for
+        // tests and any other caller that loads an MDC from a
+        // relative path; the production worker path goes through
+        // `LocalModelBuilder::build` which already canonicalizes.
+        let absolute = std::fs::canonicalize(path).ok()?;
+        let uri = url::Url::from_file_path(&absolute).ok()?.to_string();
+        let size = std::fs::metadata(&absolute).map(|m| m.len()).unwrap_or(0);
         (filename, uri, size)
     } else if let Some(url) = cf.url() {
         let filename = url.path().rsplit('/').find(|s| !s.is_empty())?.to_string();
