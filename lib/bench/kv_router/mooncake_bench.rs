@@ -65,7 +65,6 @@ enum IndexerArgs {
         /// keys, while depth=2 gives a much larger set of distinguishable branches.
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
-
     },
 }
 
