@@ -142,9 +142,10 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      enable_coverage: true
       run_cpu_only_tests: true
-      cpu_only_test_markers: nightly and vllm and gpu_0
-      gpu_test_markers: nightly and vllm and gpu_1
+      cpu_only_test_markers: vllm and gpu_0
+      gpu_test_markers: vllm and gpu_1
       gpu_test_timeout_minutes: 35
     secrets: inherit
 
@@ -159,8 +160,9 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
+      enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: nightly and vllm and (gpu_2 or gpu_4)
+      gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -175,9 +177,10 @@ jobs:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      enable_coverage: true
       run_cpu_only_tests: true
-      cpu_only_test_markers: nightly and sglang and gpu_0
-      gpu_test_markers: nightly and sglang and gpu_1
+      cpu_only_test_markers: sglang and gpu_0
+      gpu_test_markers: sglang and gpu_1
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -191,8 +194,9 @@ jobs:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
+      enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: nightly and sglang and (gpu_2 or gpu_4)
+      gpu_test_markers: sglang and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -207,9 +211,10 @@ jobs:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      enable_coverage: true
       run_cpu_only_tests: true
-      cpu_only_test_markers: nightly and trtllm and gpu_0
-      gpu_test_markers: nightly and trtllm and gpu_1
+      cpu_only_test_markers: trtllm and gpu_0
+      gpu_test_markers: trtllm and gpu_1
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -223,8 +228,9 @@ jobs:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
+      enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: nightly and trtllm and (gpu_2 or gpu_4)
+      gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
