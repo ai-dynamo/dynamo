@@ -410,6 +410,8 @@ module = [
     "huggingface_hub.*",
     "httpx",
     "httpx.*",
+    "httpx_sse",
+    "httpx_sse.*",
     "zmq",
     "zmq.*",
     "safetensors",

@@ -7,6 +7,7 @@
 fastapi==0.120.1
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
 httpx==0.28.1
+httpx-sse==0.4.1
 
 # Video generation: encode frames to MP4 (used by TRT-LLM, vLLM-Omni, SGLang diffusion)
 imageio>=2.37.0
