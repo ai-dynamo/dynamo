@@ -117,10 +117,17 @@ class _DeferredAbort:
     async def abort(self) -> None:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
-            await self._engine_client.abort(self._request_id)
+            try:
+                await asyncio.shield(self._engine_client.abort(self._request_id))
+            except asyncio.CancelledError:
+                logger.debug(
+                    f"Deferred abort: shielded from cancellation for request "
+                    f"{self._request_id}, abort continues in background"
+                )
+                return
             logger.debug(
                 f"Deferred abort: first token already received, "
-                f"aborting request {self._request_id} now"
+                f"aborted request {self._request_id}"
             )
         elif self._abort_task is None:
             logger.debug(
@@ -857,11 +864,30 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
 
-            # Abort the request (via guard if provided, otherwise direct)
+            # Log intent before the abort — synchronous, no await, so it is
+            # guaranteed to appear even if this task is concurrently cancelled
+            # by _abort_monitor's cleanup.
+            logger.debug(
+                f"Aborting {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
+
+            # Abort the request (via guard if provided, otherwise direct).
+            # Shields absorb any CancelledError injected by _abort_monitor's
+            # cleanup so engine cleanup always completes and the completion log
+            # below is always reachable.
             if abort_guard is not None:
                 await abort_guard.abort()
             else:
-                await self.engine_client.abort(request_id)
+                try:
+                    await asyncio.shield(self.engine_client.abort(request_id))
+                except asyncio.CancelledError:
+                    logger.debug(
+                        f"Abort shielded from cancellation for request "
+                        f"{request_id}, continuing in background"
+                    )
+
+            # Completion log — reachable because shields above absorb
+            # CancelledError before it can propagate past the abort calls.
             logger.debug(
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
