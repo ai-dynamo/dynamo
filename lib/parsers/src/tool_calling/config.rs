@@ -391,6 +391,22 @@ impl ToolCallConfig {
         }
     }
 
+    pub fn deepseek_v4() -> Self {
+        // DeepSeek V4 format (DSML):
+        // <｜DSML｜tool_calls>
+        // <｜DSML｜invoke name="function_name">
+        // <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+        // </｜DSML｜invoke>
+        // </｜DSML｜tool_calls>
+        Self {
+            parser_config: ParserConfig::Dsml(DsmlParserConfig {
+                function_calls_start: "<｜DSML｜tool_calls>".to_string(),
+                function_calls_end: "</｜DSML｜tool_calls>".to_string(),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn minimax_m2() -> Self {
         // MiniMax-M2.1 format:
         // <minimax:tool_call>

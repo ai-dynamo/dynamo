@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -128,15 +129,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "bootstrap_room": bootstrap_room,
         }
 
-        # Yield bootstrap_info for PrefillRouter - required for async generator contract
-        # and Rust-side expects disaggregated_params in first output
-        yield {
-            "token_ids": [],
-            "text": None,
-            "finish_reason": None,
-            "disaggregated_params": bootstrap_info,
-        }
-
         input_param = self._get_input_param(inner_request)
         routing = inner_request.get("routing") or {}
         priority = routing.get("priority")
@@ -167,6 +159,22 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )
+
+        if inner_request.get(HEALTH_CHECK_KEY):
+            # Canary: stream engine output so the Rust canary sees scheduler output.
+            # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
+            async for res in results:
+                yield res
+            return
+
+        # Yield bootstrap_info for PrefillRouter - required for async generator
+        # contract and Rust-side expects disaggregated_params in first output.
+        yield {
+            "token_ids": [],
+            "text": None,
+            "finish_reason": None,
+            "disaggregated_params": bootstrap_info,
+        }
 
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
