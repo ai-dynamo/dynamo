@@ -14,110 +14,6 @@ permissions:
 
 jobs:
   # ============================================================================
-  # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # ============================================================================
-  # ============================================================================
-  # PLANNER PIPELINE
-  # ============================================================================
-  planner-pipeline:
-    name: planner
-    uses: ./.github/workflows/build-test-distribute-flavor.yml
-    with:
-      framework: dynamo
-      builder_flavor: general
-      target: planner
-      platform: 'linux/amd64,linux/arm64'
-      cpu_only: true
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-planner' || '' }}
-        ${{ github.ref_name == 'main' && format('main-planner-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 45
-      run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and planner and gpu_0'
-      cpu_only_test_timeout_minutes: 30
-      cpu_parallel_mode: '2'
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-  # ============================================================================
-  # VLLM PIPELINE
-  # ============================================================================
-  vllm-pipeline:
-    name: vllm
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      target: runtime
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
-      multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 10
-      single_gpu_test_timeout_minutes: 120
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # ============================================================================
-  # SGLANG PIPELINE
-  # ============================================================================
-  sglang-pipeline:
-    name: sglang
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: sglang
-      target: runtime
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
-      multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 10
-      single_gpu_test_timeout_minutes: 120
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # ============================================================================
-  # TRTLLM PIPELINE
-  # ============================================================================
-  trtllm-pipeline:
-    name: trtllm
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
-      multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 10
-      single_gpu_test_timeout_minutes: 120
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
   dynamo-pipeline:
@@ -135,118 +31,8 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # DEV PIPELINES
+  # OPERATOR BUILD
   # ============================================================================
-  vllm-dev-pipeline:
-    name: vllm-dev
-    uses: ./.github/workflows/build-flavor.yml
-    with:
-      framework: vllm
-      target: dev
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
-      push_image: true
-      run_compliance_scan: true
-      copy_to_acr: true
-    secrets: inherit
-
-  sglang-dev-pipeline:
-    name: sglang-dev
-    uses: ./.github/workflows/build-flavor.yml
-    with:
-      framework: sglang
-      target: dev
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
-      push_image: true
-      run_compliance_scan: true
-      copy_to_acr: true
-    secrets: inherit
-
-  trtllm-dev-pipeline:
-    name: trtllm-dev
-    uses: ./.github/workflows/build-flavor.yml
-    with:
-      framework: trtllm
-      target: dev
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
-      push_image: true
-      run_compliance_scan: true
-      copy_to_acr: true
-    secrets: inherit
-
-  # ============================================================================
-  # EFA PIPELINES (Build only, amd64)
-  # ============================================================================
-  # ============================================================================
-  # VLLM EFA PIPELINE
-  # ============================================================================
-  vllm-efa-pipeline:
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      target: runtime
-      platform: 'linux/amd64'
-      cuda_versions: '["12.9"]'
-      make_efa: true
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-  # ============================================================================
-  # TRTLLM EFA PIPELINE
-  # ============================================================================
-  trtllm-efa-pipeline:
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platform: 'linux/amd64'
-      cuda_versions: '["13.1"]'
-      make_efa: true
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 120
-      copy_timeout_minutes: 20
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      cpu_only_test_timeout_minutes: 60
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-  # ============================================================================
-  # FRONTEND IMAGE BUILD
-  # ============================================================================
-  frontend-image:
-    name: Frontend Image
-    uses: ./.github/workflows/build-frontend-image.yaml
-    with:
-      skip_change_detection: true
-    secrets: inherit
-
-  # ============================================================================
-  # Operator
-  # ============================================================================
-
   operator:
     name: Operator
     runs-on: prod-default-v2
@@ -296,6 +82,445 @@ jobs:
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
   # ============================================================================
+  # BUILD JOBS
+  # ============================================================================
+
+  vllm-build:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  vllm-dev-build:
+    name: vllm-dev
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: dev
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      push_image: true
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-dev-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  vllm-efa-build:
+    name: vllm-runtime-efa
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      platform: 'linux/amd64'
+      cuda_version: '["12.9"]'
+      make_efa: true
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  sglang-build:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  sglang-dev-build:
+    name: sglang-dev
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: dev
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      push_image: true
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  trtllm-build:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  trtllm-dev-build:
+    name: trtllm-dev
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: dev
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      push_image: true
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-dev-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  trtllm-efa-build:
+    name: trtllm-runtime-efa
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platform: 'linux/amd64'
+      cuda_version: '["13.1"]'
+      make_efa: true
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  planner-build:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: planner
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
+        ${{ github.ref_name == 'main' && format('main-dynamo-planner-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  frontend-build:
+    name: frontend
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
+        ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  # ============================================================================
+  # TEST JOBS
+  # ============================================================================
+
+  vllm-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      gpu_test_timeout_minutes: 35
+    secrets: inherit
+
+  vllm-multi-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-efa-test:
+    name: vllm-runtime-efa
+    needs: [vllm-efa-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm-efa
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      run_gpu_tests: false
+    secrets: inherit
+
+  sglang-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+    secrets: inherit
+
+  sglang-multi-gpu-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+    secrets: inherit
+
+  trtllm-multi-gpu-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-efa-test:
+    name: trtllm-runtime-efa
+    needs: [trtllm-efa-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm-efa
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      run_gpu_tests: false
+    secrets: inherit
+
+  planner-test:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [planner-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: planner
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_parallel_mode: none
+      cpu_only_test_markers: '(pre_merge or post_merge) and planner and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
+  # IMAGE COMPLIANCE JOBS
+  # ============================================================================
+
+  vllm-compliance:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: vllm
+      target: runtime
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  sglang-compliance:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: sglang
+      target: runtime
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  trtllm-compliance:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: trtllm
+      target: runtime
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  planner-compliance:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [planner-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: planner
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: frontend
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  # ============================================================================
+  # IMAGE COPY JOBS
+  # ============================================================================
+
+  vllm-copy-to-acr:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build, vllm-test]
+    if: |
+      always() &&
+      needs.vllm-build.result == 'success' &&
+      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  sglang-copy-to-acr:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build, sglang-test]
+    if: |
+      always() &&
+      needs.sglang-build.result == 'success' &&
+      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  trtllm-copy-to-acr:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build, trtllm-test]
+    if: |
+      always() &&
+      needs.trtllm-build.result == 'success' &&
+      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  frontend-copy-to-acr:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [frontend-build, frontend-compliance]
+    if: |
+      always() &&
+      needs.frontend-build.result == 'success' &&
+      (needs.frontend-compliance.result == 'success' || needs.frontend-compliance.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  # ============================================================================
   # DEPLOYMENT JOBS
   # Deploy operator and run end-to-end tests on Kubernetes cluster
   # ============================================================================
@@ -321,7 +546,7 @@ jobs:
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [deploy-operator, vllm-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -333,7 +558,7 @@ jobs:
     secrets: inherit
 
   deploy-test-sglang:
-    needs: [deploy-operator, sglang-pipeline]
+    needs: [deploy-operator, sglang-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -345,7 +570,7 @@ jobs:
     secrets: inherit
 
   deploy-test-trtllm:
-    needs: [deploy-operator, trtllm-pipeline]
+    needs: [deploy-operator, trtllm-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -376,7 +601,7 @@ jobs:
   deploy-test-gaie:
     name: GAIE Deploy Test
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, frontend-image, vllm-pipeline]
+    needs: [deploy-operator, frontend-copy-to-acr, vllm-copy-to-acr]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -431,7 +656,7 @@ jobs:
           test_name: gaie
           extra_pytest_args: >-
             -m framework_with_gaie
-            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
 
   deploy-status-check:
@@ -451,7 +676,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -471,8 +696,8 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: always() && failure()
-    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, dynamo-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
+    if: always()
+    needs: [ deploy-status-check ]
     permissions:
       contents: read
     steps:
