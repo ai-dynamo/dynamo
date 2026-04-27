@@ -34,6 +34,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -697,6 +698,11 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
+        # Canary probe: use its pre-built disagg params (skip prefill_result decode
+        # and skip the mode-specific request_type overrides).
+        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
+            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if ep_disaggregated_params:
@@ -1197,15 +1203,12 @@ class HandlerBase(BaseGenerativeHandler):
                                 # Record KV transfer latency/bytes/speed from timing_metrics
                                 tm = output.request_perf_metrics.timing_metrics
                                 if tm is not None:
-                                    recorded = (
-                                        metrics_collector.record_kv_transfer_perf(tm)
-                                    )
-                                    # Only count success if a transfer actually occurred
-                                    if (
-                                        recorded
-                                        and self.disaggregation_mode
-                                        == DisaggregationMode.PREFILL
-                                    ):
+                                    # record_kv_transfer_perf() only returns True on the
+                                    # decode worker (the receiver), which observes non-zero
+                                    # kv_cache_transfer_{start,end} in timing_metrics. Count
+                                    # the success counter on the same signal so it stays in
+                                    # lock-step with the sibling histograms' _count. DYN-2781.
+                                    if metrics_collector.record_kv_transfer_perf(tm):
                                         metrics_collector.record_kv_transfer_success()
                         except Exception as e:
                             logging.warning(

@@ -5,31 +5,26 @@
 
 use std::time::Duration;
 
+#[path = "shared.rs"]
+mod shared;
+
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, RouterEvent, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
-};
-pub use dynamo_kv_router::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_mocker::loadgen::{
-    ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes, RouterSequence, SequenceHashMode,
-    SessionPartitionSpec, SyntheticTraceSpec, Trace,
-};
-pub use dynamo_mocker::replay::{
-    ReplayTimedKvEvent as TimedKvEvent, ReplayTimedOutputSignal as TimedOutputSignal,
-    ReplayTimedRequest as TimedReplayRequest, ReplayWorkerArtifacts as WorkerReplayArtifacts,
-};
+use dynamo_kv_router::protocols::XXH3_SEED;
+use dynamo_mocker::loadgen::{ReplayRequestHashes, Trace};
 use dynamo_tokens::compute_hash_v2;
-use indicatif::{ProgressBar, ProgressStyle};
 use plotters::prelude::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+pub use shared::{
+    BenchmarkResults, BenchmarkRun, NoopSequencePublisher, WorkerReplayArtifacts,
+    compute_benchmark_run, default_mock_engine_args, generate_replay_artifacts, make_progress_bar,
+    process_mooncake_trace, rescale_trace_timestamps,
+};
 
 /// Shared CLI arguments for trace-based benchmarks.
 #[derive(clap::Args, Debug)]
@@ -37,7 +32,8 @@ pub struct CommonArgs {
     /// Path to a JSONL mooncake trace file.
     pub mooncake_trace_path: Option<String>,
 
-    /// Run built-in self-tests instead of the benchmark.
+    /// Deprecated compatibility flag. Use `cargo test --package dynamo-bench --test ...`
+    /// for the fixture-backed integration tests instead.
     #[clap(long)]
     pub test: bool,
 
@@ -49,9 +45,10 @@ pub struct CommonArgs {
     #[clap(long, default_value = "128")]
     pub block_size: u32,
 
-    /// Wall-clock duration (ms) over which the trace is replayed during event generation.
-    #[clap(long, default_value = "30000")]
-    pub trace_simulation_duration_ms: u64,
+    /// Optional wall-clock duration (ms) used to rescale the trace during event generation.
+    /// Omit to preserve the original Mooncake timestamps.
+    #[clap(long)]
+    pub trace_simulation_duration_ms: Option<u64>,
 
     /// Wall-clock duration (ms) over which the benchmark replays operations.
     #[clap(long, default_value = "60000")]
@@ -313,171 +310,6 @@ pub fn local_block_hash_from_id(hash_id: u64, block_size: u32) -> LocalBlockHash
     LocalBlockHash(compute_hash_v2(bytes, XXH3_SEED))
 }
 
-/// Create a styled progress bar, optionally with a known total length.
-pub fn make_progress_bar(total: Option<u64>) -> ProgressBar {
-    let progress = match total {
-        Some(total) => ProgressBar::new(total),
-        None => ProgressBar::no_length(),
-    };
-
-    progress.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
-
-    progress
-}
-
-/// Results from a single benchmark run.
-#[derive(Serialize)]
-pub struct BenchmarkResults {
-    pub offered_ops_throughput: f32,
-    pub ops_throughput: f32,
-    pub offered_block_throughput: f32,
-    pub block_throughput: f32,
-    pub latency_p99_us: f32,
-}
-
-/// Load, transform, and partition the mooncake trace into per-worker request lists.
-pub fn process_mooncake_trace(
-    path: &str,
-    block_size: u32,
-    trace_length_factor: usize,
-    trace_duplication_factor: usize,
-    num_workers: usize,
-    seed: u64,
-) -> anyhow::Result<Vec<Trace>> {
-    let trace = Trace::from_mooncake(std::path::Path::new(path), block_size as usize)?
-        .expand_hash_prefix_depth(trace_length_factor)
-        .duplicate_hash_space(trace_duplication_factor);
-    Ok(trace.partition_by_session(SessionPartitionSpec::Random {
-        num_partitions: num_workers,
-        seed,
-    }))
-}
-
-/// Build default MockEngineArgs suitable for event generation.
-pub fn default_mock_engine_args(
-    num_gpu_blocks: usize,
-    block_size: usize,
-) -> anyhow::Result<MockEngineArgs> {
-    Ok(MockEngineArgs::builder()
-        .num_gpu_blocks(num_gpu_blocks)
-        .block_size(block_size)
-        .speedup_ratio(10.0)
-        .enable_prefix_caching(true)
-        .max_num_batched_tokens(None)
-        .max_num_seqs(None)
-        .build()?)
-}
-
-fn replay_worker_trace(
-    trace: Trace,
-    sched_args: MockEngineArgs,
-    trace_simulation_duration_ms: u64,
-    progress: ProgressBar,
-) -> anyhow::Result<WorkerReplayArtifacts> {
-    let total_turns = trace
-        .sessions
-        .iter()
-        .map(|session| session.turns.len())
-        .sum::<usize>();
-    let artifacts = dynamo_mocker::replay::generate_trace_worker_artifacts_offline(
-        sched_args,
-        trace.rescale_ready_span(trace_simulation_duration_ms)?,
-    )?;
-    progress.inc(total_turns as u64);
-    Ok(artifacts)
-}
-
-pub async fn generate_replay_artifacts(
-    traces: &[Trace],
-    num_gpu_blocks: usize,
-    block_size: u32,
-    trace_simulation_duration_ms: u64,
-) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
-    println!("Generating events...");
-    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
-    let progress = make_progress_bar(Some(
-        traces
-            .iter()
-            .map(|trace| {
-                trace
-                    .sessions
-                    .iter()
-                    .map(|session| session.turns.len() as u64)
-                    .sum::<u64>()
-            })
-            .sum::<u64>(),
-    ));
-
-    let mut tasks: Vec<JoinHandle<anyhow::Result<WorkerReplayArtifacts>>> = Vec::new();
-    for trace in traces.iter().cloned() {
-        let sched_args = sched_args.clone();
-        let progress = progress.clone();
-        tasks.push(tokio::task::spawn_blocking(move || {
-            replay_worker_trace(trace, sched_args, trace_simulation_duration_ms, progress)
-        }));
-    }
-
-    let mut artifacts = Vec::new();
-    for task in tasks {
-        artifacts.push(task.await??);
-    }
-
-    for worker_events in artifacts.iter().map(|artifact| &artifact.kv_events) {
-        for i in 1..worker_events.len() {
-            assert!(worker_events[i].timestamp_us >= worker_events[i - 1].timestamp_us);
-        }
-    }
-
-    println!(
-        "Generated {} events. Processing...",
-        artifacts
-            .iter()
-            .map(|artifact| artifact.kv_events.len())
-            .sum::<usize>()
-    );
-    let mut num_stored_events = 0;
-    let mut num_removed_events = 0;
-    for event in artifacts
-        .iter()
-        .flat_map(|artifact| artifact.kv_events.iter())
-    {
-        match event.event.data {
-            KvCacheEventData::Stored(_) => num_stored_events += 1,
-            KvCacheEventData::Removed(_) => num_removed_events += 1,
-            _ => (),
-        }
-    }
-
-    println!("Store events: {}", num_stored_events);
-    println!("Remove events: {}", num_removed_events);
-
-    Ok(artifacts)
-}
-
-pub async fn generate_kv_events(
-    traces: &[Trace],
-    num_gpu_blocks: usize,
-    block_size: u32,
-    trace_simulation_duration_ms: u64,
-) -> anyhow::Result<Vec<Vec<TimedKvEvent>>> {
-    Ok(generate_replay_artifacts(
-        traces,
-        num_gpu_blocks,
-        block_size,
-        trace_simulation_duration_ms,
-    )
-    .await?
-    .into_iter()
-    .map(|artifact| artifact.kv_events)
-    .collect())
-}
-
 pub fn plot_sweep(
     all_results: &[(&str, Vec<(u64, BenchmarkResults)>)],
     output_path: &str,
@@ -611,153 +443,6 @@ pub fn print_sweep_summary(name: &str, results: &[(u64, BenchmarkResults)]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sequence data generation (moved from src/bench_utils.rs)
-// ---------------------------------------------------------------------------
-
-/// Pre-generated sequence data for benchmarking.
-#[derive(Clone)]
-pub struct SequenceData {
-    pub worker_id: WorkerId,
-    pub local_hashes: Vec<LocalBlockHash>,
-    pub external_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
-impl From<RouterSequence> for SequenceData {
-    fn from(sequence: RouterSequence) -> Self {
-        Self {
-            worker_id: sequence.worker_id,
-            local_hashes: sequence.local_hashes,
-            external_hashes: sequence.external_hashes,
-        }
-    }
-}
-
-impl SequenceData {
-    /// Create a new sequence with synthetic hashes based on sequence ID.
-    pub fn new(seq_id: u64, worker_id: WorkerId, depth: usize) -> Self {
-        let local_hashes: Vec<LocalBlockHash> = (0..depth)
-            .map(|block_idx| LocalBlockHash((seq_id << 32) | (block_idx as u64)))
-            .collect();
-
-        let external_hashes: Vec<ExternalSequenceBlockHash> = (0..depth)
-            .map(|block_idx| ExternalSequenceBlockHash((seq_id << 32) | (block_idx as u64)))
-            .collect();
-
-        Self {
-            worker_id,
-            local_hashes,
-            external_hashes,
-        }
-    }
-
-    /// Create a sequence from local hashes, computing external hashes using cumulative hash.
-    pub fn from_local_hashes(worker_id: WorkerId, local_hashes: Vec<LocalBlockHash>) -> Self {
-        let seq_hashes = compute_seq_hash_for_block(&local_hashes);
-        let external_hashes = seq_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash)
-            .collect();
-
-        Self {
-            worker_id,
-            local_hashes,
-            external_hashes,
-        }
-    }
-
-    /// Convert to a store event.
-    pub fn to_store_event(&self, event_id: u64) -> RouterEvent {
-        RouterEvent::new(
-            self.worker_id,
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    start_position: None,
-                    blocks: self
-                        .local_hashes
-                        .iter()
-                        .zip(self.external_hashes.iter())
-                        .map(|(local, ext)| KvCacheStoredBlockData {
-                            tokens_hash: *local,
-                            block_hash: *ext,
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        )
-    }
-
-    /// Convert to a remove event.
-    pub fn to_remove_event(&self, event_id: u64) -> RouterEvent {
-        RouterEvent::new(
-            self.worker_id,
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: self.external_hashes.clone(),
-                }),
-                dp_rank: 0,
-            },
-        )
-    }
-}
-
-/// Generate sequences with shared prefix prompts.
-pub fn generate_sequences(
-    num_sequences: usize,
-    depth: usize,
-    num_workers: usize,
-    prefix_ratio: f64,
-    num_prefix_groups: usize,
-    seed: u64,
-    use_cumulative_hash: bool,
-) -> Vec<SequenceData> {
-    let trace = Trace::synthetic(SyntheticTraceSpec {
-        block_size: 1,
-        num_sessions: num_sequences,
-        turns_per_session: 1,
-        input_tokens: LengthSpec {
-            mean: depth,
-            stddev: 0.0,
-        },
-        output_tokens: LengthSpec {
-            mean: 1,
-            stddev: 0.0,
-        },
-        shared_prefix_ratio: prefix_ratio,
-        num_prefix_groups,
-        first_turn_arrivals: ArrivalSpec::Burst,
-        inter_turn_delays: DelaySpec::None,
-        seed,
-    })
-    .expect("sequence generation spec must be valid");
-    let hash_mode = if use_cumulative_hash {
-        SequenceHashMode::Cumulative
-    } else {
-        SequenceHashMode::Raw
-    };
-
-    trace
-        .partition_by_session(SessionPartitionSpec::RoundRobin {
-            num_partitions: num_workers,
-        })
-        .into_iter()
-        .enumerate()
-        .flat_map(|(worker_idx, partition)| {
-            partition
-                .to_router_sequences(worker_idx as WorkerId, hash_mode)
-                .expect("synthetic trace conversion must succeed")
-                .into_iter()
-                .map(SequenceData::from)
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
 /// Compute median of durations.
 pub fn median(durations: &[Duration]) -> Duration {
     if durations.is_empty() {
@@ -766,61 +451,4 @@ pub fn median(durations: &[Duration]) -> Duration {
     let mut sorted = durations.to_vec();
     sorted.sort();
     sorted[sorted.len() / 2]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn multiturn_trace() -> Trace {
-        Trace {
-            block_size: 2,
-            sessions: vec![dynamo_mocker::loadgen::SessionTrace {
-                session_id: "session-a".to_string(),
-                first_arrival_timestamp_ms: Some(0.0),
-                turns: vec![
-                    dynamo_mocker::loadgen::TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 2,
-                        hash_ids: vec![1, 2],
-                        delay_after_previous_ms: 0.0,
-                    },
-                    dynamo_mocker::loadgen::TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 2,
-                        hash_ids: vec![3, 4],
-                        delay_after_previous_ms: 5.0,
-                    },
-                ],
-            }],
-        }
-    }
-
-    #[tokio::test]
-    async fn test_replay_worker_trace_releases_follow_up_turn_after_completion_delay() {
-        let artifacts = replay_worker_trace(
-            multiturn_trace(),
-            default_mock_engine_args(1024, 2).unwrap(),
-            5,
-            make_progress_bar(Some(2)),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(artifacts.requests.len(), 2);
-        let first_uuid = artifacts.requests[0].uuid;
-        let first_completion_ms = artifacts
-            .output_signals
-            .iter()
-            .find(|signal| signal.signal.uuid == first_uuid && signal.signal.completed)
-            .unwrap()
-            .timestamp_us as f64
-            / 1000.0;
-        assert!(
-            artifacts.requests[1].scheduled_ready_at_ms + 0.1 >= first_completion_ms + 5.0,
-            "expected follow-up turn to wait for completion plus delay, got ready_at={} completion_at={}",
-            artifacts.requests[1].scheduled_ready_at_ms,
-            first_completion_ms
-        );
-    }
 }

@@ -125,9 +125,13 @@ jobs:
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      cpu_parallel_test_markers: '(pre_merge or post_merge) and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: '(pre_merge or post_merge) and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      gpu_test_markers: '(pre_merge or post_merge) and none and gpu_1'
+      # TODO: widen to include `post_merge` — today it picks up tests
+      # (e.g. fault_tolerance/deploy/*) that fail in this container-only
+      # context. Matches the coverage of the old container-validation-dynamo
+      # workflow.
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
   # ============================================================================

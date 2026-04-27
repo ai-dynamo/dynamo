@@ -13,6 +13,7 @@ from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -119,7 +120,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
 
-        return {k: v for k, v in param_mapping.items() if v is not None}
+        # Keep max_new_tokens even when None — SGLang treats None as "generate
+        # until EOS/context-length" whereas omitting it triggers a default of 128.
+        keep_if_none = {"max_new_tokens"}
+        return {
+            k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
+        }
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -275,6 +281,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_routed_experts = getattr(
             self.config.server_args, "enable_return_routed_experts", False
         )
+        routed_experts_kwargs = filter_supported_async_generate_kwargs(
+            self.engine, {"return_routed_experts": return_routed_experts}
+        )
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
@@ -308,7 +317,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
-                return_routed_experts=return_routed_experts,
+                **routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -346,7 +355,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                return_routed_experts=return_routed_experts,
+                **routed_experts_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
