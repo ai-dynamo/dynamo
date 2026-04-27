@@ -240,6 +240,10 @@ fn parse_parameters(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
@@ -259,7 +263,7 @@ mod tests {
         }
     }
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_detect_tool_call_start() {
         let config = get_test_config();
         assert!(detect_tool_call_start_dsml(
@@ -275,7 +279,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // DeepSeek V4 coverage (see lib/parsers/PARSER_CASES.md for PARSER.* taxonomy).
+    // DeepSeek V4 coverage (see lib/parsers/TEST_CASES.md for PARSER.* taxonomy).
     //
     // Covered by the V4 tests below (or by a shared DSML generic test):
     //   - PARSER.1   single-call            (parsers.rs :: test_deepseek_v4_single_tool_call)
@@ -312,10 +316,10 @@ mod tests {
     //   - PARSER.14  empty/null             (test_parse_empty_and_whitespace_inputs_v4)
     //   - PARSER.15  duplicate-calls        (test_parse_duplicate_invokes_same_name_v4)
     //
-    //   - PARSER.xml1 / PARSER.xml2  N/A — DSML carries per-parameter
-    //                  string="true|false" type hints, so XML entity decoding
-    //                  and schema-aware coercion don't apply.
-    //   - PARSER.harmony1 / PARSER.harmony2 N/A — Harmony-only.
+    //   - PARSER.xml.*  N/A — DSML carries per-parameter string="true|false" type hints,
+    //                  so XML entity decoding (PARSER.xml.entities) and schema-aware
+    //                  coercion (PARSER.xml.schema-coercion) don't apply.
+    //   - PARSER.harmony.* N/A — Harmony-only.
     //
     // TODO — bugs pinned, parser still needs to be fixed:
     //   - PARSER.5  BUG: parser drops all calls when </｜DSML｜tool_calls> is
@@ -333,7 +337,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// `PARSER.8` — streaming start-token detection (V4 variant).
-    #[test] // helper, PARSER.fmt3 — V4 token variant
+    #[test] // PARSER.20, PARSER.23 — V4 token variant
     fn test_detect_tool_call_start_v4() {
         let config = get_v4_test_config();
         assert!(detect_tool_call_start_dsml("<｜DSML｜tool_calls>", &config));
@@ -349,7 +353,7 @@ mod tests {
         assert!(!detect_tool_call_start_dsml("no tool call here", &config));
     }
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
         let text = "<｜DSML｜function_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜function_calls>more";
@@ -358,40 +362,12 @@ mod tests {
     }
 
     /// `PARSER.8` — streaming end-position lookup (V4 variant).
-    #[test] // helper, PARSER.fmt3 — V4 token variant
+    #[test] // PARSER.20, PARSER.23 — V4 token variant
     fn test_find_tool_call_end_position_v4() {
         let config = get_v4_test_config();
         let text = "<｜DSML｜tool_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜tool_calls>more";
         let pos = find_tool_call_end_position_dsml(text, &config);
         assert_eq!(&text[pos..], "more");
-    }
-
-    #[test] // PARSER.1
-    fn test_parse_single_tool_call_string_param() {
-        let input = r#"<｜DSML｜function_calls>
-<｜DSML｜invoke name="get_weather">
-<｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
-</｜DSML｜invoke>
-</｜DSML｜function_calls>"#;
-
-        let config = get_test_config();
-        let result = try_tool_call_parse_dsml(input, &config);
-        if let Err(e) = &result {
-            eprintln!("Parse error: {:?}", e);
-        }
-        let (calls, normal) = result.unwrap();
-
-        if calls.is_empty() {
-            eprintln!("Input: {}", input);
-            eprintln!("No calls parsed!");
-        }
-
-        assert_eq!(calls.len(), 1, "Expected 1 tool call, got {}", calls.len());
-        assert_eq!(normal, Some("".to_string()));
-
-        let (name, args) = extract_name_and_args(calls[0].clone());
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "San Francisco");
     }
 
     #[test] // PARSER.1, PARSER.7
@@ -440,7 +416,7 @@ mod tests {
     }
 
     /// `PARSER.2` multi-calls + `PARSER.13` interleaved-text (prefix text before the block).
-    #[test] // PARSER.2, PARSER.fmt3 — V4 variant
+    #[test] // PARSER.2, PARSER.23 — V4 variant
     fn test_parse_deepseek_v4_multiple_tool_calls() {
         let input = r#"Let's check this. <｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_favorite_tourist_spot">
@@ -473,7 +449,7 @@ mod tests {
     }
 
     /// `PARSER.6` — empty args (no-parameter invoke).
-    #[test] // PARSER.6, PARSER.fmt3 — V4 variant
+    #[test] // PARSER.6, PARSER.23 — V4 variant
     fn test_parse_deepseek_v4_no_parameters() {
         let input = r#"<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_current_time">
@@ -882,7 +858,7 @@ mod tests {
     /// into `normal_text` when block-start appears but no invokes parse —
     /// it returns the pre-block text only (empty here, since the input
     /// starts with the block-start fence). The call is still dropped.
-    #[test] // PARSER.5, PARSER.fmt3 — V4 variant
+    #[test] // PARSER.5, PARSER.23 — V4 variant
     fn test_parse_deepseek_v4_missing_end_token() {
         // Start fence + complete invoke, but no </｜DSML｜tool_calls>.
         let input = "<｜DSML｜tool_calls>\n\
@@ -913,7 +889,7 @@ mod tests {
     /// absence of the closing fence prevents the block regex from matching.
     /// All calls are dropped. If the parser ever gains partial-block
     /// recovery, this test will fail and force an intentional update.
-    #[test] // PARSER.2, PARSER.5, PARSER.fmt3
+    #[test] // PARSER.2, PARSER.5, PARSER.23
     fn test_parse_deepseek_v4_missing_end_token_multiple_calls() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"a\">\n\
@@ -938,7 +914,7 @@ mod tests {
     /// (unwrap_or_else → Value::String). Pin the fallback so removing it
     /// (which would cause the whole call to 500 on ragged-edge JSON) is a
     /// deliberate change.
-    #[test] // PARSER.4, PARSER.fmt3
+    #[test] // PARSER.4, PARSER.23
     fn test_parse_deepseek_v4_malformed_json_value_falls_back_to_string() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -962,7 +938,7 @@ mod tests {
     /// `PARSER.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
     /// intact). The invoke regex requires its own close tag, so the call is
     /// silently dropped. Pin the behavior.
-    #[test] // PARSER.4, PARSER.fmt3
+    #[test] // PARSER.4, PARSER.23
     fn test_parse_deepseek_v4_missing_invoke_close_drops_call() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -986,7 +962,7 @@ mod tests {
     /// TODO(PARSER.4) — BUG, NEEDS FIX: parser silently loses the parameter
     /// and ships an under-specified call to the user. The fix should keep
     /// the raw value up to `</｜DSML｜invoke>`. Flip this test once fixed.
-    #[test] // PARSER.4, PARSER.fmt3
+    #[test] // PARSER.4, PARSER.23
     fn test_parse_deepseek_v4_missing_parameter_close_loses_param() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -1016,7 +992,7 @@ mod tests {
     /// silently dropped — caller receives wrong args for A and never sees
     /// B at all. Fix: anchor on `<｜DSML｜invoke name=` to re-sync between
     /// invokes. Flip this test once fixed.
-    #[test] // PARSER.4, PARSER.fmt3
+    #[test] // PARSER.4, PARSER.23
     fn test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"a\">\n\

@@ -610,10 +610,14 @@ fn html_unescape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
     use rstest::rstest;
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_detect_tool_call_start() {
         let config = XmlParserConfig::default();
         assert!(detect_tool_call_start_xml("<tool_call>", &config));
@@ -624,7 +628,7 @@ mod tests {
         assert!(!detect_tool_call_start_xml("toolcall", &config));
     }
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_find_tool_call_end_position() {
         let config = XmlParserConfig::default();
         let text = "<tool_call><function=test></function></tool_call>more text";
@@ -641,7 +645,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_xml so that the jail passes the
     /// entire group to extract_tool_calls rather than emitting the second (and later)
     /// calls as raw trailing text.
-    #[test] // PARSER.2, helper
+    #[test] // PARSER.2, PARSER.20
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = XmlParserConfig::default();
 
@@ -682,7 +686,7 @@ mod tests {
         );
     }
 
-    #[rstest] // helper
+    #[rstest] // PARSER.18 — helper
     #[case(r#"{"key": "value"}"#, serde_json::json!({"key": "value"}), "JSON object")]
     #[case(r#"[1, 2, 3]"#, serde_json::json!([1, 2, 3]), "JSON array")]
     #[case("42", serde_json::json!(42), "integer")]
@@ -700,32 +704,12 @@ mod tests {
         assert_eq!(safe_parse_value(input), expected);
     }
 
-    #[rstest] // helper
+    #[rstest] // PARSER.17 — helper
     #[case("&lt;div&gt;", "<div>", "HTML tags")]
     #[case("a &amp; b", "a & b", "ampersand")]
     #[case("&quot;quoted&quot;", "\"quoted\"", "quotes")]
     fn test_html_unescape(#[case] input: &str, #[case] expected: &str, #[case] _description: &str) {
         assert_eq!(html_unescape(input), expected);
-    }
-
-    #[test] // PARSER.1
-    fn test_parse_simple_tool_call() {
-        let input = r#"<tool_call>
-<function=execute_bash>
-<parameter=command>
-pwd && ls
-</parameter>
-</function>
-</tool_call>"#;
-
-        let (calls, normal) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "execute_bash");
-        assert_eq!(normal, Some("".to_string()));
-
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["command"], "pwd && ls");
     }
 
     #[test] // PARSER.1, PARSER.7
@@ -991,7 +975,7 @@ NYC
         assert_eq!(args["city"], "NYC");
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_schema_aware_type_conversion() {
         // This test matches the Python test_parse_streaming_increment_multiple_parameters
         // from the diff, showing schema-aware type conversion
@@ -1061,7 +1045,7 @@ NYC
         );
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_schema_aware_type_conversion_fallback() {
         // Test that invalid values fall back to strings with warnings
         let tools = vec![ToolDefinition {
@@ -1097,7 +1081,7 @@ NYC
         assert_eq!(args["bool_param"], false);
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_anyof_param_parsed_as_object_not_string() {
         // When a tool parameter uses "anyOf" instead of a direct "type", the value
         // should be JSON-parsed (treated as object), not double-encoded as a string.
@@ -1151,7 +1135,7 @@ NYC
         assert_eq!(args["location"]["city"], "Paris");
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_no_schema_fallback_behavior() {
         // Without schema, behavior should match old safe_parse_value logic
         let input = r#"<tool_call>

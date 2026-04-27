@@ -287,6 +287,11 @@ pub fn detect_tool_call_start_harmony(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of the single-call happy path also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Missing-end-token recovery
+    // is N/A for harmony (no section-end concept). Keep these inline tests
+    // as the parser-specific regression moat; trim duplicated coverage once
+    // the contract suite stabilizes.
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
@@ -294,21 +299,7 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[tokio::test] // PARSER.1, PARSER.harmony2
-    async fn test_parse_tool_calls_harmony_complete_basic() {
-        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
-        let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
-        let (name, args) = extract_name_and_args(tool_calls[0].clone());
-        assert_eq!(name, "get_current_weather");
-        assert_eq!(args["location"], "San Francisco");
-        assert_eq!(args["format"], "celsius");
-    }
-
-    #[tokio::test] // PARSER.4, PARSER.harmony2
+    #[tokio::test] // PARSER.4, PARSER.19
     async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -319,7 +310,7 @@ mod tests {
         assert_eq!(tool_calls.len(), 0);
     }
 
-    #[tokio::test] // PARSER.7, PARSER.9, PARSER.harmony2
+    #[tokio::test] // PARSER.7, PARSER.9, PARSER.19
     async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -337,7 +328,7 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[tokio::test] // PARSER.9, PARSER.13, PARSER.harmony2
+    #[tokio::test] // PARSER.9, PARSER.13, PARSER.19
     async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -459,7 +450,7 @@ mod tests {
         );
     }
 
-    #[tokio::test] // PARSER.4, PARSER.5, PARSER.harmony2
+    #[tokio::test] // PARSER.4, PARSER.5, PARSER.19
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
@@ -562,7 +553,7 @@ mod tests {
 mod detect_parser_tests {
     use super::*;
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_detect_tool_call_start_harmony_chunk_with_tool_call_start_token() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json"#;
         let config = JsonParserConfig {
@@ -574,7 +565,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_detect_tool_call_start_harmony_chunk_without_tool_call_start_token() {
         // This is a warkaround for now. Right now everything is treated as tool call start token.
         // We need to improve this in the future.
@@ -588,7 +579,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.8
+    #[test] // PARSER.20, PARSER.8
     fn test_detect_tool_call_start_harmony_partial_tokens() {
         // Test partial token detection for streaming scenarios
         let config = JsonParserConfig {

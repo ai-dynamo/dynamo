@@ -305,6 +305,10 @@ fn parse_section_block(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
     use rstest::rstest;
 
@@ -312,7 +316,7 @@ mod tests {
         KimiK2ParserConfig::default()
     }
 
-    #[test] // detection helper
+    #[test] // PARSER.20 — detection helper
     fn test_detect_tool_call_start() {
         let config = default_config();
         assert!(detect_tool_call_start_kimi_k2(
@@ -334,7 +338,7 @@ mod tests {
         assert!(!detect_tool_call_start_kimi_k2("toolcall", &config));
     }
 
-    #[test] // detection helper
+    #[test] // PARSER.20 — detection helper
     fn test_find_tool_call_end_position() {
         let config = default_config();
         let text = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>more text";
@@ -345,20 +349,6 @@ mod tests {
         let text_no_end = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0";
         let pos = find_tool_call_end_position_kimi_k2(text_no_end, &config);
         assert_eq!(pos, None, "should return None when section_end is missing");
-    }
-
-    #[test] // PARSER.1
-    fn test_parse_simple_tool_call() {
-        let config = default_config();
-        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
-
-        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(normal, Some("".to_string()));
-
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["location"], "NYC");
     }
 
     #[test] // PARSER.1, PARSER.7
@@ -429,7 +419,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test] // PARSER.fmt1 — function-name conventions (`functions.X` vs bare `X`)
+    #[test] // PARSER.21 — function-name conventions (`functions.X` vs bare `X`)
     fn test_parse_without_functions_prefix() {
         let config = default_config();
         // Some models may emit without the "functions." prefix
@@ -546,7 +536,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test] // PARSER.fmt2 — whitespace tolerance
+    #[test] // PARSER.22 — whitespace tolerance
     fn test_parse_with_whitespace() {
         let config = default_config();
         let input = "<|tool_calls_section_begin|>\n<|tool_call_begin|> functions.search:0 <|tool_call_argument_begin|> {\"query\":\"rust programming\"} <|tool_call_end|>\n<|tool_calls_section_end|>";
@@ -600,7 +590,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // helper, PARSER.fmt3 — detection helper, singular section-token variant
+    #[test] // PARSER.20, PARSER.23 — detection helper, singular section-token variant
     fn test_detect_singular_section_start() {
         let config = default_config();
         // Singular variant: <|tool_call_section_begin|> (without 's')
@@ -615,7 +605,7 @@ mod tests {
         ));
     }
 
-    #[test] // PARSER.fmt3 — singular section-token variant
+    #[test] // PARSER.23 — singular section-token variant
     fn test_parse_with_singular_section_tokens() {
         let config = default_config();
         // Use singular form: tool_call_section_begin/end (without 's')
@@ -627,7 +617,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // helper, PARSER.fmt3 — detection helper, singular section-token variant
+    #[test] // PARSER.20, PARSER.23 — detection helper, singular section-token variant
     fn test_find_end_position_singular_variant() {
         let config = default_config();
         // Singular variant end token
@@ -652,7 +642,7 @@ mod tests {
         assert_eq!(calls[0].function.arguments, "{invalid json here}");
     }
 
-    #[test] // PARSER.fmt1 — function-name conventions (ID regex validation)
+    #[test] // PARSER.21 — function-name conventions (ID regex validation)
     fn test_parse_invalid_function_id_rejected_by_regex() {
         // vllm: test_extract_tool_calls_invalid_funcall
         // sglang: test_invalid_tool_call
@@ -745,7 +735,7 @@ mod tests {
         assert_eq!(args["tags"], serde_json::json!(["admin", "active"]));
     }
 
-    #[test] // PARSER.fmt4 — empty wrapper (start+end with no calls between)
+    #[test] // PARSER.24 — empty wrapper (start+end with no calls between)
     fn test_parse_empty_tool_section() {
         // vllm: test_empty_tool_section
         // Section begin immediately followed by section end, no tool calls inside
@@ -761,7 +751,7 @@ mod tests {
         );
     }
 
-    #[rstest] // PARSER.fmt1 — function-name conventions (hyphens, double-underscores)
+    #[rstest] // PARSER.21 — function-name conventions (hyphens, double-underscores)
     #[case(
         r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.list-tasklists:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#,
         "list-tasklists",

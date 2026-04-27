@@ -304,13 +304,17 @@ fn parse_tool_call_block(
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
 
     fn get_test_config() -> Glm47ParserConfig {
         Glm47ParserConfig::default()
     }
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_detect_tool_call_start() {
         let config = get_test_config();
 
@@ -326,25 +330,6 @@ mod tests {
 
         // No tool call
         assert!(!detect_tool_call_start_glm47("Just normal text", &config));
-    }
-
-    #[test] // PARSER.1
-    fn test_parse_simple_tool_call() {
-        let config = get_test_config();
-        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
-
-        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
-
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "get_weather");
-
-        let args: HashMap<String, Value> =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(
-            args.get("location").unwrap().as_str().unwrap(),
-            "San Francisco"
-        );
-        assert_eq!(normal_text, Some("".to_string()));
     }
 
     #[test] // PARSER.1, PARSER.7
@@ -422,7 +407,7 @@ mod tests {
         assert!(args.is_empty());
     }
 
-    #[test] // helper
+    #[test] // PARSER.20
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
         let chunk =
@@ -435,7 +420,7 @@ mod tests {
         );
     }
 
-    #[test] // PARSER.7, PARSER.fmt2
+    #[test] // PARSER.7, PARSER.22
     fn test_parse_multiline_arg_value() {
         let config = get_test_config();
         let message = "<tool_call>write_file<arg_key>path</arg_key><arg_value>/tmp/hello.py</arg_value><arg_key>content</arg_key><arg_value>#!/usr/bin/env python3\nprint(\"Hello, World!\")\n</arg_value></tool_call>";
@@ -526,7 +511,7 @@ mod tests {
         );
     }
 
-    #[test] // helper
+    #[test] // PARSER.17
     fn test_xml_entity_decoding() {
         let config = get_test_config();
         let message = r#"<tool_call>write_file<arg_key>content</arg_key><arg_value>x &lt; y &amp;&amp; y &gt; z</arg_value></tool_call>"#;
@@ -542,7 +527,7 @@ mod tests {
         );
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_type_coercion_with_schema() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -576,7 +561,7 @@ mod tests {
         assert_eq!(args.get("label").unwrap().as_str().unwrap(), "warm");
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_type_coercion_array_comma_separated() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -602,7 +587,7 @@ mod tests {
         assert_eq!(tags[2].as_str().unwrap(), "go");
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_type_coercion_array_json() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -626,7 +611,7 @@ mod tests {
         assert_eq!(ids[0].as_i64().unwrap(), 1);
     }
 
-    #[test] // helper
+    #[test] // PARSER.18
     fn test_type_coercion_falls_back_to_string() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {

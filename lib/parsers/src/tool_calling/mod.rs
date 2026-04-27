@@ -12,6 +12,8 @@ pub mod parsers;
 pub mod pythonic;
 pub mod response;
 #[cfg(test)]
+pub mod test_cases;
+#[cfg(test)]
 pub mod tests;
 pub mod tools;
 pub mod xml;
