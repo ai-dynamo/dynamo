@@ -18,7 +18,7 @@ Release history in this document begins at v0.6.0.
 
 **Pre-Releases**
 
-- **DeepSeek-V4:** [v1.2.0-sglang-deepseek-v4-dev.1](#v120-sglang-deepseek-v4-dev1) — SGLang container for DeepSeek-V4-Flash and V4-Pro on Blackwell (B200), based on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview. SGLang container only; no wheels, Helm charts, or TRT-LLM container.
+- **DeepSeek-V4:** [v1.2.0-sglang-deepseek-v4-dev.1](#v120-sglang-deepseek-v4-dev1) — SGLang container for DeepSeek-V4-Flash and V4-Pro on Blackwell (B200), based on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview. SGLang container only; no vLLM or TRT-LLM containers, no wheels, no Helm charts.
 - **Nightlies:** daily `ai-dynamo` and `ai-dynamo-runtime` wheels only (no containers, no Helm charts) published from `main` to [pypi.nvidia.com](https://pypi.nvidia.com/), versioned `X.Y.Z.dev${YYYYMMDD}`. No QA validation. See [Nightly Wheels](#nightly-wheels).
 - **Experimental v1.1.0 previews:** [v1.1.0-dev.3](#v110-dev3) is the latest (partial: TRT-LLM container plus `ai-dynamo` and `ai-dynamo-runtime` wheels). Older: [v1.1.0-dev.2](#v110-dev2), [v1.1.0-dev.1](#v110-dev1). See [Pre-Release Artifacts](#pre-release-artifacts) for the full inventory per version.
 
@@ -634,7 +634,7 @@ https://pypi.nvidia.com/ai-dynamo-runtime/ai_dynamo_runtime-1.2.0.dev20260426-cp
 - **Branch:** [release/1.2.0-sglang-deepseek-v4-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.2.0-sglang-deepseek-v4-dev.1)
 - **GitHub Tag:** [v1.2.0-sglang-deepseek-v4-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-sglang-deepseek-v4-dev.1)
 - **Backend (shipped):** SGLang on `lmsysorg/sglang:deepseek-v4-blackwell` (CUDA `v12.9`, Python `3.12`); NIXL `v0.10.1`, UCX `v1.20.0` bundled. Backend pins follow the upstream DeepSeek-V4 preview, **not** standard Dynamo backend pins.
-- **Coverage:** SGLang container only. No vLLM or TRT-LLM containers, no `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels, no Helm charts. vLLM recipes for V4-Flash and V4-Pro are source-only and target the `vllm/vllm-openai:deepseekv4-cu130` image (built from vLLM PR #40760); users build locally per `recipes/deepseek-v4-{flash,pro}/container/README.md`.
+- **Coverage:** SGLang container only. No vLLM or TRT-LLM containers, no `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels, no Helm charts. vLLM recipes for V4-Flash and V4-Pro are source-only and target the `vllm/vllm-openai:deepseekv4-cu130` image; users build locally per `recipes/deepseek-v4-{flash,pro}/container/README.md`.
 
 #### Container Images
 
