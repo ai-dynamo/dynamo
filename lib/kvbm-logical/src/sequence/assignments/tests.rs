@@ -1230,7 +1230,7 @@ fn test_block_sequence_append_token() {
 #[test]
 fn test_block_sequence_with_salt() {
     let seq1 = BlockSequence::new(vec![0, 1, 2, 3], 4, None);
-    let seq2 = BlockSequence::new(vec![0, 1, 2, 3], 4, Some(42));
+    let seq2 = BlockSequence::new(vec![0, 1, 2, 3], 4, Some(dynamo_tokens::SaltHash(42)));
 
     // Different salts should produce different hashes
     let hashes1 = seq1.all_sequence_hashes();

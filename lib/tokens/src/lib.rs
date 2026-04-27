@@ -26,22 +26,92 @@ pub type Token = u32;
 /// This might encode model architecture, weights, PEFT info, etc.
 pub type Salt = Vec<u8>;
 
-/// A 64-bit hash of the salt, computed using [`compute_hash_v2`] with a seed of 0.
-/// Used as the initial seed for subsequent block hashes.
-pub type SaltHash = u64;
+/// A 64-bit hash of the salt. Computed once per request and used as the seed for
+/// every block-hash computation in that request.
+///
+/// The canonical construction path is [`compute_salt_hash_from_bytes`] (or
+/// `dynamo_kv_hashing::Request::salt_hash` at the application layer). Direct
+/// `SaltHash(raw)` is allowed for deserialization / external sources.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct SaltHash(pub u64);
 
-/// A 64-bit hash computed only from the tokens within a single block.
-/// It uses [`compute_hash_v2`] with the [`SaltHash`] as the seed.
-pub type BlockHash = u64;
+impl SaltHash {
+    /// Returns the underlying u64.
+    #[inline(always)]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
-/// A 64-bit sequence-aware hash.
-/// It combines the previous block's [`SequenceHash`] (or the [`SaltHash`] for the first block)
-/// with the current block's [`BlockHash`] using [`compute_hash_v2`] and the [`SaltHash`] as the seed.
+impl From<u64> for SaltHash {
+    #[inline(always)]
+    fn from(v: u64) -> Self {
+        SaltHash(v)
+    }
+}
+
+/// A 64-bit hash computed from the tokens within a single block (with optional MM
+/// frames), seeded by the request's [`SaltHash`].
+///
+/// The canonical construction path is [`compute_block_hash`]. Direct `BlockHash(raw)`
+/// is allowed for deserialization / external sources.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct BlockHash(pub u64);
+
+impl BlockHash {
+    /// Returns the underlying u64.
+    #[inline(always)]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for BlockHash {
+    #[inline(always)]
+    fn from(v: u64) -> Self {
+        BlockHash(v)
+    }
+}
+
+/// A 64-bit sequence-aware hash. Equals the [`BlockHash`] at position 0 and
+/// `xxh3([prev_seq, block_hash], 0)` at every subsequent position. Salt propagates
+/// through `seq_hash[0]` since `block_hash[0]` already encodes it.
+///
+/// Stays a type alias because `SequenceHash` flows through downstream protocol crates
+/// (kvbm-engine sessions, kv-router events) where a wider newtype rollout is a
+/// separate, larger refactor.
 pub type SequenceHash = u64;
 
-/// Computes a hash of the data using the given seed.
+/// Computes a hash of the data using the given seed (raw u64).
+///
+/// Prefer [`compute_block_hash`] / [`compute_salt_hash_from_bytes`] for typed
+/// construction; this raw-u64 form is kept for low-level callers.
 pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
     xxhash_rust::xxh3::xxh3_64_with_seed(data, seed)
+}
+
+/// Canonical [`BlockHash`] construction: XXH3 over the per-block byte buffer
+/// (already encoded by [`compute_block_bytes_with_mm`] or `cast_slice` for the
+/// no-MM path), seeded by [`SaltHash`].
+#[inline]
+pub fn compute_block_hash(block_bytes: &[u8], salt: SaltHash) -> BlockHash {
+    BlockHash(compute_hash_v2(block_bytes, salt.0))
+}
+
+/// Canonical [`SaltHash`] construction from a pre-canonicalized salt-payload byte
+/// buffer. Application-layer callers should use `dynamo_kv_hashing::Request::salt_hash`
+/// which canonicalizes `(salt, lora_name)` first; this function is the low-level path.
+#[inline]
+pub fn compute_salt_hash_from_bytes(payload: &[u8]) -> SaltHash {
+    SaltHash(compute_hash_v2(payload, 0))
 }
 
 /// Metadata describing a single multimodal placeholder run within a token sequence.
@@ -282,9 +352,13 @@ impl PositionalSequenceHash {
     ///
     /// The mode is automatically selected based on the position value to use the minimal
     /// representation that can fit the position.
-    pub fn new(sequence_hash: SequenceHash, position: u64, local_block_hash: BlockHash) -> Self {
+    pub fn new(
+        sequence_hash: SequenceHash,
+        position: u64,
+        local_block_hash: impl Into<BlockHash>,
+    ) -> Self {
         let mode = Self::select_mode(position);
-        let upper = Self::encode_upper(mode, position, local_block_hash);
+        let upper = Self::encode_upper(mode, position, local_block_hash.into().0);
         let value = ((upper as u128) << 64) | (sequence_hash as u128);
         PositionalSequenceHash(value)
     }
@@ -303,7 +377,7 @@ impl PositionalSequenceHash {
     /// Returns the local block hash (BlockHash) component.
     pub fn local_block_hash(&self) -> BlockHash {
         let (_, _, lbh) = self.decode_upper();
-        lbh
+        BlockHash(lbh)
     }
 
     /// Returns the mode used for encoding (0, 1, 2, or 3).
@@ -474,7 +548,7 @@ impl PositionalLineageHash {
     ///
     /// At the root, the sequence hash equals the block hash and there is no parent.
     pub fn root(block_hash: BlockHash) -> Self {
-        Self::new(block_hash, None, 0)
+        Self::new(block_hash.0, None, 0)
     }
 
     /// Extends this lineage by one block, producing the child PLH.
@@ -489,7 +563,7 @@ impl PositionalLineageHash {
     /// Panics if `self.position() + 1 >= 2^24`.
     pub fn extend(&self, child_block_hash: BlockHash) -> Self {
         let parent_seq = self.current_sequence_hash();
-        let child_seq = compute_hash_v2(cast_slice(&[parent_seq, child_block_hash]), 0);
+        let child_seq = compute_hash_v2(cast_slice(&[parent_seq, child_block_hash.0]), 0);
         Self::new(child_seq, Some(parent_seq), self.position() + 1)
     }
 
@@ -908,7 +982,7 @@ struct TokenBlockChunk {
 impl TokenBlockChunk {
     /// Creates a new chunk from [`Tokens`], calculating the [`BlockHash`].
     fn new(tokens: Tokens, salt_hash: SaltHash) -> Self {
-        let block_hash = compute_hash_v2(cast_slice(&tokens), salt_hash);
+        let block_hash = compute_block_hash(cast_slice(&tokens), salt_hash);
         Self {
             tokens,
             salt_hash,
@@ -918,7 +992,7 @@ impl TokenBlockChunk {
 
     /// Creates a new chunk from a slice of `&[Token]`, calculating the [`BlockHash`].
     fn from_tokens(tokens: &[Token], salt_hash: SaltHash) -> Self {
-        let block_hash = compute_hash_v2(cast_slice(tokens), salt_hash);
+        let block_hash = compute_block_hash(cast_slice(tokens), salt_hash);
         Self {
             tokens: tokens.into(), // Converts slice to owned Tokens
             salt_hash,
@@ -971,11 +1045,11 @@ impl TokenBlock {
                 // so it propagates through every parent. Re-feeding it as the per-step
                 // seed would be redundant; using a constant 0 seed lets PLH::extend
                 // reproduce the chain from (parent_plh, child_block_hash) alone.
-                compute_hash_v2(cast_slice(&[parent, chunk.block_hash]), 0)
+                compute_hash_v2(cast_slice(&[parent, chunk.block_hash.0]), 0)
             }
             None => {
                 // First block: sequence hash is just the block hash
-                chunk.block_hash
+                chunk.block_hash.0
             }
         };
 
@@ -1100,7 +1174,7 @@ impl TokenBlockSequence {
     /// Panics if `block_size` is 0.
     pub fn new(tokens: Tokens, block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
-        let salt_hash = salt_hash.unwrap_or(0);
+        let salt_hash = salt_hash.unwrap_or_default();
         let (blocks, current_block) = Self::split_tokens(&tokens, block_size, salt_hash);
 
         Self {
@@ -1178,7 +1252,7 @@ impl TokenBlockSequence {
         let block_offset = self.blocks.len() * (self.current_block.block_size as usize);
         let tokens = std::mem::take(&mut self.current_block.tokens);
         let block_bytes = compute_block_bytes_with_mm(&tokens, block_offset, &self.mm_runs);
-        let block_hash = compute_hash_v2(&block_bytes, self.current_block.salt_hash);
+        let block_hash = compute_block_hash(&block_bytes, self.current_block.salt_hash);
         let chunk = TokenBlockChunk {
             tokens,
             salt_hash: self.current_block.salt_hash,
@@ -1526,7 +1600,7 @@ impl TokenBlockSequence {
     pub fn split_tokens(
         tokens: &[Token],
         block_size: u32,
-        salt_hash: u64,
+        salt_hash: SaltHash,
     ) -> (Vec<TokenBlock>, PartialTokenBlock) {
         assert!(block_size > 0, "block_size must be greater than 0");
         let chunks: Vec<TokenBlockChunk> = tokens
@@ -1577,7 +1651,7 @@ impl TokenBlockSequence {
     /// * `salt_hash` - The [`SaltHash`] to use for hashing.
     pub fn from_slice(tokens: &[Token], block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
-        let salt_hash = salt_hash.unwrap_or(0);
+        let salt_hash = salt_hash.unwrap_or_default();
         let (blocks, current_block) = Self::split_tokens(tokens, block_size, salt_hash);
 
         Self {
@@ -1604,7 +1678,7 @@ impl TokenBlockSequence {
         salt_hash: Option<SaltHash>,
     ) -> Result<Self, TokenBlockError> {
         assert!(block_size > 0, "block_size must be greater than 0");
-        let salt_hash = salt_hash.unwrap_or(0);
+        let salt_hash = salt_hash.unwrap_or_default();
         let validated =
             validate_and_sort_mm_info(mm_info, tokens.len()).map_err(TokenBlockError::MmInfo)?;
         let (blocks, current_block) =
@@ -1636,7 +1710,7 @@ impl TokenBlockSequence {
             let block_offset = i * bs;
             let block_tokens = &tokens[block_offset..block_offset + bs];
             let block_bytes = compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
-            let block_hash = compute_hash_v2(&block_bytes, salt_hash);
+            let block_hash = compute_block_hash(&block_bytes, salt_hash);
             let chunk = TokenBlockChunk {
                 tokens: block_tokens.into(),
                 salt_hash,
@@ -1748,12 +1822,12 @@ mod tests {
     }
 
     // Helper to get expected hashes (replace with actual calculated values if needed)
-    const TEST_SALT_HASH: SaltHash = 1337;
-    const HASH_1_4: BlockHash = 14643705804678351452; // hash([1,2,3,4], 1337)
-    const SEQ_HASH_1_4: SequenceHash = HASH_1_4;
-    const HASH_5_8: BlockHash = 16777012769546811212; // hash([5,6,7,8], 1337)
+    const TEST_SALT_HASH: SaltHash = SaltHash(1337);
+    const HASH_1_4: BlockHash = BlockHash(14643705804678351452); // hash([1,2,3,4], 1337)
+    const SEQ_HASH_1_4: SequenceHash = HASH_1_4.0;
+    const HASH_5_8: BlockHash = BlockHash(16777012769546811212); // hash([5,6,7,8], 1337)
     const SEQ_HASH_5_8: SequenceHash = 13257339816715102022; // hash([SEQ_HASH_1_4, HASH_5_8], 0)
-    const HASH_9_12: BlockHash = 483935686894639516; // hash([9,10,11,12], 1337)
+    const HASH_9_12: BlockHash = BlockHash(483935686894639516); // hash([9,10,11,12], 1337)
     const SEQ_HASH_9_12: SequenceHash = 18362646011897812054; // hash([SEQ_HASH_5_8, HASH_9_12], 0)
 
     impl PartialTokenBlock {
@@ -1796,17 +1870,17 @@ mod tests {
 
         // Block 1: [1, 2, 3, 4]
         let tokens_1_4 = &[1u32, 2, 3, 4];
-        let computed_hash_1_4 = compute_hash_v2(cast_slice(tokens_1_4), salt);
+        let computed_hash_1_4 = compute_block_hash(cast_slice(tokens_1_4), salt);
         assert_eq!(computed_hash_1_4, HASH_1_4, "Mismatch for HASH_1_4");
         // First block's sequence hash is its block hash
-        assert_eq!(computed_hash_1_4, SEQ_HASH_1_4, "Mismatch for SEQ_HASH_1_4");
+        assert_eq!(computed_hash_1_4.0, SEQ_HASH_1_4, "Mismatch for SEQ_HASH_1_4");
 
         // Block 2: [5, 6, 7, 8]
         let tokens_5_8 = &[5u32, 6, 7, 8];
-        let computed_hash_5_8 = compute_hash_v2(cast_slice(tokens_5_8), salt);
+        let computed_hash_5_8 = compute_block_hash(cast_slice(tokens_5_8), salt);
         assert_eq!(computed_hash_5_8, HASH_5_8, "Mismatch for HASH_5_8");
         // Chain step uses constant seed 0; salt is already mixed into block_hash.
-        let computed_seq_hash_5_8 = compute_hash_v2(cast_slice(&[SEQ_HASH_1_4, HASH_5_8]), 0);
+        let computed_seq_hash_5_8 = compute_hash_v2(cast_slice(&[SEQ_HASH_1_4, HASH_5_8.0]), 0);
         assert_eq!(
             computed_seq_hash_5_8, SEQ_HASH_5_8,
             "Mismatch for SEQ_HASH_5_8"
@@ -1814,9 +1888,9 @@ mod tests {
 
         // Block 3: [9, 10, 11, 12]
         let tokens_9_12 = &[9u32, 10, 11, 12];
-        let computed_hash_9_12 = compute_hash_v2(cast_slice(tokens_9_12), salt);
+        let computed_hash_9_12 = compute_block_hash(cast_slice(tokens_9_12), salt);
         assert_eq!(computed_hash_9_12, HASH_9_12, "Mismatch for HASH_9_12");
-        let computed_seq_hash_9_12 = compute_hash_v2(cast_slice(&[SEQ_HASH_5_8, HASH_9_12]), 0);
+        let computed_seq_hash_9_12 = compute_hash_v2(cast_slice(&[SEQ_HASH_5_8, HASH_9_12.0]), 0);
         assert_eq!(
             computed_seq_hash_9_12, SEQ_HASH_9_12,
             "Mismatch for SEQ_HASH_9_12"
@@ -1837,7 +1911,7 @@ mod tests {
         // LBH is truncated to 54 bits in mode 0
         assert_eq!(
             psh_0.local_block_hash(),
-            lbh_0 & ((1u64 << 54) - 1),
+            BlockHash(lbh_0 & ((1u64 << 54) - 1)),
             "LBH should be truncated to 54 bits"
         );
 
@@ -1851,7 +1925,7 @@ mod tests {
         // LBH is truncated to 46 bits in mode 1
         assert_eq!(
             psh_1.local_block_hash(),
-            lbh_0 & ((1u64 << 46) - 1),
+            BlockHash(lbh_0 & ((1u64 << 46) - 1)),
             "LBH should be truncated to 46 bits"
         );
 
@@ -1865,7 +1939,7 @@ mod tests {
         // LBH is truncated to 38 bits in mode 2
         assert_eq!(
             psh_2.local_block_hash(),
-            lbh_0 & ((1u64 << 38) - 1),
+            BlockHash(lbh_0 & ((1u64 << 38) - 1)),
             "LBH should be truncated to 38 bits"
         );
 
@@ -1879,7 +1953,7 @@ mod tests {
         // LBH is truncated to 31 bits in mode 3
         assert_eq!(
             psh_3.local_block_hash(),
-            lbh_0 & ((1u64 << 31) - 1),
+            BlockHash(lbh_0 & ((1u64 << 31) - 1)),
             "LBH should be truncated to 31 bits"
         );
 
@@ -2049,11 +2123,11 @@ mod tests {
     fn test_positional_lineage_hash_extend() {
         // PLH must be self-extending: a chain built from PLH::root + extend should be
         // bitwise identical to the chain produced by full TokenBlock construction.
-        let salt: SaltHash = 1337;
+        let salt = SaltHash(1337);
         let bh: [BlockHash; 3] = [
-            compute_hash_v2(cast_slice(&[1u32, 2, 3, 4]), salt),
-            compute_hash_v2(cast_slice(&[5u32, 6, 7, 8]), salt),
-            compute_hash_v2(cast_slice(&[9u32, 10, 11, 12]), salt),
+            compute_block_hash(cast_slice(&[1u32, 2, 3, 4]), salt),
+            compute_block_hash(cast_slice(&[5u32, 6, 7, 8]), salt),
+            compute_block_hash(cast_slice(&[9u32, 10, 11, 12]), salt),
         ];
 
         // Direct construction via TokenBlock
@@ -2085,16 +2159,17 @@ mod tests {
         // Chain definition: extended.current_sequence_hash == xxh3([parent, child_block_hash], 0)
         assert_eq!(
             plh1.current_sequence_hash(),
-            compute_hash_v2(cast_slice(&[plh0.current_sequence_hash(), bh[1]]), 0),
+            compute_hash_v2(cast_slice(&[plh0.current_sequence_hash(), bh[1].0]), 0),
         );
 
         // Salt propagation: changing salt changes block_hash[0] and therefore every
         // subsequent PLH, even though salt no longer seeds the per-step chain.
-        let alt_salt: SaltHash = 4242;
-        let alt_bh0 = compute_hash_v2(cast_slice(&[1u32, 2, 3, 4]), alt_salt);
+        let alt_salt = SaltHash(4242);
+        let alt_bh0 = compute_block_hash(cast_slice(&[1u32, 2, 3, 4]), alt_salt);
         assert_ne!(alt_bh0, bh[0]);
         let alt_plh0 = PositionalLineageHash::root(alt_bh0);
-        let alt_plh1 = alt_plh0.extend(compute_hash_v2(cast_slice(&[5u32, 6, 7, 8]), alt_salt));
+        let alt_plh1 =
+            alt_plh0.extend(compute_block_hash(cast_slice(&[5u32, 6, 7, 8]), alt_salt));
         assert_ne!(alt_plh0.as_u128(), plh0.as_u128());
         assert_ne!(alt_plh1.as_u128(), plh1.as_u128());
     }
@@ -2321,7 +2396,7 @@ mod tests {
 
         // No salt hash
         let seq_no_salt = create_test_sequence(&[1, 2, 3, 4, 5], 4, None);
-        assert_eq!(seq_no_salt.salt_hash(), 0);
+        assert_eq!(seq_no_salt.salt_hash(), SaltHash(0));
         assert_eq!(seq_no_salt.blocks().len(), 1);
         assert_ne!(seq_no_salt.blocks[0].block_hash(), HASH_1_4); // Hash differs with salt 0
         assert_eq!(seq_no_salt.current_block().tokens().as_ref(), &[5]);
@@ -2722,7 +2797,7 @@ mod tests {
 
     #[test]
     fn test_push_tokens_partial_block() {
-        let mut partial = PartialTokenBlock::create_sequence_root(4, 1337);
+        let mut partial = PartialTokenBlock::create_sequence_root(4, SaltHash(1337));
 
         let tokens = Tokens(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
@@ -2831,7 +2906,7 @@ mod tests {
         // Local block hash truncated to 38 bits in mode 2
         assert_eq!(
             psh_mode2.local_block_hash(),
-            block_hash & ((1u64 << 38) - 1)
+            BlockHash(block_hash & ((1u64 << 38) - 1))
         );
 
         // Mode 3: position fits in 31 bits (16777216 <= pos < 2147483648)
@@ -2847,7 +2922,7 @@ mod tests {
         // Local block hash truncated to 31 bits in mode 3
         assert_eq!(
             psh_mode3.local_block_hash(),
-            block_hash & ((1u64 << 31) - 1)
+            BlockHash(block_hash & ((1u64 << 31) - 1))
         );
     }
 
@@ -2950,7 +3025,7 @@ mod tests {
     #[test]
     fn test_token_block_accessors() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
 
         let block = &seq.blocks()[0];
 
@@ -3021,7 +3096,7 @@ mod tests {
     #[test]
     fn test_sequence_next_block() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
 
         let block = &seq.blocks()[0];
         let next_partial = block.next_block();
@@ -3039,7 +3114,7 @@ mod tests {
     #[test]
     fn test_sequence_reset() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let mut seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+        let mut seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
 
         assert_eq!(seq.blocks().len(), 2);
         assert_eq!(seq.total_tokens(), 9);
@@ -3055,7 +3130,7 @@ mod tests {
     #[test]
     fn test_sequence_into_parts() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
 
         let (blocks, partial) = seq.into_parts();
 
@@ -3071,7 +3146,7 @@ mod tests {
 
         // With blocks
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
         let last = seq.last_complete_block();
         assert!(last.is_some());
         assert_eq!(last.unwrap().tokens().as_ref(), &[5, 6, 7, 8]);
@@ -3139,7 +3214,7 @@ mod tests {
         assert_eq!(helper_bytes, expected, "MM-aware byte buffer mismatch");
 
         // Validate block_hash equals XXH3 over the expected buffer.
-        let expected_block_hash = compute_hash_v2(&expected, salt);
+        let expected_block_hash = compute_block_hash(&expected, salt);
         let seq = TokenBlockSequence::new_with_mm(tokens, &mm, 8, Some(salt)).unwrap();
         assert_eq!(seq.blocks().len(), 1);
         assert_eq!(seq.blocks()[0].block_hash(), expected_block_hash);

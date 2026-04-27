@@ -22,4 +22,8 @@ pub enum KvHashingError {
     /// preserved so the public API never panics on serialization.
     #[error("failed to canonicalize salt payload: {0}")]
     SaltSerialization(#[from] serde_json::Error),
+
+    /// A required field was not set on the [`crate::RequestBuilder`].
+    #[error("RequestBuilder missing required field: {0}")]
+    MissingField(&'static str),
 }

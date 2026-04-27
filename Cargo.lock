@@ -2353,6 +2353,7 @@ dependencies = [
 name = "dynamo-kv-hashing"
 version = "1.2.0"
 dependencies = [
+ "derive_builder",
  "dynamo-tokens",
  "rmp-serde",
  "serde",

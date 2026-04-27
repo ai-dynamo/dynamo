@@ -3,6 +3,7 @@
 
 //! Universal [`Request`] type used to derive block hashes.
 
+use derive_builder::Builder;
 use dynamo_tokens::{Token, TokenBlockMmInfo, validate_and_sort_mm_info};
 use serde::{Deserialize, Serialize};
 
@@ -47,33 +48,42 @@ impl From<TokenBlockMmInfo> for RequestMmObjectInfo {
 /// Construction validates `mm_info` (no overlap, no out-of-bounds, no zero-length) and
 /// sorts it by `offset`. The validated/sorted state is the only way to construct a
 /// `Request`, so all downstream block-formation code can trust the invariant.
-#[derive(Debug, Clone)]
+///
+/// Built via the owned [`RequestBuilder`] (no clones on the build path):
+///
+/// ```ignore
+/// let request = Request::builder()
+///     .tokens(tokens)
+///     .lora_name(Some("lora-x".into()))
+///     .salt(Some("model-tag".into()))
+///     .mm_info(vec![/* RequestMmObjectInfo ... */])
+///     .build()?;
+/// ```
+#[derive(Debug, Clone, Builder)]
+#[builder(
+    pattern = "owned",
+    build_fn(private, name = "build_internal", error = "KvHashingError"),
+    derive(Debug)
+)]
 pub struct Request {
+    /// Token IDs of the request.
+    #[builder(setter(into))]
     pub(crate) tokens: Vec<Token>,
+    /// Optional LoRA adapter name.
+    #[builder(default, setter(into))]
     pub(crate) lora_name: Option<String>,
+    /// Optional free-form caller salt mixed into the per-request `SaltHash`.
+    #[builder(default, setter(into))]
     pub(crate) salt: Option<String>,
-    /// Validated, sorted multimodal placeholder runs.
+    /// Multimodal placeholder runs. Validated and sorted by `build()`.
+    #[builder(default)]
     pub(crate) mm_info: Vec<RequestMmObjectInfo>,
 }
 
 impl Request {
-    /// Builds a Request, validating and sorting `mm_info`.
-    pub fn new(
-        tokens: Vec<Token>,
-        lora_name: Option<String>,
-        salt: Option<String>,
-        mm_info: Vec<RequestMmObjectInfo>,
-    ) -> Result<Self, KvHashingError> {
-        // Reuse the tokens-crate validator so behaviour matches downstream block formation.
-        let token_mm: Vec<TokenBlockMmInfo> = mm_info.iter().copied().map(Into::into).collect();
-        let validated = validate_and_sort_mm_info(&token_mm, tokens.len())?;
-        let mm_info = validated.into_iter().map(Into::into).collect();
-        Ok(Self {
-            tokens,
-            lora_name,
-            salt,
-            mm_info,
-        })
+    /// Returns a fresh owned [`RequestBuilder`].
+    pub fn builder() -> RequestBuilder {
+        RequestBuilder::default()
     }
 
     /// Returns the request tokens.
@@ -100,5 +110,28 @@ impl Request {
     /// [`dynamo_tokens::TokenBlockSequence::new_with_mm`] (already sorted/validated).
     pub(crate) fn token_mm_info(&self) -> Vec<TokenBlockMmInfo> {
         self.mm_info.iter().copied().map(Into::into).collect()
+    }
+}
+
+impl RequestBuilder {
+    /// Builds the [`Request`], validating and sorting `mm_info` against the token length.
+    pub fn build(self) -> Result<Request, KvHashingError> {
+        let mut request = self.build_internal()?;
+        // Validate against the actual token length, sort by offset, and write back.
+        // No clones: we move out of `request.mm_info`, transform via Into, and replace.
+        let token_mm: Vec<TokenBlockMmInfo> =
+            std::mem::take(&mut request.mm_info)
+                .into_iter()
+                .map(Into::into)
+                .collect();
+        let validated = validate_and_sort_mm_info(&token_mm, request.tokens.len())?;
+        request.mm_info = validated.into_iter().map(Into::into).collect();
+        Ok(request)
+    }
+}
+
+impl From<derive_builder::UninitializedFieldError> for KvHashingError {
+    fn from(e: derive_builder::UninitializedFieldError) -> Self {
+        KvHashingError::MissingField(e.field_name())
     }
 }

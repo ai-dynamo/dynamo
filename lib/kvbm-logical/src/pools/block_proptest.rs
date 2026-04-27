@@ -26,7 +26,7 @@ pub(crate) mod tests {
             return None;
         }
 
-        let sequence = TokenBlockSequence::from_slice(tokens, tokens.len() as u32, Some(42));
+        let sequence = TokenBlockSequence::from_slice(tokens, tokens.len() as u32, Some(dynamo_tokens::SaltHash(42)));
 
         // If we have a complete block, return it
         if let Some(block) = sequence.blocks().first() {

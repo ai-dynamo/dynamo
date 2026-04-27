@@ -13,13 +13,13 @@ fn sample_blocks() -> Vec<UniversalBlock> {
         offset: 4,
         length: 6,
     }];
-    let r = Request::new(
-        tokens,
-        Some("lora-x".to_string()),
-        Some("salt".to_string()),
-        mm,
-    )
-    .unwrap();
+    let r = Request::builder()
+        .tokens(tokens)
+        .lora_name(Some("lora-x".to_string()))
+        .salt(Some("salt".to_string()))
+        .mm_info(mm)
+        .build()
+        .unwrap();
     r.into_blocks(4).unwrap()
 }
 

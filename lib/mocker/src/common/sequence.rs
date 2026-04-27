@@ -4,7 +4,7 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, SaltHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
@@ -14,9 +14,9 @@ fn create_sequence_cache(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> (Vec<UniqueBlock>, Vec<u64>, Vec<PositionalLineageHash>) {
+) -> (Vec<UniqueBlock>, Vec<BlockHash>, Vec<PositionalLineageHash>) {
     let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
-    let mut block_hashes = Vec::with_capacity(tokens.blocks().len());
+    let mut block_hashes: Vec<BlockHash> = Vec::with_capacity(tokens.blocks().len());
     let mut plhs = Vec::with_capacity(tokens.blocks().len());
 
     for (pos, block) in tokens.blocks().iter().enumerate() {
@@ -46,7 +46,7 @@ fn create_sequence_cache(
 #[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
-    block_hashes: Vec<u64>,
+    block_hashes: Vec<BlockHash>,
     plhs: Vec<PositionalLineageHash>,
 
     tokens: TokenBlockSequence,
@@ -86,7 +86,7 @@ impl ActiveSequence {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
-        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
+        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(SaltHash(1337)));
         let (unique_blocks, block_hashes, plhs) =
             create_sequence_cache(&tokens, block_size, enable_prefix_caching);
 
@@ -366,7 +366,7 @@ impl ActiveSequence {
 mod tests {
     use super::*;
 
-    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<u64> {
+    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<BlockHash> {
         seq.tokens
             .blocks()
             .iter()
@@ -390,7 +390,7 @@ mod tests {
     fn assert_use_signal(
         signal: &MoveBlock,
         expected_blocks: &[UniqueBlock],
-        expected_hashes: &[u64],
+        expected_hashes: &[BlockHash],
     ) {
         match signal {
             MoveBlock::Use(blocks, hashes, ..) => {
