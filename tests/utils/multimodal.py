@@ -103,6 +103,7 @@ class TopologyConfig:
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
     single_gpu: bool = False  # append --single-gpu to script_args
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess
+    num_system_ports: int = 1  # number of DYN_SYSTEM_PORT* slots to allocate
 
 
 @dataclass
@@ -166,6 +167,8 @@ def make_multimodal_configs(
                     topo_cfg.requested_vllm_kv_cache_bytes
                 )
             )
+        if topo_cfg.num_system_ports > 1:
+            marks.append(pytest.mark.num_system_ports(topo_cfg.num_system_ports))
         if profile.gated:
             marks.append(
                 pytest.mark.skipif(

@@ -124,18 +124,23 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":3,\"video\":3,\"audio\":0}"
 fi
 
+# Each worker needs a unique DYN_SYSTEM_PORT so the Rust system status server
+# can bind without collision. In CI the test framework supplies DYN_SYSTEM_PORT1/2/3;
+# fallback values keep the script usable outside the test framework.
+unset DYN_SYSTEM_PORT
+
 # Start encode worker
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20098 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20099 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
 
 echo "=================================================="

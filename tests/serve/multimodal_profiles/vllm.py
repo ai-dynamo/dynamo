@@ -37,6 +37,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 single_gpu=True,
+                num_system_ports=3,
             ),
             "p_d": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
@@ -60,6 +61,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
+                num_system_ports=3,
             ),
         },
         request_payloads=[make_video_payload(["red", "static", "still"])],
@@ -127,6 +129,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 gpu_marker="gpu_4",
+                num_system_ports=3,
             ),
         },
         request_payloads=[make_image_payload(["green"])],

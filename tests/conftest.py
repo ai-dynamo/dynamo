@@ -1206,11 +1206,17 @@ def num_system_ports(request) -> int:
 
     Default: 1 port.
 
-    Tests that need multiple system ports (e.g. SYSTEM_PORT1 + SYSTEM_PORT2) must
-    explicitly request them via indirect parametrization:
+    Tests that need multiple system ports (e.g. SYSTEM_PORT1 + SYSTEM_PORT2) can
+    request them via indirect parametrization or via the num_system_ports marker:
       @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+      @pytest.mark.num_system_ports(3)
     """
-    return getattr(request, "param", 1)
+    if hasattr(request, "param"):
+        return request.param
+    marker = request.node.get_closest_marker("num_system_ports")
+    if marker:
+        return marker.args[0]
+    return 1
 
 
 @pytest.fixture(scope="function")
