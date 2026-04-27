@@ -62,13 +62,16 @@ navigation:
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
-      - section: Quickstart
-        path: kubernetes/README.md
+      - section: Deplyoment Guide
         contents:
+          - page: Quickstart
+            path: kubernetes/README.md
           - page: Installation Guide
             path: kubernetes/installation-guide.md
-          - page: DGDR Deployment Guide
+          - page: DGDR Reference
             path: kubernetes/dgdr.md
+          - page: Model Deployment Guide
+            path: kubernetes/model-deployment-guide.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
           - page: Service Discovery
@@ -117,8 +120,14 @@ navigation:
           - section: Azure AKS
             path: kubernetes/cloud-providers/aks/aks.md
             contents:
+              - page: RDMA / InfiniBand
+                path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+              - page: Storage for Model Caching
+                path: kubernetes/cloud-providers/aks/storage.md
               - page: Azure Lustre CSI Driver
                 path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+              - page: Spot VMs
+                path: kubernetes/cloud-providers/aks/spot-vms.md
           - page: Google GKE
             path: kubernetes/cloud-providers/gke/gke.md
           - page: Amazon ECS

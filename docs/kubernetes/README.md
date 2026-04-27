@@ -136,5 +136,6 @@ kubectl delete dgdr qwen3-quickstart -n $NAMESPACE
 ## Next Steps
 
 - **[Installation Guide](installation-guide.md)** — Cloud provider setup, GPU Operator details, optional components (Grove, RDMA, model caching, Prometheus)
-- **[DGDR Deployment Guide](dgdr.md)** — Profiling modes, autoApply, Planner, SLA targets, DGD comparison, troubleshooting
+- **[Model Deployment Guide](model-deployment-guide.md)** — Strategy selection, model caching, planner, multinode, common pitfalls
+- **[DGDR Reference](dgdr.md)** — Spec reference, lifecycle phases, monitoring commands, DGDR vs DGD
 - **[Creating Deployments](deployment/create-deployment.md)** — Hand-craft a DGD spec for full control
