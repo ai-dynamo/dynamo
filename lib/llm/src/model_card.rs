@@ -249,19 +249,20 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// Per-slug cache directory under the user's home for downloaded
-/// MDC files. Stable across restarts so the same MDC doesn't
-/// re-fetch every process start. The slug already disambiguates per
-/// model.
-fn files_cache_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    let dir = PathBuf::from(home)
-        .join(".cache/dynamo/model-metadata")
+/// Per-process scratch directory for MDC files downloaded from
+/// http(s) URIs. Lives under the OS tempdir, scoped by PID and slug
+/// so multiple models on the same process don't collide. Not
+/// persistent: the legacy `hub::from_hf` path delegates to HF Hub's
+/// own cache rather than maintaining its own, and this path
+/// follows the same posture — a process restart re-fetches the
+/// (~10 MiB) files, the OS cleans `tempdir` on reboot, and we don't
+/// own a long-running disk artifact in `$HOME`.
+fn files_download_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir()
+        .join(format!("dynamo-mdc-{}", std::process::id()))
         .join(slug.to_string());
     std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating MDC files cache dir {}", dir.display()))?;
+        .with_context(|| format!("creating MDC files download dir {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -796,22 +797,22 @@ impl ModelDeploymentCard {
             return Ok(false);
         }
 
-        let cache_dir = files_cache_dir(&self.slug)?;
+        let dir = files_download_dir(&self.slug)?;
         let client = reqwest::Client::new();
 
         for artifact in &http_artifacts {
-            let dest = cache_dir.join(&artifact.filename);
+            let dest = dir.join(&artifact.filename);
             fetch_and_verify(&client, &artifact.uri, &artifact.checksum, &dest).await?;
         }
 
         tracing::info!(
             display_name = %self.display_name,
             count = http_artifacts.len(),
-            cache_dir = %cache_dir.display(),
+            dir = %dir.display(),
             "fetched model metadata files",
         );
 
-        self.update_dir(&cache_dir);
+        self.update_dir(&dir);
         Ok(true)
     }
 
@@ -1610,8 +1611,7 @@ mod tests {
             .create_async()
             .await;
 
-        let dir =
-            std::env::temp_dir().join(format!("dynamo-self-host-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("dynamo-mdc-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("file.txt");
 
