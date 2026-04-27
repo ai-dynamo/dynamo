@@ -32,19 +32,24 @@ jobs:
       - vllm-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
+      - vllm-compliance
       - sglang-build
       - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
       - sglang-copy-to-acr
+      - sglang-compliance
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
+      - trtllm-compliance
       - planner-build
       - planner-test
+      - planner-compliance
       - frontend-build
+      - frontend-compliance
     if: always()
     steps:
       - name: Check all dependent jobs

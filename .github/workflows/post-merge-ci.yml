@@ -27,19 +27,30 @@ jobs:
       - vllm-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
+      - vllm-compliance
+      - vllm-efa-build
+      - vllm-efa-test
       - sglang-build
       - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
       - sglang-copy-to-acr
+      - sglang-compliance
+      - sglang-efa-build
+      - sglang-efa-test
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
+      - trtllm-compliance
+      - trtllm-efa-build
+      - trtllm-efa-test
       - planner-build
       - planner-test
+      - planner-compliance
       - frontend-build
+      - frontend-compliance
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang
