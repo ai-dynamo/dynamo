@@ -32,6 +32,61 @@ use crate::protocols::TokenIdType;
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
+/// Role of a metadata artifact in the model card. The frontend uses
+/// `role` to look up a specific file by what it represents rather than
+/// by filename, since filenames vary across models.
+///
+/// Closed enum: only the five files the frontend consumes today.
+/// Adding a sixth role is a non-breaking schema bump only when a new
+/// consumer is wired in.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRole {
+    /// `config.json` — model architecture and hyperparameters.
+    Config,
+    /// `tokenizer.json`, `tokenizer.model`, or `*.tiktoken` — the
+    /// tokenizer payload itself.
+    Tokenizer,
+    /// `tokenizer_config.json` — special tokens, optional embedded
+    /// chat template, and tokenizer auxiliary settings.
+    TokenizerConfig,
+    /// `chat_template.jinja` or `chat_template.json` — separate chat
+    /// template file when not embedded in `tokenizer_config.json`.
+    ChatTemplate,
+    /// `generation_config.json` — default sampling parameters.
+    GenerationConfig,
+}
+
+/// One entry in the MDC's `files` artifact list. Specifies the
+/// location, identity, and role of one metadata file the frontend
+/// needs for preprocessing.
+///
+/// `uri` is an opaque string. Today's recognized schemes:
+/// `http://...`, `hf://...`, `file://...`, `mx://...`. Future schemes
+/// layer on without contract change. Frontend verifies the file's
+/// blake3 against `checksum` on receipt regardless of transport.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ArtifactRef {
+    /// Filename used to identify the file in URLs (e.g. the route
+    /// path under `/v1/metadata/{slug}/{filename}`) and in logs.
+    pub filename: String,
+
+    /// URI describing how to reach the file. The scheme determines
+    /// the resolution path; verification is checksum-based.
+    pub uri: String,
+
+    /// `blake3:<hex>` of the file bytes. Verified on receipt by the
+    /// consumer.
+    pub checksum: String,
+
+    /// Byte size of the file. Informational; consumers MAY use it as
+    /// a sanity check or for cache budgeting.
+    pub size: u64,
+
+    /// What this file represents in the model.
+    pub role: ArtifactRole,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
