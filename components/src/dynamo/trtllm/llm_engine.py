@@ -143,33 +143,43 @@ class TrtllmLLMEngine(LLMEngine):
             self._active_requests[request_id] = generation_result
 
         try:
-            num_output_tokens_so_far = 0
+            # TensorRT-LLM reports cumulative token_ids for each output choice.
+            # With n>1, choices are interleaved, so a single cursor would make
+            # choice 1 inherit choice 0's offset. Track the emitted length per
+            # output index and convert each cumulative list into a Dynamo delta.
+            output_tokens_per_choice: dict[int, int] = {}
             async for res in generation_result:
                 if not res.outputs and not res.finished:
                     yield {"finish_reason": "error", "token_ids": []}
                     break
 
-                output = res.outputs[0]
-                next_total = len(output.token_ids)
-                out: GenerateChunk = {
-                    "token_ids": output.token_ids[num_output_tokens_so_far:]
-                }
-
-                if output.finish_reason:
-                    out["finish_reason"] = str(output.finish_reason)
-
-                if out.get("finish_reason") or res.finished:
-                    if not out.get("finish_reason"):
-                        out["finish_reason"] = "unknown"
-                    prompt_tokens = len(token_ids)
-                    out["completion_usage"] = {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": next_total,
-                        "total_tokens": prompt_tokens + next_total,
+                for output in res.outputs:
+                    output_idx = getattr(output, "index", 0) or 0
+                    tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
+                    next_total = len(output.token_ids)
+                    out: GenerateChunk = {
+                        "token_ids": output.token_ids[tokens_so_far:],
+                        "index": output_idx,
                     }
 
-                yield out
-                num_output_tokens_so_far = next_total
+                    if output.finish_reason:
+                        out["finish_reason"] = str(output.finish_reason)
+
+                    if out.get("finish_reason") or res.finished:
+                        if not out.get("finish_reason"):
+                            out["finish_reason"] = "unknown"
+                        prompt_tokens = len(token_ids)
+                        total_completion_tokens = sum(
+                            len(o.token_ids) for o in res.outputs
+                        )
+                        out["completion_usage"] = {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": total_completion_tokens,
+                            "total_tokens": prompt_tokens + total_completion_tokens,
+                        }
+
+                    yield out
+                    output_tokens_per_choice[output_idx] = next_total
         finally:
             if request_id is not None:
                 self._active_requests.pop(request_id, None)
