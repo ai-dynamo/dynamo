@@ -4,7 +4,7 @@
 //! Backend-agnostic device memory storage.
 //!
 //! [`DeviceStorage`] allocates device memory via an [`super::DeviceAllocator`]
-//! implementation, supporting any hardware backend (CUDA, Level-Zero, HPU, …).
+//! implementation, supporting any hardware backend (CUDA, SYCL/XPU, HPU, …).
 
 use super::{DeviceAllocator, MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use std::any::Any;
@@ -31,7 +31,7 @@ impl DeviceStorage {
     ///
     /// # Arguments
     /// * `len` - Size in bytes to allocate
-    /// * `ctx` - Device allocator (CUDA, Level-Zero, etc.)
+    /// * `ctx` - Device allocator (CUDA, SYCL/XPU, etc.)
     pub fn new(len: usize, ctx: Arc<dyn DeviceAllocator>) -> Result<Self> {
         if len == 0 {
             return Err(StorageError::AllocationFailed(

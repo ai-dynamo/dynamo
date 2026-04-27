@@ -10,8 +10,6 @@
 //!   via FFI with queue.raw_queue_ptr()
 //! - Sync: SyclQueue::synchronize
 //!
-//! For Level-Zero SPIR-V kernel tests, see xpu_kernel_roundtrip_ze.rs.
-//!
 //! Run with:
 //!   KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-kernels \
 //!       --features xpu_permute_kernels,testing-xpu \

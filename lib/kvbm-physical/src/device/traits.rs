@@ -4,7 +4,7 @@
 //! Device abstraction traits for multi-backend support.
 //!
 //! Defines the core traits that all hardware backends
-//! (CUDA, Level-Zero/XPU) must implement.
+//! (CUDA, SYCL/XPU) must implement.
 
 use anyhow::Result;
 use std::fmt::Debug;
@@ -60,6 +60,14 @@ pub trait DeviceContextOps: Send + Sync + Debug {
     fn raw_handle(&self) -> Option<u64> {
         None
     }
+
+    /// Get the PCI BDF address for this device.
+    ///
+    /// Used for backend-agnostic NUMA node lookups via sysfs.
+    /// Returns `None` if the backend does not support PCI address queries.
+    fn pci_bdf_address(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Device stream/queue operations — async execution interface.
@@ -73,7 +81,7 @@ pub trait DeviceStreamOps: Send + Sync + Debug {
     /// Batch copy: enqueue N independent memcpy operations, each of `size` bytes.
     ///
     /// Direction (H2D, D2H, D2D) is auto-detected from pointer addresses by
-    /// the underlying runtime (`cudaMemcpyDefault` / `zeCommandListAppendMemoryCopy`).
+    /// the underlying runtime (`cudaMemcpyDefault` / SYCL `queue.memcpy()`).
     ///
     /// Used for whole-block FC→FC transfers (1 entry per block) and per-chunk
     /// transfers when GPU kernel launch is not available.
@@ -150,7 +158,7 @@ pub trait DeviceEventOps: Send + Sync + Debug {
 /// Device memory pool operations — stream-ordered async allocation.
 ///
 /// Wraps backend-specific memory pools (CUDA `cuMemAllocFromPoolAsync`,
-/// Level-Zero USM pool, etc.) behind a unified interface.
+/// SYCL USM pool, etc.) behind a unified interface.
 ///
 /// Allocations and frees are stream-ordered: memory becomes available
 /// after all preceding operations on the stream complete.

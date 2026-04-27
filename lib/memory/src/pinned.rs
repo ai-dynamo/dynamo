@@ -4,10 +4,10 @@
 //! Backend-agnostic pinned (page-locked) host memory storage.
 //!
 //! [`PinnedStorage`] allocates pinned host memory via a [`super::DeviceAllocator`]
-//! implementation, supporting any hardware backend (CUDA, Level-Zero, HPU, …).
+//! implementation, supporting any hardware backend (CUDA, SYCL/XPU, …).
 //!
 //! Backend-specific details (CUDA write-combined probing, NUMA-aware placement,
-//! Level-Zero host-shared allocation) are handled entirely by the
+//! SYCL USM host allocation) are handled entirely by the
 //! [`super::DeviceAllocator`] implementation passed at construction time.
 
 use super::{DeviceAllocator, MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
@@ -33,11 +33,11 @@ impl PinnedStorage {
     ///
     /// The allocation is delegated to the provided [`DeviceAllocator`],
     /// which handles backend-specific details (CUDA write-combined,
-    /// Level-Zero host alloc, NUMA placement, etc.).
+    /// SYCL USM host alloc, NUMA placement, etc.).
     ///
     /// # Arguments
     /// * `len` - Size in bytes to allocate
-    /// * `ctx` - Device allocator (CUDA, Level-Zero, etc.)
+    /// * `ctx` - Device allocator (CUDA, SYCL/XPU, etc.)
     ///
     /// # Errors
     /// Returns an error if:

@@ -134,20 +134,25 @@ impl DeviceContextOps for CudaContext {
         #[cfg(target_os = "linux")]
         {
             if dynamo_memory::numa::is_numa_enabled() {
-                match dynamo_memory::numa::worker_pool::NumaWorkerPool::global()
-                    .allocate_pinned_for_gpu(size, self.device_id)
-                {
-                    Ok(Some(ptr)) => {
-                        tracing::debug!(
-                            "Using NUMA-aware allocation for {} bytes on GPU {}",
-                            size, self.device_id
-                        );
-                        return Ok(ptr as u64);
+                if let Some(pci) = self.pci_bdf_address() {
+                    let allocator = Arc::new(CudaPinnedAllocator {
+                        context: self.context.clone(),
+                    });
+                    match dynamo_memory::numa::worker_pool::NumaWorkerPool::global()
+                        .allocate_pinned_for_gpu(size, &pci, allocator)
+                    {
+                        Ok(Some(ptr)) => {
+                            tracing::debug!(
+                                "Using NUMA-aware allocation for {} bytes on GPU {}",
+                                size, self.device_id
+                            );
+                            return Ok(ptr as u64);
+                        }
+                        Ok(None) => {} // NUMA node unknown, fall through
+                        Err(e) => return Err(anyhow::anyhow!(
+                            "NUMA-aware pinned allocation failed: {}", e
+                        )),
                     }
-                    Ok(None) => {} // NUMA node unknown, fall through
-                    Err(e) => return Err(anyhow::anyhow!(
-                        "NUMA-aware pinned allocation failed: {}", e
-                    )),
                 }
             }
         }
@@ -200,6 +205,79 @@ impl DeviceContextOps for CudaContext {
 
     fn raw_handle(&self) -> Option<u64> {
         Some(self.context.cu_device() as u64)
+    }
+
+    fn pci_bdf_address(&self) -> Option<String> {
+        use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
+        unsafe {
+            let mut dev = std::mem::MaybeUninit::uninit();
+            if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), self.device_id as i32)
+                .result()
+                .is_err()
+            {
+                return None;
+            }
+            let dev = dev.assume_init();
+            let domain = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+            ).ok()?;
+            let bus = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+            ).ok()?;
+            let device = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+            ).ok()?;
+            Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
+        }
+    }
+}
+
+/// CUDA allocator for NUMA-aware pinned host memory.
+///
+/// Used by [`NumaWorkerPool::allocate_pinned_for_gpu`] on a NUMA-pinned
+/// worker thread. Binds the CUDA context and calls `cuMemHostAlloc`.
+struct CudaPinnedAllocator {
+    context: Arc<cudarc::driver::CudaContext>,
+}
+
+impl dynamo_memory::PinnedAllocator for CudaPinnedAllocator {
+    fn alloc_pinned(&self, size: usize) -> std::result::Result<*mut u8, String> {
+        use cudarc::driver::result::malloc_host;
+        use cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP;
+
+        // Record NUMA node before CUDA context binding
+        let node_before_bind = dynamo_memory::numa::get_current_cpu_numa_node();
+
+        unsafe {
+            self.context
+                .bind_to_thread()
+                .map_err(|e| format!("CUDA bind_to_thread: {:?}", e))?;
+
+            // Verify thread is still on correct NUMA node after CUDA context binding.
+            // (Matches upstream do_cuda_pinned_allocation node_after_ctx check.)
+            let node_after_ctx = dynamo_memory::numa::get_current_cpu_numa_node();
+            if node_after_ctx != node_before_bind {
+                tracing::warn!(
+                    "Thread moved after CUDA context bind! Expected node {}, now on node {}",
+                    node_before_bind.0,
+                    node_after_ctx.0
+                );
+            }
+
+            malloc_host(size, CU_MEMHOSTALLOC_DEVICEMAP)
+                .map(|p| p as *mut u8)
+                .map_err(|e| format!("CUDA malloc_host: {:?}", e))
+        }
+    }
+
+    fn free_pinned(&self, ptr: *mut u8) -> std::result::Result<(), String> {
+        unsafe {
+            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void)
+                .map_err(|e| format!("CUDA free_host: {:?}", e))
+        }
     }
 }
 

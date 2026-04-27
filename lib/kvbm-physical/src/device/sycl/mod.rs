@@ -3,7 +3,7 @@
 
 //! SYCL XPU backend implementation via `oneapi-rs`.
 //!
-//! Replaces the Level Zero (ze) backend with a pure SYCL implementation where
+//! Pure SYCL implementation for Intel XPU where
 //! `sycl::queue` (in-order) is the single ordered execution context per stream
 //! — matching CUDA stream semantics exactly.
 //!
@@ -170,6 +170,36 @@ impl DeviceContextOps for SyclContext {
     }
 
     fn allocate_pinned(&self, size: usize) -> Result<u64> {
+        // Try NUMA-aware allocation on Linux unless explicitly disabled
+        #[cfg(target_os = "linux")]
+        {
+            if dynamo_memory::numa::is_numa_enabled() {
+                if let Some(pci) = self.pci_bdf_address() {
+                    let allocator = Arc::new(SyclPinnedAllocator {
+                        queue: Arc::clone(&self.cache.alloc_queue),
+                    });
+                    match dynamo_memory::numa::worker_pool::NumaWorkerPool::global()
+                        .allocate_pinned_for_gpu(size, &pci, allocator)
+                    {
+                        Ok(Some(ptr)) => {
+                            let addr = ptr as u64;
+                            track_alloc(&HOST_ALLOCS, addr);
+                            tracing::debug!(
+                                "Using NUMA-aware allocation for {} bytes on XPU PCI {}",
+                                size, pci
+                            );
+                            return Ok(addr);
+                        }
+                        Ok(None) => {} // NUMA node unknown, fall through
+                        Err(e) => return Err(anyhow::anyhow!(
+                            "NUMA-aware pinned allocation failed: {}", e
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Fallback: non-NUMA SYCL host allocation
         let ptr = self.cache.alloc_queue
             .malloc_host(size)
             .map_err(|e| anyhow::anyhow!("SYCL host allocation failed ({} bytes): {}", size, e))?;
@@ -210,6 +240,36 @@ impl DeviceContextOps for SyclContext {
 
     fn raw_handle(&self) -> Option<u64> {
         Some(self.device_id as u64)
+    }
+
+    fn pci_bdf_address(&self) -> Option<String> {
+        SyclDevice::by_ordinal(self.device_id as usize)
+            .ok()
+            .and_then(|dev: Arc<SyclDevice>| dev.info().ok())
+            .and_then(|info| info.pci_address)
+    }
+}
+
+/// SYCL-specific [`PinnedAllocator`] for NUMA-aware host memory.
+///
+/// Wraps a `SyclQueue` to call `sycl::malloc_host` on the NUMA-pinned
+/// worker thread. No context binding is needed (unlike CUDA).
+struct SyclPinnedAllocator {
+    queue: Arc<SyclQueue>,
+}
+
+impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
+    fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
+        self.queue
+            .malloc_host(size)
+            .map(|p| p as *mut u8)
+            .map_err(|e| format!("SYCL malloc_host failed: {}", e))
+    }
+
+    fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
+        self.queue
+            .free_raw(ptr as *mut c_void)
+            .map_err(|e| format!("SYCL free_raw failed: {}", e))
     }
 }
 

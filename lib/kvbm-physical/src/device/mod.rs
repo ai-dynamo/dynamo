@@ -104,6 +104,13 @@ impl DeviceContext {
         self.device_id
     }
 
+    /// Get the PCI BDF address.
+    ///
+    /// Returns `None` if unavailable.
+    pub fn pci_bdf_address(&self) -> Option<String> {
+        self.ops.pci_bdf_address()
+    }
+
     pub fn create_stream(&self) -> Result<DeviceStream> {
         let stream_ops = self.ops.create_stream()?;
         Ok(DeviceStream {

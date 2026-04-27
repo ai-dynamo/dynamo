@@ -361,22 +361,37 @@ fn spawn_worker_thread(
     let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
         .spawn(move || {
-            // Pin to device's NUMA node. CUDA only now. TODO: add XPU.
-            if matches!(backend, DeviceBackend::Cuda) {
-                if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
-                    eprintln!(
-                        "[GPU {device_id}] Worker pinned to CPUs: {}",
-                        format_cpu_set(&cpus)
-                    );
-                    pin_thread_to_cpus(&cpus);
-                } else if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
-                    eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
-                    let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
+            // Pin to device's NUMA node (backend-agnostic via PCI BDF).
+            {
+                let pci_bdf = kvbm_physical::device::DeviceContext::new(backend, device_id)
+                    .ok()
+                    .and_then(|ctx| ctx.pci_bdf_address());
+
+                if let Some(ref bdf) = pci_bdf {
+                    if let Some(node) = dynamo_memory::numa::get_numa_node_for_pci_address(bdf) {
+                        if matches!(backend, DeviceBackend::Cuda) {
+                            // CUDA: try CPU-set subdivision (uses NVML for all-GPU enumeration)
+                            if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
+                                eprintln!(
+                                    "[GPU {device_id}] Worker pinned to CPUs: {} (PCI {bdf})",
+                                    format_cpu_set(&cpus)
+                                );
+                                pin_thread_to_cpus(&cpus);
+                            } else {
+                                eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node} (PCI {bdf})");
+                                let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
+                            }
+                        } else {
+                            // XPU/SYCL: pin to NUMA node directly
+                            eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node} (PCI {bdf})");
+                            let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
+                        }
+                    } else {
+                        eprintln!("[GPU {device_id}] No NUMA affinity for PCI {bdf}");
+                    }
                 } else {
-                    eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
+                    eprintln!("[GPU {device_id}] No PCI address available, skipping NUMA pinning");
                 }
-            } else {
-                eprintln!("[GPU {device_id}] NUMA pinning skipped (non-CUDA backend)");
             }
 
             // Build tokio runtime on this NUMA-pinned thread

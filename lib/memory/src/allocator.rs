@@ -5,7 +5,7 @@
 //!
 //! [`DeviceAllocator`] provides the minimal interface needed by [`super::DeviceStorage`]
 //! and [`super::PinnedStorage`] to allocate and free memory on any hardware backend.
-//! Concrete implementations (CUDA, Level-Zero, …) live in downstream crates
+//! Concrete implementations (CUDA, SYCL/XPU, …) live in downstream crates
 //! (e.g. `kvbm-physical`) where the backend-specific dependencies are available.
 
 use crate::Result;
