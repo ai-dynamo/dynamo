@@ -49,8 +49,9 @@ const (
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
-	BackendFramework string `json:"backendFramework,omitempty"`
+	BackendFramework string `json:"backendFramework"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component.
@@ -69,34 +70,29 @@ type DynamoComponentDeploymentSpec struct {
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 type DynamoComponentDeploymentSharedSpec struct {
-	// componentName is the stable logical identifier for this component within
-	// its DynamoGraphDeployment. It must be unique within the parent's
-	// `spec.components` list (uniqueness is enforced by the API server via the
-	// `+listMapKey=componentName` marker, which also requires this field to be
-	// `Required` at the schema level).
+	// name is the stable logical identifier for this component within its
+	// DynamoGraphDeployment. It must be unique within the parent's
+	// `spec.components` list.
 	//
 	// For standalone DynamoComponentDeployment objects, the defaulting webhook
-	// populates `componentName` from `metadata.name` on admission, so users
+	// populates `name` from `metadata.name` on admission, so users
 	// typically do not need to set it explicitly.
 	//
-	// `componentName` is decoupled from the underlying Kubernetes resource
-	// name so that the operator can rename child workloads (e.g. suffixing
-	// worker DCDs with a hash during rolling updates) without losing the
-	// stable identity that downstream consumers (labels, status maps,
-	// DGDSA references, planner RBAC, EPP filters) depend on.
+	// `name` is decoupled from the underlying Kubernetes resource name so that
+	// the operator can rename child workloads (e.g. suffixing worker DCDs with
+	// a hash during rolling updates) without losing the stable identity that
+	// downstream consumers (labels, status maps, DGDSA references, planner
+	// RBAC, EPP filters) depend on.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	ComponentName string `json:"componentName"`
+	ComponentName string `json:"name"`
 
-	// componentType indicates the role of this component within a Dynamo
-	// graph. Drives port mapping, frontend detection, planner RBAC, and the
-	// pod label `nvidia.com/dynamo-component-type`. Because `prefill` and
-	// `decode` are first-class values, users can set them directly --
-	// downstream consumers (e.g. the EPP) can filter on the component-type
-	// label rather than the v1alpha1 workaround of setting `componentType:
-	// worker` plus `subComponentType`.
+	// type indicates the role of this component within a Dynamo graph. Drives
+	// port mapping, frontend detection, planner RBAC, and the pod label
+	// `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
+	// first-class values, users can set them directly.
 	// +optional
-	ComponentType ComponentType `json:"componentType,omitempty"`
+	ComponentType ComponentType `json:"type,omitempty"`
 
 	// globalDynamoNamespace places the component in the global Dynamo
 	// namespace rather than the per-deployment namespace derived from the
@@ -155,7 +151,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
 	// eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
-	// components. Only meaningful when `componentType` is `epp`.
+	// components. Only meaningful when `type` is `epp`.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
@@ -212,7 +208,10 @@ type DynamoComponentDeploymentStatus struct {
 	// conditions captures the latest observed state of the component using
 	// standard Kubernetes condition types (including `Available` and
 	// `DynamoComponentReady`).
-	Conditions []metav1.Condition `json:"conditions"`
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// component contains replica status information for this component.
 	// +optional

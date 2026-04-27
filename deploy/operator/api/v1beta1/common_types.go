@@ -61,6 +61,7 @@ type CompilationCacheConfig struct {
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
 	// Total GPUs used is `nodeCount * container GPU request`.
+	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
@@ -109,7 +110,9 @@ type RestartStrategy struct {
 	// +kubebuilder:default=Sequential
 	Type RestartStrategyType `json:"type,omitempty"`
 
-	// order specifies the order in which components should be restarted.
+	// order is the complete ordered set of component names for sequential
+	// restarts. Omit or leave empty to use the controller's default order.
+	// This field must not be set for parallel restarts.
 	// +optional
 	Order []string `json:"order,omitempty"`
 }
@@ -126,6 +129,7 @@ type RestartStrategy struct {
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+// +kubebuilder:validation:XValidation:rule="has(self.configMapRef) != has(self.config)",message="exactly one of configMapRef or config must be specified"
 type EPPConfig struct {
 	// configMapRef references a user-provided ConfigMap containing EPP
 	// configuration. Mutually exclusive with `config`.
@@ -171,8 +175,9 @@ type ExperimentalSpec struct {
 	// `spec.experimental.gpuMemoryService` to also be set, and
 	// `spec.experimental.failover.mode` must match
 	// `spec.experimental.gpuMemoryService.mode` (enforced by the validation
-	// webhook). Inside a DynamoGraphDeployment substitute
-	// `spec.components[*].experimental.…` for `spec.experimental.…`.
+	// webhook). Inside a DynamoGraphDeployment, use
+	// `spec.components[*].experimental.failover` and
+	// `spec.components[*].experimental.gpuMemoryService` instead.
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
@@ -344,10 +349,10 @@ type DynamoCheckpointIdentity struct {
 
 // SpecTopologyConstraint defines deployment-level topology placement requirements.
 type SpecTopologyConstraint struct {
-	// topologyProfile is the name of the ClusterTopology CR that defines the
-	// topology hierarchy for this deployment.
+	// clusterTopologyName is the name of the ClusterTopology resource that
+	// defines the topology hierarchy for this deployment.
 	// +kubebuilder:validation:MinLength=1
-	TopologyProfile string `json:"topologyProfile"`
+	ClusterTopologyName string `json:"clusterTopologyName"`
 
 	// packDomain is the default topology domain to pack pods within.
 	// Optional; omit when only components carry constraints.
@@ -469,7 +474,6 @@ type ComponentReplicaStatus struct {
 	// resource backing this Dynamo component.
 	// Deprecated: use `componentNames`. During rolling updates this reflects
 	// the new (target) resource name only.
-	// +kubebuilder:deprecatedversion:warning="componentName is deprecated, view componentNames instead"
 	ComponentName string `json:"componentName"`
 
 	// componentNames is the list of underlying Kubernetes resource names for

@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -35,21 +36,19 @@ type DynamoGraphDeploymentSpec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// components are the components deployed as part of this graph. Each entry
-	// is the shared component spec carrying its own `componentName` (the
-	// stable logical identifier). Names must be unique within the list; the
-	// API server enforces this via the `listType=map` + `listMapKey=componentName`
-	// markers below (no CEL rule needed, which keeps the CRD within its
-	// `x-kubernetes-validations` cost budget).
+	// carries its own stable logical `name`, and names must be unique within
+	// the list. Component types are generally repeatable, except `type: epp`
+	// which may appear at most once.
 	// +optional
 	// +listType=map
-	// +listMapKey=componentName
+	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=25
+	// +kubebuilder:validation:XValidation:rule="self.filter(c, has(c.type) && c.type == 'epp').size() <= 1",message="at most one component may have type epp"
 	Components []DynamoComponentDeploymentSharedSpec `json:"components,omitempty"`
 
-	// env is the list of environment variables applied to all components in
-	// the deployment unless overridden by component-specific configuration.
-	// Renamed from v1alpha1's `envs` to match the Kubernetes convention
-	// (`pod.spec.containers[].env`).
+	// env is prepended to every component's environment. Component-specific
+	// env entries with the same name take precedence and may reference values
+	// from this list.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -62,7 +61,7 @@ type DynamoGraphDeploymentSpec struct {
 	Restart *Restart `json:"restart,omitempty"`
 
 	// topologyConstraint is the deployment-level topology constraint. When
-	// set, `spec.topologyConstraint.topologyProfile` names the ClusterTopology
+	// set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology
 	// CR to use. `spec.topologyConstraint.packDomain` is optional at this
 	// level and can be omitted when only components carry constraints.
 	// Components without their own `topologyConstraint` inherit from this value.
@@ -84,9 +83,11 @@ type DynamoGraphDeploymentStatus struct {
 	// conditions contains the latest observed conditions of the graph deployment.
 	// Merged by type on patch updates.
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// components contains per-component replica status information, keyed by `componentName`.
+	// components contains per-component replica status information, keyed by component name.
 	// +optional
 	Components map[string]ComponentReplicaStatus `json:"components,omitempty"`
 
@@ -94,7 +95,7 @@ type DynamoGraphDeploymentStatus struct {
 	// +optional
 	Restart *RestartStatus `json:"restart,omitempty"`
 
-	// checkpoints contains per-component checkpoint status, keyed by `componentName`.
+	// checkpoints contains per-component checkpoint status, keyed by component name.
 	// +optional
 	Checkpoints map[string]ComponentCheckpointStatus `json:"checkpoints,omitempty"`
 
@@ -163,19 +164,10 @@ func (s *DynamoGraphDeployment) SetSpec(spec any) {
 
 // AddStatusCondition adds or updates the condition slice by type.
 func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
-	if s.Status.Conditions == nil {
-		s.Status.Conditions = []metav1.Condition{}
-	}
-	for i, existing := range s.Status.Conditions {
-		if existing.Type == condition.Type {
-			s.Status.Conditions[i] = condition
-			return
-		}
-	}
-	s.Status.Conditions = append(s.Status.Conditions, condition)
+	apimeta.SetStatusCondition(&s.Status.Conditions, condition)
 }
 
-// GetComponentByName returns the component entry with the given `componentName`,
+// GetComponentByName returns the component entry with the given name,
 // or nil if not found. Helper for the v1beta1 list-based `components` field.
 func (s *DynamoGraphDeployment) GetComponentByName(name string) *DynamoComponentDeploymentSharedSpec {
 	for i := range s.Spec.Components {
@@ -220,6 +212,7 @@ func (s *DynamoGraphDeployment) HasEPPComponent() bool {
 }
 
 // GetEPPComponent returns the EPP component's name and shared spec if present.
+// The API allows at most one component with `type: epp`.
 func (s *DynamoGraphDeployment) GetEPPComponent() (string, *DynamoComponentDeploymentSharedSpec, bool) {
 	for i := range s.Spec.Components {
 		comp := &s.Spec.Components[i]

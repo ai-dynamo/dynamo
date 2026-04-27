@@ -11534,46 +11534,10 @@ spec:
                   required:
                     - pvcName
                   type: object
-                componentName:
-                  description: |-
-                    componentName is the stable logical identifier for this component within
-                    its DynamoGraphDeployment. It must be unique within the parent's
-                    `spec.components` list (uniqueness is enforced by the API server via the
-                    `+listMapKey=componentName` marker, which also requires this field to be
-                    `Required` at the schema level).
-
-                    For standalone DynamoComponentDeployment objects, the defaulting webhook
-                    populates `componentName` from `metadata.name` on admission, so users
-                    typically do not need to set it explicitly.
-
-                    `componentName` is decoupled from the underlying Kubernetes resource
-                    name so that the operator can rename child workloads (e.g. suffixing
-                    worker DCDs with a hash during rolling updates) without losing the
-                    stable identity that downstream consumers (labels, status maps,
-                    DGDSA references, planner RBAC, EPP filters) depend on.
-                  minLength: 1
-                  type: string
-                componentType:
-                  description: |-
-                    componentType indicates the role of this component within a Dynamo
-                    graph. Drives port mapping, frontend detection, planner RBAC, and the
-                    pod label `nvidia.com/dynamo-component-type`. Because `prefill` and
-                    `decode` are first-class values, users can set them directly --
-                    downstream consumers (e.g. the EPP) can filter on the component-type
-                    label rather than the v1alpha1 workaround of setting `componentType:
-                    worker` plus `subComponentType`.
-                  enum:
-                    - frontend
-                    - worker
-                    - prefill
-                    - decode
-                    - planner
-                    - epp
-                  type: string
                 eppConfig:
                   description: |-
                     eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
-                    components. Only meaningful when `componentType` is `epp`.
+                    components. Only meaningful when `type` is `epp`.
                   properties:
                     config:
                       description: |-
@@ -11722,6 +11686,9 @@ spec:
                       type: object
                       x-kubernetes-map-type: atomic
                   type: object
+                  x-kubernetes-validations:
+                    - message: exactly one of configMapRef or config must be specified
+                      rule: has(self.configMapRef) != has(self.config)
                 experimental:
                   description: |-
                     experimental groups opt-in preview features whose API shape and
@@ -11826,8 +11793,9 @@ spec:
                         `spec.experimental.gpuMemoryService` to also be set, and
                         `spec.experimental.failover.mode` must match
                         `spec.experimental.gpuMemoryService.mode` (enforced by the validation
-                        webhook). Inside a DynamoGraphDeployment substitute
-                        `spec.components[*].experimental.…` for `spec.experimental.…`.
+                        webhook). Inside a DynamoGraphDeployment, use
+                        `spec.components[*].experimental.failover` and
+                        `spec.components[*].experimental.gpuMemoryService` instead.
                       properties:
                         mode:
                           default: IntraPod
@@ -11914,9 +11882,24 @@ spec:
                       format: int32
                       minimum: 2
                       type: integer
-                  required:
-                    - nodeCount
                   type: object
+                name:
+                  description: |-
+                    name is the stable logical identifier for this component within its
+                    DynamoGraphDeployment. It must be unique within the parent's
+                    `spec.components` list.
+
+                    For standalone DynamoComponentDeployment objects, the defaulting webhook
+                    populates `name` from `metadata.name` on admission, so users
+                    typically do not need to set it explicitly.
+
+                    `name` is decoupled from the underlying Kubernetes resource name so that
+                    the operator can rename child workloads (e.g. suffixing worker DCDs with
+                    a hash during rolling updates) without losing the stable identity that
+                    downstream consumers (labels, status maps, DGDSA references, planner
+                    RBAC, EPP filters) depend on.
+                  minLength: 1
+                  type: string
                 podTemplate:
                   description: |-
                     podTemplate is the pod template used to create the component's pods.
@@ -19998,8 +19981,23 @@ spec:
                   required:
                     - packDomain
                   type: object
+                type:
+                  description: |-
+                    type indicates the role of this component within a Dynamo graph. Drives
+                    port mapping, frontend detection, planner RBAC, and the pod label
+                    `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
+                    first-class values, users can set them directly.
+                  enum:
+                    - frontend
+                    - worker
+                    - prefill
+                    - decode
+                    - planner
+                    - epp
+                  type: string
               required:
-                - componentName
+                - backendFramework
+                - name
               type: object
             status:
               description: status reflects the current observed state of the component deployment.
@@ -20123,12 +20121,13 @@ spec:
                       - type
                     type: object
                   type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
                 observedGeneration:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
-              required:
-                - conditions
               type: object
           type: object
       served: false
