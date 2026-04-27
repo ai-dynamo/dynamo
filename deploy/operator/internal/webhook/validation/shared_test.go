@@ -36,6 +36,9 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 	var (
 		negativeReplicas = int32(-1)
 		validReplicas    = int32(3)
+		workerGPU        = &nvidiacomv1alpha1.Resources{
+			Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+		}
 	)
 
 	tests := []struct {
@@ -250,6 +253,61 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			calculatedNamespace: "default-my-dgd",
 			wantErr:             true,
 			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
+		},
+		{
+			name: "checkpoint with gpuMemoryService is temporarily rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues; disable either checkpointing or gpuMemoryService for this service",
+		},
+		{
+			name: "checkpoint without gpuMemoryService is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "disabled checkpoint with gpuMemoryService is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: false,
+				},
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "frontendSidecar with no extraPodSpec containers is valid",
