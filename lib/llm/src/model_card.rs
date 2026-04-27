@@ -249,18 +249,19 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// Per-slug cache directory under the user's home for self-host
-/// downloads. Stable across restarts so the same MDC doesn't re-fetch
-/// every process start. The slug already disambiguates per model.
-fn self_host_cache_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
+/// Per-slug cache directory under the user's home for downloaded
+/// MDC files. Stable across restarts so the same MDC doesn't
+/// re-fetch every process start. The slug already disambiguates per
+/// model.
+fn files_cache_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     let dir = PathBuf::from(home)
-        .join(".cache/dynamo/self-host-metadata")
+        .join(".cache/dynamo/model-metadata")
         .join(slug.to_string());
     std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating self-host cache dir {}", dir.display()))?;
+        .with_context(|| format!("creating MDC files cache dir {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -745,11 +746,13 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
-        // Prefer the worker-self-hosted path when the MDC carries an
-        // artifact list with http(s) URIs. Falls through to the
-        // legacy HuggingFace fetch when the list is empty or none of
-        // the URIs are http(s).
-        if self.try_self_host_download().await? {
+        // Prefer the per-file artifact list when the MDC carries one
+        // with http(s) URIs (regardless of whether the worker chose
+        // to self-host or some other fronting service is publishing
+        // the URIs — the consumer side doesn't care). Falls through
+        // to the legacy HuggingFace fetch when the list is empty or
+        // none of the URIs are http(s).
+        if self.try_download_files().await? {
             return Ok(());
         }
 
@@ -767,13 +770,18 @@ impl ModelDeploymentCard {
     /// success, calls [`Self::update_dir`] so downstream consumers
     /// (`tokenizer()`, `prompt_formatter()`, etc.) see local paths.
     ///
+    /// The consumer side is scheme-agnostic: it doesn't know or care
+    /// whether the URIs point at the originating worker, a peer
+    /// holder, modelexpress, or some other front-cache. Only the URI
+    /// scheme drives the resolution path.
+    ///
     /// Returns `Ok(true)` when at least one http artifact was fetched
     /// and the typed fields were rewritten. Returns `Ok(false)` to
     /// signal the caller should fall back to its legacy resolution
     /// path (no http entries present, or `files` is empty).
     /// Returns an error on download failure or checksum mismatch —
     /// those are loud failures, not silent fallbacks.
-    async fn try_self_host_download(&mut self) -> anyhow::Result<bool> {
+    async fn try_download_files(&mut self) -> anyhow::Result<bool> {
         if self.files.is_empty() {
             return Ok(false);
         }
@@ -788,7 +796,7 @@ impl ModelDeploymentCard {
             return Ok(false);
         }
 
-        let cache_dir = self_host_cache_dir(&self.slug)?;
+        let cache_dir = files_cache_dir(&self.slug)?;
         let client = reqwest::Client::new();
 
         for artifact in &http_artifacts {
@@ -800,7 +808,7 @@ impl ModelDeploymentCard {
             display_name = %self.display_name,
             count = http_artifacts.len(),
             cache_dir = %cache_dir.display(),
-            "fetched self-hosted metadata files",
+            "fetched model metadata files",
         );
 
         self.update_dir(&cache_dir);

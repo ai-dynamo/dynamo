@@ -491,8 +491,8 @@ impl LocalModel {
         );
 
         if self.self_host_metadata {
-            self.wire_self_hosted_artifacts(endpoint.drt())
-                .context("wire self-hosted metadata artifacts")?;
+            self.move_to_self_host(endpoint.drt())
+                .context("move_to_self_host")?;
         }
 
         let source_path = PathBuf::from(self.card.source_path());
@@ -531,13 +531,16 @@ impl LocalModel {
     /// to point at this worker's own `/v1/metadata/...` route, and
     /// insert the on-disk path for each entry into the runtime's
     /// metadata artifact registry so the route handler can serve
-    /// the bytes.
+    /// the bytes. Mirrors the existing
+    /// [`ModelDeploymentCard::move_to_url`] pair (same shape, same
+    /// in-place mutation across the typed artifact fields, opposite
+    /// direction).
     ///
     /// Only entries whose current URI is a `file://` URL pointing at
     /// a path on this worker's local disk are eligible. Entries with
     /// other schemes (`hf://`, `mx://`, ...) are left as-is — the
     /// worker can't self-host bytes it doesn't have locally.
-    fn wire_self_hosted_artifacts(
+    fn move_to_self_host(
         &mut self,
         drt: &dynamo_runtime::DistributedRuntime,
     ) -> anyhow::Result<()> {
