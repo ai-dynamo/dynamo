@@ -66,13 +66,12 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		return err
 	}
 
-	// v1beta1 requires DCD.spec.componentName (it is the +listMapKey on
+	// v1beta1 requires DCD.spec.name (it is the +listMapKey on
 	// DGD.spec.components and is enforced as Required by the schema). When a
 	// v1alpha1 caller omits ServiceName -- the common case for standalone
 	// DCDs -- fall back to ObjectMeta.Name so the converted object is
-	// schema-valid. The deferred defaulting webhook (see DEP #8069) will
-	// own the same defaulting at admission time once v1beta1 is the storage
-	// version.
+	// schema-valid. The v1beta1 defaulting webhook owns the same defaulting
+	// at admission time.
 	if semantic.ComponentName == "" && !hubOrigin {
 		semantic.ComponentName = dst.ObjectMeta.Name
 	}
@@ -156,7 +155,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	if dcdNeedsHubSpecPreservation(&src.Spec, generatedPodTemplate) {
 		data, err := marshalDCDHubSpec(&src.Spec)
 		if err != nil {
-			return nil
+			return fmt.Errorf("preserve DCD hub spec: %w", err)
 		}
 		if dst.ObjectMeta.Annotations == nil {
 			dst.ObjectMeta.Annotations = map[string]string{}
