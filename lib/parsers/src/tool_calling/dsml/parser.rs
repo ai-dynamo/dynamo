@@ -323,7 +323,7 @@ mod tests {
     // TODO — not yet covered for V4:
     //   - CASE.5  Fix mid-stream truncation: parser currently drops all calls when
     //             </｜DSML｜tool_calls> is absent (max_tokens / EOS before close).
-    //             Same class as Kimi K2 pre-DIS-1765. Recovery pattern: scan for
+    //             Same class as Kimi K2 pre-PR #8208. Recovery pattern: scan for
     //             complete <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without
     //             the outer close fence (see kimi_k2_parser.rs for precedent).
     //             Pinning tests below capture the current silent-drop behavior;
