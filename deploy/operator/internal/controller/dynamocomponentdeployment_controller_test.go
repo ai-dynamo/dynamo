@@ -46,6 +46,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -3391,3 +3392,222 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 		})
 	}
 }
+
+// Test_cleanupOrphanedDeployment exercises the cleanup helper that runs when a
+// DynamoComponentDeployment transitions from single-node to multinode mode.
+// The Deployment created in the previous mode must be garbage-collected so it
+// does not co-exist with the newly created LeaderWorkerSet (issue #4749).
+func Test_cleanupOrphanedDeployment(t *testing.T) {
+	ctx := context.Background()
+
+	dcdUID := types.UID("dcd-uid-1")
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component",
+			Namespace: "default",
+			UID:       dcdUID,
+		},
+	}
+
+	tests := []struct {
+		name              string
+		existingObjects   []client.Object
+		wantDeploymentGet bool // expect Deployment to still exist after cleanup
+	}{
+		{
+			name:              "no Deployment exists - cleanup is a no-op",
+			existingObjects:   nil,
+			wantDeploymentGet: false,
+		},
+		{
+			name: "owned Deployment is deleted",
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{UID: dcdUID, Name: "test-component", Kind: "DynamoComponentDeployment", APIVersion: "nvidia.com/v1beta1", Controller: ptr.To(true)},
+						},
+					},
+				},
+			},
+			wantDeploymentGet: false,
+		},
+		{
+			name: "Deployment with same name but different owner is preserved",
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{UID: types.UID("someone-else"), Name: "other-owner", Kind: "OtherKind", APIVersion: "v1"},
+						},
+					},
+				},
+			},
+			wantDeploymentGet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			g.Expect(v1alpha1.AddToScheme(s)).To(gomega.Succeed())
+
+			betaDcd := betaDCD(t, dcd)
+			objs := []client.Object{betaDcd}
+			objs = append(objs, tt.existingObjects...)
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objs...).
+				Build()
+
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client:        fakeKubeClient,
+				Recorder:      record.NewFakeRecorder(10),
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+			}
+
+			err := reconciler.cleanupOrphanedDeployment(ctx, betaDcd)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			got := &appsv1.Deployment{}
+			err = fakeKubeClient.Get(ctx, types.NamespacedName{Name: "test-component", Namespace: "default"}, got)
+			if tt.wantDeploymentGet {
+				g.Expect(err).NotTo(gomega.HaveOccurred(), "Deployment should still exist (not owned by this DCD)")
+			} else {
+				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Deployment should have been deleted")
+			}
+		})
+	}
+}
+
+// Test_cleanupOrphanedLeaderWorkerSets exercises the cleanup helper that runs
+// when a DynamoComponentDeployment transitions from multinode back to
+// single-node mode. All indexed LWS (and their Volcano PodGroups) created in
+// the previous mode must be garbage-collected so they do not co-exist with the
+// newly created Deployment (issue #4749).
+func Test_cleanupOrphanedLeaderWorkerSets(t *testing.T) {
+	ctx := context.Background()
+
+	dcdUID := types.UID("dcd-uid-2")
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component",
+			Namespace: "default",
+			UID:       dcdUID,
+		},
+	}
+
+	ownedRef := []metav1.OwnerReference{
+		{UID: dcdUID, Name: "test-component", Kind: "DynamoComponentDeployment", APIVersion: "nvidia.com/v1beta1", Controller: ptr.To(true)},
+	}
+	foreignRef := []metav1.OwnerReference{
+		{UID: types.UID("someone-else"), Name: "other-owner", Kind: "OtherKind", APIVersion: "v1", Controller: ptr.To(true)},
+	}
+
+	tests := []struct {
+		name                  string
+		existingLWS           []*leaderworkersetv1.LeaderWorkerSet
+		existingPodGroups     []*volcanov1beta1.PodGroup
+		wantRemainingLWSNames []string
+		wantRemainingPGNames  []string
+	}{
+		{
+			name:                  "no LWS exists - cleanup is a no-op",
+			wantRemainingLWSNames: nil,
+		},
+		{
+			name: "deletes contiguous indexed owned LWS instances and their PodGroups",
+			existingLWS: []*leaderworkersetv1.LeaderWorkerSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-0", Namespace: "default", OwnerReferences: ownedRef}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-1", Namespace: "default", OwnerReferences: ownedRef}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-2", Namespace: "default", OwnerReferences: ownedRef}},
+			},
+			existingPodGroups: []*volcanov1beta1.PodGroup{
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-0", Namespace: "default", OwnerReferences: ownedRef}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-1", Namespace: "default", OwnerReferences: ownedRef}},
+			},
+			wantRemainingLWSNames: nil,
+			wantRemainingPGNames:  nil,
+		},
+		{
+			name: "stops at first gap in indexed LWS",
+			existingLWS: []*leaderworkersetv1.LeaderWorkerSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-0", Namespace: "default", OwnerReferences: ownedRef}},
+				// gap at index 1 — index 2 must NOT be visited
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-2", Namespace: "default", OwnerReferences: ownedRef}},
+			},
+			wantRemainingLWSNames: []string{"test-component-2"},
+		},
+		{
+			name: "preserves LWS with same name but different owner",
+			existingLWS: []*leaderworkersetv1.LeaderWorkerSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "test-component-0", Namespace: "default", OwnerReferences: foreignRef}},
+			},
+			wantRemainingLWSNames: []string{"test-component-0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			g.Expect(v1alpha1.AddToScheme(s)).To(gomega.Succeed())
+			g.Expect(leaderworkersetv1.AddToScheme(s)).To(gomega.Succeed())
+			g.Expect(volcanov1beta1.AddToScheme(s)).To(gomega.Succeed())
+
+			betaDcd := betaDCD(t, dcd)
+			objs := []client.Object{betaDcd}
+			for _, lws := range tt.existingLWS {
+				objs = append(objs, lws)
+			}
+			for _, pg := range tt.existingPodGroups {
+				objs = append(objs, pg)
+			}
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objs...).
+				Build()
+
+			reconciler := &DynamoComponentDeploymentReconciler{
+				Client:        fakeKubeClient,
+				Recorder:      record.NewFakeRecorder(10),
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+			}
+
+			err := reconciler.cleanupOrphanedLeaderWorkerSets(ctx, betaDcd)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			gotRemainingLWS := []string{}
+			for _, lws := range tt.existingLWS {
+				obj := &leaderworkersetv1.LeaderWorkerSet{}
+				err := fakeKubeClient.Get(ctx, types.NamespacedName{Name: lws.Name, Namespace: "default"}, obj)
+				if err == nil {
+					gotRemainingLWS = append(gotRemainingLWS, lws.Name)
+				} else {
+					g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue())
+				}
+			}
+			g.Expect(gotRemainingLWS).To(gomega.ConsistOf(tt.wantRemainingLWSNames))
+
+			gotRemainingPGs := []string{}
+			for _, pg := range tt.existingPodGroups {
+				obj := &volcanov1beta1.PodGroup{}
+				err := fakeKubeClient.Get(ctx, types.NamespacedName{Name: pg.Name, Namespace: "default"}, obj)
+				if err == nil {
+					gotRemainingPGs = append(gotRemainingPGs, pg.Name)
+				} else {
+					g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue())
+				}
+			}
+			g.Expect(gotRemainingPGs).To(gomega.ConsistOf(tt.wantRemainingPGNames))
+		})
+	}
+}
+

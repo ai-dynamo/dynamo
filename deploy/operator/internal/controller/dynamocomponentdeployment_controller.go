@@ -186,11 +186,21 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}
 
-	// Create the appropriate workload resource based on deployment type
+	// Create the appropriate workload resource based on deployment type.
+	// When the user toggles multinode on/off via spec update, the operator must
+	// garbage-collect the workload resource from the previous mode to prevent
+	// orphaned Deployment/LWS resources from co-existing (issue #4749).
 	var componentReconcileResult ComponentReconcileResult
-	if r.RuntimeConfig.LWSEnabled && dynamoComponentDeployment.IsMultinode() {
+	useLWS := r.RuntimeConfig.LWSEnabled && dynamoComponentDeployment.IsMultinode()
+	if useLWS {
+		if err = r.cleanupOrphanedDeployment(ctx, dynamoComponentDeployment); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to clean up orphaned Deployment when switching to LWS mode: %w", err)
+		}
 		componentReconcileResult, err = r.reconcileLeaderWorkerSetResources(ctx, dynamoComponentDeployment)
 	} else {
+		if err = r.cleanupOrphanedLeaderWorkerSets(ctx, dynamoComponentDeployment); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to clean up orphaned LeaderWorkerSets when switching to Deployment mode: %w", err)
+		}
 		componentReconcileResult, err = r.reconcileDeploymentResources(ctx, dynamoComponentDeployment)
 	}
 	if err != nil {
@@ -396,6 +406,113 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		message:              "LeaderWorkerSet is not ready",
 		serviceReplicaStatus: &lwsReplicaStatus,
 	}, nil
+}
+
+// cleanupOrphanedDeployment deletes any Deployment that was previously created
+// for this DynamoComponentDeployment when running in single-node mode.
+// Called when the deployment has been switched to multinode (LWS) mode so the
+// stale Deployment doesn't keep its pods running alongside the new LWS.
+//
+// Safe to invoke on every reconcile in LWS mode — it is idempotent and is a
+// no-op when the Deployment is absent. Only resources owned by this DCD are
+// deleted to avoid clobbering unrelated workloads that happen to share a name.
+func (r *DynamoComponentDeploymentReconciler) cleanupOrphanedDeployment(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
+	logger := log.FromContext(ctx)
+
+	deployment := &appsv1.Deployment{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      dynamoComponentDeployment.Name,
+		Namespace: dynamoComponentDeployment.Namespace,
+	}, deployment)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get Deployment for cleanup: %w", err)
+	}
+
+	if !metav1.IsControlledBy(deployment, dynamoComponentDeployment) {
+		// Not ours — don't touch it.
+		return nil
+	}
+
+	logger.Info("Deleting orphaned Deployment after switch to multinode (LWS) mode",
+		"deployment", deployment.Name)
+	if err := r.Delete(ctx, deployment); err != nil && !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete orphaned Deployment %q: %w", deployment.Name, err)
+	}
+	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "CleanupOrphanedDeployment",
+		"Deleted orphaned Deployment %q after switching to multinode (LWS) mode", deployment.Name)
+	return nil
+}
+
+// cleanupOrphanedLeaderWorkerSets deletes any LeaderWorkerSet (and its Volcano
+// PodGroup, if present) that was previously created for this
+// DynamoComponentDeployment when running in multinode mode.
+// Called when the deployment has been switched back to single-node (Deployment)
+// mode so stale LWS pods don't keep running alongside the new Deployment.
+//
+// Safe to invoke on every reconcile in Deployment mode — it is idempotent and
+// stops as soon as a contiguous indexed LWS instance is missing. Only resources
+// owned by this DCD are deleted.
+func (r *DynamoComponentDeploymentReconciler) cleanupOrphanedLeaderWorkerSets(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
+	logger := log.FromContext(ctx)
+
+	// Walk contiguous indexed LWS names. Current code creates only `<dcd>-0`,
+	// but legacy deployments (pre native-scaling refactor in #5468) may still
+	// have `<dcd>-1`, `<dcd>-2`, ... around. Stop at the first gap so we don't
+	// scan unboundedly.
+	for i := 0; ; i++ {
+		lwsName := fmt.Sprintf("%s-%d", dynamoComponentDeployment.Name, i)
+		lws := &leaderworkersetv1.LeaderWorkerSet{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      lwsName,
+			Namespace: dynamoComponentDeployment.Namespace,
+		}, lws)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				// Indexed LWS instances are created contiguously starting at 0,
+				// so the first gap means we've found them all.
+				break
+			}
+			return fmt.Errorf("failed to get LeaderWorkerSet %q for cleanup: %w", lwsName, err)
+		}
+
+		if !metav1.IsControlledBy(lws, dynamoComponentDeployment) {
+			// Not ours — skip but continue checking subsequent indices.
+			continue
+		}
+
+		logger.Info("Deleting orphaned LeaderWorkerSet after switch to single-node (Deployment) mode",
+			"leaderWorkerSet", lws.Name)
+		if err := r.Delete(ctx, lws); err != nil && !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete orphaned LeaderWorkerSet %q: %w", lws.Name, err)
+		}
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "CleanupOrphanedLeaderWorkerSet",
+			"Deleted orphaned LeaderWorkerSet %q after switching to single-node (Deployment) mode", lws.Name)
+
+		// Best-effort PodGroup cleanup. The PodGroup shares the LWS name; a
+		// missing PodGroup is non-fatal because gang scheduling may not be in
+		// use, so we only log on unexpected errors.
+		podGroup := &volcanov1beta1.PodGroup{}
+		err = r.Get(ctx, types.NamespacedName{
+			Name:      lwsName,
+			Namespace: dynamoComponentDeployment.Namespace,
+		}, podGroup)
+		if err != nil {
+			if !k8serrors.IsNotFound(err) {
+				logger.Error(err, "Failed to get orphaned PodGroup for cleanup", "podGroup", lwsName)
+			}
+			continue
+		}
+		if !metav1.IsControlledBy(podGroup, dynamoComponentDeployment) {
+			continue
+		}
+		if err := r.Delete(ctx, podGroup); err != nil && !k8serrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete orphaned PodGroup", "podGroup", lwsName)
+		}
+	}
+	return nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
