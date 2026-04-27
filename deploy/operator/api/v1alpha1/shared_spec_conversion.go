@@ -82,7 +82,7 @@ const (
 	//
 	// suffixServiceName preserves the v1alpha1-only DGD-entry ServiceName
 	// when it differs from the components-map key. v1beta1 fixes
-	// ComponentName == listMapKey so a non-matching ServiceName on the
+	// the component name field as the listMapKey so a non-matching ServiceName on the
 	// v1alpha1 side has no first-class home; we stash it here instead so
 	// ConvertTo(ConvertFrom(V)) is bitwise stable.
 	suffixServiceName      = "service-name"

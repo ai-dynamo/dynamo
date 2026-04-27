@@ -84,8 +84,8 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	if src.Spec.TopologyConstraint != nil {
 		semanticSpec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{
-			TopologyProfile: src.Spec.TopologyConstraint.TopologyProfile,
-			PackDomain:      v1beta1.TopologyDomain(src.Spec.TopologyConstraint.PackDomain),
+			ClusterTopologyName: src.Spec.TopologyConstraint.TopologyProfile,
+			PackDomain:          v1beta1.TopologyDomain(src.Spec.TopologyConstraint.PackDomain),
 		}
 	}
 
@@ -132,7 +132,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 			// any value in compSrc.ServiceName is treated as legacy/dead by
 			// the reconciler (graph.go materialises DCDs with ServiceName =
 			// map key). Force the v1beta1 ComponentName to the map key so the
-			// +listMapKey invariant (and the round-trip identity) hold, and
+			// +listMapKey=name invariant (and the round-trip identity) hold, and
 			// stash the (now redundant) v1alpha1 ServiceName in an origin
 			// annotation so a mismatched value still round-trips.
 			compDst.ComponentName = name
@@ -212,7 +212,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 	if src.Spec.TopologyConstraint != nil {
 		dst.Spec.TopologyConstraint = &SpecTopologyConstraint{
-			TopologyProfile: src.Spec.TopologyConstraint.TopologyProfile,
+			TopologyProfile: src.Spec.TopologyConstraint.ClusterTopologyName,
 			PackDomain:      TopologyDomain(src.Spec.TopologyConstraint.PackDomain),
 		}
 	}
@@ -233,7 +233,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Spec.Components))
 		for i := range src.Spec.Components {
 			compSrc := &src.Spec.Components[i]
-			// v1beta1 declares +listType=map +listMapKey=componentName so
+			// v1beta1 declares +listType=map +listMapKey=name so
 			// the API server normally rejects duplicates, but the
 			// conversion path is also reached from in-memory unit-test
 			// fixtures and other code paths that bypass CRD validation.
