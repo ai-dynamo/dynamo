@@ -45,21 +45,19 @@ impl MultimodalEmbeddingCachePublisher {
         let cache_rx = self.rx.clone();
 
         tokio::spawn(async move {
-            let event_publisher = match EventPublisher::for_namespace(
-                &namespace,
-                MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
-            )
-            .await
-            {
-                Ok(publisher) => publisher,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to create multimodal embedding cache publisher: {}",
-                        e
-                    );
-                    return;
-                }
-            };
+            let event_publisher =
+                match EventPublisher::for_namespace(&namespace, MULTIMODAL_EMBEDDING_CACHE_SUBJECT)
+                    .await
+                {
+                    Ok(publisher) => publisher,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to create multimodal embedding cache publisher: {}",
+                            e
+                        );
+                        return;
+                    }
+                };
 
             let mut rx = cache_rx;
             let mut last_cache_keys: Option<Vec<String>> = None;

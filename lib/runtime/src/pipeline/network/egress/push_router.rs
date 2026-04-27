@@ -18,8 +18,8 @@ use crate::{
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};

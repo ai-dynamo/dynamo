@@ -16,9 +16,9 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
+use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::publisher::MultimodalEmbeddingCacheEvent;
 use crate::kv_router::{KV_METRICS_SUBJECT, MULTIMODAL_EMBEDDING_CACHE_SUBJECT};
-use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
@@ -424,10 +424,7 @@ impl KvWorkerMonitor {
             return;
         }
 
-        embedding_cache_keys.insert(
-            event.worker_id,
-            event.cache_keys.iter().cloned().collect(),
-        );
+        embedding_cache_keys.insert(event.worker_id, event.cache_keys.iter().cloned().collect());
     }
 
     /// Get the current active decode blocks threshold, if configured.
