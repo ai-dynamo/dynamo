@@ -74,6 +74,31 @@ struct DecoderUnfoldState {
     finished: bool,
 }
 
+struct DecoderParams {
+    prompt_token_ids: Vec<TokenIdType>,
+    stop_conditions: StopConditions,
+    skip_special_tokens: bool,
+    include_stop_str_in_output: bool,
+    tracker: Option<Arc<RequestTracker>>,
+    n: u32,
+}
+
+impl DecoderParams {
+    fn from_request(request: &PreprocessedRequest) -> Self {
+        Self {
+            prompt_token_ids: request.token_ids.clone(),
+            stop_conditions: request.stop_conditions.clone(),
+            skip_special_tokens: request.output_options.skip_special_tokens.unwrap_or(false),
+            include_stop_str_in_output: request
+                .sampling_options
+                .include_stop_str_in_output
+                .unwrap_or(false),
+            tracker: request.tracker.clone(),
+            n: request.sampling_options.n.unwrap_or(1) as u32,
+        }
+    }
+}
+
 impl Backend {
     pub fn from_tokenizer(tokenizer: Tokenizer) -> Arc<Self> {
         Arc::new(Self {
@@ -98,12 +123,7 @@ impl Backend {
     fn decoder(
         &self,
         stream: ManyOut<ExecutionOutputStream>,
-        prompt_token_ids: &[TokenIdType],
-        stop_conditions: StopConditions,
-        skip_special_tokens: bool,
-        include_stop_str_in_output: bool,
-        tracker: Option<Arc<RequestTracker>>,
-        n: u32,
+        params: DecoderParams,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
@@ -111,14 +131,14 @@ impl Backend {
 
         // Pre-create one decoder per expected choice so interleaved n>1
         // responses do not share tokenizer state.
-        let n = n.max(1);
+        let n = params.n.max(1);
         let mut decoders = HashMap::with_capacity(n as usize);
         for idx in 0..n {
             let decoder = Decoder::new(
-                tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
-                stop_conditions.clone(),
-                include_stop_str_in_output,
-                tracker.clone(),
+                tokenizer.decode_stream(&params.prompt_token_ids, params.skip_special_tokens),
+                params.stop_conditions.clone(),
+                params.include_stop_str_in_output,
+                params.tracker.clone(),
             );
             decoders.insert(idx, decoder);
         }
@@ -147,33 +167,12 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        let stop_conditions = request.stop_conditions.clone();
-
-        let prompt_token_ids = request.token_ids.clone();
-
-        // TODO: Consider updating default to true to match behavior of other frameworks
-        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
-
-        // Extract include_stop_str_in_output from sampling_options (defaults to false)
-        let include_stop_str_in_output = request
-            .sampling_options
-            .include_stop_str_in_output
-            .unwrap_or(false);
-        let tracker = request.tracker.clone();
-        let n = request.sampling_options.n.unwrap_or(1) as u32;
+        let decoder_params = DecoderParams::from_request(&request);
 
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(
-            next_stream,
-            &prompt_token_ids,
-            stop_conditions,
-            skip_special_tokens,
-            include_stop_str_in_output,
-            tracker,
-            n,
-        )?;
+        let state = self.decoder(next_stream, decoder_params)?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             // If we've already detected a local stop condition, end the stream
