@@ -112,15 +112,41 @@ async fn test_chat_template_json_fallback() {
 // user's real cache or interfere with each other.
 // =============================================================
 
-/// Override `HOME` for the duration of a test scope. Returns the
-/// `TempDir` so it stays alive (otherwise it'd be cleaned up before
-/// the test runs). Pair with `#[serial_test::serial]` so the env
-/// override doesn't race with other tests.
-fn isolated_home() -> tempfile::TempDir {
-    let dir = tempdir().expect("tempdir for isolated $HOME");
-    // SAFETY: tests on this file are serialized via serial_test.
-    unsafe { std::env::set_var("HOME", dir.path()) };
-    dir
+/// RAII guard: overrides `HOME` to a fresh tempdir for the test, restores the
+/// previous value (or unsets) on drop. The tempdir is cleaned up with the
+/// guard, so the MDC cache leaves no residue for the next test.
+struct IsolatedHome {
+    _tempdir: tempfile::TempDir,
+    prev_home: Option<String>,
+}
+
+impl IsolatedHome {
+    fn path(&self) -> &std::path::Path {
+        self._tempdir.path()
+    }
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        // SAFETY: tests using this guard are serialized via serial_test.
+        unsafe {
+            match self.prev_home.take() {
+                Some(prev) => std::env::set_var("HOME", prev),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+fn isolated_home() -> IsolatedHome {
+    let tempdir = tempdir().expect("tempdir for isolated $HOME");
+    let prev_home = std::env::var("HOME").ok();
+    // SAFETY: tests using this guard are serialized via serial_test.
+    unsafe { std::env::set_var("HOME", tempdir.path()) };
+    IsolatedHome {
+        _tempdir: tempdir,
+        prev_home,
+    }
 }
 
 /// Fresh MDC loaded from TinyLlama, with the typed CheckedFiles
@@ -387,5 +413,157 @@ async fn test_download_files_resolves_hf_scheme_with_token() {
 
         let actual = format!("blake3:{}", blake3::hash(&std::fs::read(&blob).unwrap()));
         assert_eq!(actual, artifact.checksum);
+    }
+}
+
+// =============================================================
+// DRT-level integration test (gh-8749)
+//
+// Mirrors lib/llm/tests/http_metrics.rs `integration_tests`. Builds
+// a real DistributedRuntime (requires etcd and a process-spawned
+// system_status_server). Single-process worker + frontend: the
+// worker's `LocalModel::attach` publishes the MDC into discovery,
+// the frontend's `ModelWatcher` observes it and runs
+// `download_config`, which fetches via `http://` from the worker's
+// own `/v1/metadata/...` route.
+//
+// Gated by the `integration` feature and `#[ignore]`d by default
+// because it requires etcd. Run with:
+//   cargo test -p dynamo-llm --test model_card --features integration -- --ignored
+// =============================================================
+
+#[cfg(feature = "integration")]
+mod integration_tests {
+    use super::*;
+    use dynamo_llm::discovery::{ModelManager, ModelWatcher};
+    use dynamo_llm::http::service::metrics::Metrics;
+    use dynamo_llm::local_model::LocalModelBuilder;
+    use dynamo_llm::namespace::NamespaceFilter;
+    use dynamo_runtime::DistributedRuntime;
+    use dynamo_runtime::discovery::DiscoveryQuery;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Serialized because `HOME` and `DYN_SYSTEM_PORT` are
+    /// process-global. Across separate `cargo test` processes the
+    /// test is parallelizable: each gets its own tempdir-rooted
+    /// HOME, its own random port, and a unique namespace so etcd
+    /// keys don't collide.
+    #[serial_test::serial]
+    #[tokio::test]
+    #[ignore = "Requires etcd"]
+    async fn worker_self_host_round_trip_via_drt() {
+        // SAFETY: serialized within-binary; tempdir HOME + random
+        // port + unique namespace handle cross-binary parallelism.
+        unsafe {
+            std::env::set_var("DYN_SYSTEM_PORT", "0");
+            std::env::remove_var("DYN_SELF_HOST_METADATA");
+        }
+        let _home = isolated_home();
+        let test_namespace = format!(
+            "self-host-it-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        );
+
+        let runtime = dynamo_runtime::Runtime::from_settings().expect("runtime");
+        let drt = DistributedRuntime::from_settings(runtime.clone())
+            .await
+            .expect("DRT");
+        assert!(
+            drt.system_status_server_info().is_some(),
+            "system_status_server must be running for self-host registration"
+        );
+
+        let abs_path = std::fs::canonicalize(HF_PATH).expect("canonicalize HF_PATH");
+        let mut local_model = LocalModelBuilder::default()
+            .model_path(abs_path)
+            .self_host_metadata(true)
+            .build()
+            .await
+            .expect("build LocalModel");
+
+        let manager = Arc::new(ModelManager::new());
+        let metrics = Arc::new(Metrics::new());
+        let watcher = ModelWatcher::new(
+            drt.clone(),
+            manager.clone(),
+            dynamo_llm::entrypoint::RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            metrics,
+        );
+        let discovery_stream = drt
+            .discovery()
+            .list_and_watch(DiscoveryQuery::AllModels, Some(drt.primary_token()))
+            .await
+            .expect("list_and_watch");
+        let watcher_filter = NamespaceFilter::Exact(test_namespace.clone());
+        let _watcher_task = tokio::spawn(async move {
+            Arc::new(watcher)
+                .watch(discovery_stream, watcher_filter)
+                .await;
+        });
+
+        let namespace = drt.namespace(&test_namespace).unwrap();
+        let component = namespace.component("worker").unwrap();
+        let endpoint = component.endpoint("generate");
+        local_model
+            .attach(
+                &endpoint,
+                dynamo_llm::model_type::ModelType::Chat,
+                dynamo_llm::model_type::ModelInput::Text,
+                None,
+            )
+            .await
+            .expect("attach");
+
+        let want_slug = local_model.card().slug().to_string();
+        let card = poll_for_card(&manager, &want_slug, 30).await;
+
+        // Cache must be populated under the isolated HOME — the
+        // only writer is `download_files`, so its presence proves
+        // the http path ran end-to-end.
+        let blobs_dir = _home.path().join(".cache/dynamo/mdc/blobs");
+        assert!(
+            blobs_dir.exists(),
+            "expected blobs dir at {}",
+            blobs_dir.display()
+        );
+        let blobs: Vec<_> = std::fs::read_dir(&blobs_dir).unwrap().collect();
+        assert!(!blobs.is_empty(), "expected at least one blob");
+        assert_eq!(
+            card.files.len(),
+            blobs.len(),
+            "blob count must match files vector length"
+        );
+
+        let _tokenizer = card.tokenizer().expect("tokenizer should load");
+
+        // SAFETY: serialized.
+        unsafe {
+            std::env::remove_var("DYN_SYSTEM_PORT");
+        }
+    }
+
+    async fn poll_for_card(
+        manager: &ModelManager,
+        slug: &str,
+        timeout_secs: u64,
+    ) -> ModelDeploymentCard {
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            for card in manager.get_model_cards() {
+                if card.slug().to_string() == slug {
+                    return card;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("watcher never discovered card for slug {slug}");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 }

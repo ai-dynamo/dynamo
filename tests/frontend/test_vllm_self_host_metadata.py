@@ -8,7 +8,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import Generator
+from pathlib import Path
+from typing import Generator, Tuple
 
 import pytest
 import requests
@@ -90,14 +91,26 @@ class SelfHostVllmWorkerProcess(ManagedProcess):
 
 @pytest.fixture(scope="function")
 def start_self_host_services(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports: ServicePorts
-) -> Generator[ServicePorts, None, None]:
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports: ServicePorts,
+    tmp_path,
+) -> Generator[Tuple[ServicePorts, Path], None, None]:
     _ = runtime_services_dynamic_ports
     frontend_port = dynamo_dynamic_ports.frontend_port
     system_port = dynamo_dynamic_ports.system_ports[0]
+
+    # Isolate the frontend's HOME so its MDC cache (and any HF cache
+    # it might use as a fallback) lives under the test tmpdir. After
+    # the test, we inspect this path to confirm the self-host http
+    # path actually ran.
+    frontend_home = tmp_path / "frontend-home"
+    frontend_home.mkdir(parents=True, exist_ok=True)
+
     with DynamoFrontendProcess(
         request,
         frontend_port=frontend_port,
+        extra_env={"HOME": str(frontend_home)},
         terminate_all_matching_process_names=False,
     ):
         with SelfHostVllmWorkerProcess(
@@ -105,14 +118,17 @@ def start_self_host_services(
             frontend_port=frontend_port,
             system_port=system_port,
         ):
-            yield dynamo_dynamic_ports
+            yield dynamo_dynamic_ports, frontend_home
 
 
 @pytest.mark.timeout(300)
 def test_self_host_metadata_env_var_registers_model(
-    request, start_self_host_services: ServicePorts, predownload_models
+    request,
+    start_self_host_services: Tuple[ServicePorts, Path],
+    predownload_models,
 ) -> None:
-    base_url = f"http://localhost:{start_self_host_services.frontend_port}"
+    ports, frontend_home = start_self_host_services
+    base_url = f"http://localhost:{ports.frontend_port}"
 
     response = requests.get(f"{base_url}/v1/models", timeout=30)
     assert (
@@ -122,3 +138,22 @@ def test_self_host_metadata_env_var_registers_model(
     data = response.json()
     model_ids = [m.get("id") for m in data.get("data", [])]
     assert TEST_MODEL in model_ids, f"expected {TEST_MODEL} in {model_ids}"
+
+    # Validate the frontend actually used the self-host http path.
+    # `download_files` is the only writer to ~/.cache/dynamo/mdc/blobs/;
+    # the legacy hub::from_hf fallback writes to the HF Hub cache,
+    # which is a different directory. Blobs in the isolated HOME
+    # prove download_files ran with the http URIs the worker
+    # advertised in its MDC.
+    blobs_dir = frontend_home / ".cache/dynamo/mdc/blobs"
+    assert blobs_dir.exists(), (
+        f"expected MDC blobs dir at {blobs_dir} — frontend did not exercise "
+        f"the self-host http path"
+    )
+    blobs = list(blobs_dir.iterdir())
+    assert len(blobs) > 0, (
+        f"expected at least one blob in {blobs_dir} from the http fetch; " f"none found"
+    )
+    logger.info(
+        "self-host http path verified: %d blob(s) under %s", len(blobs), blobs_dir
+    )
