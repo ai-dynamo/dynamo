@@ -181,12 +181,15 @@ def _get_original_hf_hub_cache(orig: dict) -> str:
 
 
 def _merge_models_dir_into_writable_cache(models_dir: str, writable_cache: str) -> None:
-    """Symlink models--* entries from models_dir into writable_cache.
+    """Seed writable_cache with a fine-grained skeleton for each models--* entry in models_dir.
 
-    Lets the read-only volume stay read-only while making all its models accessible
-    via the single HF_HUB_CACHE path that subprocesses will use. Handles both
-    HF_HOME layout (models_dir/hub/models--*) and bare layout (models_dir/models--*).
-    Existing entries in writable_cache are left untouched.
+    Creates real (writable) NVMe directories for the model root, snapshots/, and refs/,
+    with symlinks only for immutable content (blobs/ and existing snapshot trees).
+    This lets HF hub write refs/<sha> and create snapshots/<sha>/ without ever touching
+    the read-only source volume (e.g. a mountpoint-s3 FUSE mount).
+
+    Handles both HF_HOME layout (models_dir/hub/models--*) and bare layout
+    (models_dir/models--*). Existing entries in writable_cache are left untouched.
     """
     src = Path(models_dir)
     if (src / "hub").is_dir():
@@ -194,11 +197,40 @@ def _merge_models_dir_into_writable_cache(models_dir: str, writable_cache: str) 
     dst = Path(writable_cache)
     dst.mkdir(parents=True, exist_ok=True)
     for entry in src.iterdir():
-        if entry.name.startswith("models--"):
-            link = dst / entry.name
-            if not link.exists():
-                link.symlink_to(entry.resolve())
-                logging.info("Symlinked %s -> %s", link, entry.resolve())
+        if not entry.name.startswith("models--"):
+            continue
+        model_dst = dst / entry.name
+        if model_dst.exists() or model_dst.is_symlink():
+            continue
+        # Real writable directory so HF hub can create refs/<sha> and snapshots/<sha>/
+        # without following a symlink back to the read-only source volume.
+        model_dst.mkdir(exist_ok=True)
+        # blobs/ is content-addressed and immutable — safe to symlink directly.
+        blobs_src = entry / "blobs"
+        if blobs_src.is_dir():
+            (model_dst / "blobs").symlink_to(blobs_src.resolve())
+        # snapshots/ must be a real writable dir so HF can mkdir new revision dirs.
+        # Existing per-revision trees are symlinked (immutable once written).
+        snapshots_src = entry / "snapshots"
+        if snapshots_src.is_dir():
+            snapshots_dst = model_dst / "snapshots"
+            snapshots_dst.mkdir(exist_ok=True)
+            for snap in snapshots_src.iterdir():
+                snap_link = snapshots_dst / snap.name
+                if not snap_link.exists():
+                    snap_link.symlink_to(snap.resolve())
+        # refs/ must be a real writable dir; copy ref files (tiny text files containing
+        # a commit sha) so HF can write new refs without touching the source volume.
+        refs_src = entry / "refs"
+        if refs_src.is_dir():
+            refs_dst = model_dst / "refs"
+            refs_dst.mkdir(exist_ok=True)
+            for ref_file in refs_src.iterdir():
+                if ref_file.is_file():
+                    dst_ref = refs_dst / ref_file.name
+                    if not dst_ref.exists():
+                        shutil.copy2(ref_file, dst_ref)
+        logging.info("Seeded writable cache skeleton: %s", model_dst)
 
 
 def _missing_from_hf_cache(model_ids: list) -> list:
