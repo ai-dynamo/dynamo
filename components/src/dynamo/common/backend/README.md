@@ -92,9 +92,10 @@ class MyEngine(LLMEngine):
     async def generate(self, request, context):
         # Yield streaming response dicts.
         async for result in my_engine.run(request):
-            yield {"token_ids": result.token_ids}
+            yield {"token_ids": result.token_ids, "index": 0}
         yield {
             "token_ids": result.token_ids,
+            "index": 0,
             "finish_reason": "stop",
             "completion_usage": {
                 "prompt_tokens": prompt_tokens,
@@ -139,7 +140,7 @@ class GenerateRequest(TypedDict, total=False):
 
 class GenerateChunk(TypedDict, total=False):
     token_ids: Required[list[int]]
-    index: int                    # choice index; defaults to 0 when absent
+    index: Required[int]           # choice index; use 0 for single-choice chunks
     finish_reason: str             # final chunk only
     completion_usage: dict[str, int]  # final chunk only
 ```

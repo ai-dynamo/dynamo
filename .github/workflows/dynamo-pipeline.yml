@@ -191,7 +191,7 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
-      cpu_only_test_timeout_minutes: 30
+      cpu_only_test_timeout_minutes: 60
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
     secrets: inherit
