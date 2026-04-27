@@ -1492,7 +1492,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::HFConfig;
+    use super::{ArtifactRef, ArtifactRole, HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::Path;
 
@@ -1547,5 +1547,130 @@ mod tests {
             "Should contain tokenizer eos_token (248046 <|im_end|>)"
         );
         Ok(())
+    }
+
+    /// `ArtifactRef` round-trips cleanly through serde JSON with all
+    /// fields preserved.
+    #[test]
+    fn artifact_ref_serde_roundtrip() {
+        let r = ArtifactRef {
+            filename: "tokenizer.json".into(),
+            uri: "http://worker.local:9090/v1/metadata/llama/tokenizer.json".into(),
+            checksum: "blake3:9a4b1c".into(),
+            size: 9_876_543,
+            role: ArtifactRole::Tokenizer,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ArtifactRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.filename, r.filename);
+        assert_eq!(back.uri, r.uri);
+        assert_eq!(back.checksum, r.checksum);
+        assert_eq!(back.size, r.size);
+        assert_eq!(back.role, r.role);
+    }
+
+    /// All five `ArtifactRole` variants serialize to the documented
+    /// snake_case names. Locks the wire format.
+    #[test]
+    fn artifact_role_serde_snake_case() {
+        let cases = [
+            (ArtifactRole::Config, "\"config\""),
+            (ArtifactRole::Tokenizer, "\"tokenizer\""),
+            (ArtifactRole::TokenizerConfig, "\"tokenizer_config\""),
+            (ArtifactRole::ChatTemplate, "\"chat_template\""),
+            (ArtifactRole::GenerationConfig, "\"generation_config\""),
+        ];
+        for (role, expected) in cases {
+            let s = serde_json::to_string(&role).unwrap();
+            assert_eq!(s, expected, "role {role:?}");
+            let back: ArtifactRole = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, role);
+        }
+    }
+
+    /// `fetch_and_verify` must reject a payload whose blake3 doesn't
+    /// match `expected_checksum`. No partial file is left at `dest` —
+    /// the atomic-rename machinery never runs on a checksum mismatch.
+    #[tokio::test]
+    async fn fetch_and_verify_rejects_checksum_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        let body = b"hello world";
+        let _m = server
+            .mock("GET", "/file.txt")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let dir =
+            std::env::temp_dir().join(format!("dynamo-self-host-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("file.txt");
+
+        let url = format!("{}/file.txt", server.url());
+        let result = super::fetch_and_verify(
+            &reqwest::Client::new(),
+            &url,
+            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            &dest,
+        )
+        .await;
+
+        assert!(result.is_err(), "checksum mismatch must error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("checksum mismatch"),
+            "expected checksum-mismatch error, got: {msg}"
+        );
+        assert!(
+            !dest.exists(),
+            "no file should be written on checksum mismatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MDC bytes published by an old worker (no `files` field) must
+    /// deserialize cleanly into a card with `files` defaulted to an
+    /// empty vector. This is the cross-version compatibility guarantee
+    /// for new frontends reading old workers' MDCs.
+    ///
+    /// Construction goes through `Default::default()` then serialize-
+    /// then-strip-the-`files`-field, which mirrors the wire-level
+    /// shape an old worker would emit: every other field present, no
+    /// `files` field at all.
+    #[test]
+    fn mdc_without_files_deserializes_to_empty_vec() {
+        let card = ModelDeploymentCard {
+            display_name: "old-model".into(),
+            files: vec![ArtifactRef {
+                filename: "tokenizer.json".into(),
+                uri: "file:///x".into(),
+                checksum: "blake3:0".into(),
+                size: 0,
+                role: ArtifactRole::Tokenizer,
+            }],
+            ..ModelDeploymentCard::default()
+        };
+
+        // Round-trip with `files` populated to confirm the field
+        // serializes when non-empty.
+        let with_files: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&card).unwrap()).unwrap();
+        assert!(
+            with_files.get("files").is_some(),
+            "`files` must serialize when populated"
+        );
+
+        // Now strip the `files` key from the JSON and re-deserialize
+        // — that's what an old worker's MDC bytes look like on the
+        // wire. New frontend must accept it and default to empty vec.
+        let mut without_files = with_files.clone();
+        without_files.as_object_mut().unwrap().remove("files");
+        let back: ModelDeploymentCard = serde_json::from_value(without_files).unwrap();
+        assert!(
+            back.files.is_empty(),
+            "missing files field must deserialize to an empty vector"
+        );
     }
 }
