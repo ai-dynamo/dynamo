@@ -81,6 +81,12 @@ pub struct DistributedRuntime {
     // Registry for /engine/* route callbacks
     engine_routes: crate::engine_routes::EngineRouteRegistry,
 
+    // Registry for self-hosted model metadata files served by
+    // `/v1/metadata/{model_slug}/{filename}` on the
+    // system_status_server. Populated at register_model time when
+    // the worker has opted in to `self_host_metadata`.
+    metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
+
     // Resolved event transport kind — set once at construction time from
     // DYN_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
     event_transport_kind: crate::discovery::EventTransportKind,
@@ -205,6 +211,7 @@ impl DistributedRuntime {
             request_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
+            metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
 
@@ -331,6 +338,14 @@ impl DistributedRuntime {
     /// Get the engine route registry for registering custom /engine/* routes
     pub fn engine_routes(&self) -> &crate::engine_routes::EngineRouteRegistry {
         &self.engine_routes
+    }
+
+    /// Get the metadata artifact registry that backs the
+    /// `/v1/metadata/{model_slug}/{filename}` route. Populated by
+    /// `register_model` when a worker opts in to
+    /// `self_host_metadata`.
+    pub fn metadata_artifacts(&self) -> &crate::metadata_registry::MetadataArtifactRegistry {
+        &self.metadata_artifacts
     }
 
     pub fn connection_id(&self) -> u64 {

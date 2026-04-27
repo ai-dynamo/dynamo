@@ -216,6 +216,17 @@ pub async fn spawn_system_status_server(
             );
     }
 
+    // Self-hosted model metadata files. The route is mounted
+    // unconditionally; the handler returns 404 unless a worker has
+    // opted in via `self_host_metadata` and registered the file.
+    app = app.route(
+        "/v1/metadata/{model_slug}/{*filename}",
+        get({
+            let state = Arc::clone(&server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
+
     let app = app
         .fallback(|| async {
             tracing::info!("[fallback handler] called");
@@ -472,6 +483,47 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
                     count: None,
                 }),
             )
+        }
+    }
+}
+
+/// Serve a self-hosted model metadata file.
+///
+/// Looks up `(model_slug, filename)` in the process-local
+/// [`MetadataArtifactRegistry`](crate::metadata_registry::MetadataArtifactRegistry).
+/// Returns 404 when the pair isn't registered (worker didn't opt in,
+/// model wasn't registered, or the filename isn't one the worker
+/// advertised). Returns 500 on a local read error. Successful
+/// responses serve the raw file bytes; the consumer is responsible
+/// for blake3-verifying against the MDC entry, so the transport is
+/// untrusted by construction.
+async fn metadata_file_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path((model_slug, filename)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = match state.drt().metadata_artifacts().get(&model_slug, &filename) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                model_slug,
+                filename,
+                "metadata artifact not registered for self-host"
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+        Err(err) => {
+            tracing::error!(
+                model_slug,
+                filename,
+                path = %path.display(),
+                %err,
+                "failed to read self-hosted metadata file"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
         }
     }
 }
