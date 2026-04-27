@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir --force-reinstall --no-deps \
 COPY --from=dynamo_src /workspace/components/src/dynamo /workspace/components/src/dynamo
 
 # Avoid /workspace/sglang shadowing the dynamo Python package.
-ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src:${PYTHONPATH:-}
+ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src
 
 ENV SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
     SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1
