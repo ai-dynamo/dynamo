@@ -7,12 +7,30 @@ use crate::context::AgentContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTraceRecord {
-    pub schema: String,
-    pub event_type: String,
+    pub schema: TraceSchema,
+    pub event_type: TraceEventType,
     pub event_time_unix_ms: u64,
-    pub event_source: String,
+    pub event_source: TraceEventSource,
     pub agent_context: AgentContext,
     pub request: AgentRequestMetrics,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TraceSchema {
+    #[serde(rename = "dynamo.agent.trace.v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TraceEventType {
+    #[serde(rename = "request_end")]
+    RequestEnd,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TraceEventSource {
+    #[serde(rename = "dynamo")]
+    Dynamo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,11 +8,19 @@ pub mod stream;
 pub mod types;
 
 use crate::context::AgentContext;
+use tokio_util::sync::CancellationToken;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
-pub use types::{AgentRequestMetrics, AgentTraceRecord, WorkerInfo};
+pub use types::{
+    AgentRequestMetrics, AgentTraceRecord, TraceEventSource, TraceEventType, TraceSchema,
+    WorkerInfo,
+};
 
 pub async fn init_from_env() -> anyhow::Result<()> {
+    init_from_env_with_shutdown(CancellationToken::new()).await
+}
+
+pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();
     if !policy.enabled {
         return Ok(());
@@ -20,7 +28,7 @@ pub async fn init_from_env() -> anyhow::Result<()> {
 
     bus::init(policy.capacity);
     if let Some(path) = policy.jsonl_path.clone() {
-        sink::spawn_jsonl_worker(path).await?;
+        sink::spawn_jsonl_worker_with_shutdown(path, shutdown).await?;
     }
     tracing::info!(cap = policy.capacity, "Agent trace initialized");
     Ok(())
@@ -47,10 +55,10 @@ pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetric
         .unwrap_or(request.request_received_ms);
 
     let record = AgentTraceRecord {
-        schema: "dynamo.agent.trace.v1".to_string(),
-        event_type: "request_end".to_string(),
+        schema: TraceSchema::V1,
+        event_type: TraceEventType::RequestEnd,
         event_time_unix_ms,
-        event_source: "dynamo".to_string(),
+        event_source: TraceEventSource::Dynamo,
         agent_context,
         request,
     };
@@ -65,16 +73,23 @@ mod tests {
 
     use crate::context::AgentContext;
 
-    use super::{AgentRequestMetrics, bus, emit_request_end, sink};
+    use super::{
+        AgentRequestMetrics, AgentTraceRecord, TraceEventSource, TraceEventType, TraceSchema, bus,
+        emit_request_end, sink,
+    };
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn test_agent_trace_jsonl_sink_writes_record() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent_trace.jsonl");
         bus::init(16);
-        sink::spawn_jsonl_worker(path.display().to_string())
-            .await
-            .expect("sink should start");
+        sink::spawn_jsonl_worker_with_shutdown(
+            path.display().to_string(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("sink should start");
 
         emit_request_end(
             AgentContext {
@@ -110,5 +125,11 @@ mod tests {
         assert!(content.contains("\"event_type\":\"request_end\""));
         assert!(content.contains("\"request_id\":\"req-123\""));
         assert!(content.contains("\"workflow_id\":\"run-1\""));
+
+        let record: AgentTraceRecord = serde_json::from_str(content.lines().next().unwrap())
+            .expect("jsonl record should deserialize");
+        assert_eq!(record.schema, TraceSchema::V1);
+        assert_eq!(record.event_type, TraceEventType::RequestEnd);
+        assert_eq!(record.event_source, TraceEventSource::Dynamo);
     }
 }
