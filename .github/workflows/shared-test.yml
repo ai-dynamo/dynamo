@@ -33,6 +33,7 @@ on:
       enable_coverage:
         description: 'Enable coverage collection (true/false)'
         required: false
+        type: string
         default: 'false'
       run_sanity_check:
         description: 'Whether to run sanity check on the runtime image before executing tests'
