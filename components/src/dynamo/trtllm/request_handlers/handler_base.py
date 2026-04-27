@@ -1009,7 +1009,7 @@ class HandlerBase(BaseGenerativeHandler):
         # TensorRT-LLM streams cumulative token_ids per output. For n>1 those
         # outputs are interleaved by choice index, so maintain one cursor per
         # choice and emit only the new slice for each Dynamo chunk.
-        output_tokens_per_choice = {}
+        output_tokens_per_choice: dict[int, int] = {}
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
