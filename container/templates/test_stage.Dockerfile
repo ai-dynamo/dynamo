@@ -1,15 +1,9 @@
-# syntax=docker/dockerfile:1.10.0-labs
+{#
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-# Generic test image — layers test deps on top of a pre-built runtime image.
-# Not for distroless targets (e.g. planner); those use --target planner_test
-# with the main rendered.Dockerfile instead.
-# Usage: docker build -f container/rendered.Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-
-# Install test dependencies on top of runtime image
+#}
+# === BEGIN templates/test_stage.Dockerfile ===
+FROM {{ target }} AS {{ target }}_test
 USER root
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     --mount=type=cache,target=/root/.cache/uv \
@@ -25,7 +19,5 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     fi
 
 USER dynamo
-
-# Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

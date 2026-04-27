@@ -141,7 +141,6 @@ def validate_args(args):
                 "local-dev",
                 "frontend",
                 "planner",
-                "planner-test",
                 "wheel_builder",
                 "base",
             ],
@@ -211,30 +210,6 @@ def render(args, context, script_dir):
     print(f"INFO: Generated Dockerfile written to {script_dir}/{filename}")
 
 
-def render_test(args, context, script_dir):
-    env = _make_jinja_env(script_dir)
-    template = env.get_template("templates/test.Dockerfile")
-    rendered = template.render(context=context, **_render_context(args))
-    cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
-
-    if args.output_short_filename:
-        filename = "rendered.Dockerfile.test"
-    else:
-        filename = f"{args.framework}-{args.target}-{args.device}{args.cuda_version}-{args.platform}-rendered.Dockerfile.test"
-
-    with open(f"{script_dir}/{filename}", "w") as f:
-        f.write(cleaned)
-
-    if args.show_result:
-        print("###################")
-        print("# Test Dockerfile #")
-        print("###################")
-        print(cleaned)
-        print("###################")
-
-    print(f"INFO: Generated test Dockerfile written to {script_dir}/{filename}")
-
-
 def main():
     args = parse_args()
     # Normalize platform to template variable ('amd64', 'arm64', or 'multi')
@@ -249,7 +224,6 @@ def main():
         context = yaml.safe_load(f)
 
     render(args, context, script_dir)
-    render_test(args, context, script_dir)
 
     if args.target == "local-dev":
         print(

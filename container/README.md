@@ -122,11 +122,11 @@ docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
-### 2. test image (layers test deps on top of runtime):
+### 2. test image (test deps layered on top of runtime, built from the same rendered Dockerfile):
 ```bash
-# Generate the test Dockerfile first, then build
-python container/render.py --target=runtime --framework=vllm --output-short-filename
-docker build -f container/rendered.Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
+# Generate the Dockerfile first (runtime_test stage is included automatically), then build
+container/render.py --target=runtime --framework=vllm --output-short-filename
+docker build -f container/rendered.Dockerfile --target runtime_test -t dynamo:latest-vllm-test .
 ```
 
 ### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):

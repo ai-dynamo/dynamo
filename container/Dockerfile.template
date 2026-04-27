@@ -13,7 +13,7 @@
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
         {% include "templates/frontend.Dockerfile" %}
-    {% elif target == "planner" or target == "planner-test" %}
+    {% elif target == "planner" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
         {% include "templates/planner.Dockerfile" %}
@@ -59,6 +59,11 @@
 
 {% if make_efa == true and target == "runtime" %}
     {% include "templates/aws.Dockerfile" %}
+{% endif %}
+
+# --- Test Stage
+{% if target == "runtime" %}
+    {% include "templates/test_stage.Dockerfile" %}
 {% endif %}
 
 # --- Development Stages

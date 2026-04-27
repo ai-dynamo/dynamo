@@ -107,7 +107,7 @@ FROM planner_builder AS planner_test
 
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install --requirement /tmp/requirements.test.txt
 
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

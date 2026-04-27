@@ -282,11 +282,7 @@ runs:
           NO_CACHE_ARG="--no-cache"
         fi
 
-        if [[ "${{ inputs.target }}" == "planner" ]]; then
-          DOCKERFILE_ARGS="-f container/rendered.Dockerfile --target planner_test"
-        else
-          DOCKERFILE_ARGS="-f container/rendered.Dockerfile.test --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
-        fi
+        DOCKERFILE_ARGS="-f container/rendered.Dockerfile --target ${{ inputs.target }}_test"
 
         docker buildx build \
           --progress=plain \
