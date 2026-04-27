@@ -125,7 +125,7 @@ jobs:
           - 9001:9001
     steps:
       - name: Print Storage before Run
-        if: inputs.debug_mode == 'true'
+        if: inputs.debug_mode
         shell: bash
         run: |
           echo "--- Storage ---"
@@ -181,7 +181,7 @@ jobs:
           gpu_tests: 'true'
           local_models_dir: ''
       - name: Print Storage After Run to confirm nvme and models dir usage 
-        if: inputs.debug_mode == 'true'
+        if: inputs.debug_mode
         shell: bash
         run: |
           echo "--- Storage ---"
