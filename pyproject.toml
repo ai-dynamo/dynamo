@@ -244,7 +244,8 @@ markers = [
     "gpu_8: marks tests to run on 8GPUs",
     "xpu_1: marks tests to run on XPU",
     "xpu_2: marks tests to run on 2XPUs",
-    # These 5 (profiled_vram_gib and requested_*) are used for parallel pytest executions:
+    # These 6 (num_system_ports, profiled_vram_gib and requested_*) are used for parallel pytest executions:
+    "num_system_ports(N): number of DYN_SYSTEM_PORT* slots to allocate for this test (default: 1). Use for multi-worker deployments (e.g. EPD with 3 workers)",
     "profiled_vram_gib(N): actual peak VRAM observed by nvidia-smi during profiling. Used for --max-vram-gib filtering and scheduler budget tracking",
     "requested_vllm_kv_cache_bytes(N): exact KV cache bytes for vLLM (skips memory profiling). Sets _PROFILE_PYTEST_KV_CACHE_BYTES. Most deterministic method for parallel execution",
     "requested_sglang_kv_tokens(N): max KV cache tokens for SGLang parallel execution. Sets _OVERRIDE_SGLANG_MAX_TOTAL_TOKENS to cap --max-total-tokens and prevent over-allocation",
