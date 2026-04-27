@@ -38,7 +38,14 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    handle_engine_error,
+    make_internal_error,
+    random_uuid,
+    worker_warmup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -477,15 +484,7 @@ class SglangProcessor:
                     engine_response = dynamo_response
 
                 if engine_response is None or "token_ids" not in engine_response:
-                    logger.error("No outputs from engine for request %s", request_id)
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine response for request {request_id}"
-                            ),
-                            "type": "internal_error",
-                        }
-                    }
+                    yield handle_engine_error(engine_response, request_id, logger)
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -532,6 +531,9 @@ class SglangProcessor:
                     pending_token_ids = []
                     pending_usage = None
                     first_chunk = False
+        except Exception as e:
+            logger.exception("Error generating response for request %s", request_id)
+            yield make_internal_error(request_id, str(e))
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(

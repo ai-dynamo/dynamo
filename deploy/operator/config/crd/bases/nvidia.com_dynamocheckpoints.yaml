@@ -8211,6 +8211,9 @@ spec:
                 - identity
                 - job
               type: object
+              x-kubernetes-validations:
+                - message: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues
+                  rule: '!has(self.gpuMemoryService) || !self.gpuMemoryService.enabled'
             status:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:
