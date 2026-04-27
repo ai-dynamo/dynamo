@@ -14,6 +14,7 @@ Current contract:
 
 - This crate owns the agent context schema and agent-specific trace bus/JSONL sink.
 - `dynamo-llm` is only an integration layer: parse `nvext.agent_context`, carry it through preprocessing, and emit request-end metrics.
+- Keep crate-specific adapters out of `dynamo-agents`. For example, `RequestTracker -> AgentRequestMetrics` belongs in `dynamo-llm` because `RequestTracker` is an LLM crate type. `dynamo-agents` should expose neutral schemas and emit APIs, not depend on request trackers, routers, backends, or other owning crates.
 - The trace sink is best-effort telemetry, not durable audit. It may share patterns with audit, but do not couple it to audit internals until a generic telemetry crate is justified.
 - Use `tokio_util::sync::CancellationToken` for shutdown integration. Callers with a Dynamo runtime should pass `Runtime::child_token()` or `DistributedRuntime::child_token()`.
 - Keep invariant trace fields strongly typed with serde-renamed enums instead of allocating strings for every record.
@@ -28,4 +29,5 @@ Current contract:
 
 - Do not add backend-specific scheduling or cache-control logic here.
 - Do not make this crate depend on `dynamo-llm` or runtime internals.
+- Do not export helpers that accept foreign crate types. If another crate needs to publish traces, it should map its local state into `dynamo_agents::trace` types at that crate boundary.
 - Prefer additive schema changes; preserve JSONL compatibility for existing fields.
