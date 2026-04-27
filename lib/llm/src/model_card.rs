@@ -216,7 +216,10 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// MDC files cache root: `blobs/<blake3>` + `by-slug/<slug>/<filename>` symlinks.
+/// MDC files cache root: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`
+/// symlinks. The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/`,
+/// isolating different worker sets that share a model name but publish
+/// different file content.
 fn mdc_cache_root() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -231,8 +234,11 @@ fn mdc_blobs_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-fn mdc_slug_dir(slug: &Slug) -> anyhow::Result<PathBuf> {
-    let dir = mdc_cache_root().join("by-slug").join(slug.to_string());
+fn mdc_slug_dir(slug: &Slug, mdcsum: &str) -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root()
+        .join("by-slug")
+        .join(slug.to_string())
+        .join(mdcsum);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating MDC slug dir {}", dir.display()))?;
     Ok(dir)
@@ -786,8 +792,12 @@ impl ModelDeploymentCard {
             return Ok(false);
         }
 
+        // Capture the mdcsum before taking `&mut self` borrows for symlink
+        // setup — the per-(slug, mdcsum) directory isolates worker sets that
+        // share a model name but publish different file content.
+        let mdcsum = self.mdcsum().to_string();
         let blobs = mdc_blobs_dir()?;
-        let slug_dir = mdc_slug_dir(&self.slug)?;
+        let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
         let client = reqwest::Client::new();
 
         let mut fetched = 0usize;

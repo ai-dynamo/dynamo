@@ -256,6 +256,7 @@ async fn test_download_files_resolves_local_file_scheme() {
     let mut mdc = mdc_with_file_scheme_files();
     let expected_files = mdc.files.clone();
     let slug = mdc.slug().to_string();
+    let mdcsum = mdc.mdcsum().to_string();
 
     mdc.download_config().await.expect("download_config");
 
@@ -265,7 +266,8 @@ async fn test_download_files_resolves_local_file_scheme() {
         std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/dynamo/mdc/blobs");
     let slug_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap())
         .join(".cache/dynamo/mdc/by-slug")
-        .join(&slug);
+        .join(&slug)
+        .join(&mdcsum);
     for artifact in &expected_files {
         let hex = artifact.checksum.strip_prefix("blake3:").unwrap();
         let blob = blobs_dir.join(hex);
@@ -566,6 +568,7 @@ mod integration_tests {
 
         let want_slug = local_model.card().slug().to_string();
         let card = poll_for_card(&manager, &want_slug, 30).await;
+        let want_mdcsum = card.mdcsum().to_string();
 
         // Cache must be populated under the isolated HOME — the
         // only writer is `download_files`, so its presence proves
@@ -576,7 +579,8 @@ mod integration_tests {
         let slug_dir = _home
             .path()
             .join(".cache/dynamo/mdc/by-slug")
-            .join(&want_slug);
+            .join(&want_slug)
+            .join(&want_mdcsum);
         assert!(
             blobs_dir.exists(),
             "expected blobs dir at {}",
