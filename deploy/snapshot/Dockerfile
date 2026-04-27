@@ -164,6 +164,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
+COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
@@ -220,6 +221,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy CRIU from builder (needed by nsrestore running inside these namespaces)
 COPY --from=criu-builder /criu-install/usr/local /usr/local
+COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version && echo "CRIU installed successfully"
 
 # Copy CUDA checkpoint binaries
