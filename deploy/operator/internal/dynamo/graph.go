@@ -378,8 +378,8 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && rollingUpdateCtx.NewWorkerReplicas[componentName] != 0 {
-		deployment.Spec.Replicas = ptr.To(rollingUpdateCtx.NewWorkerReplicas[componentName])
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && ok {
+		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
 	}
