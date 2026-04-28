@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Auto Dependency Upgrade - Trigger
+
+on:
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: 'Framework to attempt upgrade for'
+        type: choice
+        options: [trtllm]
+        default: trtllm
+
+permissions:
+  contents: write
+  actions:  write
+
+jobs:
+  upgrade:
+    name: ${{ matrix.framework }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [trtllm]
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Detect latest version
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OUT=$(python3 .github/scripts/dep_upgrade/detect_latest_versions.py \
+                  --framework ${{ matrix.framework }})
+          echo "$OUT"
+          {
+            echo "current=$(echo "$OUT" | jq -r .current)"
+            echo "latest=$(echo "$OUT" | jq -r .latest)"
+            echo "upgrade_needed=$(echo "$OUT" | jq -r .upgrade_needed)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Already up to date
+        if: steps.detect.outputs.upgrade_needed != 'true'
+        run: echo "No upgrade needed (current=${{ steps.detect.outputs.current }}, latest=${{ steps.detect.outputs.latest }})."
+
+      - name: Compute branch name + idempotency check
+        if: steps.detect.outputs.upgrade_needed == 'true'
+        id: branch
+        run: |
+          BRANCH="deps/upgrade-${{ matrix.framework }}-v${{ steps.detect.outputs.latest }}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            echo "Branch $BRANCH already exists on origin; skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply bump
+        if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
+        run: |
+          python3 .github/scripts/dep_upgrade/bump_dependency.py \
+            --framework ${{ matrix.framework }} \
+            --version ${{ steps.detect.outputs.latest }}
+          git status --short
+
+      - name: Commit + push upgrade branch
+        if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
+        run: |
+          git config user.name  "dynamo-dep-bot"
+          git config user.email "dynamo-dep-bot@users.noreply.github.com"
+          git checkout -b "${{ steps.branch.outputs.name }}"
+          git add container/context.yaml pyproject.toml docs/reference/support-matrix.md
+          git commit -s -m "chore: bump ${{ matrix.framework }} to v${{ steps.detect.outputs.latest }}"
+          git push origin "${{ steps.branch.outputs.name }}"
+
+      - name: Dispatch post-merge-ci on upgrade branch
+        if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run post-merge-ci.yml \
+            --ref "${{ steps.branch.outputs.name }}" \
+            -f framework=${{ matrix.framework }}

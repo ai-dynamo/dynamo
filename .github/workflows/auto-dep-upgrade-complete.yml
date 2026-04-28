@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Auto Dependency Upgrade - Complete
+
+on:
+  workflow_run:
+    workflows: ['Post-Merge CI Pipeline']
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  finalize:
+    if: startsWith(github.event.workflow_run.head_branch, 'deps/upgrade-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse upgrade branch
+        id: parse
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ ! "$BRANCH" =~ ^deps/upgrade-([a-z]+)-v(.+)$ ]]; then
+            echo "Branch $BRANCH does not match expected pattern; aborting."
+            exit 1
+          fi
+          {
+            echo "framework=${BASH_REMATCH[1]}"
+            echo "version=${BASH_REMATCH[2]}"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR body template
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ steps.parse.outputs.branch }}
+          sparse-checkout: |
+            .github/templates
+
+      - name: Open draft PR on success
+        if: github.event.workflow_run.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FW:    ${{ steps.parse.outputs.framework }}
+          VER:   ${{ steps.parse.outputs.version }}
+          BR:    ${{ steps.parse.outputs.branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          gh label create dep-upgrade --color BFD4F2 \
+              --description "Automated dependency upgrade" --force || true
+
+          BODY=$(envsubst < .github/templates/dep-upgrade-pr-body.md)
+          gh pr create --draft \
+            --base main --head "$BR" \
+            --title "chore: bump $FW to v$VER" \
+            --label dep-upgrade --label "backend::$FW" \
+            --body "$BODY"
+
+      - name: Slack on failure
+        if: github.event.workflow_run.conclusion != 'success'
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            blocks:
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: ":package: *Auto Dep Upgrade Failed* — ${{ steps.parse.outputs.framework }} v${{ steps.parse.outputs.version }}"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "<${{ github.event.workflow_run.html_url }}|Post-merge CI run> · branch `${{ steps.parse.outputs.branch }}`"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "Conclusion: `${{ github.event.workflow_run.conclusion }}`. Investigate before retry — the branch will be reused on the next cron tick if not deleted or merged."
