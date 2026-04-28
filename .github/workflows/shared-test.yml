@@ -89,6 +89,7 @@ on:
           models--Qwen--Qwen3-Embedding-4B
           models--silence09--DeepSeek-R1-Small-2layers
           models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
+          models--Wan-AI--Wan2.2-TI2V-5B-Diffusers
           models--Tongyi-MAI--Z-Image-Turbo
           models--Qwen--Qwen3-VL-2B-Instruct
           models--Qwen--Qwen2-VL-7B-Instruct
@@ -203,7 +204,7 @@ jobs:
           gpu_tests: 'true'
           seed_model_names: '' # ${{ inputs.seed_model_names }}
       - name: Print Storage After Run to confirm nvme and models dir usage 
-        if: inputs.debug_mode
+        if: always()
         shell: bash
         run: |
           echo "--- Storage ---"

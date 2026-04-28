@@ -115,6 +115,10 @@ runs:
       run: |
         set +e
 
+        # Default to failure so a killed/interrupted pytest process doesn't
+        # inherit a stale TEST_EXIT_CODE=0 from a prior step in $GITHUB_ENV.
+        echo "TEST_EXIT_CODE=1" >> $GITHUB_ENV
+
         # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
         TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
         mkdir -p "${TEST_RESULTS_DIR}"
@@ -224,9 +228,10 @@ runs:
           fi
         fi
 
-        exit 0
+        exit ${TEST_EXIT_CODE}
 
     - name: Process Test Results
+      if: always()
       shell: bash
       run: |
         STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
@@ -245,10 +250,8 @@ runs:
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
-          echo "⚠️  JUnit XML file not found - test results may not be available for upload"
-          TOTAL_TESTS=0
-          FAILED_TESTS=1
-          ERROR_TESTS=0
+          echo "❌ JUnit XML not found — treating missing results as failure"
+          exit 1
         fi
 
         exit ${TEST_EXIT_CODE}
