@@ -31,6 +31,26 @@ mod template;
 
 pub use template::{ChatTemplate, ContextMixins};
 
+/// Shared helper: extract a boolean thinking toggle from `chat_template_args`.
+///
+/// Reads the two equivalent keys (`thinking`, `enable_thinking` — vLLM's
+/// canonical kwarg) in order and returns the first bool value found, or `None`
+/// if neither key is present (or neither carries a bool). Used by the V4
+/// formatter's `resolve_thinking_mode` and by the reasoning-parser gate in
+/// `OpenAIPreprocessor::is_reasoning_disabled_by_request` so both paths agree
+/// on the signal interpretation.
+pub(crate) fn thinking_bool_from_args(
+    args: Option<&HashMap<String, serde_json::Value>>,
+) -> Option<bool> {
+    let args = args?;
+    for key in ["thinking", "enable_thinking"] {
+        if let Some(v) = args.get(key).and_then(|x| x.as_bool()) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub enum TokenInput {
     Single(Vec<u32>),
