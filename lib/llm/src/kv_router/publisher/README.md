@@ -15,23 +15,6 @@ the downstream publish path shared across Event Plane and JetStream.
   externally.
 - `worker_metrics.rs`: emits worker-local runtime metrics.
 
-## Pipeline
-
-```mermaid
-flowchart LR
-    Engine["Engine KV events"] --> Zmq["zmq_listener.rs"]
-    Zmq --> Decode["Decode KVEventBatch"]
-    Decode --> Normalize["ZmqEventNormalizer"]
-    Normalize --> Placement["PlacementEvent"]
-    Placement --> Processor["event_processor.rs"]
-    Processor --> Gap["Raw event-id gap metric"]
-    Gap --> Batch["batching.rs"]
-    Batch --> Dedup["dedup.rs on flush"]
-    Dedup --> Sink["sinks.rs emit"]
-    Sink --> Local["LocalKvIndexer"]
-    Sink --> Publish["EventPlane or JetStream"]
-```
-
 ## Stage Notes
 
 `zmq_listener.rs` skips ignored raw events before assigning the publisher-local
