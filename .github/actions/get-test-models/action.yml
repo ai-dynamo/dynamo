@@ -71,7 +71,16 @@ runs:
           t0=$(date +%s)
           echo "  ⏳ Downloading ${model_name}..."
           CONCURRENCY=256
-          if ${S5CMD_BIN} sync --concurrency ${CONCURRENCY} "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
+          if ${S5CMD_BIN} sync \
+              --concurrency ${CONCURRENCY} \
+              --exclude "*.bin" \
+              --exclude "*.bin.index.json" \
+              --exclude "*.h5" \
+              --exclude "*.msgpack" \
+              --exclude "*.pth" \
+              --exclude "*.pt" \
+              --exclude "onnx/*" \
+              "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
             echo "  ✅ ${model_name} ($(( $(date +%s) - t0 ))s)"
             COPIED=$((COPIED+1))
           else
