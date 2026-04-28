@@ -700,6 +700,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		return ctrl.Result{}, err
 	}
 
+	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgd.Name, err)
+	}
+
 	// Check if DGD is Ready
 	var condStatus metav1.ConditionStatus
 	var condReason, condMessage string
@@ -753,6 +757,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgd.Name, err)
 	}
 
 	// Check if DGD degraded from Ready
@@ -941,9 +949,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) adoptAdditionalResources(ctx co
 
 		// New ConfigMaps are created ownerless. This also repairs CMs created by
 		// older controllers that incorrectly used DGDR as the controller owner.
-		cm.SetOwnerReferences(removeDGDRControllerOwnerReference(cm.GetOwnerReferences(), dgdr))
-		if err := ctrl.SetControllerReference(dgd, cm, r.Scheme()); err != nil {
-			return fmt.Errorf("failed to set DGD owner reference on ConfigMap %s: %w", cm.Name, err)
+		ownerReferences, removedDGDROwnerReference := removeDGDROwnerReferences(cm.GetOwnerReferences(), dgdr)
+		dgdOwnerAlreadySet := isControlledByDGD(ownerReferences, dgd)
+		if dgdOwnerAlreadySet && !removedDGDROwnerReference {
+			continue
+		}
+
+		cm.SetOwnerReferences(ownerReferences)
+		if !dgdOwnerAlreadySet {
+			if err := ctrl.SetControllerReference(dgd, cm, r.Scheme()); err != nil {
+				return fmt.Errorf("failed to set DGD owner reference on ConfigMap %s: %w", cm.Name, err)
+			}
 		}
 		if err := r.Update(ctx, cm); err != nil {
 			return fmt.Errorf("failed to update owner reference on ConfigMap %s: %w", cm.Name, err)
@@ -955,18 +971,26 @@ func (r *DynamoGraphDeploymentRequestReconciler) adoptAdditionalResources(ctx co
 	return nil
 }
 
-func removeDGDRControllerOwnerReference(ownerReferences []metav1.OwnerReference, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) []metav1.OwnerReference {
+func removeDGDROwnerReferences(ownerReferences []metav1.OwnerReference, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) ([]metav1.OwnerReference, bool) {
 	filtered := ownerReferences[:0]
+	removed := false
 	for _, ownerReference := range ownerReferences {
-		if ownerReference.Controller != nil &&
-			*ownerReference.Controller &&
-			ownerReference.Kind == "DynamoGraphDeploymentRequest" &&
+		if ownerReference.Kind == "DynamoGraphDeploymentRequest" &&
 			ownerReference.Name == dgdr.Name {
+			removed = true
 			continue
 		}
 		filtered = append(filtered, ownerReference)
 	}
-	return filtered
+	return filtered, removed
+}
+
+func isControlledByDGD(ownerReferences []metav1.OwnerReference, dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
+	controller := metav1.GetControllerOf(&metav1.ObjectMeta{OwnerReferences: ownerReferences})
+	return controller != nil &&
+		controller.Kind == "DynamoGraphDeployment" &&
+		controller.Name == dgd.Name &&
+		controller.UID == dgd.UID
 }
 
 // createAdditionalResources creates ConfigMaps from the profiling output that should be deployed alongside the DGD

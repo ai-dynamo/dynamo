@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -695,6 +696,14 @@ spec:
 						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
 						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
 					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion:         "nvidia.com/v1beta1",
+						Kind:               "DynamoGraphDeploymentRequest",
+						Name:               dgdrName,
+						UID:                dgdr.UID,
+						Controller:         ptr.To(true),
+						BlockOwnerDeletion: ptr.To(true),
+					}},
 				},
 				Data: map[string]string{
 					ProfilingOutputFile: dgdYAML,
@@ -731,7 +740,138 @@ spec:
 			Expect(additionalCM.OwnerReferences[0].UID).Should(Equal(dgd.UID))
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: outputConfigMapName, Namespace: namespace}, outputCM)).Should(Succeed())
-			Expect(outputCM.OwnerReferences).Should(BeEmpty())
+			Expect(outputCM.OwnerReferences).Should(HaveLen(1))
+			Expect(outputCM.OwnerReferences[0].Kind).Should(Equal("DynamoGraphDeploymentRequest"))
+			Expect(outputCM.OwnerReferences[0].Name).Should(Equal(dgdrName))
+		})
+
+		It("Should adopt additional ConfigMaps when DGD already exists", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-existing-dgd-adopt"
+			namespace := defaultNamespace
+			dgdName := dgdrName + "-dgd"
+			additionalConfigMapName := "planner-config-existing-dgd"
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						"nvidia.com/generated-dgd-spec": `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgdr-existing-dgd-adopt-dgd
+spec:
+  services: {}`,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: namespace,
+				},
+				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+			}
+			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+
+			additionalCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      additionalConfigMapName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+				},
+				Data: map[string]string{"planner_config.json": "{}"},
+			}
+			Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+
+			_, err := reconciler.createDGD(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+			Expect(additionalCM.OwnerReferences).Should(HaveLen(1))
+			Expect(additionalCM.OwnerReferences[0].Kind).Should(Equal("DynamoGraphDeployment"))
+			Expect(additionalCM.OwnerReferences[0].Name).Should(Equal(dgdName))
+			Expect(additionalCM.OwnerReferences[0].UID).Should(Equal(dgd.UID))
+		})
+
+		It("Should skip adoption updates when ownerReferences are already correct", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-adopt-noop"
+			namespace := defaultNamespace
+			dgdName := dgdrName + "-dgd"
+			additionalConfigMapName := "planner-config-adopt-noop"
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: namespace,
+				},
+				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+			}
+			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+
+			additionalCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      additionalConfigMapName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: "nvidia.com/v1beta1",
+						Kind:       "DynamoGraphDeploymentRequest",
+						Name:       dgdrName,
+						UID:        dgdr.UID,
+					}},
+				},
+				Data: map[string]string{"planner_config.json": "{}"},
+			}
+			Expect(ctrl.SetControllerReference(dgd, additionalCM, reconciler.Scheme())).Should(Succeed())
+			Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+
+			Expect(reconciler.adoptAdditionalResources(ctx, dgdr, dgd)).Should(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+			Expect(additionalCM.OwnerReferences).Should(HaveLen(1))
+			Expect(additionalCM.OwnerReferences[0].Kind).Should(Equal("DynamoGraphDeployment"))
+			resourceVersion := additionalCM.ResourceVersion
+
+			Expect(reconciler.adoptAdditionalResources(ctx, dgdr, dgd)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+			Expect(additionalCM.ResourceVersion).Should(Equal(resourceVersion))
 		})
 	})
 
