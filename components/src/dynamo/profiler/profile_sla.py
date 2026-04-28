@@ -294,9 +294,11 @@ def _validate_dgd_service_name_lengths(
     # Honour user-supplied DGD name override (mirrors computeDGDName in the Go controller).
     dgd_name = dgdr_name + "-dgd"
     if dgdr.overrides and dgdr.overrides.dgd:
-        override_name = dgdr.overrides.dgd.get("metadata", {}).get("name", "")
-        if override_name:
-            dgd_name = override_name
+        metadata = dgdr.overrides.dgd.get("metadata")
+        if isinstance(metadata, dict):
+            override_name = metadata.get("name", "")
+            if override_name:
+                dgd_name = override_name
 
     dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
     services = dgd_spec.get("spec", {}).get("services", {})
