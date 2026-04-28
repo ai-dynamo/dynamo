@@ -158,7 +158,7 @@ jobs:
           S5CMD_BIN="s5cmd"
           if ! command -v s5cmd &> /dev/null; then
             echo "⬇️ s5cmd not found. Detecting architecture..."
-            
+            S5CMD_VERSION="2.3.0"
             ARCH=$(uname -m)
             if [[ "${ARCH}" == "x86_64" ]]; then
               S5CMD_ARCH="64bit"
@@ -169,8 +169,8 @@ jobs:
               exit 1
             fi
 
-            echo "⬇️ Downloading s5cmd v2.3.0 for Linux-${S5CMD_ARCH}..."
-            curl -sL "https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.2.2_Linux-${S5CMD_ARCH}.tar.gz" | tar -xz -C /tmp s5cmd
+            echo "⬇️ Downloading s5cmd v${S5CMD_VERSION} for Linux-${S5CMD_ARCH}..."
+            curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${S5CMD_ARCH}.tar.gz" | tar -xz -C /tmp s5cmd
             S5CMD_BIN="/tmp/s5cmd"
             chmod +x "${S5CMD_BIN}"
           fi
