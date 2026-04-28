@@ -30,7 +30,7 @@ limitations under the License.
 
 <!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
 > [!NOTE]
-> **Day-0 DeepSeek-V4 recipes available.** Tested Kubernetes deployment paths for [DeepSeek-V4-Pro](recipes/deepseek-v4-pro/) and [DeepSeek-V4-Flash](recipes/deepseek-v4-flash/) are merged to main on both **vLLM** and **SGLang**, with a prebuilt SGLang container image published on NGC.
+> **Day-0 DeepSeek-V4 recipes available.** Tested Kubernetes deployment paths for [DeepSeek-V4-Pro](recipes/deepseek-v4/deepseek-v4-pro/) and [DeepSeek-V4-Flash](recipes/deepseek-v4/deepseek-v4-flash/) are merged to main on both **vLLM** and **SGLang**, with a prebuilt SGLang container image published on NGC.
 
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
