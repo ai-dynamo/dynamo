@@ -932,30 +932,90 @@ impl JailedStream {
                     tools_slice,
                 )
                 .await;
-                if let Ok((tool_calls, normal_text)) = parse_result
-                    && !tool_calls.is_empty()
-                {
-                    // If a named tool filter is set (tool_choice=named + parser path), reject
-                    // tool calls that don't match the required tool name.
-                    let tool_calls = if let Some(ref required_name) = self.named_tool_name {
-                        let filtered: Vec<_> = tool_calls
-                            .into_iter()
-                            .filter(|tc| tc.function.name == *required_name)
-                            .collect();
-                        if filtered.is_empty() {
-                            tracing::warn!(
-                                required = %required_name,
-                                "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                match parse_result {
+                    Ok((tool_calls, normal_text)) if !tool_calls.is_empty() => {
+                        // If a named tool filter is set (tool_choice=named + parser path), reject
+                        // tool calls that don't match the required tool name.
+                        let tool_calls = if let Some(ref required_name) = self.named_tool_name {
+                            let filtered: Vec<_> = tool_calls
+                                .into_iter()
+                                .filter(|tc| tc.function.name == *required_name)
+                                .collect();
+                            if filtered.is_empty() {
+                                tracing::warn!(
+                                    required = %required_name,
+                                    "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                                );
+                            }
+                            filtered
+                        } else {
+                            tool_calls
+                        };
+
+                        if tool_calls.is_empty() {
+                            // All parsed calls were filtered out — emit the parser's stripped
+                            // normal_text, not accumulated_content (which still contains the
+                            // raw tool-call markers).
+                            return create_choice_stream(
+                                choice_index,
+                                Some(Role::Assistant),
+                                normal_text.as_deref().unwrap_or(""),
+                                None,
+                                base_choice.finish_reason,
+                                base_choice.stop_reason.clone(),
+                                base_choice.logprobs.clone(),
                             );
                         }
-                        filtered
-                    } else {
-                        tool_calls
-                    };
 
-                    if tool_calls.is_empty() {
-                        // All parsed calls were for the wrong tool — return content choice
-                        return create_choice_stream(
+                        // Convert to streaming format
+                        let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> =
+                            tool_calls
+                                .into_iter()
+                                .enumerate()
+                                .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
+                                    index: (tool_call_offset + idx) as u32,
+                                    id: Some(tool_call.id),
+                                    r#type: Some(FunctionType::Function),
+                                    function: Some(FunctionCallStream {
+                                        name: Some(tool_call.function.name),
+                                        arguments: Some(tool_call.function.arguments),
+                                    }),
+                                })
+                                .collect();
+                        create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            normal_text.as_deref().unwrap_or(""),
+                            Some(tool_call_chunks),
+                            None,
+                            None,
+                            base_choice.logprobs.clone(),
+                        )
+                    }
+                    Ok((_, normal_text)) => {
+                        // Parser succeeded but extracted no structured tool calls — typically
+                        // a malformed/truncated tool-call section (missing tool_call_end,
+                        // corrupted function id, etc.). Emit the parser's stripped
+                        // normal_text rather than accumulated_content, which still contains
+                        // the raw special-token markers and would leak them to the user.
+                        create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            normal_text.as_deref().unwrap_or(""),
+                            None,
+                            base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
+                            base_choice.logprobs.clone(),
+                        )
+                    }
+                    Err(e) => {
+                        // Parser couldn't run at all — last-resort fallback to the raw
+                        // buffer so a misconfigured parser doesn't silently drop output.
+                        tracing::warn!(
+                            error = %e,
+                            "tool-call parser errored; emitting raw buffered content as fallback"
+                        );
+                        create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
                             accumulated_content,
@@ -963,46 +1023,9 @@ impl JailedStream {
                             base_choice.finish_reason,
                             base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
-                        );
+                        )
                     }
-
-                    // Convert to streaming format
-                    let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
-                            index: (tool_call_offset + idx) as u32,
-                            id: Some(tool_call.id),
-                            r#type: Some(FunctionType::Function),
-                            function: Some(FunctionCallStream {
-                                name: Some(tool_call.function.name),
-                                arguments: Some(tool_call.function.arguments),
-                            }),
-                        })
-                        .collect();
-                    // Create choice with tool calls
-                    let choice = create_choice_stream(
-                        choice_index,
-                        Some(Role::Assistant),
-                        normal_text.as_deref().unwrap_or(""),
-                        Some(tool_call_chunks),
-                        None,
-                        None,
-                        base_choice.logprobs.clone(),
-                    );
-                    return choice;
                 }
-
-                // No tool calls found or parsing failed, return content choice
-                create_choice_stream(
-                    choice_index,
-                    Some(Role::Assistant),
-                    accumulated_content,
-                    None,
-                    base_choice.finish_reason,
-                    base_choice.stop_reason.clone(),
-                    base_choice.logprobs.clone(),
-                )
             }
             JailMode::Immediate { format } => {
                 // tool_choice=required/named path (SGLang/vLLM-style).
@@ -1841,5 +1864,47 @@ mod tests {
             "Trailing text 'Done!' should appear in output. Got text: {:?}",
             all_text
         );
+    }
+
+    /// Regression: a kimi_k2 tool-call section truncated before `<|tool_call_end|>`
+    /// (a common live-traffic pattern when the model hits max_tokens or EOS mid-call)
+    /// must NOT leak the raw special-token markers into the user-visible content
+    /// field. The parser correctly returns no tool_calls and an empty normal_text;
+    /// previously the jail discarded that and emitted the raw accumulated buffer.
+    #[tokio::test]
+    async fn test_kimi_k2_truncated_tool_call_does_not_leak_markers() {
+        let jail = JailedStream::builder().tool_call_parser("kimi_k2").build();
+
+        // Missing <|tool_call_end|> and <|tool_calls_section_end|> — the section
+        // body gets consumed by the parser but yields zero structured calls.
+        let chunks = vec![text_chunk(
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"NYC\"}",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            tool_calls.is_empty(),
+            "Truncated section should yield no tool calls, got {:?}",
+            tool_calls
+        );
+
+        let all_text = collect_text_content(&responses);
+        for marker in [
+            "<|tool_calls_section_begin|>",
+            "<|tool_call_begin|>",
+            "<|tool_call_argument_begin|>",
+            "<|tool_call_end|>",
+            "<|tool_calls_section_end|>",
+        ] {
+            assert!(
+                !all_text.contains(marker),
+                "Raw kimi_k2 marker {marker:?} leaked into user-visible content: {all_text:?}"
+            );
+        }
     }
 }
