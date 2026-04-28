@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG DSV4_BASE_IMAGE=vllm/vllm-openai:v0.20.0-cu130-ubuntu2404@sha256:fe385c4a53a4ba6a7bea28822a6a766ef55a871db7736faeeca0f11285832e4b
+
+FROM ${DSV4_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        libnuma-dev numactl \
+        ca-certificates jq curl \
+    && apt list --upgradable 2>/dev/null | tail -n +2 | grep 'jammy-' | awk -F/ '{print $1}' | xargs -r apt-get install -y --only-upgrade \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Dynamo from NGC PyPI. Pinned dev tag for reproducibility.
+RUN pip install --no-cache-dir uv && \
+    uv pip install --system --upgrade --pre --no-deps --only-binary=:all: \
+        --extra-index-url https://pypi.nvidia.com \
+        ai-dynamo-runtime==1.2.0.dev20260426 \
+        ai-dynamo==1.2.0.dev20260426 && \
+    uv pip uninstall --system nixl-cu12 || true
+
+WORKDIR /workspace
+
+ENV VLLM_USE_FLASHINFER_SAMPLER=1
+
+ENTRYPOINT []
+CMD ["bash"]
