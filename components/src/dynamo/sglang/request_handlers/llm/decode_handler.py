@@ -67,22 +67,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             shutdown_event,
         )
-        # Resolve the optional return_routed_experts kwarg once. We gate on the
-        # user opt-in flag and additionally drop the kwarg on sglang builds
-        # whose Engine.async_generate signature does not declare it (notably
-        # the older sglang pinned by DeepSeek-V4). Doing this at init keeps
-        # the per-request hot path free of signature inspection.
-        self._routed_experts_kwargs: Dict[str, Any] = {}
-        if getattr(self.config.server_args, "enable_return_routed_experts", False):
-            self._routed_experts_kwargs = filter_supported_async_generate_kwargs(
-                self.engine, {"return_routed_experts": True}
-            )
+        # Resolve the optional return_routed_experts kwarg once. Gating on the
+        # opt-in flag avoids sending the kwarg on sglang builds whose
+        # Engine.async_generate does not declare it (notably the deepseek_v4
+        # branch). Doing this at init keeps the per-request hot path free of
+        # signature inspection.
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
             )
         else:
             logging.info("Decode worker handler initialized (aggregated mode)")
+
+    @staticmethod
+    def _resolve_routed_experts_kwargs(engine: Any, server_args: Any) -> Dict[str, Any]:
+        """Resolve the return_routed_experts kwarg for this engine.
+
+        Returns ``{"return_routed_experts": True}`` only when the user opted in
+        via ``enable_return_routed_experts=True`` AND the engine's
+        ``async_generate`` signature declares the kwarg. Returns ``{}`` for the
+        default-off path and for sglang builds that do not declare the kwarg
+        (e.g. the ``deepseek_v4`` branch).
+        """
+        if not getattr(server_args, "enable_return_routed_experts", False):
+            return {}
+        return filter_supported_async_generate_kwargs(
+            engine, {"return_routed_experts": True}
+        )
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
