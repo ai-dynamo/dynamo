@@ -27,7 +27,7 @@ fn strip_quotes(s: &str) -> &str {
 }
 
 /// Check if a chunk contains the start of a xml-style tool call.
-/// Format: <tool_call><function=name><parameter=foo>...</parameter></function></tool_call>
+/// Format: `<tool_call><function=name><parameter=foo>...</parameter></function></tool_call>`
 pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool {
     // Check for complete or partial start token.
     let start_token = &config.tool_call_start_token;
@@ -87,7 +87,7 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
 }
 
 /// Try to parse Qwen3Coder formatted tool calls from a message.
-/// Format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+/// Format: `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`
 /// Returns (parsed_tool_calls, normal_text_content)
 pub fn try_tool_call_parse_xml(
     message: &str,
@@ -154,7 +154,7 @@ fn extract_tool_calls(
 }
 
 /// Parse a single tool call block
-/// Format: <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
+/// Format: `<tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>`
 fn parse_tool_call_block(
     block: &str,
     config: &XmlParserConfig,
