@@ -146,6 +146,7 @@ runs:
             FAILED=$((FAILED+1))
           fi
         done
+        du -h -d 1 /scratch/.cache/huggingface/hub || true # todo: remove this
         
         echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"
     - name: Run pytest
