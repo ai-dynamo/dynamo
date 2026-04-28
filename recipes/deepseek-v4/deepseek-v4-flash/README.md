@@ -5,12 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4-Flash Recipe
 
-Aggregated-serving recipe for **DeepSeek-V4-Flash** on Dynamo. Two backends are documented side by side: **vLLM** and **SGLang**. Both are single-replica decode-only deployments that fill 4 of 8 GPUs on a B200 node.
+Aggregated-serving recipe for **DeepSeek-V4-Flash** on Dynamo. Three backends are documented side by side: **vLLM**, **SGLang**, and **TensorRT-LLM**. All are single-replica decode-only deployments that fill 4 of 8 GPUs on a B200 node.
 
 | Variant | Backend | Manifest | GPUs | Topology | Container |
 |---------|---------|----------|------|----------|-----------|
-| **vllm-agg**   | vLLM   | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 4x B200 | DP=4 + Expert Parallel, TP=1                   | Standard Dynamo vLLM runtime image |
-| **sglang-agg** | SGLang | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 4x B200 | TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](../container/) |
+| **vllm-agg**   | vLLM        | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 4x B200 | DP=4 + Expert Parallel, TP=1                  | Standard Dynamo vLLM runtime image |
+| **sglang-agg** | SGLang      | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 4x B200 | TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](../container/) |
+| **trtllm-agg** | TensorRT-LLM | [`trtllm/agg/deploy.yaml`](trtllm/agg/deploy.yaml) | 4x B200 | TP=4 + EP=4, Attention DP, MoE backend = TRTLLM | Custom Dynamo TRT-LLM runtime image (see Notes) |
 
 Status: **Experimental** (Day-0). Modality: text only.
 
@@ -31,6 +32,8 @@ Status: **Experimental** (Day-0). Modality: text only.
      ```
 
      Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the Frontend and the decode worker) to your pushed image tag.
+
+   - **TensorRT-LLM** (`trtllm-agg`): Until the public `tensorrtllm-runtime` image bundles a TRT-LLM build that includes DeepSeek V4 support (TensorRT-LLM PR [#13568](https://github.com/NVIDIA/TensorRT-LLM/pull/13568) lifts `TOKENIZER_ALIASES` to module level; see also feat/mewtwo + MR 10189), this variant requires a custom build. The build pattern (TRT-LLM wheel + Dynamo runtime overlay) is captured in the working 04/27 build flow. Set the `image:` fields in `trtllm/agg/deploy.yaml` (both the Frontend and the decode worker) to your built image tag.
 
 ## Quick Start
 
@@ -81,6 +84,20 @@ kubectl wait --for=condition=Ready pod \
   -n ${NAMESPACE} --timeout=3600s
 ```
 
+### Deploy — TensorRT-LLM (`trtllm-agg`)
+
+```bash
+# Update the `image:` fields in trtllm/agg/deploy.yaml to your custom Dynamo
+# TRT-LLM runtime image (Prerequisite 4 — TensorRT-LLM path).
+kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
+
+# First launch of the decode worker takes up to ~60 minutes (weight load +
+# CUDA graph warmup). The startup probe is sized for this.
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=dsv4-flash-trtllm-agg \
+  -n ${NAMESPACE} --timeout=3600s
+```
+
 ## Test the Deployment
 
 Port-forward the variant you deployed:
@@ -91,6 +108,9 @@ kubectl port-forward svc/dsv4-flash-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 # SGLang
 kubectl port-forward svc/sglang-dsv4-flash-frontend 8000:8000 -n ${NAMESPACE}
+
+# TensorRT-LLM
+kubectl port-forward svc/dsv4-flash-trtllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 Either way the request shape is the same — same model name, same OpenAI-compatible endpoints:
@@ -133,6 +153,27 @@ curl http://localhost:8000/v1/chat/completions \
 | `--chunked-prefill-size 4096` | Chunk long prompts at 4k tokens for steady-state decode interleaving |
 | `--disable-flashinfer-autotune` | Skip per-shape autotuning at startup; the dsv4 base ships pre-tuned defaults |
 
+### TensorRT-LLM (`trtllm/agg/deploy.yaml`)
+
+| Flag | Purpose |
+|------|---------|
+| `--dyn-reasoning-parser deepseek_v4` | Extracts chain-of-thought into `message.reasoning_content` |
+| `--dyn-tool-call-parser deepseek_v4` | Emits OpenAI-compatible structured `tool_calls` |
+| `--tensor-parallel-size 4` + `--expert-parallel-size 4` | TP and EP across the 4 GPUs (TP must equal world_size) |
+| `--max-batch-size 4`, `--max-num-tokens 8192`, `--max-seq-len 2048` | Conservative request bounds for first-launch validation |
+| `--kv-block-size 128` | V4 requires `tokens_per_block` ∈ {128, 256}; matches the engine YAML |
+| `--extra-engine-args /config/engine.yaml` | Injects the V4 LlmArgs (`custom_tokenizer: deepseek_v4`, `enable_attention_dp: true`, `moe_config.backend: TRTLLM`, etc.) |
+
+`engine.yaml` (mounted from a ConfigMap at `/config`):
+
+| Key | Why |
+|---|---|
+| `custom_tokenizer: deepseek_v4` | Routes through the V4 tokenizer alias (TRT-LLM MR 10189), avoiding HF AutoTokenizer's offline-mode trap |
+| `enable_attention_dp: true` + `attention_dp_config` | Data-parallel attention across the 4 GPUs (per V4 serving recipe) |
+| `moe_config.backend: TRTLLM` | trtllm-gen MoE kernel (PYTORCH backend fails on Blackwell) |
+| `kv_cache_config.tokens_per_block: 128`, `free_gpu_memory_fraction: 0.3` | V4 KV-cache block size; conservative memory headroom for first launch |
+| `cuda_graph_config.enable_padding: true` | Pad to compiled batch sizes to reduce capture overhead |
+
 ## Model Details
 
 | | |
@@ -143,13 +184,13 @@ curl http://localhost:8000/v1/chat/completions \
 
 Recipe-level (per-variant) settings:
 
-| | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) |
-|---|---|---|
-| **Backend image** | Standard Dynamo vLLM runtime | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` |
-| **Parallelism** | DP=4 + Expert Parallel, TP=1 | TP=4 |
-| **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 |
-| **KV cache** | FP8, block size 256 | engine default |
-| **Speculative decoding** | — | EAGLE MTP (3 steps / 4 draft tokens) |
+| | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) | TRT-LLM (`trtllm-agg`) |
+|---|---|---|---|
+| **Backend image** | Standard Dynamo vLLM runtime | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | Custom Dynamo TRT-LLM runtime (TRT-LLM wheel from feat/mewtwo + MR 10189) |
+| **Parallelism** | DP=4 + Expert Parallel, TP=1 | TP=4 | TP=4 + EP=4 with attention DP |
+| **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 | TRT-LLM (trtllm-gen kernel) |
+| **KV cache** | FP8, block size 256 | engine default | tokens_per_block=128, free_gpu_memory_fraction=0.3 |
+| **Speculative decoding** | — | EAGLE MTP (3 steps / 4 draft tokens) | — |
 
 ## Verifying Reasoning
 
@@ -230,6 +271,21 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 - **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 - **DeepGEMM / FlashInfer warmup.** `SGLANG_JIT_DEEPGEMM_PRECOMPILE=0` + `SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1` skip the slow precompile and use the fast warmup path. `--disable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup; the dsv4 base ships pre-tuned defaults.
 - **NCCL / Gloo.** `NCCL_CUMEM_ENABLE=1` is set for V4 NCCL collectives on Blackwell. `GLOO_SOCKET_IFNAME=eth0` pins Gloo to the standard pod interface.
+
+### TensorRT-LLM-specific
+
+- **Image is custom for now.** No public `tensorrtllm-runtime` tag bundles V4 yet. Build a TRT-LLM wheel from `feat/mewtwo` plus MR 10189, layer onto the Dynamo TRT-LLM runtime, and push to your registry. Until [TensorRT-LLM PR #13568](https://github.com/NVIDIA/TensorRT-LLM/pull/13568) lands, the wheel also needs the `TOKENIZER_ALIASES` module-level fix applied as an in-place patch (or the equivalent cherry-pick).
+- **Local snapshot path for `--model-path`.** The deploy uses a local directory under `/models/hub/.../snapshots/<sha>` rather than the canonical `deepseek-ai/DeepSeek-V4-Flash` HF id. This bypasses [`huggingface/transformers#44843`](https://github.com/huggingface/transformers/issues/44843) — the `_patch_mistral_regex → is_base_mistral → model_info` path that ignores `HF_HUB_OFFLINE=1` in transformers 4.57.2/4.57.3. Once TRT-LLM bumps to a transformers release with the fix (PRs #43603 / #45444 / #45359), revert to the HF id. The OpenAI API contract is preserved either way because `--served-model-name` registers the canonical id with the frontend.
+- **Snapshot SHA pre-flight.** Before `kubectl apply`, verify the pinned SHA still matches `refs/main` in the cache:
+  ```bash
+  kubectl exec -n ${NAMESPACE} <download-job-pod> -- \
+    cat /model-store/hub/models--deepseek-ai--DeepSeek-V4-Flash/refs/main
+  ```
+  If HF has published a new commit, update the SHA in `trtllm/agg/deploy.yaml`.
+- **`--publish-events-and-metrics` is intentionally omitted.** V4's sparse-MLA `cache_manager.py` asserts `event_buffer_max_size == 0`; the flag would set it `> 0` and crash worker init. Re-enable once V4 KV-cache supports event publishing.
+- **Default request plane is TCP (no `--request-plane nats`).** Frontend defaults TCP; if the worker is set to NATS, chat completions fail with "Invalid TCP address …" because the frontend tries to parse the NATS subject as a TCP address.
+- **TP=4 + EP=4.** TP must equal `world_size` (= GPU count). The engine YAML's `enable_attention_dp: true` data-parallelizes attention across the 4 ranks for higher concurrency.
+- **Memory + UCX/MPI tuning** (`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, `UCX_TLS=tcp,self,sm,cma`, `UCX_NET_DEVICES=lo`, `OMPI_MCA_btl=self,vader,tcp`, `OMPI_MCA_pml=ob1`) matches the verified 04/27 single-node config. Adjust if your cluster's UCX/MPI setup differs.
 
 ## Sibling Recipe
 

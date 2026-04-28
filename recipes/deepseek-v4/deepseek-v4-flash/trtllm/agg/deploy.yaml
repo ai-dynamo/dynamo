@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V4-Flash TensorRT-LLM DynamoGraphDeployment
+# Aggregated mode (no P/D disagg), B200x4, TP=4 + EP=4, Attention DP, MoE backend = TRTLLM (trtllm-gen kernel).
+#
+# This is the proven 2026-04-27 config from `dynamo-nscale-dev-cluster`/`yna`/`dsv4-flash-trtllm-agg`,
+# adapted for the canonical recipes/ layout. End-to-end verified (Paris/Berlin chat, multi-turn name recall);
+# tool calling and reasoning extraction wired via --dyn-*-parser flags.
+#
+# Deploy:
+#   kubectl apply -f deploy.yaml -n <namespace>
+#
+# Test:
+#   kubectl port-forward -n <namespace> svc/dsv4-flash-trtllm-agg-frontend 8000:8000
+#   curl http://localhost:8000/v1/models
+#   curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+#     -d '{"model":"deepseek-ai/DeepSeek-V4-Flash","messages":[{"role":"user","content":"Hello"}]}'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsv4-flash-trtllm-config
+data:
+  engine.yaml: |
+    # TensorRT-LLM LlmArgs for DeepSeek-V4-Flash on B200 (SM100), TP=4 + EP=4.
+    # Parallelism (tensor_parallel_size, moe_expert_parallel_size) is set via CLI flags
+    # on dynamo.trtllm — do NOT duplicate here. This file is the LlmArgs subset Dynamo
+    # passes to the underlying tensorrt_llm.LLM() constructor via --extra-engine-args.
+
+    # Custom tokenizer alias — routes through MR 10189's V4 tokenizer path so we
+    # bypass HF AutoTokenizer.from_pretrained (which calls _patch_mistral_regex →
+    # is_base_mistral → HF Hub model_info, blocked by HF_HUB_OFFLINE=1).
+    custom_tokenizer: deepseek_v4
+
+    # KV cache. V4 requires tokens_per_block in {128, 256}; we use 128 (matches
+    # our --kv-block-size CLI flag).
+    kv_cache_config:
+      tokens_per_block: 128
+      free_gpu_memory_fraction: 0.3
+
+    # Attention DP (per MR 10189 README's serving recipe). Improves throughput at
+    # high concurrency by data-parallel-izing attention across the 4 GPUs.
+    enable_attention_dp: true
+    attention_dp_config:
+      batching_wait_iters: 0
+      enable_balance: true
+      timeout_iters: 60
+
+    # CUDA graphs. Padding to compiled batch sizes reduces capture overhead.
+    cuda_graph_config:
+      enable_padding: true
+
+    # MoE backend MUST be TRTLLM on Blackwell — uses the trtllm-gen kernel that
+    # MR 10186 wires up (customMoeRoutingKernels). PYTORCH backend will fail at
+    # runtime per fused_moe_trtllm_gen.py SM-version assertion.
+    moe_config:
+      backend: TRTLLM
+
+    # Request bounds. Conservative for first-launch validation; tune up after stable.
+    max_batch_size: 4
+    max_num_tokens: 8192
+
+    stream_interval: 10
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-flash-trtllm-agg
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /models
+      extraPodSpec:
+        mainContainer:
+          # Replace with your TRT-LLM Dynamo runtime image. Until the upstream
+          # tensorrtllm-runtime image bundles a TRT-LLM build that includes
+          # DeepSeek V4 support (TensorRT-LLM PR #13568 lifts TOKENIZER_ALIASES
+          # to module level; see also feat/mewtwo branch + MR 10189), this
+          # recipe expects a custom build. See recipes/deepseek-v4/container/
+          # for the build pattern.
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          imagePullPolicy: Always
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            # ModelExpress (Rust) on the frontend uses HF cache at $HF_HOME/hub
+            # to fetch model metadata. Pointing at the shared PVC means it
+            # resolves locally, no network needed.
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360   # 60 min — V4 worker registration depends on worker init
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        volumes:
+          - name: trtllm-config
+            configMap:
+              name: dsv4-flash-trtllm-config
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          imagePullPolicy: Always
+          workingDir: /workspace
+          volumeMounts:
+            - name: trtllm-config
+              mountPath: /config
+              readOnly: true
+          command:
+            - python3
+            - -m
+            - dynamo.trtllm
+          args:
+            # NOTE on --model-path: passing the local snapshot directory (rather
+            # than the HF id "deepseek-ai/DeepSeek-V4-Flash") makes transformers
+            # set _is_local=True, which short-circuits _patch_mistral_regex's
+            # HF Hub model_info() call. That call is what raises
+            # OfflineModeIsEnabled in transformers 4.57.2/4.57.3 with
+            # HF_HUB_OFFLINE=1 (huggingface/transformers#44843).
+            #
+            # Once TRT-LLM bumps to a transformers release with the fix
+            # (PRs #43603 / #45444 / #45359), this can be reverted to the
+            # canonical HF id. The /v1/models response is correct either way
+            # because --served-model-name registers the canonical id.
+            #
+            # Update the snapshot SHA below if HuggingFace publishes a new
+            # commit for deepseek-ai/DeepSeek-V4-Flash. Verify with:
+            #   ls /models/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots/
+            #   cat /models/hub/models--deepseek-ai--DeepSeek-V4-Flash/refs/main
+            - --model-path
+            - /models/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots/6c858e71890b508e4f3fd6491f45b325580ba934
+            - --served-model-name
+            - deepseek-ai/DeepSeek-V4-Flash
+            # TP must equal GPU count (= world_size). EP equal to TP across the
+            # 4 GPUs matches our verified trtllm-serve config (and the V3.2-fp4
+            # recipe pattern).
+            - --tensor-parallel-size
+            - "4"
+            - --expert-parallel-size
+            - "4"
+            - --max-batch-size
+            - "4"
+            - --max-num-tokens
+            - "8192"
+            - --max-seq-len
+            - "2048"
+            - --kv-block-size
+            - "128"
+            - --extra-engine-args
+            - /config/engine.yaml
+            # Activate Dynamo's V4 DSML tool-call parser and V4 reasoning parser.
+            # Without these, the model's <｜DSML｜tool_calls>...</｜DSML｜tool_calls>
+            # markup and <think>...</think> blocks leak as raw content; tool_calls
+            # is null and reasoning_content is null. Aliases registered in
+            # lib/parsers/src/tool_calling/parsers.rs (PR #8665) and
+            # lib/parsers/src/reasoning/mod.rs (same PR).
+            - --dyn-tool-call-parser
+            - deepseek_v4
+            - --dyn-reasoning-parser
+            - deepseek_v4
+            # NOTE: --publish-events-and-metrics is INTENTIONALLY OMITTED.
+            # V4's sparse/deepseek_v4/cache_manager.py:181 asserts
+            # event_buffer_max_size == 0; the flag would set it > 0 and crash
+            # init with `AssertionError: event_buffer_max_size must be 0`.
+            # Re-enable once V4 KV-cache supports event publishing.
+            #
+            # No --request-plane flag — both frontend and worker default to TCP.
+            # Adding --request-plane nats here causes "Invalid TCP address"
+            # errors on chat/completions because the frontend stays on TCP.
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            # HF cache → read weights from the PVC, never the Hub.
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRITON_CACHE_DIR
+              value: /models/.triton-cache
+            # Memory + UCX/MPI tuning (verified in our 04/27 deployment).
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+            - name: UCX_TLS
+              value: "tcp,self,sm,cma"
+            - name: UCX_NET_DEVICES
+              value: "lo"
+            - name: OMPI_MCA_btl
+              value: "self,vader,tcp"
+            - name: OMPI_MCA_pml
+              value: "ob1"
+            # NCCL — keep CUMEM enabled; single-node so no MNNVL needed.
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            # TRT-LLM perf knobs (low-risk, default-on in V3.2-fp4 recipe).
+            - name: TRTLLM_ENABLE_PDL
+              value: "1"
+            - name: TRTLLM_SERVER_DISABLE_GC
+              value: "1"
+            - name: TRTLLM_WORKER_DISABLE_GC
+              value: "1"
+            - name: TLLM_LOG_LEVEL
+              value: "INFO"
+          securityContext:
+            runAsUser: 0   # write access to /models/.triton-cache + /opt/dynamo/venv
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 60   # 60 min for V4 weight load + cudagraph warmup
+
+  pvcs:
+    - name: model-cache
+      create: false
