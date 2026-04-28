@@ -45,9 +45,9 @@ class TestNvCreateAudioSpeechRequest:
             req = NvCreateAudioSpeechRequest(input="hi", response_format=fmt)
             assert req.response_format == fmt
 
-    def test_response_format_invalid_raises(self):
-        with pytest.raises(ValidationError):
-            NvCreateAudioSpeechRequest(input="hi", response_format="webm")
+    def test_response_format_arbitrary_string(self):
+        req = NvCreateAudioSpeechRequest(input="hi", response_format="webm")
+        assert req.response_format == "webm"
 
     def test_speed_bounds(self):
         with pytest.raises(ValidationError):
@@ -96,6 +96,10 @@ class TestAudioData:
         for fmt in ("wav", "mp3", "pcm", "flac", "aac", "opus"):
             d = AudioData(output_format=fmt)
             assert d.output_format == fmt
+
+    def test_output_format_arbitrary_string(self):
+        d = AudioData(output_format="webm")
+        assert d.output_format == "webm"
 
 
 # ---------------------------------------------------------------------------

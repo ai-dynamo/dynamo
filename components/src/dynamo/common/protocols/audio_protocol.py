@@ -39,9 +39,7 @@ class NvCreateAudioSpeechRequest(BaseModel):
     Note: image and video generation use 'response_format' for this; audio uses a
     separate field because OpenAI's audio API already uses 'response_format' for codec."""
 
-    response_format: Optional[
-        Literal["wav", "pcm", "flac", "mp3", "aac", "opus"]
-    ] = "wav"
+    response_format: Optional[str] = "wav"
     """Output format."""
 
     speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
@@ -70,7 +68,7 @@ class NvCreateAudioSpeechRequest(BaseModel):
 class AudioData(BaseModel):
     """Audio data in response."""
 
-    output_format: Literal["wav", "mp3", "pcm", "flac", "aac", "opus"]
+    output_format: str
     """Actual codec used for this audio."""
 
     url: Optional[str] = None
