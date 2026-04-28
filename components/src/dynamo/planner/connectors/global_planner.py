@@ -165,6 +165,8 @@ class GlobalPlannerConnector(PlannerConnector):
         # Check response status
         if response.status == ScaleStatus.SUCCESS:
             logger.info(f"GlobalPlanner scaling successful: {response.message}")
+        elif response.status == ScaleStatus.REJECTED:
+            logger.warning(f"GlobalPlanner scaling rejected: {response.message}")
         elif response.status == ScaleStatus.ERROR:
             logger.error(f"GlobalPlanner scaling failed: {response.message}")
             raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")

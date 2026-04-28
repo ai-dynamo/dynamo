@@ -315,6 +315,32 @@ async def test_connector_error_handling(connector):
 
 
 @pytest.mark.asyncio
+async def test_connector_rejected_response_is_non_fatal(connector):
+    """Test GlobalPlannerConnector handles policy rejections without crashing."""
+    target = [
+        TargetReplica(
+            sub_component_type=SubComponentType.PREFILL,
+            component_name="p",
+            desired_replicas=2,
+        )
+    ]
+
+    with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "d", "POD_NAMESPACE": "n"}):
+        mock_response = ScaleResponse(
+            status=ScaleStatus.REJECTED,
+            message="GPU budget exceeded: request would use 3 total GPUs, max allowed is 2",
+            current_replicas={},
+        )
+        mock_client = AsyncMock()
+        mock_client.send_scale_request = AsyncMock(return_value=mock_response)
+        connector.remote_client = mock_client
+
+        await connector.set_component_replicas(target)
+
+        mock_client.send_scale_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_connector_unsupported_and_noop_operations(connector):
     """Test unsupported and no-op operations"""
     # Unsupported

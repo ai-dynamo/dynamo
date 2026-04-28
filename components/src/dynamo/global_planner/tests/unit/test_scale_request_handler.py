@@ -9,7 +9,7 @@ import pytest
 
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.planner import SubComponentType, TargetReplica
-from dynamo.planner.connectors.protocol import ScaleRequest
+from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -104,7 +104,7 @@ async def test_handler_authorization_failure(mock_runtime):
 
     assert len(results) == 1
     response = results[0]
-    assert response["status"] == "error"
+    assert response["status"] == ScaleStatus.REJECTED.value
     assert "not authorized" in response["message"]
     assert response["current_replicas"] == {}
 
@@ -200,6 +200,63 @@ async def test_handler_error_handling(mock_runtime):
         response = results[0]
         assert response["status"] == "error"
         assert "Scaling failed" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_handler_gpu_budget_rejection_is_non_error(mock_runtime):
+    """Test GPU budget denials are returned as non-fatal rejections."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["app-ns"],
+        k8s_namespace="default",
+        max_total_gpus=-1,
+    )
+    handler.max_total_gpus = 2
+
+    request = ScaleRequest(
+        caller_namespace="app-ns",
+        graph_deployment_name="my-dgd",
+        k8s_namespace="default",
+        target_replicas=[
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL, desired_replicas=2
+            ),
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE, desired_replicas=1
+            ),
+        ],
+    )
+
+    mock_connector = AsyncMock()
+    mock_connector.parent_dgd_name = "my-dgd"
+    mock_connector.kube_api = MagicMock()
+    mock_connector.kube_api.get_graph_deployment.return_value = {
+        "spec": {
+            "services": {
+                "prefill-svc": {
+                    "subComponentType": "prefill",
+                    "replicas": 1,
+                    "resources": {"limits": {"gpu": 1}},
+                },
+                "decode-svc": {
+                    "subComponentType": "decode",
+                    "replicas": 1,
+                    "resources": {"limits": {"gpu": 1}},
+                },
+            }
+        }
+    }
+    handler.connectors["default/my-dgd"] = mock_connector
+
+    results = []
+    async for response in handler.scale_request(request.model_dump()):
+        results.append(response)
+
+    assert len(results) == 1
+    response = results[0]
+    assert response["status"] == ScaleStatus.REJECTED.value
+    assert "GPU budget exceeded" in response["message"]
+    mock_connector.set_component_replicas.assert_not_awaited()
 
 
 def test_managed_dgd_names_explicit(mock_runtime):

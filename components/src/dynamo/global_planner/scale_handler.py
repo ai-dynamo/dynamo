@@ -209,7 +209,7 @@ class ScaleRequestHandler:
                 and request.caller_namespace not in self.managed_namespaces
             ):
                 yield {
-                    "status": ScaleStatus.ERROR.value,
+                    "status": ScaleStatus.REJECTED.value,
                     "message": f"Namespace {request.caller_namespace} not authorized",
                     "current_replicas": {},
                 }
@@ -266,7 +266,7 @@ class ScaleRequestHandler:
                             f"would use {total_gpus} GPUs, exceeding max of {self.max_total_gpus}"
                         )
                         yield {
-                            "status": ScaleStatus.ERROR.value,
+                            "status": ScaleStatus.REJECTED.value,
                             "message": (
                                 f"GPU budget exceeded: request would use {total_gpus} total GPUs, "
                                 f"max allowed is {self.max_total_gpus}"
