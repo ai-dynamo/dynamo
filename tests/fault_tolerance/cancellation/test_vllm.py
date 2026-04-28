@@ -339,7 +339,6 @@ def test_request_cancellation_vllm_aggregated(
                 )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2606")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
@@ -440,9 +439,8 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.timeout(
-    360
-)  # exceed worker startup timeout (300s) with test-body headroom
+@pytest.mark.skip(reason="vLLM prefill cancellation is disabled due to reliability")
+@pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
 @pytest.mark.xpu_2

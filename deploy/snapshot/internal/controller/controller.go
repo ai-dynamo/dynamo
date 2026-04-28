@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	batchv1 "k8s.io/api/batch/v1"
@@ -35,11 +34,11 @@ import (
 // NodeController watches local-node pods with checkpoint metadata and reconciles
 // snapshot execution for checkpoint and restore requests.
 type NodeController struct {
-	config     *types.AgentConfig
-	clientset  kubernetes.Interface
-	containerd *containerd.Client
-	log        logr.Logger
-	holderID   string
+	config    *types.AgentConfig
+	clientset kubernetes.Interface
+	runtime   snapshotruntime.Runtime
+	log       logr.Logger
+	holderID  string
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -50,7 +49,7 @@ type NodeController struct {
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
 	cfg *types.AgentConfig,
-	containerd *containerd.Client,
+	rt snapshotruntime.Runtime,
 	log logr.Logger,
 ) (*NodeController, error) {
 	restConfig, err := rest.InClusterConfig()
@@ -64,13 +63,13 @@ func NewNodeController(
 	}
 
 	return &NodeController{
-		config:     cfg,
-		clientset:  clientset,
-		containerd: containerd,
-		log:        log,
-		holderID:   "snapshot-agent/" + uuid.NewString(),
-		inFlight:   make(map[string]struct{}),
-		stopCh:     make(chan struct{}),
+		config:    cfg,
+		clientset: clientset,
+		runtime:   rt,
+		log:       log,
+		holderID:  "snapshot-agent/" + uuid.NewString(),
+		inFlight:  make(map[string]struct{}),
+		stopCh:    make(chan struct{}),
 	}, nil
 }
 
@@ -281,7 +280,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		if cs.Name != containerName || cs.ContainerID == "" {
 			continue
 		}
-		containerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
+		containerID = snapshotruntime.StripCRIScheme(cs.ContainerID)
 		break
 	}
 	if containerID == "" {
@@ -371,7 +370,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	var containerID string
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == containerName {
-			containerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
+			containerID = snapshotruntime.StripCRIScheme(cs.ContainerID)
 			break
 		}
 	}
@@ -384,7 +383,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	}
 
 	// Resolve the container's host PID (needed for signaling after checkpoint)
-	containerPID, _, err := snapshotruntime.ResolveContainer(ctx, w.containerd, containerID)
+	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
 		log.Error(err, "Failed to resolve container")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Container resolve failed: %v", err))
@@ -406,7 +405,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		PodNamespace:       pod.Namespace,
 		Clientset:          w.clientset,
 	}
-	if err := executor.Checkpoint(leaseCtx, w.containerd, log, req, w.config); err != nil {
+	if err := executor.Checkpoint(leaseCtx, w.runtime, log, req, w.config); err != nil {
 		if cause := context.Cause(leaseCtx); cause != nil && cause != context.Canceled {
 			err = fmt.Errorf("checkpoint lease lost: %w", cause)
 		}
@@ -514,7 +513,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerName:      containerName,
 		Clientset:          w.clientset,
 	}
-	placeholderHostPID, err := executor.Restore(restoreCtx, w.containerd, log, req)
+	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -522,7 +521,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			return statusErr
 		}
 		// Re-resolve: executor.Restore may have failed before resolving the placeholder.
-		placeholderHostPID, _, pidErr := snapshotruntime.ResolveContainerByPod(ctx, w.containerd, pod.Name, pod.Namespace, containerName)
+		placeholderHostPID, _, pidErr := w.runtime.ResolveContainerByPod(ctx, pod.Name, pod.Namespace, containerName)
 		if pidErr != nil {
 			return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
 		}

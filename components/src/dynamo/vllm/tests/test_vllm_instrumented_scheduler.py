@@ -33,6 +33,10 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+STRUCTURED_OUTPUT_WAITING_STATUS = getattr(
+    RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None
+) or getattr(RequestStatus, "WAITING_FOR_FSM")
+
 
 def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
     """Build a minimal stand-in for ``vllm.v1.request.Request``.
@@ -129,13 +133,13 @@ def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     assert q.sum_decode_kv_tokens == 1500
 
 
-def test_skipped_waiting_for_fsm_counts_as_queued_prefill():
-    """Structured-output FSM compile wait has no KV computed yet; prefill."""
+def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
+    """Structured-output grammar compile wait has no KV computed yet; prefill."""
 
     q = _run_compute_queued(
         waiting=[],
         skipped_waiting=[
-            _make_request(RequestStatus.WAITING_FOR_FSM, num_tokens=128),
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
         ],
     )
     assert q.num_prefill_requests == 1
@@ -207,7 +211,7 @@ def test_mixed_prefill_engine_snapshot():
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
         skipped_waiting=[
-            _make_request(RequestStatus.WAITING_FOR_FSM, num_tokens=300),
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
     assert q.num_prefill_requests == 3
@@ -240,13 +244,51 @@ def test_variance_spans_both_queues():
             _make_request(RequestStatus.WAITING, num_tokens=100),
         ],
         skipped_waiting=[
-            _make_request(RequestStatus.WAITING_FOR_FSM, num_tokens=300),
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
     assert q.num_prefill_requests == 2
     assert q.sum_prefill_tokens == 400
     # Population variance of [100, 300] = 10000.
     assert q.var_prefill_length == pytest.approx(10000.0)
+
+
+def test_dp_rank_prefers_data_parallel_index():
+    """External DP + dense model: vLLM resets ``data_parallel_rank`` to 0 in
+    every child but keeps ``data_parallel_index`` as the true global rank.
+    The resolver must prefer the index so each DP child gets its own port.
+    """
+    pc = SimpleNamespace(data_parallel_index=1, data_parallel_rank=0)
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 1
+
+
+def test_dp_rank_falls_back_to_rank_when_index_absent():
+    pc = SimpleNamespace(data_parallel_rank=2)
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 2
+
+
+def test_dp_rank_handles_none_rank():
+    pc = SimpleNamespace(data_parallel_index=None, data_parallel_rank=None)
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 0
+
+
+def test_dp_rank_default_zero():
+    pc = SimpleNamespace()
+    assert InstrumentedScheduler._resolve_dp_rank(pc) == 0
+
+
+def test_dp_rank_multi_node_start_offset():
+    """Multi-node: node 2 runs DP ranks 8..15 with ``--data-parallel-start-rank 8``.
+    vLLM spawns each child engine with ``dp_rank = start_rank + local_index``
+    (``vllm/v1/engine/utils.py``: ``global_index = start_index + index``) and
+    sets ``parallel_config.data_parallel_index = dp_rank`` (``vllm/v1/engine/
+    core.py``). The resolver must return the global rank so each child's ZMQ
+    port offset matches the parent-side FPM relay subscription, which iterates
+    the same global range.
+    """
+    for global_rank in (8, 9, 15):
+        pc = SimpleNamespace(data_parallel_index=global_rank, data_parallel_rank=0)
+        assert InstrumentedScheduler._resolve_dp_rank(pc) == global_rank
 
 
 def test_decode_variance_spans_both_queues():

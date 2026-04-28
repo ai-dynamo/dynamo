@@ -30,6 +30,11 @@ inputs:
     default: 'true'
   hf_token:
     required: false
+  enable_coverage:
+    description: 'Enable coverage collection (true/false)'
+    required: false
+    type: string
+    default: 'false'
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
     required: false
@@ -121,7 +126,17 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
+
+          # Add coverage flags if enabled
+          COVERAGE_FLAGS=""
+          COVERAGE_ENV=""
+          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+            echo "📊 Coverage collection enabled"
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
+            COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage --env PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src"
+          fi
+
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -150,9 +165,11 @@ runs:
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
+          --ulimit nofile=65536:65536 \
           --network host \
           --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
+          ${COVERAGE_ENV} \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -192,7 +209,7 @@ runs:
         # Docker's default is 64MB, which is insufficient and causes segfaults.
         # Do NOT use --ipc=host here — it overrides --shm-size with the host's /dev/shm
         # (64MB in K8s pods by default), silently ignoring the size we set.
-        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864"
+        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:65536"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
@@ -317,6 +334,15 @@ runs:
       with:
         name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Coverage Data
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always() && inputs.enable_coverage == 'true'
+      with:
+        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/
+        include-hidden-files: true
         retention-days: 7
 
     - name: Upload Allure Results

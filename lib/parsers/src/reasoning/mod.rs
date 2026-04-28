@@ -29,6 +29,22 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("basic", ReasoningParserType::Basic);
         map.insert("gpt_oss", ReasoningParserType::GptOss);
         map.insert("qwen3", ReasoningParserType::Qwen);
+        // DeepSeek-V4 uses the same `<think>` / `</think>` delimiters as Qwen
+        // (confirmed against deepseek-ai/DeepSeek-V4-Pro's encoding_dsv4.py)
+        // so it delegates to the same `BasicReasoningParser` config today. We
+        // still route through a dedicated `DeepSeekV4` variant rather than
+        // hard-aliasing to `Qwen` so future divergence (different special
+        // tokens, max-thinking mode, etc.) has a place to land without rippling
+        // through Qwen's own config.
+        //
+        // The three name aliases exist because callers set this via
+        // `--dyn-reasoning-parser` / `--reasoning-parser` with whatever string
+        // the HF model / vLLM recipe / chat-template author picked. We accept
+        // all three separator conventions (snake / kebab / concat) rather than
+        // force a single canonical form on users.
+        map.insert("deepseek_v4", ReasoningParserType::DeepSeekV4);
+        map.insert("deepseek-v4", ReasoningParserType::DeepSeekV4);
+        map.insert("deepseekv4", ReasoningParserType::DeepSeekV4);
         map.insert("nemotron_deci", ReasoningParserType::NemotronDeci);
         map.insert("kimi", ReasoningParserType::Kimi);
         map.insert("kimi_k25", ReasoningParserType::KimiK25);
@@ -110,6 +126,14 @@ pub enum ReasoningParserType {
     Basic,
     GptOss,
     Qwen,
+    /// DeepSeek-V4-Pro / V4-Flash. Currently uses the same `<think>` /
+    /// `</think>` `BasicReasoningParser` config as Qwen (V4 never appends
+    /// `<think>` in the completion — the chat template always pre-injects it,
+    /// so the parser starts via `set_in_reasoning(true)` rather than
+    /// `force_reasoning`). A dedicated variant keeps future V4-specific
+    /// divergence (different delimiters, thinking-effort modes) from leaking
+    /// into Qwen's behavior.
+    DeepSeekV4,
     NemotronDeci,
     Kimi,
     KimiK25,
@@ -159,6 +183,12 @@ impl ReasoningParserType {
                 parser: Box::new(basic_parser),
             },
             ReasoningParserType::Qwen => ReasoningParserWrapper {
+                parser: Box::new(basic_parser),
+            },
+            // Same `<think>` / `</think>` config as Qwen today; kept as a
+            // distinct variant so V4-specific divergence has somewhere to land.
+            // See `ReasoningParserType::DeepSeekV4` docstring for rationale.
+            ReasoningParserType::DeepSeekV4 => ReasoningParserWrapper {
                 parser: Box::new(basic_parser),
             },
             ReasoningParserType::NemotronDeci => ReasoningParserWrapper {
@@ -236,7 +266,7 @@ impl ReasoningParserType {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test] // CASE.20 — registry helper
     fn test_get_available_reasoning_parsers() {
         let parsers = get_available_reasoning_parsers();
         assert!(!parsers.is_empty());
@@ -246,6 +276,9 @@ mod tests {
             "basic",
             "gpt_oss",
             "qwen3",
+            "deepseek_v4",
+            "deepseek-v4",
+            "deepseekv4",
             "nemotron_deci",
             "kimi",
             "kimi_k25",
@@ -261,8 +294,47 @@ mod tests {
             assert!(parsers.contains(&parser));
         }
     }
+    /// `CASE.10` — reasoning-only (V4 `<think>`/`</think>`).
 
-    #[test]
+    #[test] // CASE.10
+    fn test_deepseek_v4_detect_and_parse() {
+        for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            let mut parser = ReasoningParserType::get_reasoning_parser_from_name(parser_name);
+            let result = parser.detect_and_parse_reasoning("<think>thinking</think>answer", &[]);
+            assert_eq!(result.reasoning_text, "thinking");
+            assert_eq!(result.normal_text, "answer");
+        }
+    }
+    /// `CASE.3` / `CASE.10` — no reasoning tags ⇒ no `reasoning_content`.
+
+    #[test] // CASE.3, CASE.10
+    fn test_deepseek_v4_no_forced_reasoning_without_tags() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        let result = parser.detect_and_parse_reasoning("answer only", &[]);
+        assert_eq!(result.reasoning_text, "");
+        assert_eq!(result.normal_text, "answer only");
+    }
+    /// `CASE.8` — streaming reasoning parse (chunked).
+
+    #[test] // CASE.8, CASE.10
+    fn test_deepseek_v4_streaming() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+
+        let chunks = ["<think>rea", "son</think>answer"];
+        let mut reasoning = String::new();
+        let mut normal = String::new();
+
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            reasoning.push_str(&result.reasoning_text);
+            normal.push_str(&result.normal_text);
+        }
+
+        assert_eq!(reasoning, "reason");
+        assert_eq!(normal, "answer");
+    }
+
+    #[test] // CASE.10
     fn test_kimi_k25_detect_and_parse() {
         // (description, input, expected_reasoning, expected_normal)
         let cases = [
@@ -303,7 +375,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test] // CASE.8, CASE.10
     fn test_kimi_k25_streaming_force_reasoning() {
         // Streaming: force_reasoning means tokens before <think> are treated as reasoning
         let mut parser = ReasoningParserType::KimiK25.get_reasoning_parser();
@@ -324,7 +396,7 @@ mod tests {
         assert_eq!(r3.normal_text, "Hello!");
     }
 
-    #[test]
+    #[test] // CASE.8, CASE.10
     fn test_kimi_k25_streaming() {
         // (description, tokens, expected_reasoning, expected_content)
         let cases: Vec<(&str, &[&str], &str, &str)> = vec![
@@ -367,7 +439,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test] // CASE.20 — registry lookup
     fn test_kimi_k25_parser_lookup_by_name() {
         // Verify the parser can be looked up by name
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("kimi_k25");
@@ -376,7 +448,7 @@ mod tests {
         assert_eq!(result.normal_text, "answer");
     }
 
-    #[test]
+    #[test] // CASE.23 — token-spelling differences across model variants
     fn test_kimi_vs_kimi_k25_different_tags() {
         // Kimi (original) uses ◁think▷/◁/think▷, KimiK25 uses <think>/</think>
         let mut kimi = ReasoningParserType::Kimi.get_reasoning_parser();
@@ -397,7 +469,7 @@ mod tests {
     // Simulates the OpenAI path where the preprocessor detects prompt-injected
     // reasoning and calls set_in_reasoning(true). The parser should correctly
     // transition from reasoning to content when </think> arrives.
-    #[test]
+    #[test] // CASE.8, CASE.10
     fn test_nemotron_streaming_with_set_in_reasoning() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true); // OpenAI path calls this
@@ -420,7 +492,7 @@ mod tests {
     // set_in_reasoning is never called. The parser still starts in reasoning
     // mode (force_reasoning=true) but stripped_think_start=false. The </think>
     // boundary must still be detected correctly.
-    #[test]
+    #[test] // CASE.8, CASE.10
     fn test_nemotron_streaming_force_reasoning_without_set_in_reasoning() {
         // DeepseekR1 has force_reasoning=true but we do NOT call set_in_reasoning
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
@@ -443,7 +515,7 @@ mod tests {
     // is false, the parser's prefix-check could buffer '<' and interfere with
     // </think> detection. This test verifies the boundary is detected even when
     // </think> arrives as individual characters.
-    #[test]
+    #[test] // CASE.8, CASE.20
     fn test_nemotron_streaming_split_end_think_tokens() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true);
