@@ -87,9 +87,12 @@ const (
 	SidecarImage = "bitnami/kubectl:latest"
 
 	// Volume names
-	VolumeNameProfilingOutput = "profiling-output"
-	VolumeNameProfilingConfig = "profiling-config"
-	VolumeNameModelCache      = "model-cache"
+	VolumeNameProfilingOutput            = "profiling-output"
+	VolumeNameProfilingConfig            = "profiling-config"
+	VolumeNameModelCache                 = "model-cache"
+	VolumeNameOutputCopierKubeAPIAccess  = "output-copier-kube-api-access"
+	ConfigMapNameKubeRootCA              = "kube-root-ca.crt"
+	ServiceAccountTokenExpirationSeconds = 3600
 
 	// Volume paths
 	ProfilingOutputPath        = "/data"
@@ -97,6 +100,7 @@ const (
 	ProfilingConfigMountPath   = "/config"
 	ProfilingConfigDefaultKey  = "disagg.yaml"
 	DefaultModelCacheMountPath = "/opt/model-cache"
+	ServiceAccountTokenPath    = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -1404,6 +1408,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			jobOverrides = dgdr.Spec.Overrides.ProfilingJob
 		}
 		applyProfilingJobOverrides(job, jobOverrides)
+		ensureOutputCopierKubeAPIAccess(job)
 
 		return job, false, nil
 	})
