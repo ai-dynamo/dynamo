@@ -24,6 +24,7 @@ import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
+    _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _parse_json_array_buffer,
     build_tool_call_guided_decoding,
@@ -976,10 +977,6 @@ class TestPreprocessChatRequest:
 
     def test_normalize_assistant_tool_call_arguments_helper(self):
         """The string→dict normaliser parses valid JSON and skips bad input."""
-        from dynamo.frontend.sglang_prepost import (
-            _normalize_assistant_tool_call_arguments,
-        )
-
         messages = [
             {"role": "user", "content": "hi"},
             {

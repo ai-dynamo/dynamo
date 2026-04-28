@@ -67,15 +67,21 @@ def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None
 
 
 def _materialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    """Convert message objects to plain dicts for apply_chat_template."""
+    """Convert message objects to plain dicts for apply_chat_template.
+
+    Returns deep-copied dicts so subsequent in-place normalization (e.g.
+    _normalize_assistant_tool_call_arguments) does not leak back into
+    the caller-owned request object.
+    """
     normalized: list[dict[str, Any]] = []
     for msg in messages:
         if hasattr(msg, "model_dump"):
+            # model_dump() already returns a fresh dict tree.
             normalized.append(msg.model_dump(exclude_none=False))
         elif isinstance(msg, dict):
-            normalized.append(msg)
+            normalized.append(copy.deepcopy(msg))
         else:
-            normalized.append(dict(msg))
+            normalized.append(copy.deepcopy(dict(msg)))
     _normalize_assistant_tool_call_arguments(normalized)
     return normalized
 

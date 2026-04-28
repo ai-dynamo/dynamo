@@ -466,7 +466,10 @@ class SglangProcessor:
                 else:
                     engine_response = dynamo_response
 
-                if engine_response is None or "token_ids" not in engine_response:
+                if (
+                    not isinstance(engine_response, dict)
+                    or "token_ids" not in engine_response
+                ):
                     msg = _engine_error_message(engine_response, request_id)
                     logger.error(
                         "Engine returned an invalid response for request %s: %s",
