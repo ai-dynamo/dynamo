@@ -2224,7 +2224,10 @@ mod race_regression_tests {
 
             drop_thread.join().unwrap();
             let matched = lookup_thread.join().unwrap();
-            assert!(matched.len() <= 1, "double-primary detected for {seq_hash:?}");
+            assert!(
+                matched.len() <= 1,
+                "double-primary detected for {seq_hash:?}"
+            );
 
             // Drop the lookup result; the system must converge.
             drop(matched);
@@ -2413,9 +2416,8 @@ mod audit_counter_tests {
     fn build_manager_with_metered_multi_lru(
         block_count: usize,
     ) -> (BlockManager<TestBlockData>, Arc<MeteredFrequencyTracker>) {
-        let metered = MeteredFrequencyTracker::with_tinylfu(
-            FrequencyTrackingCapacity::default().size(),
-        );
+        let metered =
+            MeteredFrequencyTracker::with_tinylfu(FrequencyTrackingCapacity::default().size());
         let registry = BlockRegistry::builder()
             .frequency_tracker(metered.clone())
             .build();
@@ -2785,7 +2787,10 @@ mod audit_counter_tests {
         let presence = manager
             .block_registry()
             .check_presence::<TestBlockData>(&hashes);
-        assert!(presence.iter().all(|(_, p)| *p), "all hashes present pre-reset");
+        assert!(
+            presence.iter().all(|(_, p)| *p),
+            "all hashes present pre-reset"
+        );
 
         // Reset.
         manager.reset_inactive_pool().expect("reset succeeds");
@@ -2796,10 +2801,7 @@ mod audit_counter_tests {
             snap.inactive_pool_size, 0,
             "inactive gauge zeroed after reset"
         );
-        assert_eq!(
-            snap.reset_pool_size, N as i64,
-            "reset gauge fully restored"
-        );
+        assert_eq!(snap.reset_pool_size, N as i64, "reset gauge fully restored");
         assert_eq!(manager.available_blocks(), N);
         let presence = manager
             .block_registry()

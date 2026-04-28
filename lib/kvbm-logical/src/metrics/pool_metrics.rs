@@ -287,9 +287,7 @@ impl BlockPoolMetrics {
                 .allocate_atomic_rollback_total
                 .load(Ordering::Relaxed),
             release_primary_noop_total: self.release_primary_noop_total.load(Ordering::Relaxed),
-            release_duplicate_noop_total: self
-                .release_duplicate_noop_total
-                .load(Ordering::Relaxed),
+            release_duplicate_noop_total: self.release_duplicate_noop_total.load(Ordering::Relaxed),
             inflight_mutable: self.inflight_mutable.load(Ordering::Relaxed),
             inflight_immutable: self.inflight_immutable.load(Ordering::Relaxed),
             reset_pool_size: self.reset_pool_size.load(Ordering::Relaxed),

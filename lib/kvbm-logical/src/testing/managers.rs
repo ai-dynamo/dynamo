@@ -49,9 +49,8 @@ pub fn create_test_manager_with_block_size<T: BlockMetadata>(
 pub fn create_test_manager_metered<T: BlockMetadata>(
     block_count: usize,
 ) -> (BlockManager<T>, Arc<MeteredFrequencyTracker>) {
-    let metered = MeteredFrequencyTracker::with_tinylfu(
-        FrequencyTrackingCapacity::default().size(),
-    );
+    let metered =
+        MeteredFrequencyTracker::with_tinylfu(FrequencyTrackingCapacity::default().size());
     let registry = BlockRegistry::builder()
         .frequency_tracker(metered.clone())
         .build();

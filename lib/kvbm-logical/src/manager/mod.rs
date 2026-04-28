@@ -127,11 +127,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
                 inactive_matched,
                 "Matched from inactive pool"
             );
-            matched.extend(
-                inactive_found
-                    .into_iter()
-                    .map(ImmutableBlock::from_inner),
-            );
+            matched.extend(inactive_found.into_iter().map(ImmutableBlock::from_inner));
         }
 
         self.metrics.inc_match_blocks_returned(matched.len() as u64);

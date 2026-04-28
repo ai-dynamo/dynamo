@@ -120,9 +120,10 @@ impl<T: BlockMetadata> std::fmt::Debug for SlotState<T> {
         match self {
             SlotState::Reset => f.write_str("Reset"),
             SlotState::Mutable => f.write_str("Mutable"),
-            SlotState::Staged { seq_hash } => {
-                f.debug_struct("Staged").field("seq_hash", seq_hash).finish()
-            }
+            SlotState::Staged { seq_hash } => f
+                .debug_struct("Staged")
+                .field("seq_hash", seq_hash)
+                .finish(),
             SlotState::Primary { seq_hash, .. } => f
                 .debug_struct("Primary")
                 .field("seq_hash", seq_hash)
@@ -442,9 +443,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         if let Some(&block_id) = inner.active_by_hash.get(&seq_hash) {
             let live: Option<Arc<ImmutableBlockInner<T>>> = match &inner.slots[block_id].state {
                 SlotState::Primary { inner: weak, .. } => weak.upgrade(),
-                other => panic!(
-                    "active_by_hash[{seq_hash:?}] = {block_id} but slot is {other:?}"
-                ),
+                other => panic!("active_by_hash[{seq_hash:?}] = {block_id} but slot is {other:?}"),
             };
             if let Some(arc) = live {
                 return Some(arc);
@@ -545,12 +544,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                 inner.slots[block_id].state,
                 SlotState::Staged { .. }
             ));
-            let inner_arc = ImmutableBlockInner::new_primary(
-                self.clone(),
-                block_id,
-                seq_hash,
-                handle.clone(),
-            );
+            let inner_arc =
+                ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
             inner.slots[block_id].state = SlotState::Primary {
                 seq_hash,
                 handle: handle.clone(),
@@ -591,19 +586,18 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let slot = &mut inner.slots[block_id];
         let handle = match &slot.state {
             SlotState::Primary { handle, .. } => handle.clone(),
-            other => panic!(
-                "eager_primary_to_inactive: slot {block_id} was {other:?}"
-            ),
+            other => panic!("eager_primary_to_inactive: slot {block_id} was {other:?}"),
         };
-        slot.state = SlotState::Inactive {
-            seq_hash,
-            handle,
-        };
+        slot.state = SlotState::Inactive { seq_hash, handle };
         inner.inactive.insert(seq_hash, block_id);
         inner.active_by_hash.remove(&seq_hash);
         self.metrics.inc_inactive_pool_size();
         self.metrics.inc_eager_primary_to_inactive();
-        tracing::trace!(?seq_hash, block_id, "Eager Primary → Inactive (lookup-driven)");
+        tracing::trace!(
+            ?seq_hash,
+            block_id,
+            "Eager Primary → Inactive (lookup-driven)"
+        );
     }
 
     /// Common slot-transition core for find/scan inactive promotions.
@@ -721,10 +715,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                 return;
             }
         };
-        slot.state = SlotState::Inactive {
-            seq_hash,
-            handle,
-        };
+        slot.state = SlotState::Inactive { seq_hash, handle };
         inner.inactive.insert(seq_hash, block_id);
         inner.active_by_hash.remove(&seq_hash);
         self.metrics.inc_inactive_pool_size();

@@ -6,7 +6,6 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-
 use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
 use crate::{pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 
