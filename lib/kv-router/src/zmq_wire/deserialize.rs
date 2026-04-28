@@ -10,7 +10,7 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use crate::protocols::BlockExtraInfo;
 
 use super::extra_keys::extra_keys_to_block_mm_infos;
-use super::filter::{BlockStoredTrailingField, KvCacheEventFilter, KvCacheEventTrailingField};
+use super::filter::{BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField};
 use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, RawKvEvent};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
@@ -51,7 +51,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut lora_name: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
-        let mut filter = KvCacheEventFilter::default();
+        let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -83,13 +83,13 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_mm_infos = Some(map.next_value()?);
                 }
                 "group_idx" => {
-                    filter.group_idx = map.next_value()?;
+                    metadata.group_idx = map.next_value()?;
                 }
                 "kv_cache_spec_kind" => {
-                    filter.kv_cache_spec_kind = map.next_value()?;
+                    metadata.kv_cache_spec_kind = map.next_value()?;
                 }
                 "kv_cache_spec_sliding_window" => {
-                    map.next_value::<Option<u32>>()?;
+                    metadata.kv_cache_spec_sliding_window = map.next_value()?;
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -106,9 +106,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 let medium = medium.unwrap_or(None);
-                if filter.should_ignore() {
-                    return Ok(RawKvEvent::Ignored);
-                }
                 let block_mm_infos = block_mm_infos
                     .unwrap_or(None)
                     .or_else(|| extra_keys_to_block_mm_infos(extra_keys.unwrap_or(None)));
@@ -121,18 +118,21 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_name: lora_name.unwrap_or(None),
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
+                    group_idx: metadata.group_idx,
+                    kv_cache_spec_kind: metadata.kv_cache_spec_kind,
+                    kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                 })
             }
             Some("BlockRemoved") => {
                 let block_hashes =
                     block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
                 let medium = medium.unwrap_or(None);
-                if filter.should_ignore() {
-                    return Ok(RawKvEvent::Ignored);
-                }
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium,
+                    group_idx: metadata.group_idx,
+                    kv_cache_spec_kind: metadata.kv_cache_spec_kind,
+                    kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
@@ -176,14 +176,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let mut block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = None;
-                let mut filter = KvCacheEventFilter::default();
+                let mut metadata = KvCacheEventMetadata::default();
 
-                for _ in 0..3 {
+                for _ in 0..4 {
                     let trailing: Option<BlockStoredTrailingField> =
                         seq.next_element()?.unwrap_or(None);
                     match trailing {
                         Some(BlockStoredTrailingField::Common(trailing)) => {
-                            filter.record_trailing(trailing);
+                            metadata.record_trailing(trailing);
                         }
                         Some(BlockStoredTrailingField::BlockMmInfos(infos)) => {
                             block_mm_infos = Some(infos);
@@ -193,10 +193,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
-
-                if filter.should_ignore() {
-                    return Ok(RawKvEvent::Ignored);
-                }
 
                 let block_mm_infos =
                     block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
@@ -211,6 +207,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_name,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
+                    group_idx: metadata.group_idx,
+                    kv_cache_spec_kind: metadata.kv_cache_spec_kind,
+                    kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                 })
             }
             "BlockRemoved" => {
@@ -218,25 +217,24 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
-                let mut filter = KvCacheEventFilter::default();
+                let mut metadata = KvCacheEventMetadata::default();
 
                 for _ in 0..3 {
                     let trailing: Option<KvCacheEventTrailingField> =
                         seq.next_element()?.unwrap_or(None);
                     if let Some(trailing) = trailing {
-                        filter.record_trailing(trailing);
+                        metadata.record_trailing(trailing);
                     }
                 }
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
-                if filter.should_ignore() {
-                    return Ok(RawKvEvent::Ignored);
-                }
-
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium,
+                    group_idx: metadata.group_idx,
+                    kv_cache_spec_kind: metadata.kv_cache_spec_kind,
+                    kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                 })
             }
             "AllBlocksCleared" => {

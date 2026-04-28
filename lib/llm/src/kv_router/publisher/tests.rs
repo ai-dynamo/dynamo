@@ -104,6 +104,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let out = convert_event(
@@ -131,6 +134,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -141,6 +147,9 @@ mod test_event_processing {
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -190,6 +199,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -200,6 +212,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let out1 = convert_event(
@@ -295,6 +310,9 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let out = convert_event(
             raw_evt,
@@ -942,16 +960,34 @@ mod tests_startup_helpers {
         // Send synthetic 3-frame message: [topic, seq(8B), payload]
         let seq: u64 = 77;
 
-        let events = vec![RawKvEvent::BlockStored {
-            block_hashes: vec![BlockHashValue::Unsigned(42)],
-            parent_block_hash: None,
-            token_ids: vec![0, 1, 2, 3],
-            block_size: 4,
-            medium: None,
-            lora_name: None,
-            block_mm_infos: None,
-            is_eagle: None,
-        }];
+        let events = vec![
+            RawKvEvent::BlockStored {
+                block_hashes: vec![BlockHashValue::Unsigned(41)],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                medium: None,
+                lora_name: None,
+                block_mm_infos: None,
+                is_eagle: None,
+                group_idx: Some(1),
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
+            },
+            RawKvEvent::BlockStored {
+                block_hashes: vec![BlockHashValue::Unsigned(42)],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                medium: None,
+                lora_name: None,
+                block_mm_infos: None,
+                is_eagle: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
+            },
+        ];
 
         let batch = KvEventBatch {
             ts: 0.0,
@@ -975,6 +1011,7 @@ mod tests_startup_helpers {
 
         // Check that we received the message
         let event = rx.try_recv().expect("no message received").event;
+        assert_eq!(event.event_id, 0);
 
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
@@ -1030,6 +1067,9 @@ mod tests_startup_helpers {
                 lora_name: None,
                 block_mm_infos: None,
                 is_eagle: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
             }],
             data_parallel_rank: Some(0),
         };

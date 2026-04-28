@@ -6,6 +6,8 @@ use serde::Serialize;
 
 use crate::protocols::BlockExtraInfo;
 
+use super::filter::{KvCacheEventMetadata, KvCacheSpecKind};
+
 #[derive(Debug, Serialize)]
 pub struct KvEventBatch {
     pub ts: f64,
@@ -72,11 +74,23 @@ pub enum RawKvEvent {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_eagle: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group_idx: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_kind: Option<KvCacheSpecKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_sliding_window: Option<u32>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group_idx: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_kind: Option<KvCacheSpecKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_spec_sliding_window: Option<u32>,
     },
     AllBlocksCleared,
     Ignored,
@@ -85,6 +99,28 @@ pub enum RawKvEvent {
 impl RawKvEvent {
     pub fn is_ignored(&self) -> bool {
         matches!(self, Self::Ignored)
+    }
+
+    pub(crate) fn metadata(&self) -> KvCacheEventMetadata {
+        match self {
+            Self::BlockStored {
+                group_idx,
+                kv_cache_spec_kind,
+                kv_cache_spec_sliding_window,
+                ..
+            }
+            | Self::BlockRemoved {
+                group_idx,
+                kv_cache_spec_kind,
+                kv_cache_spec_sliding_window,
+                ..
+            } => KvCacheEventMetadata {
+                group_idx: *group_idx,
+                kv_cache_spec_kind: *kv_cache_spec_kind,
+                kv_cache_spec_sliding_window: *kv_cache_spec_sliding_window,
+            },
+            Self::AllBlocksCleared | Self::Ignored => KvCacheEventMetadata::default(),
+        }
     }
 }
 

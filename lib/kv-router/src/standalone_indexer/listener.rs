@@ -91,7 +91,6 @@ impl ListenerLoop {
         let worker_id = self.worker_id;
         let dp_rank = self.dp_rank;
         let indexer = &self.indexer;
-        let normalizer = &self.normalizer;
         let watermark = &self.watermark;
 
         let req_frames = vec![Vec::new(), start_seq.to_be_bytes().to_vec()];
@@ -150,7 +149,7 @@ impl ListenerLoop {
                 .data_parallel_rank
                 .map_or(dp_rank, |rank| rank.cast_unsigned());
             for raw_event in batch.events {
-                let Some(placement_event) = normalizer.normalize(
+                let Some(placement_event) = self.normalizer.normalize(
                     raw_event,
                     seq,
                     WorkerWithDpRank::new(worker_id, effective_dp_rank),

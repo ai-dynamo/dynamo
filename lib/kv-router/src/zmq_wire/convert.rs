@@ -39,6 +39,9 @@ pub fn convert_event(
             block_mm_infos,
             medium: _,
             is_eagle,
+            group_idx: _,
+            kv_cache_spec_kind: _,
+            kv_cache_spec_sliding_window: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {

@@ -3,6 +3,7 @@
 
 use serde::Deserialize;
 use serde::Deserializer;
+use serde::Serialize;
 
 use crate::protocols::BlockExtraInfo;
 
@@ -21,7 +22,7 @@ pub(super) enum BlockStoredTrailingField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum KvCacheSpecKind {
+pub enum KvCacheSpecKind {
     FullAttention,
     MlaAttention,
     SlidingWindow,
@@ -35,7 +36,7 @@ pub(super) enum KvCacheSpecKind {
 }
 
 impl KvCacheSpecKind {
-    fn from_wire(value: &str) -> Self {
+    pub(crate) fn from_wire(value: &str) -> Self {
         match value {
             "full_attention" => Self::FullAttention,
             "mla_attention" => Self::MlaAttention,
@@ -56,11 +57,35 @@ impl KvCacheSpecKind {
         }
     }
 
-    fn is_main_attention(self) -> bool {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            Self::FullAttention => "full_attention",
+            Self::MlaAttention => "mla_attention",
+            Self::SlidingWindow => "sliding_window",
+            Self::SlidingWindowMla => "sliding_window_mla",
+            Self::Mamba => "mamba",
+            Self::ChunkedLocalAttention => "chunked_local_attention",
+            Self::SinkFullAttention => "sink_full_attention",
+            Self::EncoderOnlyAttention => "encoder_only_attention",
+            Self::CrossAttention => "cross_attention",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn is_main_attention(self) -> bool {
         matches!(
             self,
             Self::FullAttention | Self::MlaAttention | Self::SinkFullAttention
         )
+    }
+}
+
+impl Serialize for KvCacheSpecKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_wire())
     }
 }
 
@@ -75,29 +100,25 @@ impl<'de> Deserialize<'de> for KvCacheSpecKind {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct KvCacheEventFilter {
-    pub(super) group_idx: Option<u32>,
-    pub(super) kv_cache_spec_kind: Option<KvCacheSpecKind>,
+pub(crate) struct KvCacheEventMetadata {
+    pub(crate) group_idx: Option<u32>,
+    pub(crate) kv_cache_spec_kind: Option<KvCacheSpecKind>,
+    pub(crate) kv_cache_spec_sliding_window: Option<u32>,
 }
 
-impl KvCacheEventFilter {
+impl KvCacheEventMetadata {
     pub(super) fn record_trailing(&mut self, trailing: KvCacheEventTrailingField) {
         match trailing {
-            KvCacheEventTrailingField::GroupIdx(group_idx) if self.kv_cache_spec_kind.is_none() => {
-                self.group_idx = Some(group_idx);
+            KvCacheEventTrailingField::GroupIdx(value) => {
+                if self.group_idx.is_none() {
+                    self.group_idx = Some(value);
+                } else if self.kv_cache_spec_sliding_window.is_none() {
+                    self.kv_cache_spec_sliding_window = Some(value);
+                }
             }
-            KvCacheEventTrailingField::GroupIdx(_) => {}
             KvCacheEventTrailingField::KvCacheSpecKind(kind) => {
                 self.kv_cache_spec_kind = Some(kind);
             }
         }
-    }
-
-    pub(super) fn should_ignore(self) -> bool {
-        if let Some(kind) = self.kv_cache_spec_kind {
-            return !kind.is_main_attention();
-        }
-
-        matches!(self.group_idx, Some(group_idx) if group_idx != 0)
     }
 }

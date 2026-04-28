@@ -28,7 +28,7 @@ pub(super) async fn start_zmq_listener(
         zmq_topic
     );
 
-    let normalizer = ZmqEventNormalizer::new(kv_block_size);
+    let mut normalizer = ZmqEventNormalizer::new(kv_block_size);
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -102,12 +102,14 @@ pub(super) async fn start_zmq_listener(
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
                 for raw_event in batch.events {
-                    if raw_event.is_ignored() {
-                        continue;
-                    }
-                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
                     let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                    let Some(event) = normalizer.normalize(raw_event, event_id, worker) else {
+                    let Some(raw_event) = normalizer.preprocess(raw_event, worker) else {
+                        continue;
+                    };
+                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+                    let Some(event) =
+                        normalizer.normalize_preprocessed(raw_event, event_id, worker)
+                    else {
                         continue;
                     };
                     if tx.send(event).is_err() {

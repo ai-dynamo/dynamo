@@ -8,10 +8,11 @@ use rmp_serde::{from_slice, to_vec};
 use rstest::rstest;
 
 use crate::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEventData, WorkerWithDpRank,
-    compute_block_hash_for_seq,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
+    KvCacheEventData, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
+use super::filter::KvCacheSpecKind;
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -237,22 +238,39 @@ fn assert_parsed_event_kind(event: RawKvEvent, expected_kind: TestEventKind) {
     }
 }
 
+fn assert_event_metadata(
+    event: &RawKvEvent,
+    expected_group_idx: Option<u32>,
+    expected_kind: Option<KvCacheSpecKind>,
+    expected_sliding_window: Option<u32>,
+) {
+    let metadata = event.metadata();
+    assert_eq!(metadata.group_idx, expected_group_idx);
+    assert_eq!(metadata.kv_cache_spec_kind, expected_kind);
+    assert_eq!(
+        metadata.kv_cache_spec_sliding_window,
+        expected_sliding_window
+    );
+}
+
 #[rstest]
 #[case(TestEventKind::BlockStored)]
 #[case(TestEventKind::BlockRemoved)]
 fn test_deserialize_sequence_accepts_main_group_idx(#[case] event_kind: TestEventKind) {
     let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, Some(0))).unwrap();
 
+    assert_event_metadata(&event, Some(0), None, None);
     assert_parsed_event_kind(event, event_kind);
 }
 
 #[rstest]
 #[case(TestEventKind::BlockStored)]
 #[case(TestEventKind::BlockRemoved)]
-fn test_deserialize_sequence_ignores_non_main_group_idx(#[case] event_kind: TestEventKind) {
+fn test_deserialize_sequence_preserves_non_main_group_idx(#[case] event_kind: TestEventKind) {
     let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, Some(1))).unwrap();
 
-    assert!(matches!(event, RawKvEvent::Ignored));
+    assert_event_metadata(&event, Some(1), None, None);
+    assert_parsed_event_kind(event, event_kind);
 }
 
 #[rstest]
@@ -261,6 +279,7 @@ fn test_deserialize_sequence_ignores_non_main_group_idx(#[case] event_kind: Test
 fn test_deserialize_sequence_accepts_missing_group_idx(#[case] event_kind: TestEventKind) {
     let event: RawKvEvent = from_slice(&sequence_with_group_idx(event_kind, None)).unwrap();
 
+    assert_event_metadata(&event, None, None, None);
     assert_parsed_event_kind(event, event_kind);
 }
 
@@ -277,6 +296,7 @@ fn test_deserialize_sequence_accepts_main_attention_kind_with_nonzero_group_idx(
     ))
     .unwrap();
 
+    assert_event_metadata(&event, Some(3), Some(KvCacheSpecKind::FullAttention), None);
     assert_parsed_event_kind(event, event_kind);
 }
 
@@ -292,6 +312,7 @@ fn test_deserialize_sequence_accepts_main_attention_kind_without_group_idx_slot(
     ))
     .unwrap();
 
+    assert_event_metadata(&event, None, Some(KvCacheSpecKind::FullAttention), None);
     assert_parsed_event_kind(event, event_kind);
 }
 
@@ -309,19 +330,155 @@ fn test_deserialize_sequence_accepts_main_attention_kind_with_sliding_window(
     ))
     .unwrap();
 
+    assert_event_metadata(
+        &event,
+        Some(3),
+        Some(KvCacheSpecKind::FullAttention),
+        Some(128),
+    );
     assert_parsed_event_kind(event, event_kind);
+}
+
+#[test]
+fn test_deserialize_block_stored_sequence_preserves_block_mm_infos_and_metadata() {
+    let block_mm_infos = vec![Some(BlockExtraInfo {
+        mm_objects: vec![BlockMmObjectInfo {
+            mm_hash: 99,
+            offsets: vec![(0, 1)],
+        }],
+    })];
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Option::<String>::None,
+        Option::<u8>::None,
+        block_mm_infos.clone(),
+        3u32,
+        "full_attention",
+        128u32,
+    );
+    let encoded = to_vec(&raw_event).unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    match &event {
+        RawKvEvent::BlockStored {
+            block_mm_infos: Some(parsed),
+            ..
+        } => assert_eq!(parsed, &block_mm_infos),
+        other => panic!("expected BlockStored with block_mm_infos, got {other:?}"),
+    }
+    assert_event_metadata(
+        &event,
+        Some(3),
+        Some(KvCacheSpecKind::FullAttention),
+        Some(128),
+    );
 }
 
 #[rstest]
 #[case(TestEventKind::BlockStored)]
 #[case(TestEventKind::BlockRemoved)]
-fn test_deserialize_sequence_ignores_non_main_attention_kind_with_group_idx_zero(
+fn test_deserialize_sequence_preserves_non_main_attention_kind_with_group_idx_zero(
     #[case] event_kind: TestEventKind,
 ) {
     let event: RawKvEvent =
         from_slice(&sequence_with_cache_spec_kind(event_kind, Some(0), "mamba")).unwrap();
 
-    assert!(matches!(event, RawKvEvent::Ignored));
+    assert_event_metadata(&event, Some(0), Some(KvCacheSpecKind::Mamba), None);
+    assert_parsed_event_kind(event, event_kind);
+}
+
+#[test]
+fn test_normalizer_ignores_non_main_group_idx_without_metadata() {
+    let raw_event: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(1), None)).expect("valid raw event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    assert!(
+        normalizer
+            .preprocess(raw_event, WorkerWithDpRank::new(3, 0))
+            .is_none()
+    );
+}
+
+#[test]
+fn test_normalizer_learns_main_attention_metadata_for_remove() {
+    let store: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+        TestEventKind::BlockStored,
+        Some(3),
+        "full_attention",
+    ))
+    .expect("valid store event");
+    let remove: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(3), None)).expect("valid remove event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    assert!(normalizer.preprocess(store, worker).is_some());
+    assert!(normalizer.preprocess(remove, worker).is_some());
+}
+
+#[test]
+fn test_normalizer_metadata_is_dp_rank_scoped() {
+    let store: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+        TestEventKind::BlockStored,
+        Some(3),
+        "full_attention",
+    ))
+    .expect("valid store event");
+    let remove: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(3), None)).expect("valid remove event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    assert!(
+        normalizer
+            .preprocess(store, WorkerWithDpRank::new(7, 0))
+            .is_some()
+    );
+    assert!(
+        normalizer
+            .preprocess(remove, WorkerWithDpRank::new(7, 1))
+            .is_none()
+    );
+}
+
+#[test]
+fn test_normalizer_does_not_learn_metadata_from_remove_events() {
+    let metadata_remove: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+        TestEventKind::BlockRemoved,
+        Some(3),
+        "full_attention",
+    ))
+    .expect("valid metadata remove event");
+    let bare_remove: RawKvEvent =
+        from_slice(&block_removed_sequence(Some(3), None)).expect("valid bare remove event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    assert!(normalizer.preprocess(metadata_remove, worker).is_some());
+    assert!(normalizer.preprocess(bare_remove, worker).is_none());
+}
+
+#[test]
+fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
+    let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
+        TestEventKind::BlockStored,
+        Some(0),
+        "mamba",
+    ))
+    .expect("valid raw event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    assert!(
+        normalizer
+            .preprocess(raw_event, WorkerWithDpRank::new(3, 0))
+            .is_none()
+    );
 }
 
 #[test]
@@ -335,6 +492,9 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         lora_name: None,
         block_mm_infos: None,
         is_eagle: Some(true),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement_event =
