@@ -536,9 +536,12 @@ impl LocalModel {
         Ok(())
     }
 
-    /// Rewrite `file://` entries in `card.files` to point at this
-    /// worker's `/v1/metadata/...` route and register their on-disk
-    /// paths. Other schemes are preserved.
+    /// Walk every typed-enum metadata slot on the MDC. For each slot
+    /// whose CheckedFile is currently a local path on disk, register
+    /// the path in the runtime's metadata-artifact registry and rewrite
+    /// the CheckedFile to a `http://<worker>/v1/metadata/<slug>/<filename>`
+    /// URL. Slots that already carry a URL (e.g. `hf://`) are left alone
+    /// so existing transports continue to work.
     fn move_to_self_host(
         &mut self,
         drt: &dynamo_runtime::DistributedRuntime,
@@ -548,21 +551,28 @@ impl LocalModel {
         let registry = drt.metadata_artifacts();
 
         let mut rewritten = 0usize;
-        for artifact in self.card.files.iter_mut() {
-            let url = match url::Url::parse(&artifact.uri) {
-                Ok(u) => u,
+        for cf in self.card.iter_metadata_files_mut() {
+            // Skip slots that have already been rewritten to a URL.
+            let Some(local_path) = cf.path().map(std::path::Path::to_path_buf) else {
+                continue;
+            };
+            // Canonicalize so `Url::from_file_path` accepts it and the
+            // registry holds an absolute path.
+            let absolute = match std::fs::canonicalize(&local_path) {
+                Ok(p) => p,
                 Err(_) => continue,
             };
-            if url.scheme() != "file" {
+            let Some(filename) = absolute
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
-            }
-            let local_path = match url.to_file_path() {
-                Ok(p) => p,
-                Err(()) => continue,
             };
 
-            registry.register(&model_slug, &artifact.filename, local_path);
-            artifact.uri = format!("{base_url}/v1/metadata/{model_slug}/{}", artifact.filename);
+            let url = url::Url::parse(&format!("{base_url}/v1/metadata/{model_slug}/{filename}"))?;
+            registry.register(&model_slug, &filename, absolute);
+            cf.move_to_url(url);
             rewritten += 1;
         }
 

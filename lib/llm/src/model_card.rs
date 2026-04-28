@@ -32,28 +32,6 @@ use crate::protocols::TokenIdType;
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
-/// Role a metadata artifact plays in the model card.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactRole {
-    Config,
-    Tokenizer,
-    TokenizerConfig,
-    ChatTemplate,
-    GenerationConfig,
-}
-
-/// One entry in the MDC's `files` list. `uri` is opaque; the
-/// resolver dispatches by scheme. `checksum` is `blake3:<hex>`.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ArtifactRef {
-    pub filename: String,
-    pub uri: String,
-    pub checksum: String,
-    pub size: u64,
-    pub role: ArtifactRole,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
@@ -216,6 +194,14 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+/// Absolute upper bound on any single metadata file the frontend will
+/// accept. Defends against a compromised worker that publishes an MDC
+/// with a wildly inflated `CheckedFile.size` (or, on the legacy path,
+/// an HF repo with a huge file masquerading as a tokenizer). Realistic
+/// metadata files top out around 20 MiB; 1 GiB leaves comfortable
+/// headroom while keeping disk-exhaustion bounded.
+const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// MDC files cache root: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`
 /// symlinks. The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/`,
 /// isolating different worker sets that share a model name but publish
@@ -250,26 +236,41 @@ fn blake3_hex_of(checksum: &str) -> anyhow::Result<&str> {
         .with_context(|| format!("expected blake3 checksum, got: {checksum}"))
 }
 
-/// Fetch `uri`, blake3-verify against `expected_checksum`, atomically
-/// write to `dest`. `expected_size` caps the body to prevent a misbehaving
-/// worker from wedging RAM with much-larger-than-expected bytes before
-/// verification fails. Schemes: `http(s)`, `file`, `hf`.
+/// Stage `uri` to a temp file under `cap`, then verify by rebuilding a
+/// `CheckedFile` (using the worker's mmap-based hashing path) and
+/// comparing to `expected`. Atomically renames `tmp -> dest` on success.
+/// Schemes: `http(s)`, `file`, `hf`.
 async fn resolve_uri(
     client: &reqwest::Client,
     uri: &str,
-    expected_checksum: &str,
-    expected_size: u64,
+    expected: &CheckedFile,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
+    let cap = expected
+        .size()
+        .context("CheckedFile.size() must be populated for resolve_uri")?;
 
-    let bytes: Vec<u8> = match parsed.scheme() {
-        "http" | "https" => fetch_http_bounded(client, uri, expected_size).await?,
+    // Absolute pre-download ceiling — applied uniformly to every scheme
+    // (http, file, hf) so a compromised worker can't bypass the bound by
+    // choosing a particular transport. We reject before any bytes are
+    // fetched or copied.
+    if cap > ABSOLUTE_MAX_METADATA_BYTES {
+        anyhow::bail!(
+            "{uri}: declared size {cap} exceeds absolute metadata ceiling \
+             {ABSOLUTE_MAX_METADATA_BYTES}"
+        );
+    }
+
+    let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
+    let tmp = dest.with_extension("tmp");
+
+    let stage_result = match parsed.scheme() {
+        "http" | "https" => stream_to_tmp(client, uri, &tmp, cap).await,
         "file" => {
             let path = parsed
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
-            read_local_bounded(&path, expected_size).await?
+            copy_to_tmp(&path, &tmp, cap).await
         }
         "hf" => {
             let (repo, filename) = parse_hf_uri(uri)?;
@@ -277,36 +278,52 @@ async fn resolve_uri(
                 .await
                 .with_context(|| format!("hub::from_hf({repo})"))?;
             let path = snapshot.join(&filename);
-            read_local_bounded(&path, expected_size).await?
+            copy_to_tmp(&path, &tmp, cap).await
         }
         scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
     };
-
-    let actual = format!("blake3:{}", blake3::hash(&bytes));
-    if actual != expected_checksum {
-        anyhow::bail!("checksum mismatch for {uri}: expected {expected_checksum}, got {actual}");
+    if let Err(err) = stage_result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(err);
     }
 
-    let tmp = dest.with_extension("tmp");
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .with_context(|| format!("writing {}", tmp.display()))?;
+    // Reuse `from_disk` so the verification path is identical to the
+    // worker's registration-time construction — same mmap-backed b3sum,
+    // same size read. Single source of construction truth.
+    let actual = match CheckedFile::from_disk(&tmp) {
+        Ok(cf) => cf,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(err);
+        }
+    };
+    if actual.checksum() != expected.checksum() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        anyhow::bail!(
+            "checksum mismatch for {uri}: expected {}, got {}",
+            expected.checksum(),
+            actual.checksum()
+        );
+    }
+
     tokio::fs::rename(&tmp, dest)
         .await
         .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
     Ok(())
 }
 
-/// HTTP body fetch with a hard size cap. Rejects responses whose
-/// `Content-Length` exceeds `expected_size`, and aborts streaming if
-/// the accumulated body exceeds it. Either way, never buffers more than
-/// `expected_size` bytes.
-async fn fetch_http_bounded(
+/// Stream HTTP body to `tmp`, never buffering more than `cap` bytes
+/// in memory. Pre-rejects via `Content-Length` when the server provides
+/// it; otherwise relies on the chunked write loop catching overage.
+async fn stream_to_tmp(
     client: &reqwest::Client,
     uri: &str,
-    expected_size: u64,
-) -> anyhow::Result<Vec<u8>> {
-    use futures::StreamExt;
+    tmp: &Path,
+    cap: u64,
+) -> anyhow::Result<()> {
+    use futures::TryStreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::io::StreamReader;
 
     let response = client
         .get(uri)
@@ -317,44 +334,47 @@ async fn fetch_http_bounded(
         anyhow::bail!("fetching {uri} returned status {}", response.status());
     }
     if let Some(content_length) = response.content_length()
-        && content_length > expected_size
+        && content_length > cap
     {
-        anyhow::bail!(
-            "{uri} reports {content_length} bytes, exceeds expected size {expected_size}"
-        );
+        anyhow::bail!("{uri} reports {content_length} bytes, exceeds cap {cap}");
     }
 
-    let cap = usize::try_from(expected_size).unwrap_or(usize::MAX);
-    let mut buf = Vec::with_capacity(cap);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.with_context(|| format!("reading body from {uri}"))?;
-        if buf.len() + chunk.len() > cap {
-            anyhow::bail!("{uri} body exceeds expected size {expected_size}");
-        }
-        buf.extend_from_slice(&chunk);
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    // `take(cap + 1)` so the post-write `written > cap` check fires
+    // when the body would have spilled past `cap`.
+    let mut reader = StreamReader::new(stream).take(cap.saturating_add(1));
+    let mut file = tokio::fs::File::create(tmp)
+        .await
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let written = tokio::io::copy(&mut reader, &mut file)
+        .await
+        .with_context(|| format!("streaming body from {uri} to {}", tmp.display()))?;
+    file.flush().await.ok();
+    if written > cap {
+        anyhow::bail!("{uri} body exceeds cap {cap}");
     }
-    Ok(buf)
+    Ok(())
 }
 
-/// Read `path` with a hard size cap. Rejects files whose metadata size
-/// exceeds `expected_size` before the read; verifies the read matches the
-/// metadata size. Mirrors the http path's invariant for `file://` and `hf://`.
-async fn read_local_bounded(path: &Path, expected_size: u64) -> anyhow::Result<Vec<u8>> {
-    let metadata = tokio::fs::metadata(path)
+/// Copy a local file into `tmp`, rejecting it before the read if its
+/// metadata size exceeds `cap`. Used for `file://` and `hf://` arms
+/// (the latter via the local snapshot dir produced by `hub::from_hf`).
+async fn copy_to_tmp(src: &Path, tmp: &Path, cap: u64) -> anyhow::Result<()> {
+    let metadata = tokio::fs::metadata(src)
         .await
-        .with_context(|| format!("reading metadata for {}", path.display()))?;
-    if metadata.len() > expected_size {
+        .with_context(|| format!("reading metadata for {}", src.display()))?;
+    if metadata.len() > cap {
         anyhow::bail!(
-            "{} is {} bytes, exceeds expected size {}",
-            path.display(),
+            "{} is {} bytes, exceeds cap {}",
+            src.display(),
             metadata.len(),
-            expected_size
+            cap
         );
     }
-    tokio::fs::read(path)
+    tokio::fs::copy(src, tmp)
         .await
-        .with_context(|| format!("reading {}", path.display()))
+        .with_context(|| format!("copying {} -> {}", src.display(), tmp.display()))?;
+    Ok(())
 }
 
 /// Parse an `hf://repo[@rev]/filename` URI into `(repo[@rev],
@@ -389,80 +409,35 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn artifact_ref_from_checked_file(cf: &CheckedFile, role: ArtifactRole) -> Option<ArtifactRef> {
-    let (filename, uri, size) = if let Some(path) = cf.path() {
-        let filename = path.file_name()?.to_str()?.to_string();
-        // `Url::from_file_path` requires an absolute path.
-        let absolute = std::fs::canonicalize(path).ok()?;
-        let uri = url::Url::from_file_path(&absolute).ok()?.to_string();
-        let size = std::fs::metadata(&absolute).map(|m| m.len()).unwrap_or(0);
-        (filename, uri, size)
-    } else if let Some(url) = cf.url() {
-        let filename = url.path().rsplit('/').find(|s| !s.is_empty())?.to_string();
-        (filename, url.to_string(), 0)
-    } else {
-        return None;
-    };
-
-    Some(ArtifactRef {
-        filename,
-        uri,
-        checksum: cf.checksum().to_string(),
-        size,
-        role,
-    })
+/// Filename for a CheckedFile. Local paths take their final segment;
+/// URLs take the last non-empty path segment after `/`.
+fn filename_from_checked_file(cf: &CheckedFile) -> Option<String> {
+    if let Some(path) = cf.path() {
+        return path.file_name().and_then(|f| f.to_str()).map(String::from);
+    }
+    let url = cf.url()?;
+    url.path()
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .map(String::from)
 }
 
-fn artifacts_from_typed_fields(
-    model_info: Option<&ModelInfoType>,
-    tokenizer: Option<&TokenizerKind>,
-    prompt_formatter: Option<&PromptFormatterArtifact>,
-    chat_template_file: Option<&PromptFormatterArtifact>,
-    gen_config: Option<&GenerationConfig>,
-) -> Vec<ArtifactRef> {
-    let mut out = Vec::with_capacity(5);
-
-    if let Some(ModelInfoType::HfConfigJson(cf)) = model_info
-        && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::Config)
-    {
-        out.push(a);
+/// Extract the `&CheckedFile` from a `PromptFormatterArtifact` slot
+/// regardless of variant (tokenizer-config / chat-template-jinja / chat-template-json).
+fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
     }
+}
 
-    if let Some(tk) = tokenizer {
-        let cf = match tk {
-            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => c,
-        };
-        if let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::Tokenizer) {
-            out.push(a);
-        }
+fn pf_checked_file_mut(p: &mut PromptFormatterArtifact) -> &mut CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
     }
-
-    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(cf)) = prompt_formatter
-        && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::TokenizerConfig)
-    {
-        out.push(a);
-    }
-
-    if let Some(ct) = chat_template_file {
-        let cf = match ct {
-            PromptFormatterArtifact::HfChatTemplateJinja { file, .. }
-            | PromptFormatterArtifact::HfChatTemplateJson { file, .. } => Some(file),
-            PromptFormatterArtifact::HfTokenizerConfigJson(_) => None,
-        };
-        if let Some(cf) = cf
-            && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::ChatTemplate)
-        {
-            out.push(a);
-        }
-    }
-
-    if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = gen_config
-        && let Some(a) = artifact_ref_from_checked_file(cf, ArtifactRole::GenerationConfig)
-    {
-        out.push(a);
-    }
-
-    out
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
@@ -497,12 +472,6 @@ pub struct ModelDeploymentCard {
     /// Generation config - default sampling params
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gen_config: Option<GenerationConfig>,
-
-    /// Per-file artifact list (filename, URI, blake3, size, role).
-    /// Populated alongside the typed fields above; consumers prefer
-    /// this list, falling back when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<ArtifactRef>,
 
     /// Prompt Formatter Config
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -815,10 +784,14 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
-        // Prefer the per-file artifact list; fall through to the legacy
-        // hub::from_hf path when `files` is empty.
-        if self.download_files().await? {
-            return Ok(());
+        // New-format MDCs carry `size` on every populated CheckedFile; resolve
+        // each file via its URL through `resolve_uri`, where the absolute
+        // ceiling is enforced. Old MDCs (no size) fall through to the legacy
+        // `hub::from_hf` path; we don't defend that path because the bytes
+        // are already on disk by the time we'd see them — bandwidth and HF
+        // cache are spent regardless.
+        if self.is_new_format() {
+            return self.resolve_metadata_files().await;
         }
 
         let ignore_weights = true;
@@ -828,15 +801,12 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
-    /// Resolve each entry in `files` into the content-addressed cache,
-    /// then update the typed CheckedFile paths to point at the per-slug
-    /// symlink directory. Returns `Ok(false)` when `files` is empty so
-    /// the caller falls back to the legacy path.
-    async fn download_files(&mut self) -> anyhow::Result<bool> {
-        if self.files.is_empty() {
-            return Ok(false);
-        }
-
+    /// Walk every populated typed-enum metadata slot and resolve its
+    /// CheckedFile via `resolve_uri`. Caches each blob under the
+    /// content-addressed `blobs/<blake3>` and links into the
+    /// per-(slug, mdcsum) symlink directory. Hard-fail on any error —
+    /// no fallback to `hub::from_hf` once the new path is engaged.
+    async fn resolve_metadata_files(&mut self) -> anyhow::Result<()> {
         // Capture the mdcsum before taking `&mut self` borrows for symlink
         // setup — the per-(slug, mdcsum) directory isolates worker sets that
         // share a model name but publish different file content.
@@ -845,37 +815,117 @@ impl ModelDeploymentCard {
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
         let client = reqwest::Client::new();
 
+        // Snapshot the (uri, expected, filename) triples up front so we can
+        // call `&mut self::update_dir` after the immutable iteration ends.
+        let entries: Vec<(String, CheckedFile, String)> = self
+            .iter_metadata_files()
+            .map(|cf| {
+                let url = cf
+                    .url()
+                    .context("CheckedFile must have a URL for resolve, got local path")?
+                    .to_string();
+                let filename = filename_from_checked_file(cf).with_context(|| {
+                    format!("could not derive filename from CheckedFile uri {url}")
+                })?;
+                Ok::<_, anyhow::Error>((url, cf.clone(), filename))
+            })
+            .collect::<Result<_>>()?;
+
         let mut fetched = 0usize;
-        for artifact in &self.files {
-            let blake3_hex = blake3_hex_of(&artifact.checksum)?;
-            let blob = blobs.join(blake3_hex);
+        for (uri, expected, filename) in &entries {
+            let blake3_hex = blake3_hex_of(&expected.checksum().to_string())?.to_string();
+            let blob = blobs.join(&blake3_hex);
 
             if !blob.exists() {
-                resolve_uri(
-                    &client,
-                    &artifact.uri,
-                    &artifact.checksum,
-                    artifact.size,
-                    &blob,
-                )
-                .await?;
+                resolve_uri(&client, uri, expected, &blob).await?;
                 fetched += 1;
             }
 
-            let link = slug_dir.join(&artifact.filename);
-            symlink_force(&blob, &link)?;
+            symlink_force(&blob, &slug_dir.join(filename))?;
         }
 
         tracing::info!(
             display_name = %self.display_name,
-            artifact_count = self.files.len(),
+            artifact_count = entries.len(),
             fetched,
             cache_root = %mdc_cache_root().display(),
             "resolved model metadata files",
         );
 
         self.update_dir(&slug_dir);
-        Ok(true)
+        Ok(())
+    }
+
+    /// Iterate every populated metadata `CheckedFile` on this MDC, in
+    /// deterministic slot order: model_info, tokenizer, prompt_formatter,
+    /// chat_template_file, gen_config.
+    pub fn iter_metadata_files(&self) -> impl Iterator<Item = &CheckedFile> {
+        let model_info = self.model_info.as_ref().map(|m| match m {
+            ModelInfoType::HfConfigJson(cf) => cf,
+        });
+        let tokenizer = self.tokenizer.as_ref().map(|t| match t {
+            TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => cf,
+        });
+        let prompt_formatter = self.prompt_formatter.as_ref().map(pf_checked_file);
+        let chat_template_file = self.chat_template_file.as_ref().map(pf_checked_file);
+        let gen_config = self.gen_config.as_ref().map(|g| match g {
+            GenerationConfig::HfGenerationConfigJson(cf) => cf,
+        });
+
+        [
+            model_info,
+            tokenizer,
+            prompt_formatter,
+            chat_template_file,
+            gen_config,
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Mutable variant of [`Self::iter_metadata_files`].
+    pub fn iter_metadata_files_mut(&mut self) -> Vec<&mut CheckedFile> {
+        let mut out: Vec<&mut CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_mut() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_mut() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_mut() {
+            out.push(pf_checked_file_mut(p));
+        }
+        if let Some(c) = self.chat_template_file.as_mut() {
+            out.push(pf_checked_file_mut(c));
+        }
+        if let Some(g) = self.gen_config.as_mut() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
+    }
+
+    /// `true` iff the MDC is new-format: every populated metadata slot
+    /// carries `CheckedFile.size = Some(_)`. Mixed states (some slots
+    /// with size, some without) count as legacy and fall back to
+    /// `hub::from_hf` — they would indicate a worker bug we'd rather
+    /// surface conservatively than paper over.
+    pub fn is_new_format(&self) -> bool {
+        let mut any = false;
+        for cf in self.iter_metadata_files() {
+            if cf.size().is_none() {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 
     /// Re-write all the local disk paths as a URL. Do this before publishing the MDC.
@@ -944,17 +994,6 @@ impl ModelDeploymentCard {
             }
         }
 
-        // Keep `files` consistent. Only rewrite `file://` entries so
-        // already-rewritten `http://` (self-host) and other schemes are preserved.
-        for artifact in self.files.iter_mut() {
-            if !artifact.uri.starts_with("file://") {
-                continue;
-            }
-            let hf_url = url::Url::parse(base_url)
-                .and_then(|u| u.join(&artifact.filename))
-                .context(artifact.filename.clone())?;
-            artifact.uri = hf_url.to_string();
-        }
         Ok(())
     }
 
@@ -1100,14 +1139,6 @@ impl ModelDeploymentCard {
         // This gets replaced when we `set_name`
         let display_name = local_path.display().to_string();
 
-        let files = artifacts_from_typed_fields(
-            model_info.as_ref(),
-            tokenizer.as_ref(),
-            prompt_formatter.as_ref(),
-            chat_template_file.as_ref(),
-            gen_config.as_ref(),
-        );
-
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
@@ -1117,7 +1148,6 @@ impl ModelDeploymentCard {
             gen_config,
             prompt_formatter,
             chat_template_file,
-            files,
             prompt_context: None, // TODO - auto-detect prompt context
             context_length,
             kv_cache_block_size: 0, // set later
@@ -1575,7 +1605,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactRef, ArtifactRole, HFConfig, ModelDeploymentCard};
+    use super::{CheckedFile, HFConfig, ModelDeploymentCard, ModelInfoType, TokenizerKind};
     use std::collections::HashSet;
     use std::path::Path;
 
@@ -1632,43 +1662,14 @@ mod tests {
         Ok(())
     }
 
-    /// `ArtifactRef` round-trips cleanly through serde JSON with all
-    /// fields preserved.
-    #[test]
-    fn artifact_ref_serde_roundtrip() {
-        let r = ArtifactRef {
-            filename: "tokenizer.json".into(),
-            uri: "http://worker.local:9090/v1/metadata/llama/tokenizer.json".into(),
-            checksum: "blake3:9a4b1c".into(),
-            size: 9_876_543,
-            role: ArtifactRole::Tokenizer,
-        };
-        let json = serde_json::to_string(&r).unwrap();
-        let back: ArtifactRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.filename, r.filename);
-        assert_eq!(back.uri, r.uri);
-        assert_eq!(back.checksum, r.checksum);
-        assert_eq!(back.size, r.size);
-        assert_eq!(back.role, r.role);
-    }
-
-    /// All five `ArtifactRole` variants serialize to the documented
-    /// snake_case names. Locks the wire format.
-    #[test]
-    fn artifact_role_serde_snake_case() {
-        let cases = [
-            (ArtifactRole::Config, "\"config\""),
-            (ArtifactRole::Tokenizer, "\"tokenizer\""),
-            (ArtifactRole::TokenizerConfig, "\"tokenizer_config\""),
-            (ArtifactRole::ChatTemplate, "\"chat_template\""),
-            (ArtifactRole::GenerationConfig, "\"generation_config\""),
-        ];
-        for (role, expected) in cases {
-            let s = serde_json::to_string(&role).unwrap();
-            assert_eq!(s, expected, "role {role:?}");
-            let back: ArtifactRole = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, role);
-        }
+    /// Build a `CheckedFile` for testing with the given uri + checksum + size.
+    fn test_cf(uri: &str, checksum_hex: &str, size: u64) -> CheckedFile {
+        let json = serde_json::json!({
+            "path": uri,
+            "checksum": format!("blake3:{checksum_hex}"),
+            "size": size,
+        });
+        serde_json::from_value(json).unwrap()
     }
 
     /// blake3 mismatch errors and writes nothing.
@@ -1688,14 +1689,12 @@ mod tests {
         let dest = dir.join("file.txt");
 
         let url = format!("{}/file.txt", server.url());
-        let result = super::resolve_uri(
-            &reqwest::Client::new(),
+        let expected = test_cf(
             &url,
-            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
             body.len() as u64,
-            &dest,
-        )
-        .await;
+        );
+        let result = super::resolve_uri(&reqwest::Client::new(), &url, &expected, &dest).await;
 
         assert!(result.is_err(), "checksum mismatch must error");
         let msg = result.err().unwrap().to_string();
@@ -1712,7 +1711,7 @@ mod tests {
     }
 
     /// Oversize http body errors before the in-memory buffer can grow
-    /// past `expected_size`, so a misbehaving worker can't OOM the
+    /// past the expected size, so a misbehaving worker can't OOM the
     /// frontend before blake3 verification fails.
     #[tokio::test]
     async fn resolve_uri_http_rejects_oversize_body() {
@@ -1730,20 +1729,19 @@ mod tests {
         let dest = dir.join("big.txt");
 
         let url = format!("{}/big.txt", server.url());
-        let result = super::resolve_uri(
-            &reqwest::Client::new(),
+        // Cap is 8 bytes; mock body is 35 bytes. We error before any
+        // bytes hit the verification path.
+        let expected = test_cf(
             &url,
-            // Any blake3 will do — we error before verification
-            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
-            /* expected_size = */ 8,
-            &dest,
-        )
-        .await;
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            8,
+        );
+        let result = super::resolve_uri(&reqwest::Client::new(), &url, &expected, &dest).await;
 
         assert!(result.is_err(), "oversize body must error");
         let msg = result.err().unwrap().to_string();
         assert!(
-            msg.contains("exceeds expected size"),
+            msg.contains("exceeds cap"),
             "expected size-cap error, got: {msg}"
         );
         assert!(
@@ -1766,40 +1764,30 @@ mod tests {
         assert!(super::parse_hf_uri("https://example.com/x").is_err());
     }
 
-    /// Old MDC bytes (no `files` field) deserialize with empty
-    /// `files`, preserving cross-version compat.
+    /// `is_new_format()` is the new/old discriminant: every populated
+    /// metadata slot must carry `CheckedFile.size = Some(_)`. Mixed or
+    /// all-None states fall back to legacy.
     #[test]
-    fn mdc_without_files_deserializes_to_empty_vec() {
-        let card = ModelDeploymentCard {
-            display_name: "old-model".into(),
-            files: vec![ArtifactRef {
-                filename: "tokenizer.json".into(),
-                uri: "file:///x".into(),
-                checksum: "blake3:0".into(),
-                size: 0,
-                role: ArtifactRole::Tokenizer,
-            }],
-            ..ModelDeploymentCard::default()
-        };
+    fn is_new_format_reflects_size_presence() {
+        let mut card = ModelDeploymentCard::default();
+        // No metadata slots populated → not new format.
+        assert!(!card.is_new_format());
 
-        // Round-trip with `files` populated to confirm the field
-        // serializes when non-empty.
-        let with_files: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&card).unwrap()).unwrap();
-        assert!(
-            with_files.get("files").is_some(),
-            "`files` must serialize when populated"
-        );
+        card.tokenizer = Some(TokenizerKind::HfTokenizerJson(test_cf(
+            "file:///x/tokenizer.json",
+            "abc",
+            123,
+        )));
+        // Single slot with size → new format.
+        assert!(card.is_new_format());
 
-        // Now strip the `files` key from the JSON and re-deserialize
-        // — that's what an old worker's MDC bytes look like on the
-        // wire. New frontend must accept it and default to empty vec.
-        let mut without_files = with_files.clone();
-        without_files.as_object_mut().unwrap().remove("files");
-        let back: ModelDeploymentCard = serde_json::from_value(without_files).unwrap();
-        assert!(
-            back.files.is_empty(),
-            "missing files field must deserialize to an empty vector"
-        );
+        // Add a second slot WITHOUT size → mixed → falls back to legacy.
+        let no_size_json = serde_json::json!({
+            "path": "file:///x/config.json",
+            "checksum": "blake3:def",
+        });
+        let no_size: CheckedFile = serde_json::from_value(no_size_json).unwrap();
+        card.model_info = Some(ModelInfoType::HfConfigJson(no_size));
+        assert!(!card.is_new_format());
     }
 }

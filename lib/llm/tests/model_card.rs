@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::model_card::{
-    ArtifactRef, ArtifactRole, ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind,
-};
+use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use tempfile::tempdir;
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
@@ -189,94 +187,113 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Fresh MDC loaded from TinyLlama, with the typed CheckedFiles
-/// URL-backed (so `has_local_files()` returns false) but the
-/// `files` vector still carrying the original `file://` URIs that
-/// `from_repo_checkout` populated.
-fn mdc_with_file_scheme_files() -> ModelDeploymentCard {
+/// Fresh MDC loaded from TinyLlama, with each typed-enum CheckedFile
+/// rewritten from its local path to a `file://<absolute>` URL that
+/// points back at the same on-disk bytes. After this transformation:
+///   - `has_local_files()` returns false (URLs aren't "local"), so
+///     `download_config` dispatches into `resolve_metadata_files`.
+///   - Each `CheckedFile.size` stays populated from `from_disk`, so
+///     `is_new_format()` returns true.
+fn mdc_with_url_backed_metadata() -> ModelDeploymentCard {
     let mut mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
-    let original_files = mdc.files.clone();
-    // Forces typed enums to URL-backed (and rewrites files; we'll
-    // immediately undo that part).
-    mdc.move_to_url("hf://test/").unwrap();
-    mdc.files = original_files;
+    for cf in mdc.iter_metadata_files_mut() {
+        let path = cf
+            .path()
+            .expect("from_repo_checkout should produce local paths")
+            .to_path_buf();
+        let absolute = std::fs::canonicalize(&path).expect("canonicalize");
+        let url = url::Url::from_file_path(&absolute).expect("url from path");
+        cf.move_to_url(url);
+    }
     mdc
 }
 
 #[tokio::test]
-async fn test_files_vector_populated_from_local_repo() {
+async fn test_metadata_iter_populated_from_local_repo() {
     let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
 
-    // TinyLlama has tokenizer.json, config.json, tokenizer_config.json,
-    // chat_template.jinja, generation_config.json — all five roles.
+    let mut count = 0usize;
+    for cf in mdc.iter_metadata_files() {
+        assert!(
+            cf.size().is_some(),
+            "from_disk must populate size on every CheckedFile"
+        );
+        assert!(cf.size().unwrap() > 0, "non-zero size expected");
+        assert!(
+            cf.path().is_some() && cf.path().unwrap().exists(),
+            "expected local file at {:?}",
+            cf.path()
+        );
+        count += 1;
+    }
+    // TinyLlama_v1.1 ships config + tokenizer + tokenizer_config +
+    // generation_config (no separate chat_template). At least 4 slots.
     assert!(
-        !mdc.files.is_empty(),
-        "files vector must be populated by from_repo_checkout"
+        count >= 4,
+        "expected at least 4 metadata files for TinyLlama, got {count}"
     );
 
-    // Every entry has a file:// URI pointing into the test fixture
-    // dir, a blake3 checksum, and matching role.
-    for artifact in &mdc.files {
-        assert!(
-            artifact.uri.starts_with("file://"),
-            "expected file:// uri, got {}",
-            artifact.uri
-        );
-        assert!(
-            artifact.checksum.starts_with("blake3:"),
-            "expected blake3 checksum, got {}",
-            artifact.checksum
-        );
-        assert!(artifact.size > 0, "expected non-zero size for {artifact:?}");
-    }
+    // Every populated slot carries size → MDC is new-format.
+    assert!(mdc.is_new_format());
+}
 
-    // Each role appears at most once (a HashSet alone would dedupe
-    // and hide duplicates). Not every fixture has every role —
-    // TinyLlama_v1.1 ships no separate chat_template file — so this
-    // checks subset-of-valid + uniqueness, not exact equality.
-    let roles: Vec<_> = mdc.files.iter().map(|a| a.role).collect();
-    let unique: std::collections::HashSet<_> = roles.iter().copied().collect();
-    assert_eq!(roles.len(), unique.len(), "artifact roles should be unique");
-    let valid: std::collections::HashSet<_> = [
-        ArtifactRole::Config,
-        ArtifactRole::Tokenizer,
-        ArtifactRole::TokenizerConfig,
-        ArtifactRole::ChatTemplate,
-        ArtifactRole::GenerationConfig,
-    ]
-    .into_iter()
-    .collect();
-    assert!(unique.is_subset(&valid), "unexpected role(s) in {unique:?}");
+/// Snapshot of (filename, expected blake3 hex) pairs from an MDC's
+/// typed-enum metadata slots. Used by tests to verify the
+/// content-addressed cache landed with the right blobs and per-slug
+/// symlinks.
+fn metadata_fingerprint(mdc: &ModelDeploymentCard) -> Vec<(String, String)> {
+    mdc.iter_metadata_files()
+        .map(|cf| {
+            let filename = cf
+                .path()
+                .and_then(|p| p.file_name())
+                .and_then(|f| f.to_str())
+                .map(String::from)
+                .or_else(|| {
+                    cf.url().and_then(|u| {
+                        u.path()
+                            .rsplit('/')
+                            .find(|s| !s.is_empty())
+                            .map(String::from)
+                    })
+                })
+                .expect("derivable filename");
+            let hex = cf
+                .checksum()
+                .to_string()
+                .strip_prefix("blake3:")
+                .expect("blake3:<hex> on CheckedFile")
+                .to_string();
+            (filename, hex)
+        })
+        .collect()
 }
 
 #[serial_test::serial]
 #[tokio::test]
 async fn test_download_files_resolves_local_file_scheme() {
     let _home = isolated_home();
-    let mut mdc = mdc_with_file_scheme_files();
-    let expected_files = mdc.files.clone();
+    let mut mdc = mdc_with_url_backed_metadata();
+    let expected = metadata_fingerprint(&mdc);
     let slug = mdc.slug().to_string();
     let mdcsum = mdc.mdcsum().to_string();
 
     mdc.download_config().await.expect("download_config");
 
-    // Each artifact's blob must exist under blobs/<blake3-hex> and
-    // its bytes must blake3-match the MDC entry.
     let blobs_dir =
         std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/dynamo/mdc/blobs");
     let slug_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap())
         .join(".cache/dynamo/mdc/by-slug")
         .join(&slug)
         .join(&mdcsum);
-    for artifact in &expected_files {
-        let hex = artifact.checksum.strip_prefix("blake3:").unwrap();
+    for (filename, hex) in &expected {
         let blob = blobs_dir.join(hex);
         assert!(blob.exists(), "expected blob at {}", blob.display());
 
         let actual = format!("blake3:{}", blake3::hash(&std::fs::read(&blob).unwrap()));
-        assert_eq!(actual, artifact.checksum, "blob bytes blake3-match");
+        assert_eq!(actual, format!("blake3:{hex}"), "blob bytes blake3-match");
 
-        let link = slug_dir.join(&artifact.filename);
+        let link = slug_dir.join(filename);
         assert!(link.exists(), "expected by-slug link at {}", link.display());
     }
 
@@ -291,16 +308,15 @@ async fn test_download_files_dedupes_by_blake3() {
     let _home = isolated_home();
 
     // First registration: populate the cache.
-    let mut mdc1 = mdc_with_file_scheme_files();
-    let expected_files = mdc1.files.clone();
+    let mut mdc1 = mdc_with_url_backed_metadata();
+    let expected = metadata_fingerprint(&mdc1);
     mdc1.download_config().await.expect("first download_config");
 
     let blobs_dir =
         std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/dynamo/mdc/blobs");
-    let mtimes_before: Vec<_> = expected_files
+    let mtimes_before: Vec<_> = expected
         .iter()
-        .map(|a| {
-            let hex = a.checksum.strip_prefix("blake3:").unwrap();
+        .map(|(_, hex)| {
             std::fs::metadata(blobs_dir.join(hex))
                 .unwrap()
                 .modified()
@@ -311,15 +327,14 @@ async fn test_download_files_dedupes_by_blake3() {
     // Second registration with a fresh MDC (simulates a new worker
     // replica advertising the same blake3s, or a frontend restart
     // reading the same MDC again).
-    let mut mdc2 = mdc_with_file_scheme_files();
+    let mut mdc2 = mdc_with_url_backed_metadata();
     mdc2.download_config()
         .await
         .expect("second download_config");
 
-    let mtimes_after: Vec<_> = expected_files
+    let mtimes_after: Vec<_> = expected
         .iter()
-        .map(|a| {
-            let hex = a.checksum.strip_prefix("blake3:").unwrap();
+        .map(|(_, hex)| {
             std::fs::metadata(blobs_dir.join(hex))
                 .unwrap()
                 .modified()
@@ -337,13 +352,21 @@ async fn test_download_files_dedupes_by_blake3() {
 #[tokio::test]
 async fn test_download_files_rejects_blake3_mismatch() {
     let _home = isolated_home();
-    let mut mdc = mdc_with_file_scheme_files();
+    let mut mdc = mdc_with_url_backed_metadata();
 
-    // Tamper with one artifact's expected checksum so the verifier
-    // sees a mismatch.
-    assert!(!mdc.files.is_empty());
-    mdc.files[0].checksum =
-        "blake3:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    // Tamper with one slot's URL to point at a different file on disk.
+    // The CheckedFile's checksum still references the original bytes,
+    // so resolve_uri's content fetched-vs-claimed check will reject.
+    let other = std::fs::canonicalize(std::path::Path::new(HF_PATH).join("generation_config.json"))
+        .unwrap();
+    let other_url = url::Url::from_file_path(&other).unwrap();
+    if let Some(t) = mdc.tokenizer.as_mut() {
+        match t {
+            TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                cf.move_to_url(other_url);
+            }
+        }
+    }
 
     let err = mdc
         .download_config()
@@ -354,23 +377,10 @@ async fn test_download_files_rejects_blake3_mismatch() {
         err.contains("checksum mismatch"),
         "expected checksum-mismatch error, got: {err}"
     );
-
-    // The tampered artifact's blob (under the bad blake3) must NOT
-    // exist — atomic write guarantees no partial file.
-    let blobs_dir =
-        std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/dynamo/mdc/blobs");
-    let bad_blob =
-        blobs_dir.join("0000000000000000000000000000000000000000000000000000000000000000");
-    assert!(
-        !bad_blob.exists(),
-        "no blob should exist for the mismatched checksum"
-    );
 }
 
 /// End-to-end of the unified download path against a real HuggingFace
-/// repo. Skipped at runtime when `HF_TOKEN` is unset, matching the
-/// pattern in `lib/llm/tests/preprocessor.rs`. Uses the same gated
-/// model the preprocessor tests use so the HF cache is shared.
+/// repo. Skipped at runtime when `HF_TOKEN` is unset.
 #[serial_test::serial]
 #[tokio::test]
 async fn test_download_files_resolves_hf_scheme_with_token() {
@@ -384,82 +394,69 @@ async fn test_download_files_resolves_hf_scheme_with_token() {
     }
 
     let _home = isolated_home();
-
-    // Construct an MDC carrying hf:// URIs for the metadata files.
-    // We fabricate a minimal MDC with just the `files` vector
-    // populated; the test exercises `download_files` end-to-end via
-    // `download_config`.
     let repo = "meta-llama/Llama-3.1-70B-Instruct";
 
-    // First, prime the HF cache by calling hub::from_hf — this is
-    // the same path the resolver uses internally, but we need it
-    // here too so we can compute the expected blake3 of each file.
+    // Prime the HF cache so we can construct CheckedFiles with the
+    // right blake3 + size, then point the typed-enum slots at
+    // hf://repo/filename URIs that resolve_uri will dispatch.
     let snapshot = dynamo_llm::hub::from_hf(repo, /* ignore_weights = */ true)
         .await
         .expect("priming HF cache");
 
-    // Build the files vector from the snapshot's metadata files.
-    // URIs use the same shape `move_to_url` produces today
-    // (`hf://repo/filename`, no `@revision` segment).
-    let candidates = [
-        ("config.json", ArtifactRole::Config),
-        ("tokenizer.json", ArtifactRole::Tokenizer),
-        ("tokenizer_config.json", ArtifactRole::TokenizerConfig),
-    ];
-    let mut files = Vec::new();
-    for (filename, role) in candidates {
-        let path = snapshot.join(filename);
-        if !path.exists() {
-            continue;
-        }
-        let bytes = std::fs::read(&path).unwrap();
-        let checksum = format!("blake3:{}", blake3::hash(&bytes));
-        files.push(ArtifactRef {
-            filename: filename.to_string(),
-            uri: format!("hf://{repo}/{filename}"),
-            checksum,
-            size: bytes.len() as u64,
-            role,
-        });
-    }
+    // Build a minimal MDC carrying just config + tokenizer slots,
+    // both backed by HF snapshot files (so blake3 + size reflect the
+    // HF bytes). Other slots stay None so they don't enter the
+    // download path with stale TinyLlama checksums.
+    let hf_config = snapshot.join("config.json");
+    let hf_tokenizer = snapshot.join("tokenizer.json");
+    assert!(hf_config.exists(), "config.json missing in HF snapshot");
     assert!(
-        !files.is_empty(),
-        "expected to find at least config.json + tokenizer.json in the HF snapshot"
+        hf_tokenizer.exists(),
+        "tokenizer.json missing in HF snapshot"
     );
 
-    // Manufacture an MDC with just `display_name` + `files` set.
-    // No typed-enum CheckedFiles, so `has_local_files()` returns
-    // true via `unwrap_or(true)` on each None — meaning
-    // download_config short-circuits without entering download_files.
-    // Call download_files directly via download_config by giving
-    // it at least one URL-backed typed enum so has_local_files()
-    // returns false. Construct one minimal placeholder via
-    // `move_to_url` of a freshly loaded TinyLlama MDC, then swap in
-    // our HF-sourced files vector.
     let mut mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
-    mdc.move_to_url("hf://test/").unwrap();
-    mdc.files = files.clone();
+    mdc.prompt_formatter = None;
+    mdc.chat_template_file = None;
+    mdc.gen_config = None;
+    mdc.model_info = Some(dynamo_llm::model_card::ModelInfoType::HfConfigJson(
+        dynamo_llm::common::checked_file::CheckedFile::from_disk(&hf_config)
+            .expect("from_disk(config.json)"),
+    ));
+    mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+        dynamo_llm::common::checked_file::CheckedFile::from_disk(&hf_tokenizer)
+            .expect("from_disk(tokenizer.json)"),
+    ));
 
+    // Switch every populated CheckedFile to hf://<repo>/<filename>.
+    for cf in mdc.iter_metadata_files_mut() {
+        let filename = cf
+            .path()
+            .and_then(|p| p.file_name())
+            .and_then(|f| f.to_str())
+            .map(String::from)
+            .expect("derivable filename");
+        let url = url::Url::parse(&format!("hf://{repo}/{filename}")).expect("hf url");
+        cf.move_to_url(url);
+    }
+
+    let expected = metadata_fingerprint(&mdc);
+    assert_eq!(
+        expected.len(),
+        2,
+        "expected exactly config + tokenizer slots"
+    );
     mdc.download_config()
         .await
         .expect("download_config (hf://)");
 
-    // Assert each artifact landed in the content-addressed cache
-    // and the bytes blake3-match.
     let blobs_dir =
         std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/dynamo/mdc/blobs");
-    for artifact in &files {
-        let hex = artifact.checksum.strip_prefix("blake3:").unwrap();
+    for (_, hex) in &expected {
         let blob = blobs_dir.join(hex);
-        assert!(
-            blob.exists(),
-            "expected blob for {} at {}",
-            artifact.filename,
-            blob.display()
-        );
-
+        assert!(blob.exists(), "expected blob at {}", blob.display());
         let actual = format!("blake3:{}", blake3::hash(&std::fs::read(&blob).unwrap()));
-        assert_eq!(actual, artifact.checksum);
+        assert_eq!(actual, format!("blake3:{hex}"));
     }
 }
 
@@ -589,10 +586,11 @@ mod integration_tests {
         let blobs: Vec<_> = std::fs::read_dir(&blobs_dir).unwrap().collect();
         let links: Vec<_> = std::fs::read_dir(&slug_dir).unwrap().collect();
         assert!(!blobs.is_empty(), "expected at least one blob");
+        let metadata_count = card.iter_metadata_files().count();
         assert_eq!(
-            card.files.len(),
+            metadata_count,
             links.len(),
-            "by-slug entries must match files vector length"
+            "by-slug entries must match the count of populated metadata files"
         );
 
         let _tokenizer = card.tokenizer().expect("tokenizer should load");
