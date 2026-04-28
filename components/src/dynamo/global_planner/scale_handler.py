@@ -708,6 +708,9 @@ class ScaleRequestHandler:
                             f"Rejecting scale request from {request.caller_namespace}: "
                             f"{deny_reason}"
                         )
+                        # Soft denial: budget breach is an expected operational
+                        # outcome in fixed-total mode, not a fault. Local
+                        # planners should treat this as a no-op for this tick.
                         yield {
                             "status": ScaleStatus.REJECTED.value,
                             "message": f"GPU budget breach: {deny_reason}",
