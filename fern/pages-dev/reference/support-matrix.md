@@ -28,6 +28,8 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## Backend Dependencies
 
+> Driver requirements differ by backend — see [CUDA and Driver Requirements](#cuda-and-driver-requirements) below.
+
 The following table shows the backend framework versions included with each Dynamo release:
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |

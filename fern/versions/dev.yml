@@ -21,13 +21,15 @@ navigation:
   - section: Getting Started
     contents:
       - page: Quickstart
-        path: ../pages-dev/getting-started/quickstart.md
+        path: ../pages-dev/getting-started/quickstart.mdx
       - page: Introduction
         path: ../pages-dev/getting-started/introduction.md
       - page: Local Installation
         path: ../pages-dev/getting-started/local-installation.md
       - page: Building from Source
         path: ../pages-dev/getting-started/building-from-source.md
+      - page: Kubernetes Deployment
+        path: ../pages-dev/kubernetes/README.md
       - page: Contribution Guide
         path: ../pages-dev/contribution-guide.md
   # ==================== Resources ====================
