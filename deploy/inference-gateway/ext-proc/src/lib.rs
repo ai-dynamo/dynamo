@@ -6,17 +6,18 @@
 //! Mirrors the Go LW-EPP architecture from GAIE (issue #2834 / PR #2842):
 //! - `StreamingServer` handles the ext-proc bidirectional streaming protocol
 //! - `EndpointPicker` trait abstracts endpoint selection
-//! - The Dynamo `Router` implements `EndpointPicker` using the KV-aware router
+//! - The Dynamo `epp::Router` implements `EndpointPicker` using the KV-aware router
 //!
 //! ```text
-//! Envoy ──ext-proc──▶ ExtProcServer<Router> ──EndpointPicker──▶ Dynamo KV Router
+//! Envoy ──ext-proc──▶ ExtProcServer<epp::Router> ──EndpointPicker──▶ Dynamo KV Router
 //! ```
 
 pub mod envoy_helpers;
+pub mod epp;
 pub mod picker;
 pub mod proto;
-pub mod router;
 pub mod server;
 
+pub use epp::Router;
 pub use picker::{EndpointPicker, Endpoint, PickResult, RequestInfo};
 pub use server::ExtProcServer;
