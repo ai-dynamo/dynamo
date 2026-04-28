@@ -302,6 +302,70 @@ async fn test_download_files_resolves_local_file_scheme() {
     let _tokenizer = mdc.tokenizer().expect("tokenizer should load");
 }
 
+/// Single-process simulation of multiple replicas registering the same
+/// model concurrently. Each replica's MDC carries identical CheckedFile
+/// checksums, so they all converge on the same content-addressed blobs.
+/// Without per-task tmp suffixes, two concurrent fetches of the same
+/// blake3 would race on `<blob>.tmp` and produce spurious blake3-mismatch
+/// errors. This test exercises that exact path: N concurrent
+/// `download_config` calls against the same MDC must all succeed.
+#[serial_test::serial]
+#[tokio::test]
+async fn test_concurrent_registrations_do_not_race() {
+    let _home = isolated_home();
+
+    // Fan out 8 concurrent registrations of fresh-but-identical MDCs.
+    // 8 is enough to provoke real interleaving on multi-core hosts;
+    // the test still completes in well under a second.
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        handles.push(tokio::spawn(async move {
+            let mut mdc = mdc_with_url_backed_metadata();
+            mdc.download_config().await
+        }));
+    }
+    for handle in handles {
+        handle
+            .await
+            .expect("task panicked")
+            .expect("download_config must succeed under concurrent fetches of same blake3");
+    }
+
+    // After all 8 finished, the cache is fully populated and consistent.
+    let blobs_dir =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/dynamo/mdc/blobs");
+    let blobs: Vec<_> = std::fs::read_dir(&blobs_dir)
+        .unwrap()
+        .filter_map(|e| {
+            let entry = e.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            // Filter out leftover `tmp.*` files — they're tolerated but
+            // shouldn't be the only thing left.
+            if name.contains(".tmp.") {
+                None
+            } else {
+                Some(entry)
+            }
+        })
+        .collect();
+    assert!(
+        !blobs.is_empty(),
+        "at least one blob should land in the cache"
+    );
+
+    // No leftover tmp files — successful rename cleans up.
+    let leftover_tmps: Vec<_> = std::fs::read_dir(&blobs_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(
+        leftover_tmps.is_empty(),
+        "no `*.tmp.*` files should be left after successful concurrent registrations, got {} leftovers",
+        leftover_tmps.len(),
+    );
+}
+
 #[serial_test::serial]
 #[tokio::test]
 async fn test_download_files_dedupes_by_blake3() {

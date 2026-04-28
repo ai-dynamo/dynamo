@@ -1578,6 +1578,7 @@ dependencies = [
  "image",
  "ipnet",
  "json-five",
+ "libc",
  "memfile",
  "minijinja",
  "minijinja-contrib",

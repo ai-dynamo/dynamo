@@ -12,9 +12,10 @@
 //! - Tokenizer configuration (TokenizerKind)
 //! - Prompt formatter settings (PromptFormatterArtifact)
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
@@ -202,6 +203,67 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
 /// headroom while keeping disk-exhaustion bounded.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// In-process coordination for `resolve_uri`. Keyed on the blake3 hex
+/// of each blob, so concurrent registrations of the same content
+/// serialize to a single fetch+verify+rename within this process.
+fn resolve_uri_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    static MAP: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    MAP.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn lock_for_blake3(blake3_hex: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = resolve_uri_locks()
+        .lock()
+        .expect("resolve_uri_locks poisoned");
+    map.entry(blake3_hex.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Cross-process exclusive lock for a blob path, mirroring the pattern
+/// `hf-hub` uses internally (`libc::flock(LOCK_EX)` on a sentinel file
+/// next to the blob). The lock is held for the lifetime of `BlobLock`
+/// and released when its `_file` field drops (closing the fd).
+///
+/// Combined with the in-process `tokio::sync::Mutex` above, fetches
+/// are serialized both within-process (cheap, async-friendly) and
+/// across processes (so two frontend instances sharing a cache dir
+/// can't both fetch the same blob simultaneously).
+struct BlobLock {
+    _file: std::fs::File,
+}
+
+impl BlobLock {
+    /// Blocks the calling task until the OS-level exclusive lock is
+    /// acquired on `<blob>.lock`. Uses `tokio::task::spawn_blocking`
+    /// so the runtime stays responsive.
+    async fn acquire(blob_path: &Path) -> anyhow::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let lock_path = blob_path.with_extension("lock");
+        let file = tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .with_context(|| format!("opening lock file {}", lock_path.display()))?;
+            // SAFETY: `f` is open and owned; `flock` is a stable syscall.
+            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                anyhow::bail!(
+                    "flock {} failed: {}",
+                    lock_path.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+            Ok(f)
+        })
+        .await
+        .context("flock spawn_blocking task panicked")??;
+        Ok(Self { _file: file })
+    }
+}
+
 /// MDC files cache root: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`
 /// symlinks. The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/`,
 /// isolating different worker sets that share a model name but publish
@@ -262,6 +324,31 @@ async fn resolve_uri(
     }
 
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
+
+    // Per-blake3 in-process lock — cheap, async-friendly. Wins quickly
+    // among concurrent tasks in the same process so only one of them
+    // spawns_blocking for the cross-process flock.
+    let blake3_hex = blake3_hex_of(&expected.checksum().to_string())?.to_string();
+    let proc_lock = lock_for_blake3(&blake3_hex);
+    let _proc_guard = proc_lock.lock().await;
+
+    // Cross-process exclusive flock on `<blob>.lock` — mirrors the
+    // hf-hub pattern. Multiple frontend instances sharing a cache dir
+    // serialize here at the kernel level, never both writing to the
+    // same blob path simultaneously.
+    let _blob_guard = BlobLock::acquire(dest).await?;
+
+    // Re-check after acquiring both locks: another waiter may have
+    // populated the blob while we were queued. Short-circuit to a
+    // cache hit rather than duplicate-fetching.
+    if dest.exists() {
+        return Ok(());
+    }
+
+    // Single tmp path per blob — the flock above guarantees only one
+    // fetcher owns it at a time. A panic mid-write leaves a stale tmp;
+    // the next holder's `File::create(tmp)` truncates it cleanly, so
+    // no accumulation across runs.
     let tmp = dest.with_extension("tmp");
 
     let stage_result = match parsed.scheme() {
