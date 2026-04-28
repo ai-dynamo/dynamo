@@ -87,9 +87,12 @@ const (
 	SidecarImage = "bitnami/kubectl:latest"
 
 	// Volume names
-	VolumeNameProfilingOutput = "profiling-output"
-	VolumeNameProfilingConfig = "profiling-config"
-	VolumeNameModelCache      = "model-cache"
+	VolumeNameProfilingOutput            = "profiling-output"
+	VolumeNameProfilingConfig            = "profiling-config"
+	VolumeNameModelCache                 = "model-cache"
+	VolumeNameOutputCopierKubeAPIAccess  = "output-copier-kube-api-access"
+	ConfigMapNameKubeRootCA              = "kube-root-ca.crt"
+	ServiceAccountTokenExpirationSeconds = 3600
 
 	// Volume paths
 	ProfilingOutputPath        = "/data"
@@ -97,6 +100,7 @@ const (
 	ProfilingConfigMountPath   = "/config"
 	ProfilingConfigDefaultKey  = "disagg.yaml"
 	DefaultModelCacheMountPath = "/opt/model-cache"
+	ServiceAccountTokenPath    = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -700,6 +704,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		return ctrl.Result{}, err
 	}
 
+	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgd.Name, err)
+	}
+
 	// Check if DGD is Ready
 	var condStatus metav1.ConditionStatus
 	var condReason, condMessage string
@@ -753,6 +761,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgd.Name, err)
 	}
 
 	// Check if DGD degraded from Ready
@@ -868,6 +880,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			logger.Info("DGD already exists, updating status")
+			existingDGD := &dgdv1alpha1.DynamoGraphDeployment{}
+			if getErr := r.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD); getErr != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to get existing DGD %s: %w", dgdName, getErr)
+			}
+			if adoptErr := r.adoptAdditionalResources(ctx, dgdr, existingDGD); adoptErr != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for existing DGD %s: %w", dgdName, adoptErr)
+			}
 			delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
 			if updateErr := r.Update(ctx, dgdr); updateErr != nil {
 				logger.Error(updateErr, "Failed to remove generated-dgd-spec annotation on IsAlreadyExists path")
@@ -887,6 +906,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 				"DeploymentRejected", err.Error())
 		}
 		return ctrl.Result{}, err
+	}
+
+	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgdName, err)
 	}
 
 	delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
@@ -912,6 +935,75 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger.Info("DynamoGraphDeployment created successfully", "name", dgdName)
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
+}
+
+// adoptAdditionalResources makes profiling-generated ConfigMaps follow the DGD lifecycle.
+func (r *DynamoGraphDeploymentRequestReconciler) adoptAdditionalResources(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *dgdv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	configMaps := &corev1.ConfigMapList{}
+	if err := r.List(ctx, configMaps,
+		client.InNamespace(dgdr.Namespace),
+		client.MatchingLabels{
+			nvidiacomv1beta1.LabelDGDRName:      dgdr.Name,
+			nvidiacomv1beta1.LabelDGDRNamespace: dgdr.Namespace,
+			nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+		},
+	); err != nil {
+		return fmt.Errorf("failed to list additional ConfigMaps for DGDR %s: %w", dgdr.Name, err)
+	}
+
+	outputConfigMapName := getOutputConfigMapName(dgdr)
+	for i := range configMaps.Items {
+		cm := &configMaps.Items[i]
+		if cm.Name == outputConfigMapName {
+			continue
+		}
+
+		// New ConfigMaps are created ownerless. This also repairs CMs created by
+		// older controllers that incorrectly used DGDR as the controller owner.
+		ownerReferences, removedDGDROwnerReference := removeDGDROwnerReferences(cm.GetOwnerReferences(), dgdr)
+		dgdOwnerAlreadySet := isControlledByDGD(ownerReferences, dgd)
+		if dgdOwnerAlreadySet && !removedDGDROwnerReference {
+			continue
+		}
+
+		cm.SetOwnerReferences(ownerReferences)
+		if !dgdOwnerAlreadySet {
+			if err := ctrl.SetControllerReference(dgd, cm, r.Scheme()); err != nil {
+				return fmt.Errorf("failed to set DGD owner reference on ConfigMap %s: %w", cm.Name, err)
+			}
+		}
+		if err := r.Update(ctx, cm); err != nil {
+			return fmt.Errorf("failed to update owner reference on ConfigMap %s: %w", cm.Name, err)
+		}
+
+		logger.Info("Adopted ConfigMap for DGD lifecycle", "name", cm.Name, "namespace", cm.Namespace, "dgd", dgd.Name)
+	}
+
+	return nil
+}
+
+func removeDGDROwnerReferences(ownerReferences []metav1.OwnerReference, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) ([]metav1.OwnerReference, bool) {
+	filtered := ownerReferences[:0]
+	removed := false
+	for _, ownerReference := range ownerReferences {
+		if ownerReference.Kind == "DynamoGraphDeploymentRequest" &&
+			ownerReference.Name == dgdr.Name {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, ownerReference)
+	}
+	return filtered, removed
+}
+
+func isControlledByDGD(ownerReferences []metav1.OwnerReference, dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
+	controller := metav1.GetControllerOf(&metav1.ObjectMeta{OwnerReferences: ownerReferences})
+	return controller != nil &&
+		controller.Kind == "DynamoGraphDeployment" &&
+		controller.Name == dgd.Name &&
+		controller.UID == dgd.UID
 }
 
 // createAdditionalResources creates ConfigMaps from the profiling output that should be deployed alongside the DGD
@@ -969,8 +1061,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 		cm.Labels[nvidiacomv1beta1.LabelDGDRNamespace] = dgdr.Namespace
 		cm.Labels[nvidiacomv1beta1.LabelManagedBy] = nvidiacomv1beta1.LabelValueDynamoOperator
 
-		// Use SyncResource to create/update the ConfigMap with owner reference and change detection
-		_, _, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		// Create/update with no owner reference. The ConfigMap is adopted by the DGD
+		// after the DGD exists, so it can outlive the DGDR during auto-apply.
+		_, _, err := commonController.SyncResource(ctx, r, nil, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
 			return cm, false, nil
 		})
 		if err != nil {
@@ -1413,6 +1506,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			jobOverrides = dgdr.Spec.Overrides.ProfilingJob
 		}
 		applyProfilingJobOverrides(job, jobOverrides)
+		ensureOutputCopierKubeAPIAccess(job)
 
 		return job, false, nil
 	})
