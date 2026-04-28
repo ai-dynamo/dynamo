@@ -137,27 +137,16 @@ def patch_register_kv_caches() -> None:
     original_register = NixlConnector.register_kv_caches
 
     def patched_register_kv_caches(self, kv_caches):
+        from gpu_memory_service.client.client_local_memory_manager import (
+            ClientLocalMemoryManager,
+        )
         from gpu_memory_service.client.torch.allocator import (
             get_gms_client_memory_manager,
-            is_scratch,
         )
 
-        # Fail closed on lookup errors: falling through to original_register
-        # would pin an MR onto a scratch page that sleep is about to free,
-        # exactly the bug this patch exists to prevent.
-        try:
-            kv_mgr = get_gms_client_memory_manager("kv_cache")
-            has_deferred = kv_mgr is not None and is_scratch(kv_mgr)
-        except (LookupError, AttributeError, RuntimeError) as exc:
-            logger.warning(
-                "[GMS Patch] Cannot determine deferred-KV state — "
-                "raising to avoid pinning a stale scratch MR: %s",
-                exc,
-                exc_info=True,
-            )
-            raise
-
-        if has_deferred:
+        kv_mgr = get_gms_client_memory_manager("kv_cache")
+        defer = isinstance(kv_mgr, ClientLocalMemoryManager) and kv_mgr.aliased
+        if defer:
             self._scratch_kv_pending = kv_caches
             logger.info(
                 "[GMS Patch] Deferring NIXL KV cache registration "
