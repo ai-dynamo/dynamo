@@ -149,32 +149,3 @@ class TestEncodeToVideoBytes:
 
             assert writer.append_data.call_count == 4
             writer.close.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# encode_to_mp4_bytes (compat wrapper)
-# ---------------------------------------------------------------------------
-
-
-class TestEncodeToMp4BytesCompat:
-    def test_delegates_to_encode_to_video_bytes(self):
-        from dynamo.common.utils import video_utils
-
-        with patch.object(
-            video_utils, "encode_to_video_bytes", return_value=b"mp4-bytes"
-        ) as mock_fn:
-            result = video_utils.encode_to_mp4_bytes(make_frames(), fps=24)
-
-        mock_fn.assert_called_once_with(make_frames(), fps=24, output_format="mp4")
-        assert result == b"mp4-bytes"
-
-    def test_default_fps_is_16(self):
-        from dynamo.common.utils import video_utils
-
-        with patch.object(
-            video_utils, "encode_to_video_bytes", return_value=b"bytes"
-        ) as mock_fn:
-            video_utils.encode_to_mp4_bytes(make_frames())
-
-        _, kwargs = mock_fn.call_args
-        assert kwargs["fps"] == 16

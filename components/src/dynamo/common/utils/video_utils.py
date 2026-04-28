@@ -240,11 +240,3 @@ def encode_to_video_bytes(
     except Exception as e:
         logger.error(f"Failed to encode video to bytes: {e}")
         raise RuntimeError(f"Video encoding to bytes failed: {e}") from e
-
-
-def encode_to_mp4_bytes(
-    frames: np.ndarray,
-    fps: int = 16,
-) -> bytes:
-    """Encode numpy frames to MP4 bytes. Calls encode_to_video_bytes with format='mp4'."""
-    return encode_to_video_bytes(frames, fps=fps, output_format="mp4")

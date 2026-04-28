@@ -49,9 +49,9 @@ def _make_stage_cfg(stage_id: int):
     )
 
 
-def _make_router(stage_configs, stage_clients, formatter=None):
+def _make_router(stage_configs, stage_clients, formatter=None, output_modalities=None):
     router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=None)
+    router.config = SimpleNamespace(output_modalities=output_modalities)
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
     router._formatter = formatter or AsyncMock()
@@ -332,6 +332,7 @@ class TestStageRouterContextNormalization:
             stage_configs=[_make_stage_cfg(0)],
             stage_clients={"stage0": _StageClient(stage0_handler)},
             formatter=mock_formatter,
+            output_modalities=["audio"],
         )
 
         request = {"prompt": "hi", "data_source": "url", "response_format": "mp3"}
@@ -365,6 +366,7 @@ class TestStageRouterContextNormalization:
             stage_configs=[_make_stage_cfg(0)],
             stage_clients={"stage0": _StageClient(stage0_handler)},
             formatter=mock_formatter,
+            output_modalities=["audio"],
         )
 
         request = {"prompt": "hi", "data_source": "b64_json", "response_format": "opus"}

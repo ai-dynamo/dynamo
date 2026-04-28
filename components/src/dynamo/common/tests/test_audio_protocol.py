@@ -21,10 +21,9 @@ class TestNvCreateAudioSpeechRequest:
     def test_minimal_required_fields(self):
         req = NvCreateAudioSpeechRequest(input="hello")
         assert req.input == "hello"
-
-    def test_data_source_is_optional(self):
-        req = NvCreateAudioSpeechRequest(input="hi")
         assert req.data_source is None
+        assert req.response_format == "wav"
+        assert req.speed == 1.0
 
     def test_data_source_url(self):
         req = NvCreateAudioSpeechRequest(input="hi", data_source="url")
@@ -41,10 +40,6 @@ class TestNvCreateAudioSpeechRequest:
         assert req.data_source == "b64_json"
         assert req.response_format == "mp3"
 
-    def test_response_format_default_is_wav(self):
-        req = NvCreateAudioSpeechRequest(input="hi")
-        assert req.response_format == "wav"
-
     def test_response_format_valid_values(self):
         for fmt in ("wav", "pcm", "flac", "mp3", "aac", "opus"):
             req = NvCreateAudioSpeechRequest(input="hi", response_format=fmt)
@@ -53,10 +48,6 @@ class TestNvCreateAudioSpeechRequest:
     def test_response_format_invalid_raises(self):
         with pytest.raises(ValidationError):
             NvCreateAudioSpeechRequest(input="hi", response_format="webm")
-
-    def test_speed_default(self):
-        req = NvCreateAudioSpeechRequest(input="hi")
-        assert req.speed == 1.0
 
     def test_speed_bounds(self):
         with pytest.raises(ValidationError):
