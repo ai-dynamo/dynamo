@@ -19,9 +19,9 @@ use crate::{ParserResult, ReasoningParser};
 ///
 /// References:
 /// - SGLang MiniMaxAppendThinkDetector:
-///   https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/parser/reasoning_parser.py
+///   <https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/parser/reasoning_parser.py>
 /// - vLLM MiniMaxM2AppendThinkReasoningParser:
-///   https://github.com/vllm-project/vllm/blob/main/vllm/reasoning/minimax_m2_reasoning_parser.py
+///   <https://github.com/vllm-project/vllm/blob/main/vllm/reasoning/minimax_m2_reasoning_parser.py>
 #[derive(Debug, Default)]
 pub struct MiniMaxAppendThinkParser {
     /// Flips to true after the first streamed chunk has received the `<think>`

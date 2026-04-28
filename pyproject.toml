@@ -223,6 +223,9 @@ filterwarnings = [
     # SGLang quantization warnings on CPU-only runners
     "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
     "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
+    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
+    # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
+    "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
 ]
 
 
