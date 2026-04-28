@@ -351,7 +351,7 @@ async def _run(args: argparse.Namespace) -> int:
         async for r in handler.scale_request(req.model_dump()):
             results.append(r)
         response = results[0] if results else {"status": "none", "message": ""}
-        if response["status"] == "error":
+        if response["status"] in ("error", "budget_rejected"):
             msg = response["message"].lower()
             if "below floor" in msg:
                 return "denied_floor"

@@ -315,6 +315,32 @@ async def test_connector_error_handling(connector):
 
 
 @pytest.mark.asyncio
+async def test_connector_budget_rejected_is_non_fatal(connector):
+    """A BUDGET_REJECTED response from the GlobalPlanner is a soft denial:
+    the local planner should NOT crash. It is logged at INFO and
+    set_component_replicas returns without raising."""
+    target = [
+        TargetReplica(
+            sub_component_type=SubComponentType.PREFILL,
+            component_name="p",
+            desired_replicas=2,
+        )
+    ]
+    with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "d", "POD_NAMESPACE": "n"}):
+        mock_response = ScaleResponse(
+            status=ScaleStatus.BUDGET_REJECTED,
+            message="GPU budget breach: total 8 exceeds ceiling (6)",
+            current_replicas={},
+        )
+        mock_client = AsyncMock()
+        mock_client.send_scale_request = AsyncMock(return_value=mock_response)
+        connector.remote_client = mock_client
+        # Must NOT raise — this used to crash-loop the planner pod when the
+        # GlobalPlanner enforced a fixed-total budget.
+        await connector.set_component_replicas(target)
+
+
+@pytest.mark.asyncio
 async def test_connector_unsupported_and_noop_operations(connector):
     """Test unsupported and no-op operations"""
     # Unsupported

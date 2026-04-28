@@ -98,7 +98,10 @@ class GlobalPlannerConnector(PlannerConnector):
 
         Raises:
             EmptyTargetReplicasError: If target_replicas is empty
-            RuntimeError: If remote_client is not initialized or response indicates error
+            RuntimeError: If remote_client is not initialized or the response
+                indicates a hard error (e.g., authorization denied, K8s
+                exception). A BUDGET_REJECTED response is NOT raised — it is
+                logged at INFO and treated as a no-op for this tick.
         """
         if not target_replicas:
             raise EmptyTargetReplicasError()
@@ -162,6 +165,17 @@ class GlobalPlannerConnector(PlannerConnector):
         # Check response status
         if response.status == ScaleStatus.SUCCESS:
             logger.info(f"GlobalPlanner scaling successful: {response.message}")
+        elif response.status == ScaleStatus.BUDGET_REJECTED:
+            # Soft denial — the GlobalPlanner is healthy but our request
+            # would breach the cluster-wide GPU budget and could not be
+            # paired with an opposite-direction intent on another pool.
+            # This is a normal outcome in fixed-total deployments. Hold
+            # current allocation this tick; the local planner will
+            # re-decide on its next tick when state may have shifted.
+            logger.info(
+                f"GlobalPlanner soft-rejected scale request "
+                f"(holding current allocation): {response.message}"
+            )
         elif response.status == ScaleStatus.ERROR:
             logger.error(f"GlobalPlanner scaling failed: {response.message}")
             raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")

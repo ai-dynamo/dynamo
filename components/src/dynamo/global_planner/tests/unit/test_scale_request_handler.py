@@ -539,7 +539,8 @@ async def test_scale_down_denied_when_breaches_floor_and_no_pair(mock_runtime):
     )
     req = _scale_req(caller_ns="default-my-dgd", prefill=2)  # want to drop to 2
     results = await _run(handler, req)
-    assert results[0]["status"] == "error"
+    # Soft-deny status: budget breach is normal in fixed-total mode, not a fault.
+    assert results[0]["status"] == "budget_rejected"
     assert (
         "budget breach" in results[0]["message"].lower()
         or "below floor" in results[0]["message"].lower()
@@ -778,7 +779,7 @@ async def test_intent_cache_respects_ttl(mock_runtime):
 
     req = _scale_req(caller_ns="default-my-dgd", prefill=2)
     results = await _run(handler, req)
-    assert results[0]["status"] == "error"
+    assert results[0]["status"] == "budget_rejected"
     connector.set_component_replicas.assert_not_called()
 
 
@@ -866,7 +867,7 @@ async def test_asymmetric_pair_denied_if_outside_tolerance(mock_runtime):
     )
     req = _scale_req(caller_ns="default-my-dgd", decode=5)
     results = await _run(handler, req)
-    assert results[0]["status"] == "error"
+    assert results[0]["status"] == "budget_rejected"
     connector.set_component_replicas.assert_not_called()
 
 
@@ -895,7 +896,7 @@ async def test_asymmetric_pair_denied_if_below_tolerance(mock_runtime):
     )
     req = _scale_req(caller_ns="default-my-dgd", prefill=2)
     results = await _run(handler, req)
-    assert results[0]["status"] == "error"
+    assert results[0]["status"] == "budget_rejected"
     assert "below floor" in results[0]["message"].lower()
     connector.set_component_replicas.assert_not_called()
 
@@ -956,7 +957,7 @@ async def test_out_of_order_requests_pair_via_cache(mock_runtime):
     # First request: prefill wants to drop to 2 (from 3). No decode intent in cache.
     req_prefill = _scale_req(caller_ns="default-my-dgd", prefill=2)
     results_1 = await _run(handler, req_prefill)
-    assert results_1[0]["status"] == "error"
+    assert results_1[0]["status"] == "budget_rejected"
     connector.set_component_replicas.assert_not_called()
     # Verify the intent was still cached
     assert "default/my-dgd/prefill" in handler._intent_cache
@@ -1049,7 +1050,7 @@ async def test_satisfied_cached_intent_does_not_pair(mock_runtime):
     # partner because prefill's cached intent is satisfied.
     req = _scale_req(caller_ns="default-my-dgd", decode=2)
     results = await _run(handler, req)
-    assert results[0]["status"] == "error"
+    assert results[0]["status"] == "budget_rejected"
 
 
 @pytest.mark.asyncio
@@ -1082,4 +1083,4 @@ async def test_intent_cache_clears_on_stable_signal(mock_runtime):
     connector.set_component_replicas.reset_mock()
     req_decode_up = _scale_req(caller_ns="default-my-dgd", decode=4)
     results = await _run(handler, req_decode_up)
-    assert results[0]["status"] == "error"
+    assert results[0]["status"] == "budget_rejected"
