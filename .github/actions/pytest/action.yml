@@ -92,7 +92,7 @@ runs:
         MAX_ATTEMPTS=30
         ATTEMPT=0
         while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+          if curl --retry 5 --retry-delay 2 -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
             echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
             break
           fi

@@ -23,7 +23,7 @@ runs:
             aarch64) VCLUSTER_ARCH="arm64" ;;
             *)       echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
           esac
-          curl -sL -o /tmp/vcluster \
+          curl --retry 5 --retry-delay 2 -sL -o /tmp/vcluster \
             "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${VCLUSTER_ARCH}"
           sudo mv /tmp/vcluster /usr/local/bin/vcluster
           sudo chmod +x /usr/local/bin/vcluster
