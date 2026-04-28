@@ -168,8 +168,9 @@ class StreamProcessor:
                         "finished": False,
                     }
 
-                    # Check for finish reason
                     if finish_reason:
+                        # For n > 1, choices can finish independently and SGLang
+                        # may continue emitting chunks for other choice indices.
                         output.update(
                             {
                                 "finish_reason": normalize_finish_reason(
