@@ -3,13 +3,27 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .config import BenchmarkConfig, SweepConfig, input_file_tag, resolve_repo_root
 from .dataset_shape import count_session_ids
 from .runner import run_aiperf_single
 from .server import ServerManager
+
+
+def _restart_env(base: Dict[str, str], label: str) -> Dict[str, str]:
+    """Per-restart env with a unique DYN_NAMESPACE.
+
+    Belt-and-suspenders for the cross-iteration discovery leak: even if
+    ServerManager.stop() somehow misses a stale v1/instances or v1/mdc
+    entry, the next server boots into its own etcd subtree and cannot
+    observe it. Respects an explicit DYN_NAMESPACE in the user's yaml env.
+    """
+    env = dict(base)
+    env.setdefault("DYN_NAMESPACE", f"sweep-{label}-{uuid.uuid4().hex[:8]}")
+    return env
 
 
 def _resolve_workflow(workflow: str, repo_root: Path) -> str:
@@ -150,7 +164,7 @@ def _run_config(
             workflow_script=workflow_abs,
             model=config.model,
             extra_args=bench_cfg.extra_args,
-            env_overrides=env_overrides,
+            env_overrides=_restart_env(env_overrides, bench_cfg.label),
         )
 
     try:
@@ -165,7 +179,7 @@ def _run_config(
                     workflow_script=workflow_abs,
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
-                    env_overrides=env_overrides,
+                    env_overrides=_restart_env(env_overrides, bench_cfg.label),
                 )
 
             try:

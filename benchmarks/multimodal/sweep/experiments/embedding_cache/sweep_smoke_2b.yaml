@@ -13,7 +13,7 @@ conversation_num: 30
 warmup_count: 5
 port: 8000
 timeout: 2400
-output_dir: /dynamo-tmp/logs/04-25/2b-smoke-856213-run3
+output_dir: /dynamo-tmp/logs/04-26/2b-iter6
 restart_server_every_benchmark: true
 skip_plots: true
 
@@ -26,7 +26,12 @@ env:
   DYN_HTTP_BODY_LIMIT_MB: "200"
   # Co-locate .nsys-rep files with aiperf results instead of the default
   # date-based /dynamo-tmp/MM-DD/nsys/ dir.
-  DYN_NSYS_DIR: /dynamo-tmp/logs/04-25/2b-smoke-856213-run3/nsys
+  DYN_NSYS_DIR: /dynamo-tmp/logs/04-26/2b-iter6/nsys
+  # Relax NCCL watchdog so nsys-induced stalls don't SIGABRT TP workers.
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  NCCL_TIMEOUT: "1800"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  NCCL_DEBUG: "WARN"
 
 input_files:
   - /dynamo-tmp/data/30u_3t_5w_8000word_base64.jsonl
