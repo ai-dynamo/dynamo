@@ -68,7 +68,6 @@ runs:
         S3_BASE_URI="${{ inputs.s3_base_uri }}"
 
         echo "📦 Seeding models: ${S3_BASE_URI} → ${HUB_DEST}"
-        declare -A _pids _t0s
         COPIED=0
         FAILED=0
 
@@ -76,18 +75,11 @@ runs:
           dest="${HUB_DEST}/${model_name}"
           mkdir -p "${dest}"
 
-          _t0s["${model_name}"]=$(date +%s)
+          t0=$(date +%s)
+          echo "  ⏳ Downloading ${model_name}..."
           
-          # 2. Sync directly from S3
-          # We pipe output to a log file per model to keep the console clean
-          ${S5CMD_BIN} sync "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1 &
-          _pids["${model_name}"]=$!
-        done
-
-        # Wait and collect results
-        for model_name in "${!_pids[@]}"; do
-          if wait "${_pids[$model_name]}"; then
-            echo "  ✅ ${model_name} ($(( $(date +%s) - ${_t0s[$model_name]} ))s)"
+          if ${S5CMD_BIN} sync "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
+            echo "  ✅ ${model_name} ($(( $(date +%s) - t0 ))s)"
             COPIED=$((COPIED+1))
           else
             echo "  ❌ ${model_name} download failed!"
@@ -97,4 +89,5 @@ runs:
             FAILED=$((FAILED+1))
           fi
         done
+        
         echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"
