@@ -17,7 +17,9 @@ default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
+shard-metrics = []
 standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq"]
+indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
 
 [dependencies]
 # repo
@@ -30,7 +32,6 @@ async-trait = { workspace = true }
 dashmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
-derive-getters = { workspace = true }
 prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -61,3 +62,4 @@ rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

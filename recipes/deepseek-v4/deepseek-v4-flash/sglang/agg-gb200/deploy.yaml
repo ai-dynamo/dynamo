@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V4-Flash SGLang DynamoGraphDeployment — GB200 (arm64)
+# Aggregated mode, GB200x4 TP4, MXFP4 MoE, EAGLE MTP 3/4
+# Validated on dynamo-aws-dev-01 (p6e-gb200.36xlarge, EFA)
+#
+# Deploy:
+#   kubectl apply -f deploy.yaml -n <namespace>
+#
+# Test:
+#   kubectl port-forward -n <namespace> svc/sglang-dsv4-flash-frontend 8000:8000
+#   curl http://localhost:8000/v1/models
+#   curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+#     -d '{"model":"deepseek-ai/DeepSeek-V4-Flash","messages":[{"role":"user","content":"Hello"}]}'
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-dsv4-flash
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - operator: Exists
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-gb200-dev.1
+          imagePullPolicy: Always
+          env:
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        tolerations:
+        - operator: Exists
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-gb200-dev.1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - deepseek-ai/DeepSeek-V4-Flash
+            - --served-model-name
+            - deepseek-ai/DeepSeek-V4-Flash
+            - --trust-remote-code
+            - --tp
+            - "4"
+            - --moe-runner-backend
+            - flashinfer_mxfp4
+            - --speculative-algo
+            - EAGLE
+            - --speculative-num-steps
+            - "3"
+            - --speculative-eagle-topk
+            - "1"
+            - --speculative-num-draft-tokens
+            - "4"
+            - --chunked-prefill-size
+            - "4096"
+            - --disable-flashinfer-autotune
+            - --dyn-tool-call-parser
+            - deepseek_v4
+            - --dyn-reasoning-parser
+            - deepseek_v4
+          env:
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3"
+            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+              value: "0"
+            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+          resources:
+            limits:
+              vpc.amazonaws.com/efa: "4"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+  pvcs:
+    - name: shared-model-cache
+      create: false

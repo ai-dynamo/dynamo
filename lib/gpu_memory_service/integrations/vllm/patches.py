@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import logging
 
-from gpu_memory_service import get_gms_client_memory_manager
-from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
 
 logger = logging.getLogger(__name__)

@@ -5,9 +5,9 @@ use super::json::JsonParserType;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JsonParserConfig {
-    /// Start token for individual tool calls (e.g., "<TOOLCALL>")
+    /// Start token for individual tool calls (e.g., `<TOOLCALL>`)
     pub tool_call_start_tokens: Vec<String>,
-    /// End token for individual tool calls (e.g., "</TOOLCALL>")
+    /// End token for individual tool calls (e.g., `</TOOLCALL>`)
     pub tool_call_end_tokens: Vec<String>,
     /// Separator tokens between function name and arguments
     /// (e.g., "<｜tool▁sep｜>" for DeepSeek v3.1)
@@ -25,6 +25,13 @@ pub struct JsonParserConfig {
     /// The type of JSON parser to use
     #[serde(default)]
     pub parser_type: JsonParserType,
+
+    /// Parse input as bare JSON (a `{...}` object or `[...]` array) with no
+    /// wrapping markers. Intended for guided-decoding paths where the backend
+    /// emits a raw JSON shape. When true, `tool_call_start_tokens` /
+    /// `tool_call_end_tokens` are ignored.
+    #[serde(default)]
+    pub bare_json_mode: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -36,6 +43,7 @@ impl Default for JsonParserConfig {
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
+            bare_json_mode: false,
         }
     }
 }
@@ -44,15 +52,15 @@ impl Default for JsonParserConfig {
 pub struct XmlParserConfig {
     /// Start token for individual tool calls (e.g., "<tool_call>")
     pub tool_call_start_token: String,
-    /// End token for individual tool calls (e.g., "</tool_call>")
+    /// End token for individual tool calls (e.g., `</tool_call>`)
     pub tool_call_end_token: String,
-    /// Start token for function name (e.g., "<function=")
+    /// Start token for function name (e.g., `<function=`)
     pub function_start_token: String,
-    /// End token for function (e.g., "</function>")
+    /// End token for function (e.g., `</function>`)
     pub function_end_token: String,
-    /// Start token for parameter (e.g., "<parameter=")
+    /// Start token for parameter (e.g., `<parameter=`)
     pub parameter_start_token: String,
-    /// End token for parameter (e.g., "</parameter>")
+    /// End token for parameter (e.g., `</parameter>`)
     pub parameter_end_token: String,
 }
 
@@ -380,6 +388,22 @@ impl ToolCallConfig {
         // </｜DSML｜function_calls>
         Self {
             parser_config: ParserConfig::Dsml(DsmlParserConfig::default()),
+        }
+    }
+
+    pub fn deepseek_v4() -> Self {
+        // DeepSeek V4 format (DSML):
+        // <｜DSML｜tool_calls>
+        // <｜DSML｜invoke name="function_name">
+        // <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+        // </｜DSML｜invoke>
+        // </｜DSML｜tool_calls>
+        Self {
+            parser_config: ParserConfig::Dsml(DsmlParserConfig {
+                function_calls_start: "<｜DSML｜tool_calls>".to_string(),
+                function_calls_end: "</｜DSML｜tool_calls>".to_string(),
+                ..Default::default()
+            }),
         }
     }
 

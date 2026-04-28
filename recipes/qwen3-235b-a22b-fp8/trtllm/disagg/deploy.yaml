@@ -24,6 +24,7 @@ data:
       max_batch_size: 2
     disable_overlap_scheduler: true
     print_iter_log: false
+    # DEEPGEMM requires Blackwell (SM100+). Remove moe_config block to run on Hopper (SM90).
     moe_config:
       backend: DEEPGEMM
       max_num_tokens: 8192
@@ -52,6 +53,7 @@ data:
       max_batch_size: 512
     disable_overlap_scheduler: false
     print_iter_log: false
+    # DEEPGEMM requires Blackwell (SM100+). Remove moe_config block to run on Hopper (SM90).
     moe_config:
       backend: DEEPGEMM
       max_num_tokens: 8192
@@ -82,7 +84,7 @@ spec:
                     - qwen3-235b-a22b-disagg-frontend
               topologyKey: kubernetes.io/hostname
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           command:
@@ -117,7 +119,7 @@ spec:
               value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/prefill.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
@@ -173,7 +175,7 @@ spec:
               value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/decode.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh

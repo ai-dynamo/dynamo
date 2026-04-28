@@ -55,6 +55,7 @@ dynamo/
 ├── tests/                          # End-to-end and cross-component tests
 │   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
 │   ├── kvbm_integration/           # KVBM integration tests
+│   ├── gpu_memory_service/         # GPU Memory Service E2E tests
 │   ├── fault_tolerance/            # Fault tolerance, migration, cancellation
 │   ├── deploy/                     # Deployment tests
 │   ├── frontend/                   # Frontend HTTP/gRPC tests
@@ -83,20 +84,21 @@ dynamo/
 
 **Python tests** (`pytest`):
 
-| Type              | Description                              | Location                                     |
-|-------------------|------------------------------------------|----------------------------------------------|
-| Unit              | Single function/class, isolated          | `components/src/dynamo/<component>/tests/`   |
-| Integration       | Interactions between modules/services    | `components/src/dynamo/<component>/tests/`   |
-| End-to-End        | User workflows, CLI, API                 | `tests/serve/`, `tests/deploy/`, etc.        |
-| KVBM Integration  | KV block manager integration             | `tests/kvbm_integration/`                    |
-| Router            | Router E2E with backends                 | `tests/router/`                              |
-| Planner           | Planner unit + integration tests         | `components/src/dynamo/planner/tests/`       |
-| Frontend          | Frontend HTTP/gRPC tests                 | `tests/frontend/`                            |
-| Profiler          | Profiler unit + integration tests        | `components/src/dynamo/profiler/tests/`      |
-| Global Planner    | Global planner unit tests                | `components/src/dynamo/global_planner/tests/`|
-| Fault Tolerance   | Chaos, migration, cancellation           | `tests/fault_tolerance/`                     |
-| Deployment        | Deployment validation                    | `tests/deploy/`                              |
-| Benchmark         | Performance/load                         | `benchmarks/`                                |
+| Type               | Description                           | Location                                      |
+|--------------------|---------------------------------------|-----------------------------------------------|
+| Unit               | Single function/class, isolated       | `components/src/dynamo/<component>/tests/`    |
+| Integration        | Interactions between modules/services | `components/src/dynamo/<component>/tests/`    |
+| End-to-End         | User workflows, CLI, API              | `tests/serve/`, `tests/deploy/`, etc.         |
+| KVBM Integration   | KV block manager integration          | `tests/kvbm_integration/`                     |
+| GPU Memory Service | GPU Memory Service E2E                | `tests/gpu_memory_service/`                   |
+| Router             | Router E2E with backends              | `tests/router/`                               |
+| Planner            | Planner unit + integration tests      | `components/src/dynamo/planner/tests/`        |
+| Frontend           | Frontend HTTP/gRPC tests              | `tests/frontend/`                             |
+| Profiler           | Profiler unit + integration tests     | `components/src/dynamo/profiler/tests/`       |
+| Global Planner     | Global planner unit tests             | `components/src/dynamo/global_planner/tests/` |
+| Fault Tolerance    | Chaos, migration, cancellation        | `tests/fault_tolerance/`                      |
+| Deployment         | Deployment validation                 | `tests/deploy/`                               |
+| Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
 ---
 
@@ -111,7 +113,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
+| Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
@@ -511,6 +513,22 @@ Long-running tests **must** have an explicit timeout. A test that hangs (e.g., w
 
 - If a test exceeds its time budget (see [Test Types and Locations](#test-types-and-locations)), profile it with `pytest --durations=0` and consider mocking heavy dependencies, using a smaller model checkpoint, or moving it to a nightly/weekly pipeline with `@pytest.mark.slow`.
 
+### Pipeline Time Budgets
+
+Each lifecycle marker corresponds to a CI pipeline with an aggregate wall-clock budget. When adding or marking a test, the pipeline it lands in must continue to fit under its budget:
+
+| Marker       | Pipeline budget | Rationale                                                                 |
+|--------------|-----------------|---------------------------------------------------------------------------|
+| `pre_merge`  | < 30 min        | Runs on every PR; fast feedback is required to keep developers unblocked. |
+| `post_merge` | < 1 hr          | Runs after merge to `main`; catches regressions quickly without gating PRs.|
+| `nightly`    | < 3 hr          | Runs once per day; covers longer integration and multi-GPU scenarios.     |
+
+Guidance when adding a test:
+
+- Pick the **lightest** lifecycle marker the test can live in. A test that only needs to run daily should not be marked `pre_merge`.
+- Before marking a new test `pre_merge`, check the test's expected runtime and confirm the pre-merge pipeline still fits under 30 min. If it wouldn't, move the test to `post_merge` or `nightly`, or shrink it (mock heavy dependencies, smaller checkpoint, fewer cases).
+- If a pipeline is already near its budget, prefer downgrading existing slow tests (`pre_merge` → `post_merge`, `post_merge` → `nightly`) over adding more.
+
 ### Time Budget Industry Practices
 
 Our per-test time targets are informed by widely adopted test size classifications:
@@ -551,6 +569,14 @@ The profiler automatically detects the engine type and uses the appropriate bina
 **Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
+
+**Requirement (all engines):** Do not hardcode `CUDA_VISIBLE_DEVICES` in launch scripts. The profiler and parallel test runner set `CUDA_VISIBLE_DEVICES` to pin each test to a specific GPU. A script that overrides this (e.g. `CUDA_VISIBLE_DEVICES=0`) will ignore the assignment and land on the wrong GPU. Instead, inherit from the environment with a default:
+
+```bash
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+```
+
+Then pass the variable to each worker: `CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python3 -m dynamo.vllm ...`. For multi-GPU scripts that assign distinct GPUs per worker, use named env vars with defaults (e.g. `PREFILL_CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_VISIBLE_DEVICES:-0}"`).
 
 ### Engine-specific mapping
 

@@ -49,8 +49,11 @@ pub struct MediaFetcher {
 impl MediaFetcher {
     #[new]
     fn new() -> Self {
+        // Use from_env so DYN_MM_ALLOW_INTERNAL is honored by the
+        // Rust-side frontend-decode fetch path, matching the Python
+        // UrlValidationPolicy.from_env() behavior on the backend.
         Self {
-            inner: RsMediaFetcher::default(),
+            inner: RsMediaFetcher::from_env(),
         }
     }
     fn user_agent(&mut self, user_agent: String) {
@@ -63,6 +66,10 @@ impl MediaFetcher {
 
     fn allow_direct_port(&mut self, allow: bool) {
         self.inner.allow_direct_port = allow;
+    }
+
+    fn allow_private_ips(&mut self, allow: bool) {
+        self.inner.allow_private_ips = allow;
     }
 
     fn allowed_media_domains(&mut self, domains: Vec<String>) {

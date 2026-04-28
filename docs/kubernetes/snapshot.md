@@ -25,6 +25,7 @@ title: Snapshot
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
 - vLLM or SGLang backend today
 - `ReadWriteMany` storage for cross-node restore
+- **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
 ## Quick Start via `DynamoCheckpoint` CR
 
@@ -106,6 +107,8 @@ Cross-node restore requires shared `ReadWriteMany` storage. The chart defaults t
 
 If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=true`; install the chart with `storage.pvc.create=false` and set `storage.pvc.name` instead.
 
+CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`).
+
 Verify that the PVC and DaemonSet are ready:
 
 ```bash
@@ -141,6 +144,16 @@ spec:
             image: registry.example.com/dynamo/vllm-placeholder:1.0.0
             ...
 ```
+
+If this checkpoint should capture and restore GPU Memory Service helpers, set:
+
+```yaml
+spec:
+  gpuMemoryService:
+    enabled: true
+```
+
+`spec.gpuMemoryService` is outside `spec.identity`, so it does not change the checkpoint identity hash.
 
 For a full working example, see [deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml).
 
@@ -261,6 +274,8 @@ spec:
           ...
         ...
 ```
+
+Auto mode only hashes `checkpoint.identity`. If you need GMS-specific checkpoint behavior, configure it on the `DynamoCheckpoint` object with `spec.gpuMemoryService.enabled`.
 
 Useful inspection commands:
 

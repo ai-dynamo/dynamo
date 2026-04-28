@@ -25,6 +25,7 @@ from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import ReasoningConfig as ReasoningConfig
@@ -59,6 +60,9 @@ def run_mocker_trace_replay(
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
     trace_block_size=512,
+    trace_format="mooncake",
+    trace_shared_prefix_ratio=0.0,
+    trace_num_prefix_groups=0,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -70,4 +74,7 @@ def run_mocker_trace_replay(
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
         trace_block_size=trace_block_size,
+        trace_format=trace_format,
+        trace_shared_prefix_ratio=trace_shared_prefix_ratio,
+        trace_num_prefix_groups=trace_num_prefix_groups,
     )

@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::preprocessor::media::MediaDecoder;
 
 pub mod deepseek_v32;
+pub mod deepseek_v4;
 mod template;
 
 pub use template::{ChatTemplate, ContextMixins};
@@ -87,6 +88,10 @@ pub trait OAIChatLikeRequest {
     }
 
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+        None
+    }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
         None
     }
 }

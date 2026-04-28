@@ -1,11 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-
 import pytest
 
-from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MultimodalModelProfile,
     TopologyConfig,
@@ -19,11 +16,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "e_pd": "disagg_multimodal_e_pd.sh",
     "epd": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
-    "audio_agg": "audio_agg.sh",
-    "audio_disagg": "audio_disagg.sh",
 }
-
-_AUDIO_DIR = os.path.join(WORKSPACE_DIR, "examples/multimodal")
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
@@ -84,24 +77,26 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
         request_payloads=[make_image_payload(["purple"])],
     ),
+    # Audio: uses agg topology with DYN_CHAT_PROCESSOR=vllm because the Rust
+    # Jinja engine cannot render multimodal content arrays (audio_url).
     MultimodalModelProfile(
         name="Qwen/Qwen2-Audio-7B-Instruct",
         short_name="qwen2-audio-7b",
         topologies={
-            "audio_agg": TopologyConfig(
-                marks=[pytest.mark.nightly],
+            "agg": TopologyConfig(
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on amd64 post-merge. "
+                        "OPS-4445"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=600,
-                directory=_AUDIO_DIR,
-            ),
-            "audio_disagg": TopologyConfig(
-                marks=[pytest.mark.nightly],
-                timeout_s=600,
-                directory=_AUDIO_DIR,
-                gpu_marker="gpu_4",
+                env={"DYN_CHAT_PROCESSOR": "vllm"},
             ),
         },
-        gpu_marker="gpu_2",
         request_payloads=[make_audio_payload(["Hester", "Pynne"])],
+        extra_vllm_args=["--max-model-len", "7232"],
     ),
     MultimodalModelProfile(
         name="google/gemma-3-4b-it",
@@ -116,5 +111,40 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
         gated=True,
+    ),
+    # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
+    # We may use less GPUs by squeezing the model onto 2 GPUs.
+    MultimodalModelProfile(
+        name="llava-hf/llava-1.5-7b-hf",
+        short_name="llava-1.5-7b",
+        topologies={
+            "e_pd": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=340,
+                gpu_marker="gpu_4",
+            ),
+            "epd": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=300,
+                gpu_marker="gpu_4",
+            ),
+        },
+        # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
+        # keep this as a multimodal serving smoke check, not a color oracle.
+        request_payloads=[
+            make_image_payload(
+                [
+                    "green",
+                    "white",
+                    "black",
+                    "purple",
+                    "red",
+                    "pink",
+                    "yellow",
+                    "blue",
+                    "orange",
+                ]
+            )
+        ],
     ),
 ]

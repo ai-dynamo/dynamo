@@ -25,6 +25,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,7 +41,10 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -60,6 +65,8 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 
 func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -175,6 +182,11 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	if err := r.reconcileK8sDiscoveryResources(ctx, ckpt); err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources for checkpoint")
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile K8s discovery resources for checkpoint: %w", err)
+	}
+
 	hash := ckpt.Status.IdentityHash
 	if hash == "" {
 		var err error
@@ -183,6 +195,32 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
 		}
 	}
+
+	// Sync DRA ResourceClaimTemplate for GMS-enabled checkpoints.
+	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
+		if !r.RuntimeConfig.DRAEnabled {
+			return ctrl.Result{}, fmt.Errorf(
+				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available")
+		}
+		if len(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers) == 0 {
+			return ctrl.Result{}, fmt.Errorf("checkpoint job requires at least one container for GMS")
+		}
+		gpuQty := ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
+		gpuCount := int(gpuQty.Value())
+		deviceClassName := ""
+		if ckpt.Spec.GPUMemoryService != nil {
+			deviceClassName = ckpt.Spec.GPUMemoryService.DeviceClassName
+		}
+		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
+		_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, ckpt.Namespace, gpuCount, deviceClassName)
+		})
+		if err != nil {
+			logger.Error(err, "Failed to sync GMS ResourceClaimTemplate for checkpoint")
+			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for checkpoint: %w", err)
+		}
+	}
+
 	jobName := snapshotprotocol.GetCheckpointJobName(
 		hash,
 		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
@@ -190,7 +228,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 
 	// Use SyncResource to create/update the checkpoint Job
 	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
-		job, err := buildCheckpointJob(r.Config, ckpt, jobName)
+		job, err := buildCheckpointJob(ctx, r.Client, r.Config, ckpt, jobName)
 		return job, false, err
 	})
 	if err != nil {
@@ -221,6 +259,47 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 
 	// Status update will trigger next reconcile via watch
 	return ctrl.Result{}, nil
+}
+
+func (r *CheckpointReconciler) reconcileK8sDiscoveryResources(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (err error) {
+	logger := log.FromContext(ctx)
+	resourceName := ""
+	defer func() {
+		if err == nil {
+			return
+		}
+		logger.Error(err, "failed to sync checkpoint k8s discovery resource", "resource", resourceName)
+		err = fmt.Errorf("failed to sync checkpoint k8s discovery %s: %w", resourceName, err)
+	}()
+
+	resourceName = "service account"
+	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(ckpt.Name, ckpt.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+		return serviceAccount, false, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	resourceName = "role"
+	role := discovery.GetK8sDiscoveryRole(ckpt.Name, ckpt.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.Role, bool, error) {
+		return role, false, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	resourceName = "role binding"
+	roleBinding := discovery.GetK8sDiscoveryRoleBinding(ckpt.Name, ckpt.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
+		return roleBinding, false, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
