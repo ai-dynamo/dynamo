@@ -327,14 +327,16 @@ impl DecodeStream {
         skip_special_tokens: bool,
     ) -> Self {
         let num_input_tokens = prompt_token_ids.len();
-        let prompt_token_ids = prompt_token_ids.to_vec();
+        let prefix_offset =
+            num_input_tokens.saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET);
+        let prompt_token_ids = prompt_token_ids[prefix_offset..].to_vec();
+        let read_offset = prompt_token_ids.len();
         Self {
             tokenizer,
             skip_special_tokens,
             all_token_ids: prompt_token_ids,
-            prefix_offset: num_input_tokens
-                .saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET),
-            read_offset: num_input_tokens,
+            prefix_offset: 0,
+            read_offset,
         }
     }
 
