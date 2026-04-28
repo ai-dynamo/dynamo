@@ -87,8 +87,8 @@ on:
           models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B
           models--openai--gpt-oss-20b
           models--Qwen--Qwen3-Embedding-4B
-#          models--silence09--DeepSeek-R1-Small-2layers
-#          models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
+          models--silence09--DeepSeek-R1-Small-2layers
+          models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
 #          models--Tongyi-MAI--Z-Image-Turbo
 #          models--Qwen--Qwen3-VL-2B-Instruct
 #          models--Qwen--Qwen2-VL-7B-Instruct
