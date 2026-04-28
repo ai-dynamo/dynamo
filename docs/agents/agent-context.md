@@ -73,10 +73,19 @@ normalized trace event.
 ```bash
 export DYN_AGENT_TRACE_JSONL=/tmp/dynamo-agent-trace.jsonl
 export DYN_AGENT_TRACE_CAPACITY=1024
+export DYN_AGENT_TRACE_JSONL_BUFFER_BYTES=1048576
+export DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS=1000
 ```
 
 `DYN_AGENT_TRACE_CAPACITY` is optional and defaults to `1024`. It controls the
-in-process broadcast buffer used by the best-effort trace sink.
+bounded in-process broadcast buffer used by the best-effort trace bus. Publishing
+to the bus is non-blocking; if a consumer falls behind, records can be dropped
+and Dynamo logs the lag.
+
+The JSONL writer runs in a background task. It batches records with an async
+buffer and flushes when either `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES` is reached
+or `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` elapses. Defaults are `1048576`
+bytes and `1000` ms. Disk I/O is not on the LLM request hot path.
 
 The sink is best-effort telemetry. It is intended for profiling and correlation,
 not durable audit logging.
@@ -94,8 +103,9 @@ export DYN_AGENT_TRACE_NAMESPACE=<dynamo-namespace>
 `DYN_AGENT_TRACE_NAMESPACE` is optional; when omitted, Dynamo uses the configured
 model namespace or the local model endpoint namespace.
 
-Python harnesses can publish through `dynamo.llm.AgentTraceEventPublisher` so
-they do not need to implement the event-plane wire format directly.
+Harnesses publish normalized tool records to this topic using the Dynamo
+event-plane transport. Dynamo subscribes to the topic and relays valid tool
+records onto the same in-process trace bus as LLM request records.
 
 ## Trace Record
 
@@ -238,8 +248,8 @@ cache actions, but the current trace path is analysis-only.
 - Dynamo emits request-end trace records when agent tracing is enabled.
 - Dynamo can ingest harness tool lifecycle records from the event plane when
   `DYN_AGENT_TRACE_TOOL_EVENTS=1`.
-- The trace sink is local JSONL output. It does not publish durable audit
-  records.
+- The trace sink is async local JSONL output behind a bounded bus. It does not
+  publish durable audit records.
 - Scheduling and cache-control decisions should continue to use existing
   request hints and router/backend mechanisms.
 

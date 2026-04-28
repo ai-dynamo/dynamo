@@ -30,7 +30,8 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
 
     bus::init(policy.capacity);
     if let Some(path) = policy.jsonl_path.clone() {
-        sink::spawn_jsonl_worker_with_shutdown(path, shutdown).await?;
+        let options = sink::JsonlSinkOptions::from_policy(&policy);
+        sink::spawn_jsonl_worker_with_shutdown(path, options, shutdown).await?;
     }
     tracing::info!(cap = policy.capacity, "Agent trace initialized");
     Ok(())
@@ -133,9 +134,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("agent_trace.jsonl");
         bus::init(16);
+        let shutdown = CancellationToken::new();
         sink::spawn_jsonl_worker_with_shutdown(
             path.display().to_string(),
-            CancellationToken::new(),
+            sink::JsonlSinkOptions {
+                buffer_bytes: 128,
+                flush_interval: Duration::from_millis(10),
+            },
+            shutdown.clone(),
         )
         .await
         .expect("sink should start");
@@ -234,5 +240,7 @@ mod tests {
             record.tool.unwrap().status,
             Some(AgentToolStatus::Succeeded)
         );
+
+        shutdown.cancel();
     }
 }
