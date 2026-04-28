@@ -99,6 +99,42 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+To exercise the multimodal path, attach an image:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"}},
+        {"type": "text", "text": "Describe what is in this image."}
+      ]
+    }],
+    "max_tokens": 256
+  }'
+```
+
+…or an audio clip:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "audio_url", "audio_url": {"url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"}},
+        {"type": "text", "text": "Transcribe this audio clip."}
+      ]
+    }],
+    "max_tokens": 256
+  }'
+```
+
 ## Key Configuration Notes
 
 - `--enable-multimodal` enables image, video, and audio inputs.
