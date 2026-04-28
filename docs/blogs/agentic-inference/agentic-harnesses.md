@@ -199,6 +199,52 @@ codex exec \
   "Say ok"
 ```
 
+### Codex Model Metadata Shapes the Request
+
+Codex parity begins before the first `POST /v1/responses`. The CLI resolves the configured model string into a local model-catalog record, and the resulting `ModelInfo` controls the harness state built around the model: base instructions, history formatting, tool registry, reasoning parameters, verbosity controls, image support, context accounting, tool-output truncation, `parallel_tool_calls`, and the final Responses payload.
+
+Two endpoints can serve the same underlying model and still drive different agent behavior if Codex attaches different catalog metadata. The request may validate against the schema while the harness around it has changed.
+
+Tool-output truncation is a useful example. Codex does not replay unlimited command output into the next model turn. Shell and tool observations are truncated according to the selected model's catalog policy before they re-enter context. In the catalog snapshot we tested, `gpt-5.5` used:
+
+```json
+{ "mode": "tokens", "limit": 10000 }
+```
+
+By contrast, `openai/openai/gpt-5.5` on a custom endpoint used fallback metadata:
+
+```json
+{ "mode": "bytes", "limit": 10000 }
+```
+
+Those budgets are not equivalent. A `10,000`-byte limit cuts off structured logs, tracebacks, JSON, or test output much earlier than a `10,000`-token limit for ASCII-heavy coding output. For a coding agent, that changes what the model can inspect after a failed test, a search command, or a compiler error. The model may need additional tool calls to recover context that the intended catalog profile would have preserved.
+
+Reasoning settings are also catalog-derived. Codex sends a Responses `reasoning` object when the selected model metadata says reasoning summaries are supported. In that path, Codex also requests `reasoning.encrypted_content` so reasoning state can be replayed across turns. Fallback metadata removes that path.
+
+Prompting changes too. In Codex, switching from the fallback/default profile to the `gpt-5.5` catalog profile changes the system prompt. The fallback prompt is organized around generic Codex operation (`# How you work`, `# AGENTS.md spec`, `# Tool Guidelines`) and emphasizes `AGENTS.md` precedence, planning, validation, and shell-search habits. The `gpt-5.5` prompt is a different instruction document (`# Personality`, `# General`, `# Working with the user`) that frames the agent as a pragmatic software engineer and adds stronger guidance on codebase reading, local-pattern reuse, scoped edits, dirty worktrees, `apply_patch`, collaboration updates, and final-answer formatting. Catalog aliasing therefore affects base behavioral policy as well as request fields such as truncation and reasoning.
+
+We saw this directly in a 50-task subset of SWE-Bench Verified. In this setup, both routes reached OpenAI-served GPT-5.5; the difference was the endpoint and the model-catalog record Codex attached to it. When the custom endpoint used model ID `openai/openai/gpt-5.5` without being associated with the `gpt-5.5` catalog profile, Codex used generic fallback behavior. In one run, the fallback profile issued roughly half as many tool calls:
+
+| Catalog profile | Total tool calls | Per task |
+|-----------------|------------------|----------|
+| `gpt-5.5` profile | 2,087 | 41.7 |
+| Fallback profile | 1,048 | 21.0 |
+| Delta | -1,039 | -20.8 |
+
+The paired comparison pointed in the same direction on every task: the `gpt-5.5` profile used more tools in `50 / 50` tasks, while the fallback profile used more tools in `0 / 50`. A permutation test put the difference below `p < 0.001`.
+
+After adding a model-catalog alias so `openai/openai/gpt-5.5` inherited the intended `gpt-5.5` profile, the same 50-task setup became much closer:
+
+| Catalog profile | Total tool calls | Per task |
+|-----------------|------------------|----------|
+| `gpt-5.5` profile | 2,081 | 41.6 |
+| Alias-backed custom profile | 2,205 | 44.1 |
+| Delta | +124 | +2.5 |
+
+The remaining difference was not statistically significant in this run: the permutation test was about `p = 0.22`, and the paired directions were mixed (`20 / 50` tasks favored the native profile, `28 / 50` favored the alias-backed profile, and `2 / 50` tied).
+
+For Dynamo, the implication is that Codex compatibility needs to be evaluated at the catalog and request-shaping layer as well as the HTTP schema layer. If Codex cannot resolve a model ID into the intended profile, fallback defaults may change truncation, search-tool availability, verbosity controls, reasoning-summary support, and parallel tool-call support before Dynamo receives the request.
+
 ## What's Next
 
 Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
