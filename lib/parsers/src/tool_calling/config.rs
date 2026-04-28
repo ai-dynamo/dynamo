@@ -5,9 +5,9 @@ use super::json::JsonParserType;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JsonParserConfig {
-    /// Start token for individual tool calls (e.g., "<TOOLCALL>")
+    /// Start token for individual tool calls (e.g., `<TOOLCALL>`)
     pub tool_call_start_tokens: Vec<String>,
-    /// End token for individual tool calls (e.g., "</TOOLCALL>")
+    /// End token for individual tool calls (e.g., `</TOOLCALL>`)
     pub tool_call_end_tokens: Vec<String>,
     /// Separator tokens between function name and arguments
     /// (e.g., "<｜tool▁sep｜>" for DeepSeek v3.1)
@@ -52,15 +52,15 @@ impl Default for JsonParserConfig {
 pub struct XmlParserConfig {
     /// Start token for individual tool calls (e.g., "<tool_call>")
     pub tool_call_start_token: String,
-    /// End token for individual tool calls (e.g., "</tool_call>")
+    /// End token for individual tool calls (e.g., `</tool_call>`)
     pub tool_call_end_token: String,
-    /// Start token for function name (e.g., "<function=")
+    /// Start token for function name (e.g., `<function=`)
     pub function_start_token: String,
-    /// End token for function (e.g., "</function>")
+    /// End token for function (e.g., `</function>`)
     pub function_end_token: String,
-    /// Start token for parameter (e.g., "<parameter=")
+    /// Start token for parameter (e.g., `<parameter=`)
     pub parameter_start_token: String,
-    /// End token for parameter (e.g., "</parameter>")
+    /// End token for parameter (e.g., `</parameter>`)
     pub parameter_end_token: String,
 }
 

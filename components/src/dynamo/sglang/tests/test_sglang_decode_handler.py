@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_media_urls,
 )
+from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
     pytest.mark.unit,
@@ -184,6 +186,53 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
         "Go",
         "llo",
         "od",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
+    chunks = await _collect(
+        StreamProcessor.process_sglang_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "text": "a",
+                        "meta_info": {"finish_reason": None},
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [201],
+                        "text": "b",
+                        "meta_info": {"finish_reason": None},
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "text": "a",
+                        "meta_info": {"finish_reason": {"type": "stop"}},
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "text": "b",
+                        "meta_info": {"finish_reason": {"type": "stop"}},
+                    },
+                ]
+            )
+        )
+    )
+
+    outputs = [json.loads(chunk) for chunk in chunks]
+
+    assert [output["index"] for output in outputs] == [0, 1, 0, 1]
+    assert [output["finished"] for output in outputs] == [False, False, True, True]
+    assert [output.get("finish_reason") for output in outputs] == [
+        None,
+        None,
+        "stop",
+        "stop",
     ]
 
 

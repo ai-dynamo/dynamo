@@ -179,7 +179,7 @@ class StreamProcessor:
                             }
                         )
                         yield json.dumps(output)
-                        break
+                        continue
 
                     yield json.dumps(output)
 
