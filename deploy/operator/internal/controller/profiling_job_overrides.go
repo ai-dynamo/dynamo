@@ -122,7 +122,7 @@ func removeVolumeMountByName(mounts []corev1.VolumeMount, name string) []corev1.
 		return mounts
 	}
 
-	result := mounts[:0]
+	result := make([]corev1.VolumeMount, 0, len(mounts))
 	for _, mount := range mounts {
 		if mount.Name != name {
 			result = append(result, mount)
