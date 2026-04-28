@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+import random
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
@@ -20,14 +22,24 @@ from urllib.parse import urlparse
 
 class LocalMediaServer(BaseHTTPRequestHandler):
     image_store: dict[str, bytes] = {}
-    processing_time_ms: int = 0
+    processing_time_mean_ms: float = 0.0
+    processing_time_variance_ms: float = 0.0
 
     @classmethod
     def set_images(cls, images: dict[str, bytes]) -> None:
         cls.image_store = dict(images)
 
+    def _sample_processing_time_s(self) -> float:
+        mean = self.processing_time_mean_ms
+        variance = self.processing_time_variance_ms
+        if variance <= 0.0:
+            return max(mean, 0.0) / 1000.0
+        sample_ms = random.gauss(mean, math.sqrt(variance))
+        return max(sample_ms, 0.0) / 1000.0
+
     def do_GET(self) -> None:
         start = time.monotonic()
+        target_s = self._sample_processing_time_s()
 
         parsed_path = urlparse(self.path)
         resource = parsed_path.path.lstrip("/")
@@ -42,16 +54,24 @@ class LocalMediaServer(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"Image not found")
 
-        remaining = self.processing_time_ms / 1000.0 - (time.monotonic() - start)
+        remaining = target_s - (time.monotonic() - start)
         if remaining > 0:
             time.sleep(remaining)
 
 
-def run_server(port: int, images: dict[str, bytes], processing_time_ms: int) -> None:
+def run_server(
+    port: int,
+    images: dict[str, bytes],
+    processing_time_mean_ms: float,
+    processing_time_variance_ms: float,
+) -> None:
     LocalMediaServer.set_images(images)
-    LocalMediaServer.processing_time_ms = processing_time_ms
+    LocalMediaServer.processing_time_mean_ms = processing_time_mean_ms
+    LocalMediaServer.processing_time_variance_ms = processing_time_variance_ms
     httpd = HTTPServer(("", port), LocalMediaServer)
     print(
-        f"Server running on port {port} " f"(processing_time_ms={processing_time_ms})"
+        f"Server running on port {port} "
+        f"(processing_time_mean_ms={processing_time_mean_ms}, "
+        f"processing_time_variance_ms={processing_time_variance_ms})"
     )
     httpd.serve_forever()

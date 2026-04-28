@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +19,8 @@
 # Example usage:
 # python -m benchmarks.multimodal.local_media_server.main \
 #     --image test.jpg:https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg \
-#     --processing-time-ms 200 &
+#     --processing-time-mean-ms 200 \
+#     --processing-time-variance-ms 400 &
 # IMG_SERVER_PID=$!
 # trap "kill $IMG_SERVER_PID" EXIT
 #
@@ -58,7 +59,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     name_to_url = parse_images(args.image)
     name_to_bytes = download(name_to_url)
-    run_server(args.port, name_to_bytes, args.processing_time_ms)
+    run_server(
+        args.port,
+        name_to_bytes,
+        args.processing_time_mean_ms,
+        args.processing_time_variance_ms,
+    )
 
 
 if __name__ == "__main__":

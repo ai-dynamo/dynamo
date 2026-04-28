@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,11 +43,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Specify the port number for the server. Default is 8233.",
     )
     parser.add_argument(
-        "--processing-time-ms",
-        type=int,
-        default=0,
-        help="Per-request delay in milliseconds before the server responds, "
+        "--processing-time-mean-ms",
+        type=float,
+        default=0.0,
+        help="Mean per-request delay (ms) before the server responds, "
         "simulating origin-CDN latency. Default is 0.",
+    )
+    parser.add_argument(
+        "--processing-time-variance-ms",
+        type=float,
+        default=0.0,
+        help="Variance (sigma^2, ms^2) of the per-request delay. "
+        "Each request samples N(mean, sqrt(variance)), clamped at 0. Default is 0.",
     )
     return parser
 
