@@ -272,13 +272,21 @@ impl PendingWorkerState {
                     "Allocating disk-backed memory for G3 layout"
                 );
 
+                let g3_path = PathBuf::from(format!(
+                    "/tmp/kvbm_g3_{}.bin",
+                    runtime.messenger().instance_id()
+                ));
+
+                // Register the path for unlink-on-signal before allocation, so that
+                // if `fallocate` is interrupted by SIGINT/SIGTERM after `open(O_CREAT)`
+                // has already created the file, the cleanup task still removes it.
+                // Clean shutdowns continue to be handled by `DiskStorage`'s Drop impl.
+                crate::connector::disk_cleanup::register(g3_path.clone());
+
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
-                    .allocate_disk(Some(PathBuf::from(format!(
-                        "/tmp/kvbm_g3_{}.bin",
-                        runtime.messenger().instance_id()
-                    ))))
+                    .allocate_disk(Some(g3_path.clone()))
                     .build()
                     .map_err(|e| {
                         tracing::error!(
@@ -292,6 +300,31 @@ impl PendingWorkerState {
 
                 let handle = transfer_manager.register_layout(disk_layout)?;
                 created_layouts.push(LogicalLayoutHandle::G3);
+
+                // Proactive unlink: remove the directory entry now that NIXL has
+                // registered the file. The `DiskStorage` fd inside the registered
+                // layout keeps the inode alive — POSIX/UCX continue using the fd —
+                // but the kernel reclaims the disk space on *any* process exit
+                // (Ctrl+C → vLLM IPC shutdown, SIGKILL, panic-abort, segfault).
+                // This is the primary cleanup path; `Drop` and the signal task
+                // are belt-and-suspenders for environments where this race
+                // (pre-registration crash) leaves a partial file behind.
+                match std::fs::remove_file(&g3_path) {
+                    Ok(()) => {
+                        crate::connector::disk_cleanup::deregister(&g3_path);
+                        tracing::info!(
+                            path = %g3_path.display(),
+                            "G3 cache file unlinked from filesystem (held by fd until process exit)"
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => tracing::warn!(
+                        path = %g3_path.display(),
+                        error = %e,
+                        "failed to unlink G3 cache file after NIXL registration"
+                    ),
+                }
+
                 Some(handle)
             } else {
                 None
