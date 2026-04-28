@@ -968,20 +968,19 @@ impl JailedStream {
                         }
 
                         // Convert to streaming format
-                        let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> =
-                            tool_calls
-                                .into_iter()
-                                .enumerate()
-                                .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
-                                    index: (tool_call_offset + idx) as u32,
-                                    id: Some(tool_call.id),
-                                    r#type: Some(FunctionType::Function),
-                                    function: Some(FunctionCallStream {
-                                        name: Some(tool_call.function.name),
-                                        arguments: Some(tool_call.function.arguments),
-                                    }),
-                                })
-                                .collect();
+                        let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
+                                index: (tool_call_offset + idx) as u32,
+                                id: Some(tool_call.id),
+                                r#type: Some(FunctionType::Function),
+                                function: Some(FunctionCallStream {
+                                    name: Some(tool_call.function.name),
+                                    arguments: Some(tool_call.function.arguments),
+                                }),
+                            })
+                            .collect();
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
