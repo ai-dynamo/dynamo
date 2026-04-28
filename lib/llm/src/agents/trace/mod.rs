@@ -42,7 +42,7 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     {
-        spawn_jsonl_worker_with_shutdown(
+        if let Err(err) = spawn_jsonl_worker_with_shutdown(
             BUS.subscribe(),
             path,
             JsonlSinkOptions {
@@ -51,7 +51,11 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
             },
             shutdown,
         )
-        .await?;
+        .await
+        {
+            JSONL_WORKER_STARTED.store(false, Ordering::Release);
+            return Err(err);
+        }
     }
 
     tracing::info!(capacity = policy.capacity, "Agent trace initialized");
@@ -73,19 +77,26 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn sanitize_finite(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite())
+}
+
 pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetrics) {
+    let mut request = request;
+    request.prefill_wait_time_ms = sanitize_finite(request.prefill_wait_time_ms);
+    request.prefill_time_ms = sanitize_finite(request.prefill_time_ms);
+    request.ttft_ms = sanitize_finite(request.ttft_ms);
+    request.total_time_ms = sanitize_finite(request.total_time_ms);
+    request.kv_hit_rate = sanitize_finite(request.kv_hit_rate);
+    request.kv_transfer_estimated_latency_ms =
+        sanitize_finite(request.kv_transfer_estimated_latency_ms);
+
     let event_time_unix_ms = request
         .request_received_ms
         .map_or_else(unix_time_ms, |received_ms| {
             request
                 .total_time_ms
-                .and_then(|ms| {
-                    if !ms.is_finite() {
-                        tracing::debug!(total_time_ms = ms, "invalid agent trace total_time_ms");
-                        return None;
-                    }
-                    Some(received_ms.saturating_add(ms.max(0.0).round() as u64))
-                })
+                .map(|ms| received_ms.saturating_add(ms.max(0.0).round() as u64))
                 .unwrap_or(received_ms)
         });
 
@@ -172,8 +183,18 @@ mod tests {
         assert!(content.contains("\"request_id\":\"req-123\""));
         assert!(content.contains("\"workflow_id\":\"run-1\""));
 
-        let wrapper: serde_json::Value = serde_json::from_str(content.lines().next().unwrap())
-            .expect("jsonl record should deserialize");
+        let wrapper = content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|wrapper| {
+                wrapper
+                    .get("event")
+                    .and_then(|event| event.get("request"))
+                    .and_then(|request| request.get("request_id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("req-123")
+            })
+            .expect("expected req-123 record in jsonl");
         let record: AgentTraceRecord = serde_json::from_value(wrapper["event"].clone())
             .expect("jsonl event should deserialize");
         assert_eq!(record.schema, TraceSchema::V1);
@@ -185,5 +206,47 @@ mod tests {
         );
 
         shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_emit_request_end_sanitizes_non_finite_metrics() {
+        BUS.init(16);
+        let mut rx = BUS.subscribe();
+
+        emit_request_end(
+            AgentContext {
+                workflow_type_id: "ms_agent".to_string(),
+                workflow_id: "run-non-finite".to_string(),
+                program_id: "run-non-finite:agent".to_string(),
+                parent_program_id: None,
+            },
+            AgentRequestMetrics {
+                request_id: "req-non-finite".to_string(),
+                x_request_id: None,
+                model: "test-model".to_string(),
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                request_received_ms: Some(1000),
+                prefill_wait_time_ms: Some(f64::NAN),
+                prefill_time_ms: Some(f64::INFINITY),
+                ttft_ms: Some(f64::NEG_INFINITY),
+                total_time_ms: Some(f64::NAN),
+                kv_hit_rate: Some(f64::INFINITY),
+                kv_transfer_estimated_latency_ms: Some(f64::NEG_INFINITY),
+                queue_depth: None,
+                worker: None,
+            },
+        );
+
+        let record = rx.recv().await.expect("trace record should publish");
+        assert_eq!(record.event_time_unix_ms, 1000);
+        let request = record.request.expect("request metrics should be present");
+        assert_eq!(request.prefill_wait_time_ms, None);
+        assert_eq!(request.prefill_time_ms, None);
+        assert_eq!(request.ttft_ms, None);
+        assert_eq!(request.total_time_ms, None);
+        assert_eq!(request.kv_hit_rate, None);
+        assert_eq!(request.kv_transfer_estimated_latency_ms, None);
     }
 }

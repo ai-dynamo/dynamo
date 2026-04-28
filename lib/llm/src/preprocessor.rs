@@ -141,7 +141,7 @@ impl LLMMetricAnnotation {
 
 fn record_llm_metric_tokens(
     tracker: Option<&RequestTracker>,
-    input_tokens: usize,
+    input_tokens: Option<usize>,
     output_tokens: usize,
     cached_tokens: Option<usize>,
 ) {
@@ -152,8 +152,8 @@ fn record_llm_metric_tokens(
     // Usage-derived token counts arrive late in the response path. Earlier
     // router-side observations still win because RequestTracker stores them
     // with OnceLock.
-    if input_tokens > 0 || cached_tokens.is_some() {
-        tracker.record_isl(input_tokens, cached_tokens);
+    if input_tokens.is_some() || cached_tokens.is_some() {
+        tracker.record_isl(input_tokens.unwrap_or(0), cached_tokens);
     }
     tracker.record_osl(output_tokens);
 }
@@ -935,11 +935,11 @@ impl OpenAIPreprocessor {
                         let chunk_tokens = backend_output.token_ids.len();
                         inner.cumulative_output_tokens += chunk_tokens;
 
-                        let isl = inner.response_generator.get_isl().unwrap_or(0) as usize;
+                        let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
                         (chunk_tokens, isl)
                     } else {
-                        (0, 0)
+                        (0, None)
                     };
 
                     let current_osl = inner.cumulative_output_tokens;
@@ -976,7 +976,7 @@ impl OpenAIPreprocessor {
                         .and_then(|t| t.decode_worker_type())
                         .map(String::from);
                     let llm_metrics = LLMMetricAnnotation {
-                        input_tokens: isl,
+                        input_tokens: isl.unwrap_or(0),
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
@@ -1068,7 +1068,7 @@ impl OpenAIPreprocessor {
                         };
                         record_llm_metric_tokens(
                             tracker.as_deref(),
-                            usage.prompt_tokens as usize,
+                            Some(usage.prompt_tokens as usize),
                             usage.completion_tokens as usize,
                             cached_tokens,
                         );

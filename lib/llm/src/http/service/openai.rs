@@ -394,6 +394,22 @@ fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, heade
     }
 }
 
+fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
+    source: &Context<T>,
+    target: &mut Context<U>,
+) {
+    if !crate::agents::trace::is_enabled() {
+        return;
+    }
+
+    if let Ok(x_request_id) = source.get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY) {
+        target.insert(
+            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.as_ref().clone(),
+        );
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -675,7 +691,8 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -1518,7 +1535,8 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
