@@ -2149,6 +2149,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "19090",
 													},
 													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
+													},
+													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2357,6 +2361,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3160,6 +3168,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "19090",
 													},
 													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
+													},
+													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -3355,6 +3367,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -5423,6 +5439,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"}, {Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
