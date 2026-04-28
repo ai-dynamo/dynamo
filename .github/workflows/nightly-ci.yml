@@ -141,7 +141,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 240
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   sglang-test:
@@ -175,7 +175,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: sglang and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 240
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   trtllm-test:
@@ -209,7 +209,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 240
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   # ============================================================================
