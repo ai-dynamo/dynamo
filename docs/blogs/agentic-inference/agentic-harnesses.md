@@ -237,7 +237,7 @@ We validated this against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A
 
 ### Combined Reasoning and Tool Calls
 
-The hardest parsing test is when both parsers have to operate on the same token stream. A model that reasons before calling a tool generates a response where `<think>` content flows first, followed by `<tool_call>` XML. Two different parsers, `nemotron_deci` for reasoning and `qwen3_coder` for tool calls, have to split that stream into the correct Anthropic Messages API content blocks without interfering with each other.
+A model that reasons before calling a tool generates a response where `<think>` content flows first, followed by `<tool_call>` XML. In the case of Nemotron, two different parsers, `nemotron_deci` for reasoning and `qwen3_coder` for tool calls, have to split that stream into the correct Anthropic Messages API content blocks without interfering with each other.
 
 We sent the same prompt five times through the Anthropic Messages API: a system prompt instructing the model to think step by step, two tool definitions (calculator and weather), and the user message "Think carefully about what 15 * 23 equals, then use the calculator to verify." The response structure from a representative round:
 
