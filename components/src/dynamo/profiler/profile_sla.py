@@ -289,7 +289,9 @@ def _validate_dgd_service_name_lengths(
     """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
     dgdr_name = os.environ.get("DGDR_NAME", "")
     if not dgdr_name:
-        return
+        raise ValueError(
+            "DGDR_NAME environment variable is not set; cannot validate DGD service name lengths"
+        )
 
     # Honour user-supplied DGD name override (mirrors computeDGDName in the Go controller).
     dgd_name = dgdr_name + "-dgd"
