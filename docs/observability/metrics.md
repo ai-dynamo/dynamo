@@ -112,6 +112,7 @@ The core Dynamo backend system exposes metrics at the `/metrics` endpoint with t
 - `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)
+- `dynamo_component_errors_total`: Total errors encountered while handling a request (counter, labeled with `error_type`). See [Component Error Types](#component-error-types).
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
 - `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge). Automatically updated before each Prometheus scrape on both the frontend (`/metrics` on port 8000) and the system status server (`/metrics` on `DYN_SYSTEM_PORT` when set).
 
@@ -121,6 +122,75 @@ The core Dynamo backend system exposes metrics at the `/metrics` endpoint with t
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 curl http://localhost:8081/metrics
 ```
+
+#### Component Labels
+
+Backend `dynamo_component_*` series carry two groups of labels: the ones the Dynamo runtime emits, and the ones Prometheus/Kubernetes attach during scraping.
+
+**Emitted by Dynamo (present in the metric itself):**
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `dynamo_namespace` | The Dynamo runtime namespace — the logical scope shared by every component (frontend / router / prefill / decode) in one deployment. **Not** the K8s namespace. | `dynamo_cloud_vllm_v1_disagg_router_071de157` |
+| `dynamo_component` | Service role: see [Component Names](#component-names) below. | `backend`, `prefill`, `router` |
+| `dynamo_endpoint` | The RPC within that component: see [Endpoint Names](#endpoint-names) below. | `generate`, `clear_kv_blocks`, `worker_kv_indexer_query_dp0` |
+| `model` | The model being served (OpenAI-style label). Present on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. | `Qwen/Qwen3-0.6B` |
+| `model_name` | Same model identifier under a second label name, kept for engine-native and dashboard back-compat. | `Qwen/Qwen3-0.6B` |
+| `error_type` | Only on `dynamo_component_errors_total` — the failure category. See [Component Error Types](#component-error-types). | `generate`, `publish_response` |
+
+**Injected by Prometheus / Kubernetes (added by the scraper, not in the metric itself):**
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `instance` | Scrape target as `<podIP>:<metricsPort>`. | `192.168.133.236:9090` |
+| `pod` | Kubernetes pod name; the per-replica disambiguator. | `vllm-v1-disagg-router-vllmdecodeworker-...` |
+| `container` | Container name inside the pod (usually `main`). | `main` |
+| `namespace` | Kubernetes namespace the pod runs in. **Not** the same as `dynamo_namespace`. | `dynamo-cloud` |
+| `job` | Prometheus scrape-job name, `<k8s-namespace>/<service-name>`. | `dynamo-cloud/dynamo-worker` |
+| `endpoint` | Named port on the K8s `Service` that Prometheus scraped. **Not** the same as `dynamo_endpoint`. | `system` |
+
+> **Watch out for these collisions:**
+> - `dynamo_namespace` (Dynamo deployment scope) vs. `namespace` (K8s namespace).
+> - `dynamo_endpoint` (Dynamo RPC) vs. `endpoint` (K8s Service port name).
+
+#### Component Names
+
+Values you will see in the `dynamo_component` label:
+
+| Value | Meaning |
+|-------|---------|
+| `frontend` | The HTTP frontend (`python -m dynamo.frontend`). |
+| `router` | The KV router. |
+| `planner` | The planner component. |
+| `prefill` | The prefill worker in disaggregated serving. |
+| `backend` | The decode worker in disaggregated serving (vLLM, SGLang, mocker), **or** the combined worker in aggregated mode. |
+| `tensorrt_llm` | The decode worker in disaggregated serving for TRT-LLM. |
+| `encode` | Multimodal encoder worker. |
+
+> The name `backend` for the decode worker is historical and will likely be renamed to `decode` in a future release.
+
+#### Endpoint Names
+
+Values you will see in the `dynamo_endpoint` label on backend workers:
+
+| Value | Meaning |
+|-------|---------|
+| `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls (one per request the router routes through); on a decode worker this counts decode-stage `generate` calls. |
+| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
+
+#### Component Error Types
+
+The `dynamo_component_errors_total` counter is labeled with `error_type`, identifying which stage of request handling failed:
+
+| `error_type` | Stage | Meaning |
+|--------------|-------|---------|
+| `deserialization` | Ingress | Could not parse the incoming request payload. |
+| `invalid_message` | Ingress | Wire-format violation in the incoming message. |
+| `response_stream` | Pre-generate | The worker received the request but could not open the response stream back to the frontend (transport problem before `generate` was called). |
+| `generate` | Engine | The engine's `generate()` itself returned an error. This is the counter that reflects engine/inference failures. |
+| `publish_response` | Streaming | The engine produced response chunks but the worker could not push one of them back to the frontend (write failed mid-stream). **Also fires on client cancellation** — the frontend disconnecting before the stream finishes — so this counter can be inflated by user-aborted requests. |
+| `publish_final` | Teardown | All response chunks were sent, but the worker could not deliver the final stream-complete marker. The connection died right at the end. |
 
 ### Specialized Component Metrics
 
