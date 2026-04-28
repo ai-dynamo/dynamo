@@ -329,13 +329,15 @@ impl Indexer {
                     lower_tier: lt,
                 })
             }
-            Self::Remote(remote) => remote
-                .find_matches_by_tier(sequence, false)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "Remote indexer tiered query failed");
-                    KvRouterError::IndexerOffline
-                }),
+            Self::Remote(remote) => {
+                remote
+                    .find_matches_by_tier(sequence, false)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "Remote indexer tiered query failed");
+                        KvRouterError::IndexerOffline
+                    })
+            }
             Self::None => Ok(TieredMatchDetails::default()),
         }
     }
