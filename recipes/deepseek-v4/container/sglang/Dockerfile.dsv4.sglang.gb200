@@ -10,6 +10,11 @@ FROM ${DSV4_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+RUN pip uninstall -y black termplotlib \
+    && apt-get update \
+    && apt list --upgradable 2>/dev/null | tail -n +2 | grep 'noble' | awk -F/ '{print $1}' | xargs -r apt-get install -y --only-upgrade \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=dynamo_src /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_src /usr/local/bin/etcd /usr/local/bin/etcd
 ENV PATH=/usr/local/bin/etcd:${PATH}
