@@ -925,6 +925,18 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            group_idx: Option<u32>,
+            kv_cache_spec_kind: Option<&'static str>,
+        }
+
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
@@ -961,41 +973,29 @@ mod tests_startup_helpers {
         let seq: u64 = 77;
 
         let events = vec![
-            RawKvEvent::BlockStored {
-                block_hashes: vec![BlockHashValue::Unsigned(41)],
+            MapBlockStoredEvent {
+                event_type: "BlockStored",
+                block_hashes: vec![41],
                 parent_block_hash: None,
                 token_ids: vec![0, 1, 2, 3],
                 block_size: 4,
-                medium: None,
-                lora_name: None,
-                block_mm_infos: None,
-                is_eagle: None,
                 group_idx: Some(1),
-                kv_cache_spec_kind: None,
-                kv_cache_spec_sliding_window: None,
+                kv_cache_spec_kind: Some("mamba"),
             },
-            RawKvEvent::BlockStored {
-                block_hashes: vec![BlockHashValue::Unsigned(42)],
+            MapBlockStoredEvent {
+                event_type: "BlockStored",
+                block_hashes: vec![42],
                 parent_block_hash: None,
                 token_ids: vec![0, 1, 2, 3],
                 block_size: 4,
-                medium: None,
-                lora_name: None,
-                block_mm_infos: None,
-                is_eagle: None,
                 group_idx: None,
                 kv_cache_spec_kind: None,
-                kv_cache_spec_sliding_window: None,
             },
         ];
 
-        let batch = KvEventBatch {
-            ts: 0.0,
-            events,
-            data_parallel_rank: Some(1),
-        };
+        let batch = (0.0, events, Some(1_i32));
 
-        let payload = Bytes::from(rmps::to_vec(&batch).unwrap());
+        let payload = Bytes::from(rmps::to_vec_named(&batch).unwrap());
 
         let frames = vec![
             Bytes::from("").to_vec(),

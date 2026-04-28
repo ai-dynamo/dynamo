@@ -345,6 +345,43 @@ fn test_normalizer_ignores_non_main_group_idx_without_metadata() {
 }
 
 #[test]
+fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
+    #[derive(serde::Serialize)]
+    struct MapBlockStoredEvent {
+        #[serde(rename = "type")]
+        event_type: &'static str,
+        block_hashes: Vec<u64>,
+        parent_block_hash: Option<u64>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        group_idx: Option<u32>,
+        kv_cache_spec_kind: Option<&'static str>,
+    }
+
+    let event = MapBlockStoredEvent {
+        event_type: "BlockStored",
+        block_hashes: vec![11],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        group_idx: Some(1),
+        kv_cache_spec_kind: Some("mamba"),
+    };
+    let encoded = rmp_serde::to_vec_named(&(0.0, vec![event], Some(0_i32)))
+        .expect("serialize raw event batch");
+    let mut batch = decode_event_batch(&encoded).expect("deserialize raw event batch");
+    let decoded = batch.events.pop().expect("batch should contain event");
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    assert_event_metadata(&decoded, Some(1), Some(KvCacheSpecKind::Mamba), None);
+    assert!(
+        normalizer
+            .preprocess(decoded, WorkerWithDpRank::new(3, 0))
+            .is_none()
+    );
+}
+
+#[test]
 fn test_normalizer_learns_main_attention_metadata_for_remove() {
     let store: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,
