@@ -9,7 +9,7 @@ Aggregated-serving recipe for **DeepSeek-V4-Pro** on Dynamo. Two backends are do
 
 | Variant | Backend | Manifest | GPUs | Topology | Container |
 |---------|---------|----------|------|----------|-----------|
-| **vllm-agg**   | vLLM   | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 8x B200 | TP=8 + Expert Parallel                         | Custom build (vLLM's V4 stack not in a stock release) |
+| **vllm-agg**   | vLLM   | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 8x B200 | TP=8 + Expert Parallel                         | Standard Dynamo vLLM runtime image |
 | **sglang-agg** | SGLang | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 8x B200 | TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](../container/) |
 
 Status: **Experimental** (Day-0). Modality: text only.
@@ -26,19 +26,16 @@ Status: **Experimental** (Day-0). Modality: text only.
 
    - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 
-   - **vLLM** (`vllm-agg`): DeepSeek-V4 is not in a stock vLLM release yet, so a reference Dockerfile ships in [`recipes/deepseek-v4/container/`](../container/) (shared with the V4-Flash recipe). Build in two steps:
+   - **vLLM** (`vllm-agg`): Build the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
 
-     1. Build the Dynamo vLLM runtime image locally per [`<repo_root>/container/README.md`](../../../container/README.md) (this produces the local tag `dynamo:latest-vllm-runtime`).
-     2. Build the dsv4 overlay on top of it using [`vllm/Dockerfile.dsv4.vllm.b200`](../container/vllm/Dockerfile.dsv4.vllm.b200). See [`recipes/deepseek-v4/container/README.md`](../container/README.md) for build args. From the repo root:
+     ```bash
+     container/render.py --framework vllm --target runtime --output-short-filename
+     docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+     ```
 
-        ```bash
-        docker build -f recipes/deepseek-v4/container/vllm/Dockerfile.dsv4.vllm.b200 \
-          -t <your-registry>/vllm-dsv4:<tag> .
-        ```
+     Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the Frontend and the decode worker) to your pushed image tag.
 
-     Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the Frontend and the decode worker) to `<your-registry>/vllm-dsv4:<tag>`.
-
-   > The Pro and Flash recipes share the same dsv4 image on each backend. If you've already built the vLLM or SGLang overlay for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
+   > The Pro and Flash recipes share the same image on each backend. If you've already built the vLLM or SGLang runtime for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
 
 ## Quick Start
 
@@ -165,7 +162,7 @@ Recipe-level (per-variant) settings:
 
 | | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) |
 |---|---|---|
-| **Backend image** | Custom overlay on `vllm/vllm-openai:deepseekv4-cu130` | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` |
+| **Backend image** | Standard Dynamo vLLM runtime | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` |
 | **Parallelism** | TP=8, Expert Parallel enabled | TP=8 |
 | **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 |
 | **KV cache** | FP8, block size 256 | engine default |
@@ -241,7 +238,7 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### vLLM-specific
 
-- **Image tag.** `vllm/agg/deploy.yaml` ships with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace it with your built Dynamo + vLLM (DeepSeek-V4) image — see Prerequisite 4.
+- **Image tag.** `vllm/agg/deploy.yaml` ships with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace it with your built standard Dynamo vLLM runtime image — see Prerequisite 4.
 - **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe (`failureThreshold: 540` at `periodSeconds: 10`).
 - **Day-0 thinking modes.** Send `chat_template_kwargs: {"thinking": false}` until the upstream sparse-attention fix lands — see the callout at the top of this README.
 
