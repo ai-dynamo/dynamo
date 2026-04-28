@@ -336,7 +336,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}
 
 	// Clean up legacy per-replica LeaderWorkerSets and PodGroups (e.g. name-0, name-1...).
-	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
+	baseKubeName := dynamoComponentDeployment.Name
 	for i := 0; i < 100; i++ {
 		legacyName := fmt.Sprintf("%s-%d", baseKubeName, i)
 		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
@@ -541,7 +541,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
-	kubeName := r.getKubeName(opt.dynamoComponentDeployment, false)
+	kubeName := opt.dynamoComponentDeployment.Name
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
 

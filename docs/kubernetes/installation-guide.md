@@ -173,7 +173,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 >   - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
 > - When installing LWS with Volcano for gang scheduling, set the gang scheduling value:
 >   ```bash
->   helm install lws ... --set gangScheduling=volcano
+>   helm install lws ... --set gangSchedulingManagement.schedulerProvider=volcano
 >   ```
 >   See the [LWS documentation](https://lws.sigs.k8s.io/docs/) for details.
 > - These must be installed manually before deploying multinode workloads with LWS.
