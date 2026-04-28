@@ -12,10 +12,9 @@
 //! - Tokenizer configuration (TokenizerKind)
 //! - Prompt formatter settings (PromptFormatterArtifact)
 
-use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
@@ -203,32 +202,12 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
 /// headroom while keeping disk-exhaustion bounded.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// In-process coordination for `resolve_uri`. Keyed on the blake3 hex
-/// of each blob, so concurrent registrations of the same content
-/// serialize to a single fetch+verify+rename within this process.
-fn resolve_uri_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
-    static MAP: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    MAP.get_or_init(|| StdMutex::new(HashMap::new()))
-}
-
-fn lock_for_blake3(blake3_hex: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = resolve_uri_locks()
-        .lock()
-        .expect("resolve_uri_locks poisoned");
-    map.entry(blake3_hex.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-}
-
-/// Cross-process exclusive lock for a blob path, mirroring the pattern
-/// `hf-hub` uses internally (`libc::flock(LOCK_EX)` on a sentinel file
-/// next to the blob). The lock is held for the lifetime of `BlobLock`
-/// and released when its `_file` field drops (closing the fd).
-///
-/// Combined with the in-process `tokio::sync::Mutex` above, fetches
-/// are serialized both within-process (cheap, async-friendly) and
-/// across processes (so two frontend instances sharing a cache dir
-/// can't both fetch the same blob simultaneously).
+/// Exclusive lock for a blob path, mirroring the pattern `hf-hub`
+/// uses internally (`libc::flock(LOCK_EX)` on a sentinel file next to
+/// the blob). The lock is per-open-file-description, so the kernel
+/// serializes both within-process tasks and across processes
+/// uniformly. Held for the lifetime of `BlobLock`; released when its
+/// `_file` field drops.
 struct BlobLock {
     _file: std::fs::File,
 }
@@ -325,78 +304,58 @@ async fn resolve_uri(
 
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
 
-    // Per-blake3 in-process lock — cheap, async-friendly. Wins quickly
-    // among concurrent tasks in the same process so only one of them
-    // spawns_blocking for the cross-process flock.
-    let blake3_hex = blake3_hex_of(&expected.checksum().to_string())?.to_string();
-    let proc_lock = lock_for_blake3(&blake3_hex);
-    let _proc_guard = proc_lock.lock().await;
-
-    // Cross-process exclusive flock on `<blob>.lock` — mirrors the
-    // hf-hub pattern. Multiple frontend instances sharing a cache dir
-    // serialize here at the kernel level, never both writing to the
-    // same blob path simultaneously.
+    // Exclusive flock on `<blob>.lock` — Linux's per-open-file-description
+    // lock semantics serialize both within-process tasks and across
+    // processes uniformly. Mirrors the pattern `hf-hub` uses internally.
     let _blob_guard = BlobLock::acquire(dest).await?;
 
-    // Re-check after acquiring both locks: another waiter may have
-    // populated the blob while we were queued. Short-circuit to a
-    // cache hit rather than duplicate-fetching.
+    // Re-check after acquiring the lock: another waiter (in this process
+    // or another) may have populated the blob while we were queued.
+    // Short-circuit to a cache hit rather than duplicate-fetching.
     if dest.exists() {
         return Ok(());
     }
 
-    // Single tmp path per blob — the flock above guarantees only one
-    // fetcher owns it at a time. A panic mid-write leaves a stale tmp;
-    // the next holder's `File::create(tmp)` truncates it cleanly, so
-    // no accumulation across runs.
-    let tmp = dest.with_extension("tmp");
-
-    let stage_result = match parsed.scheme() {
-        "http" | "https" => stream_to_tmp(client, uri, &tmp, cap).await,
-        "file" => {
-            let path = parsed
-                .to_file_path()
-                .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
-            copy_to_tmp(&path, &tmp, cap).await
+    // Stage scheme-specific bytes into a per-call tmp, verify by
+    // rebuilding `CheckedFile::from_disk(tmp)` (same mmap-backed b3sum
+    // path the worker used at registration), then atomic-rename onto
+    // the content-addressed cache slot. The flock above gates the
+    // download itself; the per-call tmp + rename gives a uniform
+    // atomic-publish primitive (shared with `symlink_force`).
+    stage_and_rename(dest, |tmp| async move {
+        match parsed.scheme() {
+            "http" | "https" => stream_to_tmp(client, uri, &tmp, cap).await?,
+            "file" => {
+                let path = parsed
+                    .to_file_path()
+                    .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
+                copy_to_tmp(&path, &tmp, cap).await?;
+            }
+            "hf" => {
+                let (repo, filename) = parse_hf_uri(uri)?;
+                let snapshot = crate::hub::from_hf(&repo, /* ignore_weights = */ true)
+                    .await
+                    .with_context(|| format!("hub::from_hf({repo})"))?;
+                let path = snapshot.join(&filename);
+                copy_to_tmp(&path, &tmp, cap).await?;
+            }
+            scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
         }
-        "hf" => {
-            let (repo, filename) = parse_hf_uri(uri)?;
-            let snapshot = crate::hub::from_hf(&repo, /* ignore_weights = */ true)
-                .await
-                .with_context(|| format!("hub::from_hf({repo})"))?;
-            let path = snapshot.join(&filename);
-            copy_to_tmp(&path, &tmp, cap).await
-        }
-        scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
-    };
-    if let Err(err) = stage_result {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(err);
-    }
 
-    // Reuse `from_disk` so the verification path is identical to the
-    // worker's registration-time construction — same mmap-backed b3sum,
-    // same size read. Single source of construction truth.
-    let actual = match CheckedFile::from_disk(&tmp) {
-        Ok(cf) => cf,
-        Err(err) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(err);
+        // Verify the staged bytes match the expected CheckedFile.
+        // `from_disk` runs the same hashing path the worker used at
+        // registration, so identity is bit-identical between sides.
+        let actual = CheckedFile::from_disk(&tmp)?;
+        if actual.checksum() != expected.checksum() {
+            anyhow::bail!(
+                "checksum mismatch for {uri}: expected {}, got {}",
+                expected.checksum(),
+                actual.checksum()
+            );
         }
-    };
-    if actual.checksum() != expected.checksum() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        anyhow::bail!(
-            "checksum mismatch for {uri}: expected {}, got {}",
-            expected.checksum(),
-            actual.checksum()
-        );
-    }
-
-    tokio::fs::rename(&tmp, dest)
-        .await
-        .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Stream HTTP body to `tmp`, never buffering more than `cap` bytes
@@ -480,20 +439,93 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
-/// Materialize a symlink at `link` pointing at `target`. Replaces an
-/// existing symlink at `link` if present (idempotent).
-fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
-    if link.exists() || link.is_symlink() {
-        std::fs::remove_file(link).with_context(|| format!("removing {}", link.display()))?;
+/// Per-call unique tmp path next to `dest`. The pid+uuid suffix
+/// guarantees disjoint tmp paths across concurrent callers (within and
+/// across processes), so the kernel `rename` is the synchronization
+/// point — never a `create(tmp)` collision.
+fn unique_tmp_path(dest: &Path) -> PathBuf {
+    let suffix = format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let name = dest
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut p = dest.to_path_buf();
+    p.set_file_name(format!("{name}.{suffix}"));
+    p
+}
+
+/// Stage some content via `f(&tmp)`, then atomically rename onto
+/// `dest`. The tmp is per-call, so concurrent callers (within or
+/// across processes) don't collide; the rename is atomic on the
+/// same filesystem and overwrites any existing target. On staging
+/// failure the tmp is cleaned up; on rename failure the same.
+///
+/// Async sibling of [`stage_and_rename_sync`] for I/O that needs the
+/// tokio runtime (network fetch, large copies). Both share the
+/// per-call tmp + atomic-rename pattern.
+async fn stage_and_rename<F, Fut>(dest: &Path, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let tmp = unique_tmp_path(dest);
+    if let Err(err) = f(tmp.clone()).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(err);
     }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link)
-        .with_context(|| format!("symlinking {} -> {}", link.display(), target.display()))?;
-    #[cfg(not(unix))]
-    std::fs::copy(target, link)
-        .map(|_| ())
-        .with_context(|| format!("copying {} -> {}", target.display(), link.display()))?;
+    if let Err(err) = tokio::fs::rename(&tmp, dest).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        anyhow::bail!(
+            "renaming {} -> {}: {err}",
+            tmp.display(),
+            dest.display()
+        );
+    }
     Ok(())
+}
+
+/// Sync sibling of [`stage_and_rename`]. Use for cheap operations
+/// like creating a symlink that don't justify spawning blocking work.
+fn stage_and_rename_sync<F>(dest: &Path, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&Path) -> anyhow::Result<()>,
+{
+    let tmp = unique_tmp_path(dest);
+    if let Err(err) = f(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!(
+            "renaming {} -> {}: {err}",
+            tmp.display(),
+            dest.display()
+        );
+    }
+    Ok(())
+}
+
+/// Materialize a symlink at `link` pointing at `target`. Atomic and
+/// safe across concurrent callers (multiple processes / tokio tasks)
+/// — uses the per-call tmp + rename pattern, so the loser of any
+/// race ends up with an equivalent target.
+fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
+    stage_and_rename_sync(link, |tmp| {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, tmp).with_context(|| {
+            format!("symlinking {} -> {}", tmp.display(), target.display())
+        })?;
+        #[cfg(not(unix))]
+        std::fs::copy(target, tmp)
+            .map(|_| ())
+            .with_context(|| format!("copying {} -> {}", target.display(), tmp.display()))?;
+        Ok(())
+    })
 }
 
 /// Filename for a CheckedFile. Local paths take their final segment;
