@@ -2350,6 +2350,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-ext-proc"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "dynamo-kv-router",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "1.2.0"
 dependencies = [
