@@ -98,9 +98,16 @@ fi
 if [[ "$DISABLE_NSYS" == "1" ]]; then
     NSYS_PREFIX=()
 else
+    # --trace=nvtx (drop `cuda`) — vllm serve is CUDA-active so the NVTX
+    # channel survives without the `cuda` keepalive; dropping `cuda` collapses
+    # the qdstrm by ~150× (1.2 GB → 7.6 MB on 397B / 8× H100), keeps nsys
+    # finalize inside the SIGINT deadline, and matches dynamo_serve.sh's
+    # backend prefix so the two configs produce parity-sized reps. NVTX-level
+    # analysis (`nsys stats --report nvtx_sum`) is unchanged. If you need
+    # kernel-level CUDA correlation, set DYN_NSYS_TRACE=nvtx,cuda explicitly.
     NSYS_PREFIX=(
         "$NSYS_BIN" profile
-        --trace=nvtx,cuda
+        --trace="${DYN_NSYS_TRACE:-nvtx}"
         --sample=none
         --cpuctxsw=none
         --delay="$NSYS_DELAY_S"
@@ -121,7 +128,7 @@ NSYS_PID=0
 # wrappers must forward SIGINT/SIGTERM — never `trap '' INT TERM`.
 cleanup() {
     [[ "$NSYS_PID" -gt 0 ]] && kill -INT "$NSYS_PID" 2>/dev/null || true
-    for _ in $(seq 1 150); do
+    for _ in $(seq 1 300); do
         [[ "$NSYS_PID" -gt 0 ]] && kill -0 "$NSYS_PID" 2>/dev/null || break
         sleep 1
     done

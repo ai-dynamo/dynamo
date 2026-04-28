@@ -86,6 +86,11 @@ def run_aiperf_single(
     print(f"  aiperf {sweep_mode}={sweep_value} -> {artifact_dir}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
+    # Multi-GB aiperf debug artifact (every prompt + every base64 image
+    # sent); regenerable from --input-file. Drop it so multi-config
+    # sweeps don't silently bleed scratch.
+    (artifact_dir / "inputs.json").unlink(missing_ok=True)
+
     if proc.returncode != 0:
         print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)
         for stream_name, stream in [("stderr", proc.stderr), ("stdout", proc.stdout)]:

@@ -12,7 +12,7 @@ conversation_num: 30
 warmup_count: 2
 port: 8000
 timeout: 2400
-output_dir: /dynamo-tmp/logs/04-25/sweep-397b-v3
+output_dir: /dynamo-tmp/logs/04-27/sweep-397b-862258-iter1
 restart_server_every_benchmark: true
 skip_plots: true
 
@@ -23,7 +23,12 @@ env:
   DYN_NVTX: "1"
   DYN_ENABLE_RUST_NVTX: "1"
   DYN_HTTP_BODY_LIMIT_MB: "200"
-  DYN_NSYS_DIR: "/dynamo-tmp/logs/04-25/sweep-397b-v3/nsys"
+  DYN_NSYS_DIR: "/dynamo-tmp/logs/04-27/sweep-397b-862258-iter1/nsys"
+  # Relax NCCL watchdog so nsys-induced stalls don't SIGABRT TP workers.
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+  NCCL_TIMEOUT: "1800"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  NCCL_DEBUG: "WARN"
 
 input_files:
   - /dynamo-tmp/data/30u_3t_5w_8000word_base64.jsonl
@@ -48,6 +53,7 @@ configs:
       - --max-model-len
       - "32768"
 
+  # iter5: all 3 configs enabled.
   - label: dynamo-fd
     workflow: benchmarks/multimodal/sweep/workflows/dynamo_serve.sh
     extra_args:
