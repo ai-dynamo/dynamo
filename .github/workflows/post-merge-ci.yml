@@ -8,16 +8,50 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: 'Framework to validate'
+        type: choice
+        options: [all, vllm, sglang, trtllm]
+        default: all
 
 permissions:
   contents: read
 
 jobs:
   # ============================================================================
+  # DISPATCH CONFIG
+  # On workflow_dispatch, narrows the run to a single framework.
+  # On push, all run flags resolve to true (full pipeline as before).
+  # ============================================================================
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      run_vllm:   ${{ steps.flags.outputs.run_vllm }}
+      run_sglang: ${{ steps.flags.outputs.run_sglang }}
+      run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
+    steps:
+      - id: flags
+        shell: bash
+        env:
+          FW: ${{ github.event.inputs.framework || 'all' }}
+        run: |
+          for f in vllm sglang trtllm; do
+            if [[ "$FW" == "all" || "$FW" == "$f" ]]; then
+              echo "run_$f=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run_$f=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -63,6 +97,7 @@ jobs:
 
   snapshot-agent:
     name: Snapshot Agent
+    if: github.event_name != 'workflow_dispatch'
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -87,6 +122,8 @@ jobs:
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -102,6 +139,8 @@ jobs:
 
   vllm-dev-build:
     name: vllm-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -118,6 +157,8 @@ jobs:
 
   vllm-efa-build:
     name: vllm-runtime-efa
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -134,6 +175,8 @@ jobs:
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -149,6 +192,8 @@ jobs:
 
   sglang-dev-build:
     name: sglang-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -165,6 +210,8 @@ jobs:
 
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -180,6 +227,8 @@ jobs:
 
   trtllm-dev-build:
     name: trtllm-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -196,6 +245,8 @@ jobs:
 
   trtllm-efa-build:
     name: trtllm-runtime-efa
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -212,6 +263,7 @@ jobs:
 
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -227,6 +279,8 @@ jobs:
 
   frontend-build:
     name: frontend
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -698,7 +752,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     needs: [ deploy-status-check ]
     permissions:
       contents: read
