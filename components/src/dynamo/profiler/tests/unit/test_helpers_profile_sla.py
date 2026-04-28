@@ -1181,15 +1181,44 @@ class TestValidateDgdServiceNameLengths:
         assert "TRTLLMDecodeWorker" in msg
         assert "ok" not in msg
 
-    def test_raises_when_dgdr_name_unset(self, monkeypatch):
-        """Missing DGDR_NAME should raise ValueError — it is always set in production."""
+    def test_fallback_to_config_metadata_name_when_dgdr_name_unset(self, monkeypatch):
+        """Without DGDR_NAME, the name in final_config.metadata.name is used."""
         from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
 
         monkeypatch.delenv("DGDR_NAME", raising=False)
         dgdr = self._make_dgdr()
-        config = self._make_final_config(["svc"])
-        with pytest.raises(ValueError, match="DGDR_NAME"):
+        # "x" * 40 + "svc" (3) = 43 ≤ 45 → passes
+        config = {"metadata": {"name": "x" * 40}, "spec": {"services": {"svc": {}}}}
+        _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
+
+    def test_fallback_raises_when_config_name_causes_violation(self, monkeypatch):
+        """Without DGDR_NAME, a long metadata.name still triggers a violation."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        monkeypatch.delenv("DGDR_NAME", raising=False)
+        dgdr = self._make_dgdr()
+        # "x" * 40 + "TRTLLMPrefillWorker" (19) = 59 > 45
+        config = {
+            "metadata": {"name": "x" * 40},
+            "spec": {"services": {"TRTLLMPrefillWorker": {}}},
+        }
+        with pytest.raises(ValueError, match="pod-naming limit"):
             _validate_dgd_service_name_lengths(dgdr, config)
+
+    def test_skips_when_neither_dgdr_name_nor_config_name_available(
+        self, monkeypatch, caplog
+    ):
+        """No DGDR_NAME and no metadata.name in config → debug log, no raise."""
+        import logging
+
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        monkeypatch.delenv("DGDR_NAME", raising=False)
+        dgdr = self._make_dgdr()
+        config = self._make_final_config(["s" * 45])  # no metadata key
+        with caplog.at_level(logging.DEBUG):
+            _validate_dgd_service_name_lengths(dgdr, config)
+        assert any("skipping" in r.message for r in caplog.records)
 
     def test_respects_dgd_name_override(self, monkeypatch):
         """User-supplied DGD name override is used instead of dgdr_name + '-dgd'."""

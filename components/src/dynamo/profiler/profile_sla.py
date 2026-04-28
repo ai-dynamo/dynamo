@@ -288,21 +288,29 @@ def _validate_dgd_service_name_lengths(
 ) -> None:
     """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
     dgdr_name = os.environ.get("DGDR_NAME", "")
-    if not dgdr_name:
-        raise ValueError(
-            "DGDR_NAME environment variable is not set; cannot validate DGD service name lengths"
-        )
-
-    # Honour user-supplied DGD name override (mirrors computeDGDName in the Go controller).
-    dgd_name = dgdr_name + "-dgd"
-    if dgdr.overrides and dgdr.overrides.dgd:
-        metadata = dgdr.overrides.dgd.get("metadata")
-        if isinstance(metadata, dict):
-            override_name = metadata.get("name", "")
-            if override_name:
-                dgd_name = override_name
-
     dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
+
+    if dgdr_name:
+        # Operator path: compute the DGD name exactly as the Go controller does.
+        dgd_name = dgdr_name + "-dgd"
+        if dgdr.overrides and dgdr.overrides.dgd:
+            metadata = dgdr.overrides.dgd.get("metadata")
+            if isinstance(metadata, dict):
+                override_name = metadata.get("name", "")
+                if override_name:
+                    dgd_name = override_name
+    else:
+        # Non-operator path (e.g. standalone CLI): fall back to the name already
+        # embedded in the generated config. These template names ("vllm-disagg",
+        # "trtllm-disagg", …) are always short, so violations are unlikely here,
+        # but we still run the check to catch any edge cases.
+        dgd_name = dgd_spec.get("metadata", {}).get("name", "")
+        if not dgd_name:
+            logger.debug(
+                "DGDR_NAME unset and no metadata.name in config; "
+                "skipping DGD service name length validation."
+            )
+            return
     services = dgd_spec.get("spec", {}).get("services", {})
     violations = []
     for svc_name in services:
