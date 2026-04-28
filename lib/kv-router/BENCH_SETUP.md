@@ -106,7 +106,7 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
 ### Worker scaling
 
 ```bash
-for factor in 1 2 4 8; do
+for factor in 1 2 4 8 16 32; do
   cargo bench --package dynamo-bench --bench mooncake_bench -- \
     $(git rev-parse --show-toplevel)/lib/kv-router/traces/conversation_trace.jsonl \
     --trace-simulation-duration-ms 10000 --benchmark-duration-ms 30000 \
@@ -240,18 +240,20 @@ Config: 2 shards × 4 workers per shard, `--num-unique-inference-workers 1000`, 
 
 | Duplication factor | Effective workers | Branches | Offered ops/s | Early-exit | Avg routing | Avg shard | p99 | Block split |
 |-------------------|-----------------|----------|--------------|------------|-------------|-----------|-----|-------------|
-| 1× | 7,000 | 831 | 11,860 | 85.4% | 2,194 ns | 611 µs | **1,370 µs** | 91.6% / 8.4% |
-| 2× | 14,000 | 1,650 | 23,721 | 86.3% | 414 ns | 388 µs | **736 µs** | 47.9% / 52.1% |
-| 4× | 28,000 | 3,329 | 47,443 | 86.4% | 454 ns | 375 µs | **620 µs** | 49.1% / 50.9% |
-| 8× | 56,000 | 6,646 | 94,886 | 86.7% | 285 ns | 345 µs | **611 µs** | 56.5% / 43.5% |
+| 1× | 7,000 | 831 | 11,860 | 85.4% | 287 ns | 347 µs | 587 µs | 90.8% / 9.2% |
+| 2× | 14,000 | 1,650 | 23,721 | 86.3% | 282 ns | 289 µs | **458 µs** | 48.7% / 51.3% |
+| 4× | 28,000 | 3,330 | 47,443 | 86.4% | 249 ns | 293 µs | **446 µs** | 49.7% / 50.3% |
+| 8× | 56,000 | 6,647 | 94,886 | 86.7% | 302 ns | 381 µs | 623 µs | 57.9% / 42.1% |
+| 16× | 112,000 | 13,296 | 189,772 | 86.8% | 278 ns | 402 µs | 709 µs | 56.2% / 43.8% |
+| 32× | 224,000 | 26,617 | 379,543 | 86.5% | 344 ns | 364 µs | 713 µs | 49.3% / 50.7% |
 
-**Block skew self-corrects at scale.** At 1× (7k workers) the shard split is 91.6%/8.4% and p99 is 1,370 µs. At 2× (14k workers) the shards snap to near-balanced (48/52) and p99 halves to 736 µs. Above that threshold p99 plateaus at ~611 µs — adding 4× more workers shaves only 17%.
+**1× is the only problematic case.** The 90.8%/9.2% block split at 7k workers is the lifetime skew issue — a few heavy branches landed on one shard and dominated it. At 2× the shards snap to balanced (48.7%/51.3%) due to the different hashes. and p99 drops to 458 µs.
 
-**Routing lookup is anomalously slow at 1× (2,194 ns vs 285–454 ns elsewhere).** With only 831 branches and 7,000 workers all querying the same hot routing entries, and event workers simultaneously writing block counts for the heavily skewed shard, there is contention on the routing table's DashMap stripes. At 2×+ the workers spread across more branches and contention drops.
+**Sweet spot around 4×.** p99 is lowest at 4× (446 µs) where shards are balanced and per-shard tree depth is still moderate. Beyond that, p99 rises as each shard holds more blocks, but plateaus at ~700–750 µs between 16× and 32× even as workers double. This is sub-linear: block count grows 8× from 4× to 32×, but p99 grows only ~60%.
 
-**Throughput scales linearly** (11,860 → 94,886 ops/s) with no cliff visible up to 56,000 workers.
+**No worker-count or lookup ceiling.** Throughput scales linearly (11,860 → 379,543 ops/s, doubling each factor step) with no saturation up to 224,000 effective workers. There is no cliff. Similarly, avg routing ranges from 249–344 ns across 831 to 26,617 branches — DashMap lookup is not a bottleneck in this range.
 
-**Practical implication:** the lifetime block skew issue (see Known Issues) is most acute below ~14,000 effective workers. Above that the assignment algorithm self-corrects and the issue is largely mitigated.
+**Practical implication:** If minimizing single-query latency matters, 14k–28k workers is the sweet spot for a 2-shard config; if maximizing throughput matters, the indexer keeps scaling.
 
 ---
 
