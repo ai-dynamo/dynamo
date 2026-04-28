@@ -115,26 +115,40 @@ class _DeferredAbort:
             self._first_token_event.set()
 
     async def abort(self) -> None:
-        """Abort immediately if first token received, otherwise defer."""
-        if self._first_token_received:
-            try:
-                await asyncio.shield(self._engine_client.abort(self._request_id))
-            except asyncio.CancelledError:
+        """Abort the request. Creates a Task to hold a strong reference so the
+        engine abort cannot be dropped if this coroutine is concurrently
+        cancelled."""
+        if self._abort_task is None:
+            if self._first_token_received:
                 logger.debug(
-                    f"Deferred abort: shielded from cancellation for request "
-                    f"{self._request_id}, abort continues in background"
+                    f"Deferred abort: first token already received, "
+                    f"aborting request {self._request_id} now"
                 )
-                return
+                self._abort_task = asyncio.create_task(self._run_abort())
+            else:
+                logger.debug(
+                    f"Deferred abort: first token not received for request "
+                    f"{self._request_id}, spawning background task"
+                )
+                self._abort_task = asyncio.create_task(self._wait_and_abort())
+        try:
+            await self._abort_task
+        except asyncio.CancelledError:
             logger.debug(
-                f"Deferred abort: first token already received, "
-                f"aborted request {self._request_id}"
+                f"Deferred abort: shielded from cancellation for request "
+                f"{self._request_id}, abort continues in background"
             )
-        elif self._abort_task is None:
-            logger.debug(
-                f"Deferred abort: first token not received for request "
-                f"{self._request_id}, spawning background task"
+
+    async def _run_abort(self) -> None:
+        """Execute engine.abort() and emit the canonical completion log."""
+        try:
+            await self._engine_client.abort(self._request_id)
+            logger.debug(f"Aborted Request ID: {self._request_id}")
+        except Exception as e:
+            logger.warning(
+                f"Deferred abort: engine abort raised for request "
+                f"{self._request_id}: {e}"
             )
-            self._abort_task = asyncio.create_task(self._wait_and_abort())
 
     async def _wait_and_abort(self) -> None:
         """Background task: wait for first token, then abort."""
@@ -142,17 +156,7 @@ class _DeferredAbort:
             await self._first_token_event.wait()
         except Exception:
             pass
-        try:
-            await self._engine_client.abort(self._request_id)
-            logger.debug(
-                f"Deferred abort: background task fired abort for request "
-                f"{self._request_id}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Deferred abort: background abort failed for request "
-                f"{self._request_id}: {e}"
-            )
+        await self._run_abort()
 
     async def close(self) -> None:
         """Clean up the deferred-abort waiter when generation exits.
@@ -872,12 +876,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             # Abort the request (via guard if provided, otherwise direct).
-            # Shields absorb any CancelledError injected by _abort_monitor's
-            # cleanup so engine cleanup always completes and the completion log
-            # below is always reachable.
             if abort_guard is not None:
+                # Guard owns completion logging: "Aborted Request ID:" is
+                # emitted from _run_abort() once engine.abort() returns,
+                # even if this task is concurrently cancelled.
                 await abort_guard.abort()
             else:
+                # No guard: shield the abort so a concurrent CancelledError
+                # from _abort_monitor cleanup cannot interrupt it mid-flight.
                 try:
                     await asyncio.shield(self.engine_client.abort(request_id))
                 except asyncio.CancelledError:
@@ -885,12 +891,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         f"Abort shielded from cancellation for request "
                         f"{request_id}, continuing in background"
                     )
-
-            # Completion log — reachable because shields above absorb
-            # CancelledError before it can propagate past the abort calls.
-            logger.debug(
-                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
-            )
+                logger.debug(
+                    f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                )
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
