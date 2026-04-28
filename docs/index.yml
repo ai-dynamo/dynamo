@@ -63,6 +63,7 @@ navigation:
   - section: Kubernetes Deployment
     contents:
       - section: Deployment Guide
+        path: kubernetes/README.md
         contents:
           - page: Detailed Installation Guide
             path: kubernetes/installation-guide.md
