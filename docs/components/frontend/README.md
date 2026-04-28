@@ -45,9 +45,9 @@ This starts an OpenAI-compatible HTTP server with integrated pre/post processing
 
 The frontend does the pre and post processing. To do this it will need access to the model configuration files: `config.json`, `tokenizer.json`, `tokenizer_config.json`, etc. It does not need the weights.
 
-Frontend will download the files it needs from Hugging Face, no setup is required. However we recommend setting up [modelexpress-server](https://github.com/ai-dynamo/modelexpress) and a shared folder such as a Kubernetes PVC. This ensures the model is only downloaded once across the whole cluster.
+By default each worker self-hosts its metadata files on its system status server (`DYN_SYSTEM_PORT`, automatically set to `9090` by the Kubernetes operator). At registration the frontend fetches each file over HTTP from `http://<worker>/v1/metadata/<slug>/<filename>` and verifies its blake3 checksum against the model's discovery card. No shared filesystem or HuggingFace access is required on the frontend pod for this path. To opt out, set `DYN_SELF_HOST_METADATA=false` on the worker, or pass `self_host_metadata=False` to `register_model(...)`. Note that for non-Kubernetes setups, `DYN_SYSTEM_PORT` must be set explicitly on the worker — without it the system status server doesn't run and self-host silently no-ops, falling through to the legacy paths below.
 
-If the model is not available on Hugging Face, such as a private or customized model, you will need to make the model files available locally at the same file path as on the backend. The backend's `--model-path <here>` will need to exist on the frontend and contain at least the configuration (JSON) files.
+When self-host is disabled (or the worker isn't running a system status server), the frontend falls back to legacy paths: a direct Hugging Face download — no setup required for public models, though we recommend [modelexpress-server](https://github.com/ai-dynamo/modelexpress) plus a shared folder such as a Kubernetes PVC for cluster-wide caching — or a local read at the same path the worker used (the backend's `--model-path <here>` must exist on the frontend pod with at least the configuration JSON files). For private or customized models not on Hugging Face, the local-path approach is the only legacy option, which is the failure mode worker self-host was added to address.
 
 ### KServe gRPC Frontend
 
