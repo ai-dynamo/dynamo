@@ -291,6 +291,10 @@ func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.Dynam
 	if v, ok := slaMap["itl"].(float64); ok {
 		dst.SLA.ITL = &v
 	}
+	if v, ok := slaMap["optimizationType"].(string); ok {
+		ot := v1beta1.OptimizationType(v)
+		dst.SLA.OptimizationType = &ot
+	}
 
 	if v, ok := slaMap["isl"].(float64); ok {
 		if dst.Workload == nil {
