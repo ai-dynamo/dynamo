@@ -486,7 +486,7 @@ impl ConnectorLeader {
             .build();
 
         // Build G2→G3 policy from config (or defaults if not configured).
-        // Default: Presence — symmetric with G1→G2. Promote any block not already
+        // Default: Presence — symmetric with G1→G2. Offload any block not already
         // on disk and not already in flight; let G3's eviction backend handle
         // cold-block churn under pressure. Opt into LFU-on-admission for
         // workloads where disk write amplification matters by setting
