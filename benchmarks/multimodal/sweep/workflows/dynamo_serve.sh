@@ -125,11 +125,11 @@ else
     # Backend (vLLM workers) issues CUDA every step → NVTX channel stays
     # alive without `cuda` in the trace list. Dropping `cuda` collapses the
     # qdstrm size by orders of magnitude, which keeps nsys finalize inside
-    # the 150 s cleanup() budget on 397B / 8 TP runs (otherwise the .qdstrm
+    # the 300 s cleanup() budget on 397B / 8 TP runs (otherwise the .qdstrm
     # gets killed mid-merge and is unrecoverable). See research/profiling.md.
-    NSYS_BE_TRACE=(--trace=nvtx)
+    NSYS_BE_TRACE=(--trace=nvtx,cuda)
     echo "[nsys] frontend -> $FRONTEND_OUT (trace=nvtx,cuda)" >&2
-    echo "[nsys] backend  -> $BACKEND_OUT (trace=nvtx)" >&2
+    echo "[nsys] backend  -> $BACKEND_OUT (trace=nvtx,cuda)" >&2
     FE_PREFIX=("${NSYS_BASE[@]}" "${NSYS_FE_TRACE[@]}" -o "$FRONTEND_OUT")
     BE_PREFIX=("${NSYS_BASE[@]}" "${NSYS_BE_TRACE[@]}" -o "$BACKEND_OUT")
 fi
@@ -158,9 +158,11 @@ cleanup() {
     for pid in "$FE_NSYS_PID" "$BE_NSYS_PID"; do
         [[ -n "$pid" && "$pid" -gt 0 ]] && kill -INT "$pid" 2>/dev/null || true
     done
-    # Shared 150 s deadline — both nsys instances finalize in parallel, so
-    # wall time = max(fe, be), under the orchestrator's 180 s SIGKILL budget.
-    for _ in $(seq 1 150); do
+    # Shared 300 s deadline — both nsys instances finalize in parallel, so
+    # wall time = max(fe, be), under the orchestrator's 330 s SIGKILL budget.
+    # Bumped from 150 s after iter4 dynamo-fd-ec orphaned a 990 MB qdstrm
+    # mid-finalize when backend trace was flipped to nvtx,cuda.
+    for _ in $(seq 1 300); do
         any_alive=0
         for pid in "$FE_NSYS_PID" "$BE_NSYS_PID"; do
             [[ -n "$pid" && "$pid" -gt 0 ]] && kill -0 "$pid" 2>/dev/null && any_alive=1
