@@ -101,9 +101,7 @@ def multi_replica_services(
         # `file` passes a local dir as --model-path; without
         # --model-name the display_name would become that path string
         # and surface as the `/v1/models` id.
-        worker_extra_args = (
-            ["--model-name", TEST_MODEL] if scheme == "file" else None
-        )
+        worker_extra_args = ["--model-name", TEST_MODEL] if scheme == "file" else None
 
         frontend = DynamoFrontendProcess(
             request,

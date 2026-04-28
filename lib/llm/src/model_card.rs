@@ -447,11 +447,7 @@ where
     }
     if let Err(err) = tokio::fs::rename(&tmp, dest).await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        anyhow::bail!(
-            "renaming {} -> {}: {err}",
-            tmp.display(),
-            dest.display()
-        );
+        anyhow::bail!("renaming {} -> {}: {err}", tmp.display(), dest.display());
     }
     Ok(())
 }
@@ -469,11 +465,7 @@ where
     }
     if let Err(err) = std::fs::rename(&tmp, dest) {
         let _ = std::fs::remove_file(&tmp);
-        anyhow::bail!(
-            "renaming {} -> {}: {err}",
-            tmp.display(),
-            dest.display()
-        );
+        anyhow::bail!("renaming {} -> {}: {err}", tmp.display(), dest.display());
     }
     Ok(())
 }
@@ -483,9 +475,8 @@ where
 fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     stage_and_rename_sync(link, |tmp| {
         #[cfg(unix)]
-        std::os::unix::fs::symlink(target, tmp).with_context(|| {
-            format!("symlinking {} -> {}", tmp.display(), target.display())
-        })?;
+        std::os::unix::fs::symlink(target, tmp)
+            .with_context(|| format!("symlinking {} -> {}", tmp.display(), target.display()))?;
         #[cfg(not(unix))]
         std::fs::copy(target, tmp)
             .map(|_| ())
@@ -502,9 +493,7 @@ fn checked_file_to_uri(cf: &CheckedFile) -> anyhow::Result<String> {
     if let Some(url) = cf.url() {
         return Ok(url.to_string());
     }
-    let path = cf
-        .path()
-        .context("CheckedFile has neither path nor url")?;
+    let path = cf.path().context("CheckedFile has neither path nor url")?;
     let absolute = std::fs::canonicalize(path)
         .with_context(|| format!("canonicalizing {}", path.display()))?;
     let url = url::Url::from_file_path(&absolute)
