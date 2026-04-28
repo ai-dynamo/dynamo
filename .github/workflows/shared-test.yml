@@ -155,6 +155,7 @@ jobs:
       - name: Download s5cmd
         shell: bash
         run: |
+          set +e
           S5CMD_BIN="s5cmd"
           if ! command -v s5cmd &> /dev/null; then
             echo "⬇️ s5cmd not found. Detecting architecture..."
