@@ -92,52 +92,7 @@ Apply the base NicClusterPolicy using kustomize:
 kubectl apply -k https://github.com/Azure/aks-rdma-infiniband/configs/nicclusterpolicy/base
 ```
 
-This applies the following NicClusterPolicy which targets nodes with Mellanox NICs and installs the DOCA/OFED driver:
-
-```yaml
-apiVersion: mellanox.com/v1alpha1
-kind: NicClusterPolicy
-metadata:
-  name: nic-cluster-policy
-spec:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: feature.node.kubernetes.io/pci-15b3.present
-          operator: In
-          values:
-          - "true"
-  ofedDriver:
-    repository: nvcr.io/nvidia/mellanox
-    image: doca-driver
-    version: doca3.2.0-25.10-1.2.8.0-2
-    env:
-    - name: OFED_BLACKLIST_MODULES_FILE
-      value: "/host/etc/modprobe.d/blacklist-ofed-modules.conf"
-    forcePrecompiled: false
-    upgradePolicy:
-      autoUpgrade: true
-      drain:
-        deleteEmptyDir: true
-        enable: true
-        force: true
-        timeoutSeconds: 300
-      maxParallelUpgrades: 1
-    startupProbe:
-      initialDelaySeconds: 10
-      periodSeconds: 20
-    livenessProbe:
-      initialDelaySeconds: 30
-      periodSeconds: 30
-    readinessProbe:
-      initialDelaySeconds: 10
-      periodSeconds: 30
-  docaTelemetryService:
-    repository: nvcr.io/nvidia/doca
-    image: doca_telemetry
-    version: 1.22.5-doca3.1.0-host
-```
+This targets nodes with Mellanox NICs (`feature.node.kubernetes.io/pci-15b3.present`) and installs the DOCA/OFED driver as a DaemonSet.
 
 Wait for the MOFED driver DaemonSet to finish installing on all nodes (this may take several minutes):
 
