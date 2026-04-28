@@ -98,6 +98,8 @@ class Worker:
             async for chunk in self.engine.generate(request, context):
                 if context.is_stopped():
                     break
+                if "index" not in chunk:
+                    chunk["index"] = 0
                 yield chunk
         except DynamoException:
             raise
