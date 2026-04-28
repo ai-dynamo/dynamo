@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4-Pro SGLang DynamoGraphDeployment
-# Aggregated mode, B200x8 TP8, MXFP4 MoE, EAGLE MTP 3/4
+# Aggregated mode, B200x8 TP8, MXFP4 MoE
+# EAGLE disabled: crashes on long context (>18k tokens) and tool calling on B200 TP8
+# due to insufficient GPU memory headroom (4.23 GB/GPU with EAGLE vs 7.75 GB without)
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -71,14 +73,6 @@ spec:
             - "8"
             - --moe-runner-backend
             - flashinfer_mxfp4
-            - --speculative-algo
-            - EAGLE
-            - --speculative-num-steps
-            - "3"
-            - --speculative-eagle-topk
-            - "1"
-            - --speculative-num-draft-tokens
-            - "4"
             - --chunked-prefill-size
             - "4096"
             - --disable-flashinfer-autotune
