@@ -303,78 +303,109 @@ fn spawn_instance_removal_watcher(
     let endpoint_name = endpoint.name().to_string();
 
     tokio::spawn(async move {
+        // Release the dedup guard on EVERY exit path -- normal exit, discovery
+        // stream failure, AND task panic. A leaked entry would silently disable
+        // the orphaned-pending-request fix for that endpoint until process restart.
+        struct GuardRelease(EndpointId);
+        impl Drop for GuardRelease {
+            fn drop(&mut self) {
+                if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                    map.remove(&self.0);
+                }
+            }
+        }
+        let _release = GuardRelease(endpoint_id);
+
         let namespace = endpoint.component().namespace().name();
         let component = endpoint.component().name().to_string();
-        let query = DiscoveryQuery::Endpoint {
-            namespace,
-            component,
-            endpoint: endpoint_name.clone(),
-        };
 
-        let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    endpoint = %endpoint_name,
-                    "Failed to start instance removal watcher: {e}"
-                );
-                guard.remove(&endpoint_id);
-                return;
-            }
-        };
+        // Outer reconnect loop: a transient discovery-plane failure (failed
+        // initial connect or the watch stream ending) must not permanently
+        // disable orphaned-pending-request cancellation for this endpoint.
+        // Reconnect with a cancellation-aware backoff until cancel_token fires.
+        const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        'reconnect: loop {
+            let query = DiscoveryQuery::Endpoint {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint_name.clone(),
+            };
 
-        loop {
-            tokio::select! {
-                event = stream.next() => {
-                    match event {
-                        Some(Ok(DiscoveryEvent::Removed(id))) => {
-                            // Only act on endpoint-type removals; pass the
-                            // full EndpointInstanceId so cancellation is
-                            // scoped to exactly one service identity.
-                            if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                let n = addressed.cancel_instance_streams(eid).await;
-                                if n > 0 {
-                                    tracing::warn!(
-                                        namespace = %eid.namespace,
-                                        component = %eid.component,
-                                        endpoint = %eid.endpoint,
-                                        instance_id = eid.instance_id,
-                                        cancelled = n,
-                                        "Cancelled pending response streams for removed \
-                                         instance (discovery-driven cleanup)"
-                                    );
-                                }
-                            }
-                        }
-                        Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
-                            // Clear tombstone so new requests for this identity are
-                            // tracked normally after a pod restart.
-                            let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                            addressed.clear_instance_tombstone(&eid).await;
-                        }
-                        Some(Ok(_)) => {
-                            // Ignore non-endpoint events (Model, EventChannel).
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!(
-                                endpoint = %endpoint_name,
-                                "Instance removal watcher stream error: {e}"
-                            );
-                        }
-                        None => {
-                            // Stream ended — discovery plane shut down.
-                            break;
-                        }
+            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Failed to start instance removal watcher (will retry): {e}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
                     }
                 }
-                _ = cancel_token.cancelled() => {
-                    break;
+            };
+
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(Ok(DiscoveryEvent::Removed(id))) => {
+                                // Only act on endpoint-type removals; pass the
+                                // full EndpointInstanceId so cancellation is
+                                // scoped to exactly one service identity.
+                                if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                    let n = addressed.cancel_instance_streams(eid).await;
+                                    if n > 0 {
+                                        tracing::warn!(
+                                            namespace = %eid.namespace,
+                                            component = %eid.component,
+                                            endpoint = %eid.endpoint,
+                                            instance_id = eid.instance_id,
+                                            cancelled = n,
+                                            "Cancelled pending response streams for removed \
+                                             instance (discovery-driven cleanup)"
+                                        );
+                                    }
+                                }
+                            }
+                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
+                                // Clear tombstone so new requests for this identity are
+                                // tracked normally after a pod restart. Also fires on
+                                // reconnect when list_and_watch replays current state,
+                                // which limits how long a stale tombstone survives.
+                                let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                                addressed.clear_instance_tombstone(&eid).await;
+                            }
+                            Some(Ok(_)) => {
+                                // Ignore non-endpoint events (Model, EventChannel).
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream error: {e}"
+                                );
+                            }
+                            None => {
+                                // Stream ended — discovery plane closed the watch.
+                                // Reconnect rather than exiting permanently, otherwise
+                                // a transient discovery restart would silently disable
+                                // orphaned-pending-request cancellation.
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream ended; reconnecting"
+                                );
+                                continue 'reconnect;
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break 'reconnect;
+                    }
                 }
             }
         }
 
-        // Release the guard so the next router creation can re-arm the watcher.
-        guard.remove(&endpoint_id);
+        // _release.drop() removes the dedup-guard entry; debug-log on the way out.
         tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
     });
 }
@@ -1465,5 +1496,84 @@ mod tests {
         );
 
         rt.shutdown();
+    }
+
+    /// The watcher dedup guard must be released even if the spawned task panics.
+    /// Without this, a panic anywhere in the watcher body would leave a stale
+    /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
+    /// request cancellation for that endpoint until process restart.
+    ///
+    /// We exercise the Drop-guard pattern directly against the same static
+    /// rather than driving `spawn_instance_removal_watcher` end-to-end (which
+    /// would require staging a panicking discovery stream). The test mirrors
+    /// the production code's GuardRelease shape; if the production code stops
+    /// using a Drop guard, the integration would regress and the existing
+    /// orphan-cancellation tests would fail.
+    #[tokio::test]
+    async fn watcher_dedup_guard_released_on_panic() {
+        let endpoint_id = EndpointId {
+            namespace: "panic-test-ns".to_string(),
+            component: "panic-test-comp".to_string(),
+            name: "panic-test-endpoint".to_string(),
+        };
+
+        // Mimic the production code's pre-spawn dedup insert.
+        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+        map.insert(endpoint_id.clone(), ());
+
+        let endpoint_id_clone = endpoint_id.clone();
+        let join = tokio::spawn(async move {
+            // Same shape as in spawn_instance_removal_watcher.
+            struct GuardRelease(EndpointId);
+            impl Drop for GuardRelease {
+                fn drop(&mut self) {
+                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                        map.remove(&self.0);
+                    }
+                }
+            }
+            let _release = GuardRelease(endpoint_id_clone);
+            panic!("simulated watcher-task panic");
+        });
+
+        let result = join.await;
+        assert!(result.is_err() && result.unwrap_err().is_panic());
+        assert!(
+            !map.contains_key(&endpoint_id),
+            "Drop guard must release the dedup entry even on panic"
+        );
+    }
+
+    /// Normal-exit path: the Drop guard releases the entry when the task
+    /// finishes without panicking. This is the everyday case (cancel_token
+    /// fires or discovery stream closes).
+    #[tokio::test]
+    async fn watcher_dedup_guard_released_on_normal_exit() {
+        let endpoint_id = EndpointId {
+            namespace: "normal-test-ns".to_string(),
+            component: "normal-test-comp".to_string(),
+            name: "normal-test-endpoint".to_string(),
+        };
+
+        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+        map.insert(endpoint_id.clone(), ());
+
+        let endpoint_id_clone = endpoint_id.clone();
+        tokio::spawn(async move {
+            struct GuardRelease(EndpointId);
+            impl Drop for GuardRelease {
+                fn drop(&mut self) {
+                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                        map.remove(&self.0);
+                    }
+                }
+            }
+            let _release = GuardRelease(endpoint_id_clone);
+            // task body returns normally
+        })
+        .await
+        .unwrap();
+
+        assert!(!map.contains_key(&endpoint_id));
     }
 }

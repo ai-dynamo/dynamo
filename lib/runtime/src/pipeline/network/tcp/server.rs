@@ -8,8 +8,25 @@ use std::{
     net::{IpAddr, SocketAddr, TcpListener},
     os::fd::{AsFd, FromRawFd},
     sync::Arc,
+    time::Duration,
 };
 use tokio::sync::Mutex;
+use tokio::time::Instant;
+
+/// Time-to-live for instance tombstones.
+///
+/// The tombstone only needs to bridge the in-flight `register()` →
+/// `associate_instance()` window for a single request -- sub-millisecond in
+/// practice. 5 seconds is several orders of magnitude longer than the race
+/// window we actually protect, and short enough that even if a watcher misses
+/// an `Added` event for a same-identity re-registration (rare under monotonic
+/// etcd lease IDs, but possible across discovery restarts), valid requests
+/// aren't rejected for long. Bounding by recent activity keeps the set sized
+/// by (recent worker churn × TTL), not process lifetime, fixing the unbounded
+/// memory growth that would otherwise occur because `instance_id` is the etcd
+/// lease ID and a restarted pod always presents a *new* identity that the
+/// `Added`-event clear path cannot match against the *old* tombstone.
+const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 
 use bytes::Bytes;
 use derive_builder::Builder;
@@ -133,12 +150,23 @@ struct State {
     /// Maps EndpointInstanceId -> set of subject UUIDs for batch cancellation
     /// when the discovery plane reports the instance is gone.
     instance_subjects: HashMap<EndpointInstanceId, HashSet<String>>,
-    /// Tombstone set keyed by full EndpointInstanceId.  Closes the race window
-    /// where `cancel_instance_streams()` fires before `associate_instance()`
-    /// for the same request.  Cleared by `clear_instance_tombstone()` when the
-    /// instance reappears in the discovery set.
-    removed_instances: HashSet<EndpointInstanceId>,
+    /// Tombstone map keyed by full EndpointInstanceId, with insertion time as
+    /// the value.  Closes the race window where `cancel_instance_streams()`
+    /// fires before `associate_instance()` for the same request.  Entries
+    /// expire after [`TOMBSTONE_TTL`]; `clear_instance_tombstone()` is also
+    /// available for explicit removal when the instance reappears in
+    /// discovery (defensive: with monotonic etcd lease IDs the new identity
+    /// usually differs from the tombstoned one).
+    removed_instances: HashMap<EndpointInstanceId, Instant>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+/// Drop tombstone entries older than [`TOMBSTONE_TTL`] from `tombstones`.
+///
+/// Called lazily on every `associate_instance` and `cancel_instance_streams`
+/// so the set is bounded by recent activity rather than process lifetime.
+fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: Instant) {
+    tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
 }
 
 impl TcpStreamServer {
@@ -233,7 +261,9 @@ impl TcpStreamServer {
     /// instance_id cannot cancel each other's streams.
     pub async fn associate_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
         let mut state = self.state.lock().await;
-        if state.removed_instances.contains(id) {
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        if state.removed_instances.contains_key(id) {
             // Instance was already removed -- cancel immediately.
             tracing::warn!(
                 subject,
@@ -294,8 +324,10 @@ impl TcpStreamServer {
     /// Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let mut state = self.state.lock().await;
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
         // Tombstone the identity so late associate_instance() calls cancel immediately.
-        state.removed_instances.insert(id.clone());
+        state.removed_instances.insert(id.clone(), now);
         let subjects = match state.instance_subjects.remove(id) {
             Some(subjects) => subjects,
             None => return 0,
@@ -1276,6 +1308,110 @@ mod tests {
         let still_tracked = server.cancel_instance_streams(&id_b).await;
         assert_eq!(still_tracked, 1, "Service-B subject should be unaffected");
         assert!(prov_b.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_tombstone_expires_after_ttl() {
+        // After TOMBSTONE_TTL elapses, a previously-tombstoned identity must
+        // accept new associations again, AND the entry must be physically
+        // pruned from `removed_instances` so the set remains bounded.
+        let server = test_server().await;
+
+        let id = make_eid("ns", "comp", "generate", 42);
+
+        // Tombstone the identity.
+        server.cancel_instance_streams(&id).await;
+        {
+            let state = server.state.lock().await;
+            assert!(state.removed_instances.contains_key(&id));
+        }
+
+        // Advance past the TTL.
+        tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
+
+        // associate_instance for the same identity should now succeed (no
+        // longer tombstoned). Any new subject must be tracked normally.
+        let (subject, _provider) = register_and_get_subject(&server).await;
+        assert!(
+            server.associate_instance(&subject, &id).await,
+            "tombstone older than TTL should not block association"
+        );
+
+        // The expired tombstone must have been pruned (lazy pruning fires on
+        // every associate_instance/cancel_instance_streams call).
+        {
+            let state = server.state.lock().await;
+            assert!(
+                !state.removed_instances.contains_key(&id),
+                "expired tombstone should be pruned, not retained"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_tombstone_within_ttl_blocks_associate() {
+        // Regression net for the original tombstone fix: a tombstone younger
+        // than TTL must still cancel late-arriving associate_instance() calls.
+        let server = test_server().await;
+
+        let id = make_eid("ns", "comp", "generate", 42);
+        server.cancel_instance_streams(&id).await;
+
+        // Advance only a small fraction of the TTL.
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let (subject, provider) = register_and_get_subject(&server).await;
+        assert!(
+            !server.associate_instance(&subject, &id).await,
+            "tombstone within TTL must still block association"
+        );
+        assert!(provider.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_tombstone_lazy_prune_on_cancel() {
+        // Old tombstones must be pruned on the next cancel_instance_streams
+        // call, regardless of which identity is being tombstoned.
+        let server = test_server().await;
+
+        let id_old = make_eid("ns", "comp", "generate", 1);
+        let id_new = make_eid("ns", "comp", "generate", 2);
+
+        server.cancel_instance_streams(&id_old).await;
+        tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
+        server.cancel_instance_streams(&id_new).await;
+
+        let state = server.state.lock().await;
+        assert!(
+            !state.removed_instances.contains_key(&id_old),
+            "old tombstone should be pruned by the next cancel_instance_streams call"
+        );
+        assert!(
+            state.removed_instances.contains_key(&id_new),
+            "fresh tombstone should be retained"
+        );
+        assert_eq!(state.removed_instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_clear_tombstone_only_affects_named_identity() {
+        // Documents the monotonic-lease invariant: `clear_instance_tombstone`
+        // for one EndpointInstanceId must not touch a sibling entry. With etcd
+        // lease IDs this defensive code rarely fires (new lease = new
+        // EndpointInstanceId), but the per-key scope must hold.
+        let server = test_server().await;
+
+        let id_a = make_eid("ns", "comp", "generate", 1);
+        let id_b = make_eid("ns", "comp", "generate", 2);
+
+        server.cancel_instance_streams(&id_a).await;
+        server.clear_instance_tombstone(&id_b).await;
+
+        let state = server.state.lock().await;
+        assert!(
+            state.removed_instances.contains_key(&id_a),
+            "clearing a different identity must not remove id_a's tombstone"
+        );
     }
 
     #[tokio::test]

@@ -88,18 +88,32 @@ pub struct ResponseStreamPrologue {
 
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 
+/// RAII container for the cleanup closure. Owning the `Drop` here (instead of
+/// on `RegisteredStream`) lets `into_parts()` move the public fields out by
+/// plain destructure -- no `unsafe`, no `ManuallyDrop`, no `ptr::read`.
+struct Cleanup(Option<Box<dyn FnOnce() + Send + 'static>>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
 /// The [`RegisteredStream`] object is acquired from a [`StreamProvider`] and is used to provide
 /// an awaitable receiver which will the `T` which is either a stream writer for a request stream
 /// or a stream reader for a response stream.
 ///
 /// RAII cleanup: if this object is dropped without calling [`into_parts()`], the
-/// optional `cleanup_on_drop` closure fires, removing the orphaned registration
-/// from the stream server's internal maps. This prevents HashMap leaks when
-/// a registered stream is never consumed (e.g., early error in the request path).
+/// optional cleanup closure (held by the inner `Cleanup` struct) fires, removing
+/// the orphaned registration from the stream server's internal maps. This
+/// prevents HashMap leaks when a registered stream is never consumed (e.g.,
+/// early error in the request path).
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
-    cleanup_on_drop: Option<Box<dyn FnOnce() + Send + 'static>>,
+    cleanup: Cleanup,
 }
 
 impl<T> std::fmt::Debug for RegisteredStream<T> {
@@ -115,7 +129,7 @@ impl<T> RegisteredStream<T> {
         Self {
             connection_info,
             stream_provider,
-            cleanup_on_drop: None,
+            cleanup: Cleanup(None),
         }
     }
 
@@ -123,7 +137,7 @@ impl<T> RegisteredStream<T> {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.cleanup_on_drop = Some(Box::new(cleanup));
+        self.cleanup.0 = Some(Box::new(cleanup));
         self
     }
 
@@ -132,26 +146,13 @@ impl<T> RegisteredStream<T> {
     /// This **disarms** the RAII cleanup -- the caller takes responsibility for
     /// cleaning up the registration if the stream provider is never awaited.
     pub fn into_parts(self) -> (ConnectionInfo, StreamProvider<T>) {
-        // Use ManuallyDrop to prevent Drop from running, then move the fields out.
-        let mut this = std::mem::ManuallyDrop::new(self);
-        this.cleanup_on_drop.take();
-
-        // SAFETY: `ManuallyDrop` prevents `Drop` from running, so moving these
-        // fields out is sound as long as each field is read exactly once.
-        unsafe {
-            (
-                std::ptr::read(&this.connection_info),
-                std::ptr::read(&this.stream_provider),
-            )
-        }
-    }
-}
-
-impl<T> Drop for RegisteredStream<T> {
-    fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup_on_drop.take() {
-            cleanup();
-        }
+        let Self {
+            connection_info,
+            stream_provider,
+            mut cleanup,
+        } = self;
+        cleanup.0.take(); // disarm before Cleanup's Drop fires
+        (connection_info, stream_provider)
     }
 }
 
@@ -178,6 +179,68 @@ impl PendingConnections {
 #[async_trait::async_trait]
 pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
+}
+
+#[cfg(test)]
+mod registered_stream_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn dummy_conn_info() -> ConnectionInfo {
+        ConnectionInfo {
+            transport: "test".to_string(),
+            info: "{}".to_string(),
+        }
+    }
+
+    /// Drop without `into_parts()` must run the cleanup closure.
+    #[test]
+    fn drop_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        drop(stream);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "cleanup must fire when RegisteredStream is dropped"
+        );
+    }
+
+    /// `into_parts()` must disarm the cleanup. After the call, dropping the
+    /// returned halves must NOT trigger the closure -- the caller has taken
+    /// ownership of cleanup responsibility.
+    #[test]
+    fn into_parts_disarms_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        let (conn, provider) = stream.into_parts();
+        drop(conn);
+        drop(provider);
+
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "into_parts() must disarm the cleanup closure"
+        );
+    }
+
+    /// `RegisteredStream` with no cleanup configured must drop cleanly.
+    #[test]
+    fn drop_without_cleanup_is_a_noop() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream: RegisteredStream<()> = RegisteredStream::new(dummy_conn_info(), rx);
+        drop(stream); // must not panic; nothing observable to assert beyond that
+    }
 }
 
 // #[derive(Debug, Clone, Serialize, Deserialize)]

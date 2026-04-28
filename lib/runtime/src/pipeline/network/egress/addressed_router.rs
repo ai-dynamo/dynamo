@@ -371,8 +371,15 @@ where
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // Worker connected on the response plane but inference setup failed
-                // (error prologue). Not migratable -- the worker started the request.
+                // Worker connected on the response plane but `generate()` failed.
+                // The wire prologue carries only an opaque error string, so we
+                // cannot tell setup/connectivity failures apart from application
+                // errors (invalid input, model-side rejection, etc.). Migrating
+                // unconditionally could duplicate side effects from non-
+                // migratable application errors, so we keep this path non-
+                // migratable. A future change can carry a structured error type
+                // through the prologue and route migratable subtypes to
+                // `CannotConnect`.
                 if let Some(subject) = &recv_subject {
                     self.resp_transport.cancel_recv_stream(subject).await;
                 }
