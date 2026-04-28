@@ -45,7 +45,8 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -335,29 +336,51 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		anyModified = true
 	}
 
-	// Clean up legacy per-replica LeaderWorkerSets and PodGroups (e.g. name-0, name-1...).
-	baseKubeName := dynamoComponentDeployment.Name
-	for i := 0; i < 100; i++ {
-		legacyName := fmt.Sprintf("%s-%d", baseKubeName, i)
-		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
-		err := r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, lwsToDelete)
-		if err == nil {
-			logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacyName)
-			if err := r.Delete(ctx, lwsToDelete); err != nil {
-				logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", legacyName)
+	// Clean up legacy per-replica LeaderWorkerSets and PodGroups created
+	// before the move to native LWS scaling. The legacy code path stamped an
+	// "instance-id" label on each per-replica resource; the single-LWS path
+	// no longer sets it, so its presence reliably identifies legacy objects.
+	// We list once per resource type and prune anything we still own.
+	hasInstanceID, err := labels.NewRequirement("instance-id", selection.Exists, nil)
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("build legacy label selector: %w", err)
+	}
+	legacyListOpts := []client.ListOption{
+		client.InNamespace(dynamoComponentDeployment.Namespace),
+		client.MatchingLabelsSelector{Selector: labels.NewSelector().Add(*hasInstanceID)},
+	}
+
+	var legacyLWSList leaderworkersetv1.LeaderWorkerSetList
+	if err := r.List(ctx, &legacyLWSList, legacyListOpts...); err != nil {
+		logger.Error(err, "Failed to list legacy LeaderWorkerSets for cleanup")
+	} else {
+		for i := range legacyLWSList.Items {
+			legacy := &legacyLWSList.Items[i]
+			if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
+				continue
+			}
+			logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
+			if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", legacy.Name)
+				continue
 			}
 			anyModified = true
-		} else if !k8serrors.IsNotFound(err) {
-			logger.Error(err, "Failed to check legacy LeaderWorkerSet", "name", legacyName)
 		}
+	}
 
-		// Also delete legacy PodGroups
-		pgToDelete := &volcanov1beta1.PodGroup{}
-		err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, pgToDelete)
-		if err == nil {
-			logger.Info("Deleting legacy PodGroup", "name", legacyName)
-			if err := r.Delete(ctx, pgToDelete); err != nil {
-				logger.Error(err, "Failed to delete legacy PodGroup", "name", legacyName)
+	var legacyPGList volcanov1beta1.PodGroupList
+	if err := r.List(ctx, &legacyPGList, legacyListOpts...); err != nil {
+		logger.Error(err, "Failed to list legacy PodGroups for cleanup")
+	} else {
+		for i := range legacyPGList.Items {
+			legacy := &legacyPGList.Items[i]
+			if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
+				continue
+			}
+			logger.Info("Deleting legacy PodGroup", "name", legacy.Name)
+			if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete legacy PodGroup", "name", legacy.Name)
+				continue
 			}
 			anyModified = true
 		}
