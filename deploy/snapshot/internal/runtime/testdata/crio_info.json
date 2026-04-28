@@ -1,0 +1,43 @@
+{
+  "sandboxID": "aaaabbbbccccddddeeeeffff00001111222233334444555566667777",
+  "pid": 54321,
+  "runtimeSpec": {
+    "ociVersion": "1.0.2-dev",
+    "root": {
+      "path": "/var/lib/containers/storage/overlay/xyz/merged",
+      "readonly": false
+    },
+    "mounts": [
+      {
+        "destination": "/proc",
+        "type": "proc",
+        "source": "proc"
+      },
+      {
+        "destination": "/etc/hostname",
+        "type": "bind",
+        "source": "/var/lib/kubelet/pods/abc/etc-hostname",
+        "options": ["bind", "rprivate"]
+      },
+      {
+        "destination": "/var/run/secrets/kubernetes.io/serviceaccount",
+        "type": "bind",
+        "source": "/var/lib/kubelet/pods/abc/volumes/kubernetes.io~projected/kube-api-access-xxxxx",
+        "options": ["bind", "rprivate"]
+      }
+    ],
+    "linux": {
+      "maskedPaths": [
+        "/proc/acpi",
+        "/proc/kcore",
+        "/proc/keys"
+      ],
+      "readonlyPaths": [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys"
+      ]
+    }
+  }
+}
