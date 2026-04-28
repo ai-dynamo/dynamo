@@ -161,9 +161,11 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in to self-hosting MDC artifacts on this worker's
-    /// `system_status_server`. Default `false` (or via
-    /// [`ENV_SELF_HOST_METADATA`]).
+    /// Opt in or out of self-hosting MDC artifacts on this worker's
+    /// `system_status_server`. Default `true`; flipped via
+    /// [`ENV_SELF_HOST_METADATA`] (falsy values opt out). When enabled
+    /// but `DYN_SYSTEM_PORT` isn't set, [`move_to_self_host`] logs a
+    /// warning and silently no-ops.
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -547,14 +549,17 @@ impl LocalModel {
         drt: &dynamo_runtime::DistributedRuntime,
     ) -> anyhow::Result<()> {
         let Some(base_url) = self_host_base_url(drt)? else {
-            // Default-on behavior on a worker without DYN_SYSTEM_PORT —
-            // no server to register against. Frontends still resolve
-            // each CheckedFile through whatever URI is naturally there
-            // (`hf://` after `move_to_url`, or synthesized `file://`).
-            tracing::info!(
+            // self_host_metadata is enabled but no system_status_server
+            // is running — set DYN_SYSTEM_PORT to spawn it (operator
+            // deployments inject this automatically; standalone setups
+            // must set it explicitly). Frontends still resolve each
+            // CheckedFile via whatever URI is naturally there (`hf://`
+            // from `move_to_url`, or synthesized `file://`).
+            tracing::warn!(
                 model_slug = %self.card.slug(),
                 "self_host_metadata enabled but system_status_server is not \
-                 running (DYN_SYSTEM_PORT unset); skipping http rewrites",
+                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
+                 set DYN_SYSTEM_PORT to enable",
             );
             return Ok(());
         };
@@ -725,10 +730,7 @@ mod env_self_host_metadata_tests {
         for v in ["0", "false", "FALSE", "no", "NO", "off", "OFF", ""] {
             // SAFETY: serialized via serial_test.
             unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(
-                !env_self_host_metadata_default(),
-                "expected OFF for {v:?}"
-            );
+            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
             assert!(
                 !LocalModelBuilder::default().self_host_metadata,
                 "builder default must follow env for {v:?}"
