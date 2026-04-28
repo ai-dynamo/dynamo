@@ -148,6 +148,17 @@ class KvIndexer:
         instance-id order is reached at ``tcp://127.0.0.1:{base + idx}``.
         This matches the local multi-worker layout where every worker
         shares a host and needs a distinct port offset.
+
+        TODO(upstream): both paths require the caller to construct the
+        worker_id->endpoint mapping out-of-band. In k8s today, callers pair
+        sorted(instance_ids) with sorted pod IPs from a headless-Service DNS
+        lookup, which is arbitrary and yields partial overlap scoring (Thompson
+        beta+load compensates). The proper fix is to plumb the runtime's
+        ``DiscoveryQuery::EventChannels`` API into the Python bindings and have
+        ``dynamo.vllm`` register its ZMQ endpoint as an ``EventChannel`` on the
+        ``DynamoWorkerMetadata`` CR at startup. Then this method becomes a
+        single discovery query against the runtime, with no caller-side mapping
+        and a correct worker_id<->endpoint linkage.
         """
         if worker_endpoints:
             for wid, endpoint in worker_endpoints.items():
