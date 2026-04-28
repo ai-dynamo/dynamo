@@ -50,6 +50,7 @@ const (
 	annDGDNilServices = "nvidia.com/dgd-nil-services"
 	annDGDHubSpec     = "nvidia.com/dgd-hub-spec"
 	annDGDSpokeSpec   = "nvidia.com/dgd-spoke-spec"
+	annDGDSpokeStatus = "nvidia.com/dgd-spoke-status"
 	annDGDHubOrigin   = "nvidia.com/dgd-hub-origin"
 )
 
@@ -106,6 +107,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	if !hubOrigin {
 		if data, err := marshalDGDSpokeSpec(&src.Spec); err == nil {
 			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeSpec, string(data))
+		}
+		if data, err := json.Marshal(src.Status); err == nil {
+			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, string(data))
 		}
 	}
 
@@ -197,8 +201,12 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec); ok && raw != "" {
 		if spec, ok := restoreDGDSpokeSpec(raw); ok {
 			dst.Spec = spec
+			if rawStatus, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus); ok && rawStatus != "" {
+				_ = json.Unmarshal([]byte(rawStatus), &dst.Status)
+			} else {
+				convertDGDStatusFrom(&src.Status, &dst.Status)
+			}
 			scrubDGDInternalAnnotations(&dst.ObjectMeta)
-			convertDGDStatusFrom(&src.Status, &dst.Status)
 			return nil
 		}
 	}
@@ -343,6 +351,7 @@ func hasDGDInternalAnnotations(annotations map[string]string) bool {
 			key == annDGDNilServices ||
 			key == annDGDHubSpec ||
 			key == annDGDSpokeSpec ||
+			key == annDGDSpokeStatus ||
 			strings.HasPrefix(key, annDGDCompPrefix) {
 			return true
 		}
@@ -356,6 +365,7 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 		annDGDNilServices,
 		annDGDHubSpec,
 		annDGDSpokeSpec,
+		annDGDSpokeStatus,
 		annDGDHubOrigin,
 	} {
 		delAnnFromObj(obj, key)
@@ -477,7 +487,6 @@ func convertDGDStatusFrom(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoG
 func convertReplicaStatusTo(src *ServiceReplicaStatus) *v1beta1.ComponentReplicaStatus {
 	out := &v1beta1.ComponentReplicaStatus{
 		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentName:   src.ComponentName,
 		ComponentNames:  slices.Clone(src.ComponentNames),
 		Replicas:        src.Replicas,
 		UpdatedReplicas: src.UpdatedReplicas,
@@ -492,12 +501,16 @@ func convertReplicaStatusTo(src *ServiceReplicaStatus) *v1beta1.ComponentReplica
 }
 
 func convertReplicaStatusFrom(src *v1beta1.ComponentReplicaStatus) *ServiceReplicaStatus {
+	componentNames := slices.Clone(src.ComponentNames)
+
 	out := &ServiceReplicaStatus{
 		ComponentKind:   ComponentKind(src.ComponentKind),
-		ComponentName:   src.ComponentName,
-		ComponentNames:  slices.Clone(src.ComponentNames),
+		ComponentNames:  componentNames,
 		Replicas:        src.Replicas,
 		UpdatedReplicas: src.UpdatedReplicas,
+	}
+	if len(componentNames) > 0 {
+		out.ComponentName = componentNames[len(componentNames)-1]
 	}
 	if src.ReadyReplicas != nil {
 		out.ReadyReplicas = ptr.To(*src.ReadyReplicas)
