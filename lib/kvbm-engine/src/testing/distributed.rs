@@ -17,6 +17,7 @@ use crate::{
     worker::{DirectWorker, Worker},
 };
 use kvbm_logical::manager::BlockManager;
+use kvbm_physical::device::DeviceBackend;
 use kvbm_physical::manager::{LayoutHandle, TransferManager};
 use kvbm_physical::transfer::StorageKind;
 use kvbm_physical::{
@@ -539,10 +540,14 @@ pub fn create_direct_worker(
         .build()?;
     let agent = test_agent.into_nixl_agent();
 
+    // Auto-detect backend so we don't hardcode CUDA on XPU-only systems
+    let backend = DeviceBackend::detect_backend()?;
+
     // Create TransferManager with the event_system
     let manager = TransferManager::builder()
         .event_system(Arc::new(event_system))
         .nixl_agent(agent.clone())
+        .device_backend(backend)
         .device_id(0)
         .build()?;
 

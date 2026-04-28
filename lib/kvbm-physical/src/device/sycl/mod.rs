@@ -556,6 +556,9 @@ impl DeviceMemPoolOps for SyclMemPoolWrapper {
 // =====================================================================
 
 /// Check if the SYCL XPU backend is available.
+///
+/// Uses `catch_unwind` defensively in case the SYCL runtime panics
+/// when its shared libraries are not present.
 pub fn is_available() -> bool {
-    SyclDevice::count().map(|n| n > 0).unwrap_or(false)
+    std::panic::catch_unwind(|| SyclDevice::count().map(|n| n > 0).unwrap_or(false)).unwrap_or(false)
 }
