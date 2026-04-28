@@ -182,7 +182,7 @@ jobs:
           parallel_mode: ${{ inputs.gpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
           gpu_tests: 'true'
-          # local_models_dir: ''
+          local_models_dir: ''
       - name: Print Storage After Run to confirm nvme and models dir usage 
         if: inputs.debug_mode
         shell: bash
