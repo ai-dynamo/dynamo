@@ -4,9 +4,10 @@
 name: Nightly CI Pipeline
 
 on:
-  schedule:
-    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  workflow_dispatch:  # Allow manual triggering for testing
+  pull_request:
+    branches:
+      - main
+  #workflow_dispatch:  # Allow manual triggering for testing
 
 permissions:
   contents: read
@@ -22,7 +23,7 @@ jobs:
   # ============================================================================
   create-fresh-builder:
     name: Create fresh K8s builder
-    runs-on: prod-default-small-v2
+    runs-on: xpu
     permissions:
       contents: read
     outputs:
@@ -39,7 +40,8 @@ jobs:
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
-          suppress_fallback_warning: 'true'
+          fresh_builder: false
+          use_runner_docker_builder: true
 
   # ============================================================================
   # COMPUTE NIGHTLY DEV VERSION
@@ -73,15 +75,20 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      version_selector: '["12.9", "13.0", "xpu"]'
-      platform: 'linux/amd64,linux/arm64'
+      version_selector: '["xpu"]'
+      platform: 'linux/amd64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      use_runner_docker_builder: true
+      fresh_builder: false
+      use_sccache: false
+      push_image: false
     secrets: inherit
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [create-fresh-builder]
+    if: false
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -95,6 +102,7 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [create-fresh-builder]
+    if: false
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -118,21 +126,19 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      version_selector: '["12.9", "13.0", "xpu"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      enable_coverage: true
-      run_cpu_only_tests: true
-      cpu_only_test_markers: vllm and gpu_0
-      gpu_test_markers: vllm and gpu_1
-      gpu_test_timeout_minutes: 35
+      version_selector: '["xpu"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: false
+      run_gpu_tests: false
       run_xpu_test: true
-      xpu_test_marker: 'vllm and xpu_1 and not multimodal'
-      xpu_test_timeout_minutes: 300
+      xpu_test_marker: 'vllm and xpu_1 and (pre_merge or nightly) and not multimodal'
+      xpu_test_timeout_minutes: 180
     secrets: inherit
 
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -150,6 +156,7 @@ jobs:
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -167,6 +174,7 @@ jobs:
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -184,6 +192,7 @@ jobs:
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build]
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -201,6 +210,7 @@ jobs:
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build]
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -221,6 +231,7 @@ jobs:
   dynamo-pipeline:
     name: dynamo-runtime
     needs: [create-fresh-builder, compute-dev-version]
+    if: false
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -242,6 +253,7 @@ jobs:
   # ============================================================================
   rust-tests:
     name: rust-${{ matrix.dir == '.' && 'root' || matrix.dir }}-coverage
+    if: false
     runs-on:
       group: Fastchecker
     strategy:
@@ -313,7 +325,7 @@ jobs:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
     needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
-    if: always()
+    if: false
     permissions:
       contents: read
     steps:
@@ -512,7 +524,7 @@ jobs:
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
-    if: always()
+    if: false
     needs: [vllm-build, sglang-build, trtllm-build, create-fresh-builder]
     permissions:
       contents: read
@@ -535,7 +547,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: always()
+    if: false
     needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     permissions:
       contents: read

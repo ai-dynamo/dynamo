@@ -117,7 +117,7 @@ jobs:
       fail-fast: false
       matrix:
         version_selector: ${{ fromJson(inputs.version_selector) }}
-    runs-on: prod-builder-v3
+    runs-on: ${{ matrix.version_selector == 'xpu' && 'xpu' || 'prod-builder-v3' }}
     # version_selector not empty -- name: cuda12, linux/amd64
     # version_selector cpu/empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.version_selector == 'xpu' && 'xpu' || (matrix.version_selector == '' || matrix.version_selector == 'cpu') && 'cpu' || format('cuda{0}', matrix.version_selector) }}
