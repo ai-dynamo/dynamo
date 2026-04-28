@@ -15,7 +15,7 @@ on:
         required: false
         type: string
       nightly:
-        description: 'Publish as nightly (nightly-dated NGC tags; skips git tag, RC, and Helm push). Must be run from main.'
+        description: 'Publish as nightly (nightly-dated NGC tags; skips RC and Helm push). Must be run from main.'
         required: false
         type: boolean
         default: false
@@ -41,6 +41,9 @@ jobs:
       version: ${{ steps.extract.outputs.version }}
       commit_sha: ${{ steps.extract.outputs.commit_sha }}
       nightly: ${{ steps.extract.outputs.nightly }}
+      rc_number: ${{ steps.rc_tag.outputs.rc_number }}
+      ngc_version_tag: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+      helm_chart_version: ${{ steps.rc_tag.outputs.helm_chart_version }}
     steps:
       - name: Extract version and validate inputs
         id: extract
@@ -78,37 +81,25 @@ jobs:
           echo "Source commit SHA: ${COMMIT_SHA}"
           echo "Nightly: ${NIGHTLY}"
 
-  # ============================================================================
-  # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
-  # Sources images from ECR using SHA-based tags produced by post-merge CI.
-  # ============================================================================
-
-  release-publish:
-    name: Tag RC & Publish to NGC
-    needs: [prepare-release]
-    if: needs.prepare-release.result == 'success'
-    runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
-    environment: automated-release
-    env:
-      VERSION: ${{ needs.prepare-release.outputs.version }}
-      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
-      NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
-      REGISTRY_IMAGE: ai-dynamo/dynamo
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-    steps:
+      # Checkout at the source commit with full tags so the RC-number step can
+      # enumerate existing v<VERSION>-rc<N> tags and auto-increment. Also lets
+      # downstream jobs (release-publish, stage-wheels-artifactory) consume the
+      # computed rc_number/ngc_version_tag as needs.prepare-release.outputs.*
+      # and run in parallel.
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # fetch-depth: 0 + fetch-tags required here — git tag -l enumerates existing RC tags
         with:
-          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+          ref: ${{ steps.extract.outputs.commit_sha }}
           fetch-depth: 0
           fetch-tags: true
-          token: ${{ secrets.RC_GITHUB_PAT }}
 
-      - name: Determine next RC tag
+      - name: Determine next RC number
         id: rc_tag
         env:
           INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
+          VERSION: ${{ steps.extract.outputs.version }}
+          COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
+          NIGHTLY: ${{ steps.extract.outputs.nightly }}
         run: |
           set -euo pipefail
 
@@ -116,7 +107,6 @@ jobs:
             DATE_UTC=$(date -u +%Y%m%d)
             SHORT_SHA="${COMMIT_SHA:0:7}"
             NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
-            echo "rc_tag=" >> $GITHUB_OUTPUT
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
             echo "helm_chart_version=" >> $GITHUB_OUTPUT
@@ -149,30 +139,38 @@ jobs:
             fi
           fi
 
-          RC_TAG="v${VERSION}-rc${NEXT_RC}"
-
           # Normalize version for Helm SemVer: X.Y.Z.suffix → X.Y.Z-suffix
           SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
           HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
 
-          echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
-          echo "Will create tag: ${RC_TAG}"
+          echo "RC number: ${NEXT_RC}"
           echo "Helm chart version: ${HELM_CHART_VERSION}"
 
-      - name: Create RC tag
-        if: env.NIGHTLY != 'true'
-        env:
-          RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${RC_TAG}" -m "Release candidate ${RC_TAG}"
-          git push origin "${RC_TAG}"
-          echo "Created and pushed tag: ${RC_TAG}"
+  # ============================================================================
+  # NGC PUBLISH: crane copy to NGC, Helm chart push
+  # Sources images from ECR using SHA-based tags produced by post-merge CI.
+  # ============================================================================
+
+  release-publish:
+    name: Publish to NGC
+    needs: [prepare-release]
+    if: needs.prepare-release.result == 'success'
+    runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
+    environment: automated-release
+    env:
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
+      REGISTRY_IMAGE: ai-dynamo/dynamo
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
 
       - name: Setup crane
         env:
@@ -202,7 +200,7 @@ jobs:
         env:
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
-          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
         run: |
           set -euo pipefail
 
@@ -326,7 +324,7 @@ jobs:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
           NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
-          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
+          HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
         run: |
           set -euo pipefail
 
@@ -366,9 +364,8 @@ jobs:
 
       - name: Create release summary
         env:
-          RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
-          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
-          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
         run: |
@@ -381,9 +378,6 @@ jobs:
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
-          if [[ "${NIGHTLY}" != "true" ]]; then
-            echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
-          fi
           echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
           echo "| Source Commit SHA | ${COMMIT_SHA} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
@@ -421,4 +415,145 @@ jobs:
             echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
           fi
+
+  # ============================================================================
+  # ARTIFACTORY STAGING: extract wheels from the dynamo-runtime image in ECR
+  # and upload them to JFrog Artifactory so consumers can pip-install them.
+  # Runs in parallel with release-publish (both gated only on prepare-release).
+  # ============================================================================
+
+  stage-wheels-artifactory:
+    name: Stage Wheels to Artifactory
+    needs: [prepare-release]
+    if: needs.prepare-release.result == 'success'
+    runs-on: prod-tester-amd-v1
+    environment: automated-release
+    env:
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      RC_NUMBER: ${{ needs.prepare-release.outputs.rc_number }}
+      REGISTRY_IMAGE: ai-dynamo/dynamo
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+    steps:
+      - name: Setup crane
+        env:
+          CRANE_VERSION: v0.20.2
+        run: |
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          sudo mv crane /usr/local/bin/
+          crane version
+
+      - name: Login to ECR
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | crane auth login --username AWS --password-stdin "${ECR_HOSTNAME}"
+
+      - name: Extract wheels from dynamo-runtime image
+        id: extract
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12"
+
+          STAGE="${RUNNER_TEMP}/wheels"
+          mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"
+
+          echo "Exporting amd64 filesystem from ${ECR_IMAGE}..."
+          crane export --platform=linux/amd64 "${ECR_IMAGE}" - \
+            | tar -x -C "${STAGE}/amd64" \
+                --wildcards \
+                'opt/dynamo/wheelhouse/ai_dynamo-*py3-none-any.whl' \
+                'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl' \
+                'opt/dynamo/wheelhouse/kvbm-*x86_64*.whl'
+
+          echo "Exporting arm64 filesystem from ${ECR_IMAGE}..."
+          crane export --platform=linux/arm64 "${ECR_IMAGE}" - \
+            | tar -x -C "${STAGE}/arm64" \
+                --wildcards \
+                'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl' \
+                'opt/dynamo/wheelhouse/kvbm-*aarch64*.whl'
+
+          OUT="${STAGE}/upload"
+          mkdir -p "${OUT}"
+
+          shopt -s nullglob
+          AMD64_WHEELS=("${STAGE}/amd64/opt/dynamo/wheelhouse/"*.whl)
+          ARM64_WHEELS=("${STAGE}/arm64/opt/dynamo/wheelhouse/"*.whl)
+          shopt -u nullglob
+
+          if [ ${#AMD64_WHEELS[@]} -eq 0 ]; then
+            echo "::error::No amd64 wheels extracted from ${ECR_IMAGE}"
+            exit 1
+          fi
+          if [ ${#ARM64_WHEELS[@]} -eq 0 ]; then
+            echo "::error::No arm64 wheels extracted from ${ECR_IMAGE}"
+            exit 1
+          fi
+
+          cp "${AMD64_WHEELS[@]}" "${OUT}/"
+          cp "${ARM64_WHEELS[@]}" "${OUT}/"
+
+          echo "Wheels staged for upload:"
+          ls -la "${OUT}/"
+
+          echo "upload_dir=${OUT}" >> $GITHUB_OUTPUT
+
+      - name: Upload wheels to Artifactory
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          UPLOAD_DIR: ${{ steps.extract.outputs.upload_dir }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            SUBPATH="nightly/${{ github.run_id }}"
+          else
+            if [ -z "${RC_NUMBER}" ]; then
+              echo "Error: RC_NUMBER is empty for a non-nightly release"
+              exit 1
+            fi
+            SUBPATH="release/${VERSION}/rc${RC_NUMBER}"
+          fi
+
+          BASE_URL="${ARTIFACTORY_URL%/}/${SUBPATH}"
+          echo "Uploading to: ${BASE_URL}/"
+
+          echo "## Wheel Staging Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Wheel | Target |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          shopt -s nullglob
+          WHEELS=("${UPLOAD_DIR}"/*.whl)
+          if [ ${#WHEELS[@]} -eq 0 ]; then
+            echo "Error: no wheels found in ${UPLOAD_DIR}"
+            exit 1
+          fi
+
+          for WHEEL in "${WHEELS[@]}"; do
+            WHEEL_FILENAME=$(basename "${WHEEL}")
+            TARGET_URL="${BASE_URL}/${WHEEL_FILENAME}"
+            BODY_FILE=$(mktemp)
+            HTTP_CODE=$(curl -sSL -o "${BODY_FILE}" -w "%{http_code}" \
+              --connect-timeout 30 --max-time 300 \
+              --retry 3 --retry-delay 5 --retry-all-errors \
+              -u "${ARTIFACTORY_USER}:${ARTIFACTORY_TOKEN}" \
+              -T "${WHEEL}" \
+              "${TARGET_URL}")
+            if [ "${HTTP_CODE}" != "201" ]; then
+              echo "::error::Artifactory deploy failed: HTTP ${HTTP_CODE} at ${TARGET_URL}"
+              cat "${BODY_FILE}" || true
+              exit 1
+            fi
+            echo "Uploaded: ${WHEEL_FILENAME} -> ${TARGET_URL}"
+            echo "| \`${WHEEL_FILENAME}\` | ${TARGET_URL} |" >> $GITHUB_STEP_SUMMARY
+            rm -f "${BODY_FILE}"
+          done
 

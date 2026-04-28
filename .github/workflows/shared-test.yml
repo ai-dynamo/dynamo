@@ -30,6 +30,11 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      enable_coverage:
+        description: 'Enable coverage collection (true/false)'
+        required: false
+        type: string
+        default: 'false'
       run_sanity_check:
         description: 'Whether to run sanity check on the runtime image before executing tests'
         required: false
@@ -200,6 +205,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           dind_as_sidecar: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && startsWith(matrix.version_selector, 'cuda') }}
@@ -213,6 +219,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}
       - name: Run XPU tests (sequential)
         timeout-minutes: ${{ inputs.xpu_test_timeout_minutes }}
         if: ${{ matrix.version_selector == 'xpu' && inputs.run_xpu_test }}
@@ -227,6 +234,7 @@ jobs:
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
           device: xpu
+          enable_coverage: ${{ inputs.enable_coverage }}
 
       - name: Cleanup Docker Images
         if: ${{ always() && matrix.version_selector == 'xpu' && matrix.platform == 'amd64' && inputs.run_xpu_test }}

@@ -17,31 +17,39 @@ Per-model gap tracking lives elsewhere (not in this repo).
 
 ### Generic (all parsers)
 
-- **`CASE.1`** Single tool call — happy path (one complete, well-formed call). Ex: `xml::test_parse_simple_tool_call`.
-- **`CASE.2`** Multiple tool calls — sequential or parallel (2+ in one response). Ex: `tool_choice::test_streaming_required_tool_parallel`.
-- **`CASE.3`** No tool call (response is text only). Ex: `xml::test_parse_no_tool_calls`.
-- **`CASE.4`** Malformed / partial JSON args (truncated, missing close brace, invalid syntax). Ex: `deepseek_v3::test_parse_..._with_invalid_json`, `xml::test_parse_missing_..._closing_tag`.
-- **`CASE.5`** Missing end-token recovery (recover calls when `section_end` is absent due to max_tokens / EOS). Ex: `kimi_k2::test_parse_malformed_no_section_end`.
-- **`CASE.6`** Empty args (`arguments={}` / no-arg call). Ex: `kimi_k2::test_parse_no_arg_call`.
-- **`CASE.7`** Complex arg types (nested objects, arrays, bool, number, Unicode / newlines in values). Ex: `kimi_k2::test_parse_complex_json_arguments`.
-- **`CASE.8`** Streaming — token-by-token assembly + chunk-boundary splits. Ex: `basic::test_buffer_state_persistence_across_calls`, `basic::test_partial_token_matching_closing_tag`, `basic::test_kimi_k2_one_shot_split`.
-- **`CASE.9`** Paired reasoning + tool in same response. Ex: `test_reasoning_parser::test_nemotron_with_reasoning_and_tool_calls`.
-- **`CASE.10`** Reasoning only (think tags, no tool call). Ex: `basic::test_detect_and_parse_reasoning_reasoning`.
-- **`CASE.11`** `tool_choice` = auto / required / named / none. Ex: `tool_choice::test_named_tool_choice_parses_json` (**hermes only today**).
-- **`CASE.12`** `finish_reason` semantics (`stop` / `tool_calls` / `length` mapping). Ex: `tool_choice_finish_reasons::*` (hermes only); `test_streaming_tool_parsers::test_qwen_finish_reason_length_vllm`.
-- **`CASE.13`** Normal text interleaved with tool calls. Ex: `xml::test_parse_with_normal_text`.
-- **`CASE.14`** Empty content / empty `tool_calls` array / null response. Ex: `parallel_tool_call_integration::test_empty_tool_calls`.
+- **`CASE.1`** Single tool call — happy path (one complete, well-formed call).
+- **`CASE.2`** Multiple tool calls — sequential or parallel (2+ in one response).
+- **`CASE.3`** No tool call (response is text only).
+- **`CASE.4`** Malformed / partial JSON args (truncated, missing close brace, invalid syntax).
+- **`CASE.5`** Missing end-token recovery (recover calls when `section_end` is absent due to max_tokens / EOS).
+- **`CASE.6`** Empty args (`arguments={}` / no-arg call).
+- **`CASE.7`** Complex arg types (nested objects, arrays, bool, number, Unicode / newlines in values).
+- **`CASE.8`** Streaming — token-by-token assembly + chunk-boundary splits.
+- **`CASE.9`** Paired reasoning + tool in same response.
+- **`CASE.10`** Reasoning only (think tags, no tool call).
+- **`CASE.11`** `tool_choice` = auto / required / named / none.
+- **`CASE.12`** `finish_reason` semantics (`stop` / `tool_calls` / `length` mapping).
+- **`CASE.13`** Normal text interleaved with tool calls.
+- **`CASE.14`** Empty content / empty `tool_calls` array / null response.
 - **`CASE.15`** Duplicate tool calls (same name twice). No test anywhere in the repo; universal gap.
-- **`CASE.16`** Regression for a specific customer bug (ticket ID referenced in test name or body). Ex: `kimi_k2::test_parse_malformed_no_section_end`.
+- **`CASE.16`** Regression for a specific customer bug (ticket ID referenced in test name or body).
 
 ### XML-family (`CASE.xml*`)
 
-- **`CASE.xml1`** XML entity / HTML unescape handling (`&lt;`, `&amp;`, `&quot;` in parameter values). Ex: `xml::test_html_unescape`, `glm47::test_xml_entity_decoding`.
-- **`CASE.xml2`** Schema-aware type coercion (string → number/bool/array based on declared parameter schema). Ex: `xml::test_schema_aware_type_conversion`, `glm47::test_type_coercion_*`.
+- **`CASE.xml1`** XML entity / HTML unescape handling (`&lt;`, `&amp;`, `&quot;` in parameter values).
+- **`CASE.xml2`** Schema-aware type coercion (string → number/bool/array based on declared parameter schema).
 
 ### Harmony (`CASE.harmony*`)
 
-- **`CASE.harmony1`** Channel / recipient parsing (analysis / commentary / final channels). Ex: `harmony_parser::test_parse_tool_calls_harmony_*`.
+- **`CASE.harmony1`** Channel / recipient parsing (analysis / commentary / final channels).
+
+### Parser-internal & format-variant categories
+
+- **`CASE.20`** Detection helpers — direct tests of `detect_tool_call_start_*` / `find_tool_call_end_position_*` (the streaming jail's entry points). Distinct from `CASE.8` which exercises the full streaming pipeline.
+- **`CASE.21`** Function-name conventions — allowed identifier chars (hyphens, underscores, dots), prefix variants (`functions.NAME` vs bare `NAME`), and rejection of malformed function IDs. Models differ on what they emit; parsers must take a position.
+- **`CASE.22`** Whitespace / formatting tolerance — whitespace inside or between tokens (newlines after `<|tool_call_begin|>`, spaces around the function ID, etc.). Parser must accept the same call regardless of formatting.
+- **`CASE.23`** Token format variants — multiple acceptable spellings for the same semantic (e.g., Kimi K2's singular `<|tool_call_section_*|>` vs plural `<|tool_calls_section_*|>` section tokens). Parser must accept all configured variants.
+- **`CASE.24`** Empty section / no-content wrappers — start+end fences with nothing between them (`<|tool_calls_section_begin|><|tool_calls_section_end|>`). Must produce zero calls and preserve any surrounding text.
 
 ### Universal gaps (no test anywhere, not promoted to numbered categories)
 
@@ -62,7 +70,6 @@ One complete, well-formed call in the response.
 
 - Applies to every tool-call parser.
 - Baseline correctness check. If `CASE.1` fails, nothing else below matters.
-- Example: `dsml/parser.rs::test_parse_single_tool_call_string_param`.
 
 ## `CASE.2` — Multiple tool calls (sequential or parallel)
 
@@ -71,8 +78,6 @@ Two or more calls in one response, in the same block or back-to-back.
 - Applies to every tool-call parser.
 - Some grammars emit parallel calls in one block (DSML, XML); others emit
   sequential top-level sentinels (JSON dialects). Either way, extract all.
-- Example: `dsml/parser.rs::test_parse_multiple_tool_calls`,
-  `tool_choice::test_streaming_required_tool_parallel`.
 
 ## `CASE.3` — No tool call
 
@@ -81,7 +86,6 @@ Response is plain text, no tool-call grammar present.
 - Applies to every tool-call parser.
 - Must return empty `Vec<ToolCall>` and the input as `normal_text`. Zero false
   positives.
-- Example: `dsml/parser.rs::test_parse_no_tool_calls`.
 
 ## `CASE.4` — Malformed / partial JSON args
 
@@ -94,8 +98,6 @@ payload.
 - Behavior must be documented: either graceful fallback to string (DSML's
   current behavior via `serde_json::from_str(...).unwrap_or_else(|_| String(...))`)
   or explicit error. Silent drop is the failure mode.
-- Example: `dsml/parser.rs::test_parse_deepseek_v4_malformed_json_value_falls_back_to_string`,
-  `deepseek_v3_parser.rs::test_parse_tool_calls_deepseek_v3_with_invalid_json`.
 
 ## `CASE.5` — Missing end-token recovery
 
@@ -111,8 +113,6 @@ emitted EOS mid-generation.
   outer close fence (Kimi K2 does this post-fix), or (b) return an explicit
   error. Either way, pin the behavior with a test so a future change is
   intentional.
-- Example (post-recovery): `kimi_k2_parser.rs::test_parse_malformed_no_section_end`.
-- Example (behavior-pinning, pre-recovery): `dsml/parser.rs::test_parse_deepseek_v4_missing_end_token`.
 
 ## `CASE.6` — Empty args
 
@@ -120,8 +120,6 @@ Tool call with `arguments={}`, or a no-parameter invoke.
 
 - Applies to every tool-call parser.
 - Must still return the call — empty args is a valid call, not a missing one.
-- Example: `kimi_k2_parser.rs::test_parse_no_arg_call`,
-  `dsml/parser.rs::test_parse_deepseek_v4_no_parameters`.
 
 ## `CASE.7` — Complex argument types
 
@@ -133,8 +131,6 @@ newlines inside argument values.
   JSON round-tripping. For XML grammars without hints, the type-coercion
   half of the test is covered under `CASE.xml2` instead — here just verify
   that complex values make it through without truncation or escape bugs.
-- Example: `dsml/parser.rs::test_parse_mixed_types_realistic`,
-  `kimi_k2_parser.rs::test_parse_complex_json_arguments`.
 
 ## `CASE.8` — Streaming
 
@@ -149,10 +145,6 @@ together:
    match on the next chunk.
 
 - Applies to every tool-call parser. Dominant production path.
-- Example: `basic::test_buffer_state_persistence_across_calls`,
-  `basic::test_partial_token_matching_closing_tag`,
-  `basic::test_kimi_k2_one_shot_split`,
-  `test_streaming_tool_parsers::test_deepseek_v4_e2e_fragmented_tokens_vllm`.
 
 ## `CASE.9` — Paired reasoning + tool in same response
 
@@ -162,8 +154,6 @@ must be extracted: `reasoning_content` populated AND `tool_calls` populated.
 - Applies to every (tool, reasoning) parser pair.
 - Watch for the "unclosed think-tag swallows tool call" bug — if the reasoning
   parser is greedy it may eat the tool-call content that follows.
-- Example: `test_reasoning_parser::test_nemotron_with_reasoning_and_tool_calls`,
-  `test_reasoning_parser::test_kimi_k25_with_reasoning_and_tool_calls`.
 
 ## `CASE.10` — Reasoning only
 
@@ -171,8 +161,6 @@ must be extracted: `reasoning_content` populated AND `tool_calls` populated.
 `reasoning_content` and leave `tool_calls` empty.
 
 - Applies to every reasoning parser.
-- Example: `reasoning/base_parser.rs::test_detect_and_parse_reasoning_reasoning`,
-  `reasoning/mod.rs::test_deepseek_v4_detect_and_parse`.
 
 ## `CASE.11` — `tool_choice` = auto / required / named / none
 
@@ -184,8 +172,6 @@ Each of the four OpenAI `tool_choice` modes exercised per parser.
   run `hermes` only today. Adding a new parser requires parametrizing those
   suites or adding a per-parser equivalent.
 - Universal gap across most parsers in the repo as of 2026-04.
-- Example: `tool_choice::test_named_tool_choice_parses_json`,
-  `tool_choice::test_required_tool_choice_parses_json_array`.
 
 ## `CASE.12` — `finish_reason` semantics
 
@@ -196,8 +182,6 @@ non-streaming paths.
 - When a tool call lands, `finish_reason` must become `tool_calls`. When
   `max_tokens` truncates mid-stream, `length` must propagate — this is
   often the signal that should trigger `CASE.5` recovery on the parser side.
-- Example: `tool_choice_finish_reasons::test_named_tool_choice_normal_stop_becomes_tool_calls`,
-  `test_streaming_tool_parsers::test_qwen_finish_reason_length_vllm`.
 
 ## `CASE.13` — Normal text interleaved with tool calls
 
@@ -205,8 +189,6 @@ Model emits narration text before / after / between tool-call blocks. Parser
 must split content correctly: text → `normal_content`, calls → `tool_calls`.
 
 - Applies to every tool-call parser.
-- Example: `dsml/parser.rs::test_parse_with_normal_text`,
-  `test_streaming_tool_parsers.rs::test_deepseek_v4_e2e_content_before_tool_vllm`.
 
 ## `CASE.14` — Empty content / empty `tool_calls` array / null response
 
@@ -217,8 +199,6 @@ Engine emits a chunk with `delta.content = ""`, or a final response with
 - Null-value handling inside parameters is parser-level (`parse_parameters`
   in DSML handles it via `serde_json::Value::Null`). Empty-choices /
   empty-stream handling is typically at the e2e integration layer.
-- Example: `dsml/parser.rs::test_parse_null_parameter`,
-  `parallel_tool_call_integration::test_empty_tool_calls`.
 
 ## `CASE.15` — Duplicate tool calls (same name twice)
 
@@ -255,8 +235,6 @@ value is surfaced to the client.
   whether to JSON-decode or pass through verbatim; no entity decoding pass.
 - **N/A for JSON-family and Harmony** — JSON has its own escape semantics
   handled by `serde_json`.
-- Example: `xml/parser.rs::test_html_unescape`,
-  `glm47_parser.rs::test_xml_entity_decoding`.
 
 ## `CASE.xml2` — Schema-aware type coercion
 
@@ -269,8 +247,6 @@ number / bool / array based on the declared parameter type.
   intent per parameter, so no schema lookup is needed.
 - **N/A for JSON-family** — JSON has native types.
 - **N/A for Harmony** — payload is JSON inside the channel envelope.
-- Example: `xml/parser.rs::test_schema_aware_type_conversion`,
-  `glm47_parser.rs::test_type_coercion_array_comma_separated`.
 
 ---
 
@@ -283,8 +259,6 @@ into tool-call extraction while surfacing `analysis` as reasoning and
 `final` as the user-visible output.
 
 - **Harmony only.** N/A for every other family.
-- Example: `harmony/harmony_parser.rs::test_parse_tool_calls_harmony_with_multi_args`,
-  `harmony/harmony_parser.rs::test_parse_tool_calls_harmony_with_normal_text`.
 
 ---
 

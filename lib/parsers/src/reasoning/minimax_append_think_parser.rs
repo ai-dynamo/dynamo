@@ -69,7 +69,7 @@ impl ReasoningParser for MiniMaxAppendThinkParser {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test] // CASE.10 — minimax inline-reasoning
     fn test_detect_and_parse_prepends_think_all_as_normal_text() {
         let mut parser = MiniMaxAppendThinkParser::new();
         let result = parser.detect_and_parse_reasoning("reasoning content here", &[]);
@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // CASE.10 — minimax inline-reasoning
     fn test_detect_and_parse_with_end_token_is_still_normal_text() {
         let mut parser = MiniMaxAppendThinkParser::new();
         let result =
@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // CASE.8, CASE.10
     fn test_streaming_first_chunk_gets_prefix_rest_pass_through() {
         let mut parser = MiniMaxAppendThinkParser::new();
 
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(r3.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // CASE.13 — minimax leaves tool-call shape inline
     fn test_streaming_bare_json_tool_call_is_normal_text() {
         // Regression: under SGLang guided decoding the model emits a bare
         // JSON array with no `</think>`. The parser must not capture it as
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(r.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // CASE.9, CASE.13 — minimax inline-reasoning
     fn test_streaming_tool_call_after_reasoning_is_all_normal_text() {
         let mut parser = MiniMaxAppendThinkParser::new();
 
