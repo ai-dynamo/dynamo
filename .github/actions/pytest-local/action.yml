@@ -101,43 +101,53 @@ runs:
       shell: bash
       run: |
         set +e
-        if [[ -d "${{ inputs.nvme_dir }}" ]]; then
-          NVME_ROOT="${{ inputs.nvme_dir }}"
-        else
-          NVME_ROOT="/tmp"
-        fi
+        NVME_ROOT="${{ inputs.nvme_dir }}"
+        [[ -z "${NVME_ROOT}" || ! -d "${NVME_ROOT}" ]] && NVME_ROOT="/tmp"
 
         HUB_DEST="${NVME_ROOT}/.cache/huggingface/hub"
         mkdir -p "${HUB_DEST}"
 
         if [[ ! -d "${{ inputs.local_models_dir }}" ]]; then
-          echo "⚠️  local_models_dir '${{ inputs.local_models_dir }}' not found — skipping model seed"
-        else
-          echo "📦 Seeding models: ${{ inputs.local_models_dir }} → ${HUB_DEST}"
-          declare -A _pids _t0s
-          COPIED=0
-          FAILED=0
-          for model_name in ${{ inputs.seed_model_names }}; do
-            src="${{ inputs.local_models_dir }}/${model_name}"
-            if [[ ! -d "${src}" ]]; then
-              echo "  ⚠️  ${model_name} not found in local_models_dir — skipping"
-              continue
-            fi
-            _t0s["${model_name}"]=$(date +%s)
-            cp -rn "${src}" "${HUB_DEST}/" &
-            _pids["${model_name}"]=$!
-          done
-          for model_name in "${!_pids[@]}"; do
-            if wait "${_pids[$model_name]}"; then
-              echo "  ✅ ${model_name} ($(( $(date +%s) - ${_t0s[$model_name]} ))s)"
-              COPIED=$((COPIED+1))
-            else
-              echo "  ❌ ${model_name} copy failed"
-              FAILED=$((FAILED+1))
-            fi
-          done
-          echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"
+          echo "⚠️ local_models_dir '${{ inputs.local_models_dir }}' not found — skipping model seed"
+          exit 0
         fi
+
+        echo "📦 Seeding models: ${{ inputs.local_models_dir }} → ${HUB_DEST}"
+        declare -A _pids _t0s
+        COPIED=0
+        FAILED=0
+
+        for model_name in ${{ inputs.seed_model_names }}; do
+          src="${{ inputs.local_models_dir }}/${model_name}"
+          
+          if [[ ! -d "${src}" ]]; then
+            echo "  ⚠️ ${model_name} not found — skipping"
+            continue
+          fi
+
+          # Prepare destination
+          dest="${HUB_DEST}/${model_name}"
+          mkdir -p "${dest}"
+
+          _t0s["${model_name}"]=$(date +%s)
+          
+          # Optimization: Use tar piping to reduce S3 metadata overhead and stream files
+          ( tar -c -C "${src}" . | tar -x -C "${dest}" ) &
+          _pids["${model_name}"]=$!
+        done
+
+        # Wait and collect results
+        for model_name in "${!_pids[@]}"; do
+          if wait "${_pids[$model_name]}"; then
+            echo "  ✅ ${model_name} ($(( $(date +%s) - ${_t0s[$model_name]} ))s)"
+            COPIED=$((COPIED+1))
+          else
+            echo "  ❌ ${model_name} copy failed"
+            FAILED=$((FAILED+1))
+          fi
+        done
+        
+        echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"
     - name: Run pytest
       shell: bash
       env:
