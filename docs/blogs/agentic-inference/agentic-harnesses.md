@@ -1,20 +1,20 @@
 # Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo
 
-An agentic exchange has to preserve more than assistant text: assistant turns interleave reasoning with one or more tool calls, while subsequent user turns return the corresponding tool results to the model context. The rules for replaying reasoning are model- and turn-dependent: some reasoning should be retained, while some should be dropped. The responsibility for handling this more expressive interaction and producing correctly segmented API results falls on the inference engine: tool-call parsing and reasoning parsing need to happen before the attached harness consumes the response. Additionally, high-value agentic workflows such as coding depend on a responsive harness experience: reasoning segments, tool-call events, and request metadata need to stream back as the turn unfolds, instead of arriving after a final text response. This post covers lessons from running real agentic clients against Dynamo: how we hardened parser and API coverage and how those parser layers have been abstracted into independent reusable crates.
+An agentic exchange must preserve a structured interaction: assistant turns interleave reasoning with one or more tool calls, and subsequent user turns return the corresponding tool results to the model context. Reasoning replay is model- and turn-dependent: some reasoning should be retained, while some should be dropped. The inference engine is responsible for this more expressive interaction and for producing correctly segmented API results. Tool-call parsing and reasoning parsing need to happen before the attached harness consumes the response. High-value agentic workflows such as coding also depend on a responsive harness experience: reasoning segments, tool-call events, and request metadata need to stream back as the turn unfolds instead of arriving after a final text response. This post covers lessons from running real agentic clients against Dynamo: how we hardened parser and API coverage and how those parser layers became standalone reusable crates.
 
-Our work here builds upon the performance considerations outline in our [first post](./agentic-inference.md) which focused on the architecture underneath agentic inference: the frontend, the router, and KV cache management. The focus of our fixes in this follow up blog was threefold: correctness, user-experience equivalence, as well as performance.
+These changes build on the performance considerations outlined in our [first post](./agentic-inference.md), which focused on the serving architecture underneath agentic inference: the frontend, router, and KV cache management. This follow-up focuses on correctness, user-experience equivalence, and performance.
 
-New agentic harnesses are constantly coming onto the scene and existing ones evolving, maturing and adding more elaborate features. So the focus is on the core features of popular harnesses such as Claude Code and Codex and OpenClaw, in the hopes that any learnings will be useful and transferrable.
-
+Agentic harnesses are still evolving quickly. Claude Code, Codex, and OpenClaw expose the same pressure points from different API surfaces, so the examples below focus on the core behaviors that custom serving stacks need to reproduce.
 
 ## Harness-Facing Dynamo Settings
 
-Our experiments used the newly released `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` model, thought they are applicable across different models, reasoning and tool calling parsers.
+Our experiments used the newly released `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` model, though the same issues apply across models, reasoning parsers, and tool-call parsers.
 
-To reproduce our results, the frontend must be configured with newly the exposed Anthropic-compatible API and enabled with the switches that preserve prompt, reasoning, and tool state:
-- `--enable-anthropic-api` so harnesses can talk to Dynamo over the Anthropic API. Most harnesses can fall back to the default Messages API but that leads to a degraded experience.
-- `--strip-anthropic-preamble` this looks for, and strps the Anthropic billing header that can cause kv-reuse instability.
-- `--enable-streaming-tool-dispatch` this *new* feature means tool calls can start executing as soon as they are decoded, rather than waiting till the end of turn.
+To reproduce our results, configure the frontend with the Anthropic-compatible API and the flags that preserve prompt, reasoning, and tool state:
+
+- `--enable-anthropic-api` exposes the Anthropic Messages API to harnesses. Many harnesses can fall back to the default Messages API, but the experience is degraded.
+- `--strip-anthropic-preamble` removes the Anthropic billing header that can destabilize KV reuse.
+- `--enable-streaming-tool-dispatch` lets complete tool calls start executing as soon as they are decoded, rather than waiting for the end of the turn.
 
 Putting all of this together:
 ```bash
@@ -26,7 +26,8 @@ python -m dynamo.frontend \
 ```
 
 On the worker side, the important settings in this deployment are:
-- `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` so tool calls and reasoning blocks are reconstructed in the model-specific format the harness actually needs. For instance, a common pattern is to drop all reasoning tokens from previous turns.
+
+- `--dyn-tool-call-parser <parser>` and `--dyn-reasoning-parser <parser>` reconstruct tool calls and reasoning blocks in the model-specific format the harness expects. Those parsers also control whether reasoning from previous turns should be retained, transformed, or dropped.
 
 ## Prompt Stability Is Key for Cache Reuse
 
@@ -39,179 +40,13 @@ You are Claude Code, an interactive CLI tool...
 
 These headers poison the KV cache and prevent it from being reused, even across sessions by the same user. A varying line at position zero means every new session starts from a different token prefix, so the stable instructions and tool definitions behind it never line up cleanly for reuse.
 
-TO restore proper kv-cache hits, Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
+To restore KV-cache reuse, Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
 
 The measured impact was large. On a Dynamo B200 deployment with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill. That is about a `5x` reduction in TTFT for new users hitting the same deployment or for the same user opening a new session.
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" style="max-width:720px;width:100%;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;border:1px solid #e5e7eb;border-radius:8px">
-<line x1="72" y1="324.0" x2="696" y2="324.0" stroke="#e5e7eb" stroke-width="1"/>
-<text x="64" y="328.0" text-anchor="end" fill="#6b7280" font-size="11">0</text>
-<line x1="72" y1="268.4" x2="696" y2="268.4" stroke="#e5e7eb" stroke-width="1"/>
-<text x="64" y="272.4" text-anchor="end" fill="#6b7280" font-size="11">200</text>
-<line x1="72" y1="212.8" x2="696" y2="212.8" stroke="#e5e7eb" stroke-width="1"/>
-<text x="64" y="216.8" text-anchor="end" fill="#6b7280" font-size="11">400</text>
-<line x1="72" y1="157.1" x2="696" y2="157.1" stroke="#e5e7eb" stroke-width="1"/>
-<text x="64" y="161.1" text-anchor="end" fill="#6b7280" font-size="11">600</text>
-<line x1="72" y1="101.5" x2="696" y2="101.5" stroke="#e5e7eb" stroke-width="1"/>
-<text x="64" y="105.5" text-anchor="end" fill="#6b7280" font-size="11">800</text>
-<line x1="72" y1="45.9" x2="696" y2="45.9" stroke="#e5e7eb" stroke-width="1"/>
-<text x="64" y="49.9" text-anchor="end" fill="#6b7280" font-size="11">1000</text>
-<text x="16" y="178.0" text-anchor="middle" fill="#374151" font-size="12" font-weight="500" transform="rotate(-90,16,178.0)">TTFT (ms)</text>
-<text x="384.0" y="372" text-anchor="middle" fill="#374151" font-size="12" font-weight="500">Request (3 rounds × 15 requests)</text>
-<line x1="72" y1="277.2" x2="696" y2="277.2" stroke="#3b82f6" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>
-<line x1="72" y1="70.5" x2="696" y2="70.5" stroke="#ef4444" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>
-<line x1="72" y1="277.0" x2="696" y2="277.0" stroke="#22c55e" stroke-width="1" stroke-dasharray="6,4" opacity="0.5"/>
-<text x="698" y="74.5" fill="#ef4444" font-size="10" font-weight="600">911ms</text>
-<text x="698" y="271.2" fill="#3b82f6" font-size="10" font-weight="600">168ms</text>
-<text x="698" y="291.0" fill="#22c55e" font-size="10" font-weight="600">169ms</text>
-<circle cx="78.9" cy="69.0" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="78.9" cy="275.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="78.9" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="92.8" cy="71.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="92.8" cy="277.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="92.8" cy="277.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="106.7" cy="68.8" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="106.7" cy="276.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="106.7" cy="278.1" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="120.5" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="120.5" cy="278.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="120.5" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="134.4" cy="69.1" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="134.4" cy="275.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="134.4" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="148.3" cy="71.1" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="148.3" cy="277.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="148.3" cy="276.3" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="162.1" cy="69.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="162.1" cy="278.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="162.1" cy="278.5" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="176.0" cy="71.5" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="176.0" cy="275.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="176.0" cy="275.9" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="189.9" cy="69.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="189.9" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="189.9" cy="275.1" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="203.7" cy="71.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="203.7" cy="275.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="203.7" cy="278.7" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="217.6" cy="69.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="217.6" cy="278.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="217.6" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="231.5" cy="71.8" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="231.5" cy="276.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="231.5" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="245.3" cy="72.0" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="245.3" cy="278.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="245.3" cy="278.1" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="259.2" cy="68.6" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="259.2" cy="275.5" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="259.2" cy="275.9" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="273.1" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="273.1" cy="278.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="273.1" cy="278.5" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="286.9" cy="69.0" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="286.9" cy="278.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="286.9" cy="277.9" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="300.8" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="300.8" cy="278.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="300.8" cy="275.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="314.7" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="314.7" cy="275.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="314.7" cy="278.4" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="328.5" cy="68.5" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="328.5" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="328.5" cy="276.0" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="342.4" cy="71.9" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="342.4" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="342.4" cy="278.4" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="356.3" cy="69.5" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="356.3" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="356.3" cy="275.9" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="370.1" cy="71.7" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="370.1" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="370.1" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="384.0" cy="69.3" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="384.0" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="384.0" cy="275.7" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="397.9" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="397.9" cy="275.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="397.9" cy="277.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="411.7" cy="71.6" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="411.7" cy="278.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="411.7" cy="276.1" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="425.6" cy="68.1" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="425.6" cy="276.1" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="425.6" cy="277.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="439.5" cy="71.3" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="439.5" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="439.5" cy="275.5" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="453.3" cy="68.7" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="453.3" cy="276.3" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="453.3" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="467.2" cy="72.0" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="467.2" cy="274.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="467.2" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="481.1" cy="69.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="481.1" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="481.1" cy="278.3" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="494.9" cy="69.1" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="494.9" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="494.9" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="508.8" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="508.8" cy="276.2" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="508.8" cy="278.4" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="522.7" cy="69.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="522.7" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="522.7" cy="275.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="536.5" cy="71.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="536.5" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="536.5" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="550.4" cy="69.5" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="550.4" cy="275.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="550.4" cy="275.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="564.3" cy="72.3" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="564.3" cy="278.7" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="564.3" cy="278.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="578.1" cy="69.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="578.1" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="578.1" cy="278.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="592.0" cy="71.9" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="592.0" cy="278.4" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="592.0" cy="275.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="605.9" cy="72.2" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="605.9" cy="276.0" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="605.9" cy="278.8" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="619.7" cy="68.3" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="619.7" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="619.7" cy="276.1" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="633.6" cy="72.1" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="633.6" cy="275.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="633.6" cy="277.9" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="647.5" cy="69.5" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="647.5" cy="278.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="647.5" cy="276.2" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="661.3" cy="72.4" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="661.3" cy="278.9" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="661.3" cy="278.6" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="675.2" cy="69.6" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="675.2" cy="275.6" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="675.2" cy="276.1" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="689.1" cy="72.0" r="3.5" fill="#ef4444" opacity="0.7"/>
-<circle cx="689.1" cy="278.8" r="3.5" fill="#3b82f6" opacity="0.7"/>
-<circle cx="689.1" cy="278.3" r="3.5" fill="#22c55e" opacity="0.7"/>
-<circle cx="80" cy="40" r="5" fill="#3b82f6" opacity="0.8"/>
-<text x="90" y="44" fill="#374151" font-size="12">Stable prefix</text>
-<circle cx="240" cy="40" r="5" fill="#ef4444" opacity="0.8"/>
-<text x="250" y="44" fill="#374151" font-size="12">Varying prefix</text>
-<circle cx="400" cy="40" r="5" fill="#22c55e" opacity="0.8"/>
-<text x="410" y="44" fill="#374151" font-size="12">Stripped prefix</text>
-</svg>
-
-<p style="text-align:center;color:#6b7280;font-size:0.9em;margin-top:0.5em"><em>Prompt stability versus TTFT on a 52K-token prefix. Stable and stripped prefixes land at ~168–169 ms TTFT; a varying prefix jumps to ~911 ms.</em></p>
-
 ## The Nuances of Reasoning and Tool Parsing
 
-Carrying reasoning into the next turn does not have one universal correct form. Some models intentionally drop prior thinking on ordinary assistant turns. Agentic turns with interleaved tool calls are different: there, the reasoning and tool sequence often needs to persist to the next turn in the same order. The real contract is model-specific and turn-specific.
+Reasoning replay into the next turn does not have one universal correct form. Some models intentionally drop prior thinking on ordinary assistant turns. Agentic turns with interleaved tool calls are different: there, the reasoning spans often need to remain attached to the tool calls they explain. The real contract is model-specific and turn-specific.
 
 Anthropic's [April 23 Claude Code postmortem](https://www.anthropic.com/engineering/april-23-postmortem) gives a concrete production example of this policy: thinking from previous turns can be cleared on session resume to reduce the prefill burden after the cached prompt has expired.
 
@@ -284,7 +119,7 @@ The streaming path makes the parser interaction more visible. A streaming reques
 
 The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
 
-This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The fix had three parts:
+This round-trip did not produce the correct Anthropic event sequence until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The fix had three parts:
 
 1. **One owner for reasoning parsing**: reasoning parsing used to happen at multiple competing layers. The backend parser could split model output into `reasoning_content` and normal `content`, while the Anthropic streaming converter still tried to infer `<think>` boundaries when mapping the same stream into Anthropic content blocks. PR #7358 made ownership explicit. If a backend path has already produced structured reasoning deltas, the Anthropic converter trusts them and only maps them into the response format.
 
@@ -339,19 +174,19 @@ ANTHROPIC_BASE_URL=http://localhost:8000 \
 npx openclaw agent --local -m "Say ok" --json
 ```
 
-The fixes in this area brought the custom deployment closer to the native backend behavior.
-One concrete example shows the flavor of these bugs better than a long checklist. During startup, the harness asks for details about the selected model directly, but Dynamo did not yet serve that endpoint:
+The fixes in this area brought the custom deployment closer to the native backend behavior. One concrete example shows the flavor of these bugs better than a long checklist. During startup, the harness asks for details about the selected model directly, but Dynamo did not yet serve that endpoint:
 
 ```text
 GET /v1/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 HTTP/1.1 404 Not Found
 ```
-Another example is `message_start` reporting `input_tokens: 0` even when the final response later contains the real count. This can make the token count in the harness temporarily drop to `0` every time a new turn starts. [PR #7234](https://github.com/ai-dynamo/dynamo/pull/7234) fixed that Anthropic path by populating `input_tokens` before the stream begins. The broader tokenizer-service work landed separately in [PR #7699](https://github.com/ai-dynamo/dynamo/pull/7699), which added `/v1/tokenize` and `/v1/detokenize` endpoints for accurate token counts before a request is processed by the engine.
+
+Another example is `message_start` reporting `input_tokens: 0` even when the final response later contains the real count. This can make the token count in the harness temporarily drop to `0` every time a new turn starts. [PR #7234](https://github.com/ai-dynamo/dynamo/pull/7234) fixed that Anthropic path by populating `input_tokens` before the stream begins. Those counts are also control-plane data for long sessions: harnesses use context length to decide when to compact the conversation before the next request would exceed the model window. The broader tokenizer-service work landed separately in [PR #7699](https://github.com/ai-dynamo/dynamo/pull/7699), which added `/v1/tokenize` and `/v1/detokenize` endpoints for accurate token counts before a request is processed by the engine.
 
 ## Responses and Codex Fidelity
 
 The Codex-facing version of the same problem lives on the `v1/responses` side. Passing compliance tests is not enough to provide parity in user experience.
-We found that a Responses API request could not survive an internal round-trip without losing the fields that made it a Responses request rather than a chat completions request. Preserving those fields turned out to be an architectural concern, not just a serializer concern. The relevant changes live in Dynamo's `ResponseParams` path and the upstream type-alignment work in [PR #6089](https://github.com/ai-dynamo/dynamo/pull/6089).
+We found that a Responses API request could not survive an internal round-trip without losing the fields that made it a Responses request rather than a chat completions request. Preserving those fields required architectural changes in Dynamo's `ResponseParams` path, together with the upstream type-alignment work in [PR #6089](https://github.com/ai-dynamo/dynamo/pull/6089).
 
 Codex should point at Dynamo through the OpenAI-compatible Responses API with request compression enabled:
 
