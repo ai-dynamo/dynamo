@@ -89,9 +89,7 @@ impl DecoderParams {
             prompt_token_ids: request.token_ids.clone(),
             stop_conditions: request.stop_conditions.clone(),
             // Default to true to match upstream framework behavior:
-            //   vLLM:    SamplingParams.skip_special_tokens defaults True
-            //   SGLang:  SamplingParams.skip_special_tokens defaults True
-            //   TRT-LLM: SamplingParams.skip_special_tokens defaults True
+            //   vLLM/sgLang/TRT-LLM: SamplingParams.skip_special_tokens defaults True
             // Without this, models that occasionally emit a special token id
             // (e.g. DeepSeek-V4 producing token id 0 = `<｜begin▁of▁sentence｜>`
             // mid-output) leak the token's text into `content` / `reasoning_content`.
