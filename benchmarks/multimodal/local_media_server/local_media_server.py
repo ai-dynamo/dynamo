@@ -16,7 +16,7 @@
 import math
 import random
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 
@@ -34,7 +34,7 @@ class LocalMediaServer(BaseHTTPRequestHandler):
         variance = self.processing_time_variance_ms
         if variance <= 0.0:
             return max(mean, 0.0) / 1000.0
-        sample_ms = random.gauss(mean, math.sqrt(variance))
+        sample_ms = random.normalvariate(mean, math.sqrt(variance))
         return max(sample_ms, 0.0) / 1000.0
 
     def do_GET(self) -> None:
@@ -68,7 +68,7 @@ def run_server(
     LocalMediaServer.set_images(images)
     LocalMediaServer.processing_time_mean_ms = processing_time_mean_ms
     LocalMediaServer.processing_time_variance_ms = processing_time_variance_ms
-    httpd = HTTPServer(("", port), LocalMediaServer)
+    httpd = ThreadingHTTPServer(("", port), LocalMediaServer)
     print(
         f"Server running on port {port} "
         f"(processing_time_mean_ms={processing_time_mean_ms}, "
