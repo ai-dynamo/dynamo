@@ -4,6 +4,7 @@
 mod bus;
 pub mod config;
 mod integration;
+mod publisher;
 mod sink;
 pub mod stream;
 pub mod types;
@@ -13,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub(crate) use integration::{request_metrics, start_tool_event_ingest_from_policy};
+pub use publisher::AgentToolEventPublisher;
 pub use types::{
     AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
     TraceEventType, TraceSchema, WorkerInfo,
@@ -94,21 +96,37 @@ pub fn emit_tool_event(
 }
 
 pub fn publish_tool_record(record: AgentTraceRecord) {
-    if !record.event_type.is_tool_event() {
+    if let Err(error) = validate_tool_record(&record) {
         tracing::warn!(
+            %error,
             event_type = ?record.event_type,
-            "dropping non-tool record from agent tool event path"
-        );
-        return;
-    }
-    if record.tool.is_none() {
-        tracing::warn!(
-            event_type = ?record.event_type,
-            "dropping agent tool record without tool payload"
+            "dropping invalid agent tool record"
         );
         return;
     }
     publish(record);
+}
+
+fn validate_tool_record(record: &AgentTraceRecord) -> anyhow::Result<()> {
+    if record.schema != TraceSchema::V1 {
+        anyhow::bail!("unsupported agent trace schema: {:?}", record.schema);
+    }
+    if record.event_source != TraceEventSource::Harness {
+        anyhow::bail!(
+            "agent tool records must be harness-originated, got {:?}",
+            record.event_source
+        );
+    }
+    if !record.event_type.is_tool_event() {
+        anyhow::bail!("expected tool event, got {:?}", record.event_type);
+    }
+    if record.tool.is_none() {
+        anyhow::bail!("missing tool payload");
+    }
+    if record.request.is_some() {
+        anyhow::bail!("tool event must not include request metrics");
+    }
+    Ok(())
 }
 
 fn current_time_unix_ms() -> u64 {
