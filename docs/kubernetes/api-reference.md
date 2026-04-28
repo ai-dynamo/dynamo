@@ -1447,13 +1447,6 @@ _Appears in:_
 
 
 ComponentCheckpointConfig configures checkpointing for a DGD component.
-Setting `spec.components[*].experimental.checkpoint` opts the component
-into checkpointing.
-Omitting the field disables it. The v1alpha1 `enabled` flag is dropped here
-to follow the standard Kubernetes pattern of "presence == opt-in";
-conversion from v1alpha1 maps `enabled:false` (with or without a populated
-payload) to an absent field, with the original payload preserved via an
-origin annotation when present.
 
 
 
@@ -1519,7 +1512,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
-| `componentName` _string_ | componentName is the name of the primary underlying Kubernetes<br />resource backing this Dynamo component.<br />Deprecated: use `componentNames`. During rolling updates this reflects<br />the new (target) resource name only. |  |  |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
@@ -1687,7 +1679,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate is the pod template used to create the component's pods.<br />The operator injects its defaults (image, command, env, ports, probes,<br />resources, volume mounts) into the container named `"main"` inside<br />`podTemplate.spec.containers`, merging user overrides by name. If no<br />container named `"main"` is present, the operator auto-generates it<br />with standard defaults. All other containers in `podTemplate.spec.containers`<br />are treated as user-managed sidecars: the operator does not inject<br />defaults into them, so sidecars must specify required fields (e.g. `image`)<br />themselves. The validation webhook rejects pod templates where a<br />non-`"main"` container is missing a required field such as `image`. |  | Optional: \{\} <br /> |
@@ -1695,7 +1687,7 @@ _Appears in:_
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures multinode components. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into using the<br />DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,<br />`scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field<br />so that external autoscalers (HPA/KEDA/Planner) can drive scaling via<br />the Scale subresource. Omit the field to opt out. The struct is<br />currently empty -- v1alpha1's `enabled` bool was redundant with field<br />presence -- but is intentionally kept as a struct so that future<br />per-component DGDSA configuration knobs can be added without another<br />API break. |  | Optional: \{\} <br /> |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into using the<br />DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,<br />`scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field<br />so that external autoscalers (HPA/KEDA/Planner) can drive scaling via<br />the Scale subresource. Omit the field to opt out. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds EPP-specific configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
@@ -1717,7 +1709,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br />Required: \{\} <br /> |
-| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate is the pod template used to create the component's pods.<br />The operator injects its defaults (image, command, env, ports, probes,<br />resources, volume mounts) into the container named `"main"` inside<br />`podTemplate.spec.containers`, merging user overrides by name. If no<br />container named `"main"` is present, the operator auto-generates it<br />with standard defaults. All other containers in `podTemplate.spec.containers`<br />are treated as user-managed sidecars: the operator does not inject<br />defaults into them, so sidecars must specify required fields (e.g. `image`)<br />themselves. The validation webhook rejects pod templates where a<br />non-`"main"` container is missing a required field such as `image`. |  | Optional: \{\} <br /> |
@@ -1725,7 +1717,7 @@ _Appears in:_
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures multinode components. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into using the<br />DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,<br />`scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field<br />so that external autoscalers (HPA/KEDA/Planner) can drive scaling via<br />the Scale subresource. Omit the field to opt out. The struct is<br />currently empty -- v1alpha1's `enabled` bool was redundant with field<br />presence -- but is intentionally kept as a struct so that future<br />per-component DGDSA configuration knobs can be added without another<br />API break. |  | Optional: \{\} <br /> |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into using the<br />DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,<br />`scalingAdapter: \{\}`), a DGDSA is created and owns the `replicas` field<br />so that external autoscalers (HPA/KEDA/Planner) can drive scaling via<br />the Scale subresource. Omit the field to opt out. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds EPP-specific configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
@@ -2008,7 +2000,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | gpuMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When set, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
-| `failover` _[FailoverSpec](#failoverspec)_ | failover configures active-passive GPU failover for this component.<br />When set, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires<br />`spec.experimental.gpuMemoryService` to also be set, and<br />`spec.experimental.failover.mode` must match<br />`spec.experimental.gpuMemoryService.mode` (enforced by the validation<br />webhook). Inside a DynamoGraphDeployment, use<br />`spec.components[*].experimental.failover` and<br />`spec.components[*].experimental.gpuMemoryService` instead. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | failover configures active-passive GPU failover for this component.<br />Requires `gpuMemoryService` to also be set, and `failover.mode` must<br />match `gpuMemoryService.mode` (enforced by the validation webhook). |  | Optional: \{\} <br /> |
 | `checkpoint` _[ComponentCheckpointConfig](#componentcheckpointconfig)_ | checkpoint configures container-image snapshotting and restore for<br />this component. When set, the DGD controller can produce a<br />DynamoCheckpoint CR from a running pod and later restore pods from<br />that checkpoint for faster cold start. The user-facing shape of this<br />field -- especially its interaction with the standalone<br />DynamoCheckpoint resource and the identity-hash computation -- is<br />still settling, which is why it lives under `experimental` in v1beta1<br />instead of at the top level. |  | Optional: \{\} <br /> |
 
 
@@ -2017,24 +2009,12 @@ _Appears in:_
 
 
 FailoverSpec configures active-passive failover for a worker component.
-Setting `spec.experimental.failover` opts the component into failover mode:
-the main container is cloned into two engine containers (active + standby)
+The main container is cloned into two engine containers (active + standby)
 sharing GPUs via DRA, and the standby acquires the flock when the active
-engine fails. Omitting the field disables failover. Failover requires that
-`spec.experimental.gpuMemoryService` is also set, and
-`spec.experimental.failover.mode` must match
-`spec.experimental.gpuMemoryService.mode` (enforced by the validation
-webhook). Also requires the `nvidia.com/dynamo-kube-discovery-mode: container`
-annotation on the DGD. The v1alpha1 `enabled` flag is dropped here to follow
-the standard Kubernetes pattern of "presence == opt-in"; conversion from
-v1alpha1 maps `enabled:false` (with or without a populated payload) to an
-absent field, with the original payload preserved via an origin annotation
-when present.
-
-Exposed at `spec.experimental.failover` (or
-`spec.components[*].experimental.failover` inside a
-DynamoGraphDeployment) in v1beta1 -- see ExperimentalSpec for the stability
-caveat.
+engine fails. Failover requires that gpuMemoryService is also set, and that
+failover.mode matches gpuMemoryService.mode. Also requires the
+`nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+See ExperimentalSpec for the stability caveat.
 
 
 
@@ -2087,20 +2067,9 @@ _Appears in:_
 
 
 GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a
-worker component. Setting `spec.experimental.gpuMemoryService` (i.e.
-presence of this struct) opts the component into GMS: the operator injects
-a GMS sidecar and replaces the main container's GPU resources with a DRA
-`ResourceClaim` for shared GPU access. Omitting the field disables GMS for
-the component. The v1alpha1 `enabled` flag is dropped here to follow the
-standard Kubernetes pattern of "presence == opt-in"; conversion from
-v1alpha1 maps `enabled:false` (with or without a populated payload) to an
-absent field, with the original payload preserved via an origin annotation
-when present (see the v1alpha1 conversion code).
-
-Exposed at `spec.experimental.gpuMemoryService` (or
-`spec.components[*].experimental.gpuMemoryService` inside a
-DynamoGraphDeployment) in v1beta1 -- see ExperimentalSpec for the stability
-caveat.
+worker component. The operator injects a GMS sidecar and replaces the main
+container's GPU resources with a DRA `ResourceClaim` for shared GPU access.
+See ExperimentalSpec for the stability caveat.
 
 
 
@@ -2473,11 +2442,7 @@ ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapt
 (DGDSA). When `scalingAdapter` is set on a component (even as an empty
 object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
 field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-the Scale subresource. Omitting the field opts the component out. The
-struct is empty in v1beta1 (it carried only an `enabled` bool in v1alpha1,
-which is redundant with field presence) but is intentionally kept as a
-struct so that future per-component DGDSA configuration knobs can be added
-without another API break.
+the Scale subresource. Omitting the field opts the component out.
 
 
 

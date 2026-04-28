@@ -69,6 +69,7 @@ type DynamoComponentDeploymentSpec struct {
 // container named `"main"` and merges user overrides using strategic-merge-by-name
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+// +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -85,6 +86,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// RBAC, EPP filters) depend on.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ComponentName string `json:"name"`
 
 	// type indicates the role of this component within a Dynamo graph. Drives
@@ -142,11 +144,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
 	// `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
 	// so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-	// the Scale subresource. Omit the field to opt out. The struct is
-	// currently empty -- v1alpha1's `enabled` bool was redundant with field
-	// presence -- but is intentionally kept as a struct so that future
-	// per-component DGDSA configuration knobs can be added without another
-	// API break.
+	// the Scale subresource. Omit the field to opt out.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
