@@ -43,7 +43,7 @@ inputs:
   local_models_dir:
     description: 'Path to a pre-staged, read-only HuggingFace model cache on the runner. When set and the path exists, --models-dir is passed to pytest (offline mode, no downloads). Only used when gpu_tests=true.'
     required: false
-    default: '/models/ci/models'
+    default: ''
   nvme_dir:
     description: 'Path to the NVMe directory on the runner. When set, the NVME_ROOT environment variable is set to this path.'
     required: false
