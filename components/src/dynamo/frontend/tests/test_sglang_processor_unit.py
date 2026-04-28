@@ -915,6 +915,108 @@ class TestPreprocessChatRequest:
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
 
+    def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
+        """Multi-turn with prior assistant tool_calls renders without raising.
+
+        Regression: the qwen3-coder Jinja template calls ``arguments | items``
+        on assistant tool_calls and required ``arguments`` to be a mapping.
+        Dynamo carries arguments as a JSON string per the OpenAI wire
+        contract; the prepost must parse them to dict before templating.
+        """
+        request = {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": "Weather in Tokyo?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_001",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"city": "Tokyo"}),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_001",
+                    "content": json.dumps({"temperature": 22}),
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+        }
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+        assert len(result.prompt_token_ids) > 0
+        # Original request dict must not be mutated by the normaliser
+        # (callers reuse it for downstream processing).
+        original_args = request["messages"][1]["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(original_args, str)
+
+    def test_normalize_assistant_tool_call_arguments_helper(self):
+        """The string→dict normaliser parses valid JSON and skips bad input."""
+        from dynamo.frontend.sglang_prepost import (
+            _normalize_assistant_tool_call_arguments,
+        )
+
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "f",
+                            "arguments": json.dumps({"a": 1}),
+                        }
+                    },
+                    {
+                        "function": {
+                            "name": "g",
+                            "arguments": "not-json",
+                        }
+                    },
+                    {
+                        "function": {
+                            "name": "h",
+                            "arguments": {"already": "dict"},
+                        }
+                    },
+                ],
+            },
+            # Tool messages are not assistant; arguments key shouldn't exist
+            # but if it did we wouldn't touch it.
+            {"role": "tool", "tool_call_id": "x", "content": "ok"},
+        ]
+        _normalize_assistant_tool_call_arguments(messages)
+        tcs = messages[1]["tool_calls"]
+        assert tcs[0]["function"]["arguments"] == {"a": 1}
+        # Malformed JSON left as-is so the template error stays visible.
+        assert tcs[1]["function"]["arguments"] == "not-json"
+        # Already-dict values pass through untouched.
+        assert tcs[2]["function"]["arguments"] == {"already": "dict"}
+
     def test_tool_choice_none_strips_tools_from_template(self, tokenizer):
         """When exclude flag is on and tool_choice=none, tools are excluded from template."""
         tool_request = {
@@ -1479,9 +1581,8 @@ class TestUtilities:
         int(cid[5:], 16)  # Should not raise
 
     def test_preprocess_error(self):
-        """PreprocessError stores error_dict and stringifies."""
-        err = PreprocessError({"error": {"message": "n=2 unsupported"}})
-        assert err.error_dict == {"error": {"message": "n=2 unsupported"}}
+        """PreprocessError stores message and stringifies."""
+        err = PreprocessError("n=2 unsupported")
         assert "n=2" in str(err)
 
 
