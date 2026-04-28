@@ -407,9 +407,7 @@ fn register_model<'p>(
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
             .media_fetcher(media_fetcher.map(|m| m.inner));
-        // Only flip the builder's flag when the caller passed an
-        // explicit kwarg. Absence falls through to the builder's
-        // default, which honors the DYN_SELF_HOST_METADATA env var.
+        // Absence falls through to the DYN_SELF_HOST_METADATA env var default.
         if let Some(enabled) = self_host_metadata {
             builder.self_host_metadata(enabled);
         }

@@ -569,14 +569,21 @@ impl LocalModel {
         let mut rewritten = 0usize;
         for cf in self.card.iter_metadata_files_mut() {
             // Skip slots that have already been rewritten to a URL.
-            let Some(local_path) = cf.path().map(std::path::Path::to_path_buf) else {
+            let Some(local_path) = cf.path().map(Path::to_path_buf) else {
                 continue;
             };
             // Canonicalize so `Url::from_file_path` accepts it and the
             // registry holds an absolute path.
             let absolute = match std::fs::canonicalize(&local_path) {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %local_path.display(),
+                        %err,
+                        "failed to canonicalize self-host metadata path; skipping",
+                    );
+                    continue;
+                }
             };
             let Some(filename) = absolute
                 .file_name()
@@ -592,7 +599,7 @@ impl LocalModel {
             rewritten += 1;
         }
 
-        tracing::info!(
+        tracing::debug!(
             model_slug,
             rewritten,
             base_url,

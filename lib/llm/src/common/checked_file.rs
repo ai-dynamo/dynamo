@@ -17,9 +17,7 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct CheckedFile {
-    /// Either a path on local disk or a remote URL. `Url` accepts arbitrary
-    /// schemes, so this single field carries `file://`, `http(s)://`, `hf://`,
-    /// `mx://`, etc. without further structure.
+    /// Either a path on local disk or a remote URL.
     path: Either<PathBuf, Url>,
 
     /// Checksum of the contents of path
@@ -95,9 +93,6 @@ impl CheckedFile {
         &self.checksum
     }
 
-    /// File size in bytes. `None` for legacy-wire-format MDCs that
-    /// predate this field; consumers can use this as a "is this a
-    /// new-format MDC" discriminant.
     pub fn size(&self) -> Option<u64> {
         self.size
     }
@@ -160,8 +155,7 @@ impl Serialize for CheckedFile {
     where
         S: Serializer,
     {
-        // Field count: path + checksum always; size only when present.
-        let n = 2 + usize::from(self.size.is_some());
+        let n = if self.size.is_some() { 3 } else { 2 };
         let mut cf = serializer.serialize_struct("CheckedFile", n)?;
         match &self.path {
             Either::Left(path) => cf.serialize_field("path", &path)?,
