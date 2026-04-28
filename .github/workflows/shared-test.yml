@@ -132,7 +132,7 @@ jobs:
           df -h
           echo "--- End Storage ---"
           echo "--- Storage ---"
-          du -h -d 1 /scratch/.cache/huggingface/hub
+          du -h -d 1 /scratch/.cache/huggingface/hub || true
           echo "--- End Storage ---"
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
