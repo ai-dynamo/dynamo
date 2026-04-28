@@ -426,7 +426,6 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			Components: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
 					ComponentKind:     v1beta1.ComponentKindDeployment,
-					ComponentName:     "dgd-worker-0",
 					ComponentNames:    []string{"dgd-worker-0", "dgd-worker-1"},
 					Replicas:          2,
 					UpdatedReplicas:   2,

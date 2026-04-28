@@ -199,7 +199,7 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 			},
 			Component: &v1beta1.ComponentReplicaStatus{
 				ComponentKind:   v1beta1.ComponentKindDeployment,
-				ComponentName:   "dcd-0",
+				ComponentNames:  []string{"dcd-0"},
 				Replicas:        3,
 				UpdatedReplicas: 3,
 				ReadyReplicas:   ptr.To(int32(3)),
