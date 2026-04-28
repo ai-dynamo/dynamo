@@ -12,10 +12,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlConnector,
-    NixlHandshakePayload,
-)
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnector,
+        NixlHandshakePayload,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector":
+        raise
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+        NixlConnector,
+        NixlHandshakePayload,
+    )
+
 from vllm.v1.core.sched.output import SchedulerOutput
 
 # Optional import for LMCache support

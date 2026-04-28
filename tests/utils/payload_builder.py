@@ -232,6 +232,7 @@ def chat_payload(
     logprobs: bool = False,
     top_logprobs: Optional[int] = None,
     extra_body: Optional[Dict[str, Any]] = None,
+    expected_num_choices: Optional[int] = None,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -263,6 +264,7 @@ def chat_payload(
             repeat_count=repeat_count,
             expected_log=expected_log or [],
             expected_response=expected_response or [],
+            expected_num_choices=expected_num_choices,
         )
     else:
         return ChatPayload(
@@ -270,6 +272,7 @@ def chat_payload(
             repeat_count=repeat_count,
             expected_log=expected_log or [],
             expected_response=expected_response or [],
+            expected_num_choices=expected_num_choices,
         )
 
 

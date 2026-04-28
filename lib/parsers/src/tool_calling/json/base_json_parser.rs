@@ -391,7 +391,7 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
 mod detect_parser_tests {
     use super::*;
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_hermes() {
         let text =
             r#"<tool_call>{"name": "search", "parameters": { "query": "rust" } }</tool_call>"#;
@@ -404,7 +404,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token() {
         let text = r#"{"name": "search", "parameters": { "query": "rust" } }"#;
         let config = JsonParserConfig {
@@ -416,7 +416,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.13
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token_with_normal_text() {
         let text = r#"Here it is {"name": "#;
         let config = JsonParserConfig {
@@ -428,7 +428,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_with_square_brackets() {
         // These kind of false positives are expected when calling this function for stream=True
         let text = r#"Here it is [{"name": "search","#;
@@ -441,7 +441,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_false_positive() {
         // These kind of false positives are expected when calling this function for stream=True
         let text = r#"Here it is { Whats up"#;
@@ -454,7 +454,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_nemotron_deci() {
         let text =
             r#"<TOOLCALL>[{"name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
@@ -467,7 +467,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_with_lllama3_json_token() {
         let text = r#"<|python_tag|>{ "name": }"#;
         let config = JsonParserConfig {
@@ -479,7 +479,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_mistral_token() {
         let text = r#"Hello Yo ! [TOOL_CALLS]{"name": "search", "#;
         let config = JsonParserConfig {
@@ -491,7 +491,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_phi4_token() {
         let text = r#"functools{"name": "search", "#;
         let config = JsonParserConfig {
@@ -503,7 +503,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.8
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_fun() {
         // Test the streaming scenario where "fun" arrives first
         let text = r#"fun"#;
@@ -519,7 +519,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.8
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_func() {
         let text = r#"func"#;
         let config = JsonParserConfig {
@@ -534,7 +534,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.8
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_f() {
         let text = r#"f"#;
         let config = JsonParserConfig {
@@ -549,7 +549,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.8
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_with_prefix() {
         // Test case where text ends with a partial token (more realistic streaming scenario)
         let text = r#"Hello fun"#;
@@ -565,7 +565,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_phi4_avoid_false_positive() {
         // Test to ensure we don't get false positives for unrelated text
         let text = r#"funny joke"#;
@@ -581,7 +581,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn detect_tool_call_start_basic_json_chunk_phi4_no_match() {
         let text = r#"hello world"#;
         let config = JsonParserConfig {
