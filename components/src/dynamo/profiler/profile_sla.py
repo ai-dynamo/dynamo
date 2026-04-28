@@ -279,6 +279,44 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
     return True
 
 
+_MAX_COMBINED_RESOURCE_NAME_LENGTH = 45
+
+
+def _validate_dgd_service_name_lengths(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    final_config: Any,
+) -> None:
+    """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
+    dgdr_name = os.environ.get("DGDR_NAME", "")
+    if not dgdr_name:
+        return
+
+    # Honour user-supplied DGD name override (mirrors computeDGDName in the Go controller).
+    dgd_name = dgdr_name + "-dgd"
+    if dgdr.overrides and dgdr.overrides.dgd:
+        override_name = dgdr.overrides.dgd.get("metadata", {}).get("name", "")
+        if override_name:
+            dgd_name = override_name
+
+    dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
+    services = dgd_spec.get("spec", {}).get("services", {})
+    violations = []
+    for svc_name in services:
+        combined = len(dgd_name) + len(svc_name)
+        if combined > _MAX_COMBINED_RESOURCE_NAME_LENGTH:
+            violations.append(
+                f"'{svc_name}' ({len(svc_name)}): combined length {combined}"
+            )
+
+    if violations:
+        raise ValueError(
+            f"DGD name '{dgd_name}' (length {len(dgd_name)}) combined with service "
+            f"name(s) exceeds the {_MAX_COMBINED_RESOURCE_NAME_LENGTH}-character "
+            f"pod-naming limit. Shorten the DGDR name '{dgdr_name}'. "
+            f"Violations: {'; '.join(violations)}"
+        )
+
+
 async def run_profile(
     dgdr: DynamoGraphDeploymentRequestSpec,
     ops: ProfilerOperationalConfig | None = None,
@@ -484,6 +522,9 @@ async def run_profile(
                 "Propagated %d profiling-job toleration(s) to the final DGD config.",
                 len(job_tolerations),
             )
+
+        if final_config:
+            _validate_dgd_service_name_lengths(dgdr, final_config)
 
         if not _write_final_output(ops, final_config):
             return
