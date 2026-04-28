@@ -121,11 +121,7 @@ type RestartStrategy struct {
 // (DGDSA). When `scalingAdapter` is set on a component (even as an empty
 // object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
 // field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-// the Scale subresource. Omitting the field opts the component out. The
-// struct is empty in v1beta1 (it carried only an `enabled` bool in v1alpha1,
-// which is redundant with field presence) but is intentionally kept as a
-// struct so that future per-component DGDSA configuration knobs can be added
-// without another API break.
+// the Scale subresource. Omitting the field opts the component out.
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
@@ -170,14 +166,8 @@ type ExperimentalSpec struct {
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
 	// failover configures active-passive GPU failover for this component.
-	// When set, the main container is cloned into two engine containers
-	// (active + standby) sharing GPUs via DRA. Requires
-	// `spec.experimental.gpuMemoryService` to also be set, and
-	// `spec.experimental.failover.mode` must match
-	// `spec.experimental.gpuMemoryService.mode` (enforced by the validation
-	// webhook). Inside a DynamoGraphDeployment, use
-	// `spec.components[*].experimental.failover` and
-	// `spec.components[*].experimental.gpuMemoryService` instead.
+	// Requires `gpuMemoryService` to also be set, and `failover.mode` must
+	// match `gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
@@ -194,20 +184,9 @@ type ExperimentalSpec struct {
 }
 
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a
-// worker component. Setting `spec.experimental.gpuMemoryService` (i.e.
-// presence of this struct) opts the component into GMS: the operator injects
-// a GMS sidecar and replaces the main container's GPU resources with a DRA
-// `ResourceClaim` for shared GPU access. Omitting the field disables GMS for
-// the component. The v1alpha1 `enabled` flag is dropped here to follow the
-// standard Kubernetes pattern of "presence == opt-in"; conversion from
-// v1alpha1 maps `enabled:false` (with or without a populated payload) to an
-// absent field, with the original payload preserved via an origin annotation
-// when present (see the v1alpha1 conversion code).
-//
-// Exposed at `spec.experimental.gpuMemoryService` (or
-// `spec.components[*].experimental.gpuMemoryService` inside a
-// DynamoGraphDeployment) in v1beta1 -- see ExperimentalSpec for the stability
-// caveat.
+// worker component. The operator injects a GMS sidecar and replaces the main
+// container's GPU resources with a DRA `ResourceClaim` for shared GPU access.
+// See ExperimentalSpec for the stability caveat.
 type GPUMemoryServiceSpec struct {
 	// mode selects the GMS deployment topology.
 	// +optional
@@ -221,24 +200,12 @@ type GPUMemoryServiceSpec struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// Setting `spec.experimental.failover` opts the component into failover mode:
-// the main container is cloned into two engine containers (active + standby)
+// The main container is cloned into two engine containers (active + standby)
 // sharing GPUs via DRA, and the standby acquires the flock when the active
-// engine fails. Omitting the field disables failover. Failover requires that
-// `spec.experimental.gpuMemoryService` is also set, and
-// `spec.experimental.failover.mode` must match
-// `spec.experimental.gpuMemoryService.mode` (enforced by the validation
-// webhook). Also requires the `nvidia.com/dynamo-kube-discovery-mode: container`
-// annotation on the DGD. The v1alpha1 `enabled` flag is dropped here to follow
-// the standard Kubernetes pattern of "presence == opt-in"; conversion from
-// v1alpha1 maps `enabled:false` (with or without a populated payload) to an
-// absent field, with the original payload preserved via an origin annotation
-// when present.
-//
-// Exposed at `spec.experimental.failover` (or
-// `spec.components[*].experimental.failover` inside a
-// DynamoGraphDeployment) in v1beta1 -- see ExperimentalSpec for the stability
-// caveat.
+// engine fails. Failover requires that gpuMemoryService is also set, and that
+// failover.mode matches gpuMemoryService.mode. Also requires the
+// `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+// See ExperimentalSpec for the stability caveat.
 type FailoverSpec struct {
 	// mode selects the failover deployment topology. Must match
 	// `spec.experimental.gpuMemoryService.mode` (or
@@ -270,13 +237,6 @@ const (
 )
 
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
-// Setting `spec.components[*].experimental.checkpoint` opts the component
-// into checkpointing.
-// Omitting the field disables it. The v1alpha1 `enabled` flag is dropped here
-// to follow the standard Kubernetes pattern of "presence == opt-in";
-// conversion from v1alpha1 maps `enabled:false` (with or without a populated
-// payload) to an absent field, with the original payload preserved via an
-// origin annotation when present.
 // +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)",message="When checkpoint is configured, either checkpointRef or identity must be specified"
 type ComponentCheckpointConfig struct {
 	// mode defines how checkpoint creation is handled.
@@ -469,12 +429,6 @@ type ComponentReplicaStatus struct {
 	// componentKind is the underlying resource kind (e.g. `PodClique`,
 	// `Deployment`, `LeaderWorkerSet`).
 	ComponentKind ComponentKind `json:"componentKind"`
-
-	// componentName is the name of the primary underlying Kubernetes
-	// resource backing this Dynamo component.
-	// Deprecated: use `componentNames`. During rolling updates this reflects
-	// the new (target) resource name only.
-	ComponentName string `json:"componentName"`
 
 	// componentNames is the list of underlying Kubernetes resource names for
 	// this Dynamo component. During normal operation this contains a single

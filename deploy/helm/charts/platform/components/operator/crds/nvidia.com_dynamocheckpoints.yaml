@@ -8199,6 +8199,9 @@ spec:
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                       type: object
+                      x-kubernetes-validations:
+                        - message: size is required when disabled is false
+                          rule: (has(self.disabled) && self.disabled) || (has(self.size) && quantity(self.size).isGreaterThan(quantity('0')))
                     ttlSecondsAfterFinished:
                       description: |-
                         Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed

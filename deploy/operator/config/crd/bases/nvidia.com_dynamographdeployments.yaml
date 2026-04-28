@@ -11500,6 +11500,9 @@ spec:
                             pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                             x-kubernetes-int-or-string: true
                         type: object
+                        x-kubernetes-validations:
+                          - message: size is required when disabled is false
+                            rule: (has(self.disabled) && self.disabled) || (has(self.size) && quantity(self.size).isGreaterThan(quantity('0')))
                       subComponentType:
                         description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                         type: string
@@ -12140,14 +12143,8 @@ spec:
                           failover:
                             description: |-
                               failover configures active-passive GPU failover for this component.
-                              When set, the main container is cloned into two engine containers
-                              (active + standby) sharing GPUs via DRA. Requires
-                              `spec.experimental.gpuMemoryService` to also be set, and
-                              `spec.experimental.failover.mode` must match
-                              `spec.experimental.gpuMemoryService.mode` (enforced by the validation
-                              webhook). Inside a DynamoGraphDeployment, use
-                              `spec.components[*].experimental.failover` and
-                              `spec.components[*].experimental.gpuMemoryService` instead.
+                              Requires `gpuMemoryService` to also be set, and `failover.mode` must
+                              match `gpuMemoryService.mode` (enforced by the validation webhook).
                             properties:
                               mode:
                                 default: IntraPod
@@ -12251,6 +12248,7 @@ spec:
                           downstream consumers (labels, status maps, DGDSA references, planner
                           RBAC, EPP filters) depend on.
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       podTemplate:
                         description: |-
@@ -20299,11 +20297,7 @@ spec:
                           DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
                           `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
                           so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-                          the Scale subresource. Omit the field to opt out. The struct is
-                          currently empty -- v1alpha1's `enabled` bool was redundant with field
-                          presence -- but is intentionally kept as a struct so that future
-                          per-component DGDSA configuration knobs can be added without another
-                          API break.
+                          the Scale subresource. Omit the field to opt out.
                         type: object
                       sharedMemorySize:
                         anyOf:
@@ -20350,6 +20344,9 @@ spec:
                     required:
                       - name
                     type: object
+                    x-kubernetes-validations:
+                      - message: eppConfig may only be set when type is epp
+                        rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
@@ -20610,13 +20607,6 @@ spec:
                           - Deployment
                           - LeaderWorkerSet
                         type: string
-                      componentName:
-                        description: |-
-                          componentName is the name of the primary underlying Kubernetes
-                          resource backing this Dynamo component.
-                          Deprecated: use `componentNames`. During rolling updates this reflects
-                          the new (target) resource name only.
-                        type: string
                       componentNames:
                         description: |-
                           componentNames is the list of underlying Kubernetes resource names for
@@ -20645,7 +20635,6 @@ spec:
                         type: integer
                     required:
                       - componentKind
-                      - componentName
                       - replicas
                       - updatedReplicas
                     type: object
