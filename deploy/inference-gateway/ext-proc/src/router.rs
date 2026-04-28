@@ -18,9 +18,11 @@ use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+
+use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -516,4 +518,93 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     );
 
     cfg
+}
+
+// ---------------------------------------------------------------------------
+// EndpointPicker trait implementation (mirrors Go LW-EPP from GAIE #2834)
+// ---------------------------------------------------------------------------
+
+/// Build a worker_id → Endpoint mapping and an allowed-ID set from the
+/// endpoint list provided by the ext_proc server. Uses `hash_pod_name` to
+/// convert pod names to Dynamo worker IDs.
+fn build_worker_map(endpoints: &[Endpoint]) -> (HashSet<u64>, Vec<(u64, &Endpoint)>) {
+    let mut ids = HashSet::new();
+    let mut mapping = Vec::new();
+
+    for ep in endpoints {
+        let worker_id = hash_pod_name(&ep.pod_name);
+        ids.insert(worker_id);
+        mapping.push((worker_id, ep));
+    }
+
+    (ids, mapping)
+}
+
+#[tonic::async_trait]
+impl EndpointPicker for Router {
+    async fn pick(
+        &self,
+        req: &RequestInfo,
+        endpoints: &[Endpoint],
+    ) -> Result<PickResult, PickError> {
+        if endpoints.is_empty() {
+            return Err(PickError::NoEndpoints);
+        }
+
+        // Build allowed worker ID set from the provided endpoints
+        let (allowed_worker_ids, worker_to_endpoint) = build_worker_map(endpoints);
+
+        // If no body, fall back to first endpoint (GET-style request)
+        if req.body.is_empty() {
+            return Ok(PickResult {
+                endpoint: endpoints[0].address_port(),
+                fallbacks: vec![],
+            });
+        }
+
+        let body_str = std::str::from_utf8(&req.body)
+            .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
+
+        let tokens = self
+            .tokenize(body_str)
+            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+
+        let filter = if allowed_worker_ids.is_empty() {
+            None
+        } else {
+            Some(allowed_worker_ids)
+        };
+
+        let (decode_worker, _overlap) = self
+            .route_decode(&tokens, false, filter)
+            .await
+            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+
+        // Map selected worker_id back to an endpoint address
+        let endpoint = worker_to_endpoint
+            .iter()
+            .find(|(wid, _)| *wid == decode_worker.worker_id)
+            .map(|(_, ep)| ep.address_port())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    worker_id = decode_worker.worker_id,
+                    "Selected worker not in provided endpoints, using first"
+                );
+                endpoints[0].address_port()
+            });
+
+        tracing::info!(
+            worker_id = decode_worker.worker_id,
+            dp_rank = decode_worker.dp_rank,
+            endpoint = %endpoint,
+            token_count = tokens.len(),
+            model = %req.model,
+            "Picked endpoint"
+        );
+
+        Ok(PickResult {
+            endpoint,
+            fallbacks: vec![],
+        })
+    }
 }

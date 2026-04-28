@@ -3,14 +3,20 @@
 
 //! Envoy ext_proc gRPC server for Dynamo inference routing.
 //!
-//! This crate implements the Envoy `ExternalProcessor.Process` bidirectional
-//! streaming RPC, using Dynamo's native Rust KV-aware router directly
-//! (no CGO/FFI boundary). It replaces the Go EPP ext_proc server path
-//! while keeping the same Envoy wire protocol.
+//! Mirrors the Go LW-EPP architecture from GAIE (issue #2834 / PR #2842):
+//! - `StreamingServer` handles the ext-proc bidirectional streaming protocol
+//! - `EndpointPicker` trait abstracts endpoint selection
+//! - The Dynamo `Router` implements `EndpointPicker` using the KV-aware router
+//!
+//! ```text
+//! Envoy ──ext-proc──▶ ExtProcServer<Router> ──EndpointPicker──▶ Dynamo KV Router
+//! ```
 
 pub mod envoy_helpers;
+pub mod picker;
 pub mod proto;
 pub mod router;
 pub mod server;
 
+pub use picker::{EndpointPicker, Endpoint, PickResult, RequestInfo};
 pub use server::ExtProcServer;

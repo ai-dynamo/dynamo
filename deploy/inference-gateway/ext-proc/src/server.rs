@@ -3,8 +3,9 @@
 
 //! Envoy `ExternalProcessor.Process` bidirectional streaming implementation.
 //!
-//! Port of the Go EPP `StreamingServer.Process` from
-//! `gateway-api-inference-extension/pkg/epp/handlers/server.go`.
+//! Mirrors the Go LW-EPP `StreamingServer` from GAIE `pkg/epp-light/server.go`
+//! (issue #2834 / PR #2842). The server handles the ext-proc protocol and
+//! delegates endpoint selection to an `EndpointPicker` implementation.
 //!
 //! The state machine enforces ordered responses:
 //! `RequestHeaders → RequestBody → RequestTrailers → ResponseHeaders → ResponseBody → ResponseTrailers`
@@ -19,15 +20,15 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
+use crate::picker::{EndpointPicker, Endpoint, PickError, RequestInfo};
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request, ProcessingRequest, ProcessingResponse,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
-use crate::router::Router;
 
-/// State machine phases for the ext_proc stream, matching the Go implementation.
+/// State machine phases for the ext_proc stream, matching the Go LW-EPP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamState {
     RequestReceived,
@@ -37,6 +38,7 @@ enum StreamState {
     ResponseReceived,
     HeaderResponseResponseComplete,
     BodyResponseResponsesComplete,
+    #[allow(dead_code)]
     TrailerResponseResponsesComplete,
     RequestEvicted,
 }
@@ -48,6 +50,7 @@ struct RequestContext {
     incoming_model_name: String,
     target_model_name: String,
     request_id: String,
+    #[allow(dead_code)]
     request_received_at: Option<Instant>,
     request_size: usize,
     response_size: usize,
@@ -55,6 +58,7 @@ struct RequestContext {
     model_server_streaming: bool,
 
     request_headers: HashMap<String, String>,
+    request_metadata: HashMap<String, prost_types::Struct>,
     response_headers: HashMap<String, String>,
 
     req_header_resp: Option<ProcessingResponse>,
@@ -80,6 +84,7 @@ impl RequestContext {
             response_complete: false,
             model_server_streaming: false,
             request_headers: HashMap::new(),
+            request_metadata: HashMap::new(),
             response_headers: HashMap::new(),
             req_header_resp: None,
             req_body_resp: Vec::new(),
@@ -91,7 +96,7 @@ impl RequestContext {
     }
 
     /// Advance the state machine and collect responses that are ready to send.
-    /// Mirrors Go `updateStateAndSendIfNeeded`.
+    /// Mirrors Go LW-EPP `sendPendingResponses`.
     fn drain_pending_responses(&mut self) -> Vec<ProcessingResponse> {
         let mut out = Vec::new();
 
@@ -138,7 +143,6 @@ impl RequestContext {
         if self.state == StreamState::BodyResponseResponsesComplete {
             if let Some(resp) = self.resp_trailer_resp.take() {
                 out.push(resp);
-                self.state = StreamState::TrailerResponseResponsesComplete;
             }
         }
 
@@ -146,14 +150,30 @@ impl RequestContext {
     }
 }
 
-/// The ext_proc gRPC server backed by Dynamo's KV-aware router.
-pub struct ExtProcServer {
-    router: Arc<Router>,
+/// The ext_proc gRPC server. Mirrors Go LW-EPP `StreamingServer`.
+///
+/// Takes an `EndpointPicker` for endpoint selection, decoupling the ext-proc
+/// protocol handling from the routing decision — exactly as the Go LW-EPP
+/// separates `StreamingServer` from `EndpointPicker`.
+pub struct ExtProcServer<P: EndpointPicker> {
+    picker: Arc<P>,
+    /// Endpoints known to the server. In the Go LW-EPP these come from
+    /// the `Datastore` which watches K8s pods. Here they can be populated
+    /// from Dynamo's discovery or set externally.
+    endpoints: Arc<tokio::sync::RwLock<Vec<Endpoint>>>,
 }
 
-impl ExtProcServer {
-    pub fn new(router: Arc<Router>) -> Self {
-        Self { router }
+impl<P: EndpointPicker> ExtProcServer<P> {
+    pub fn new(picker: Arc<P>) -> Self {
+        Self {
+            picker,
+            endpoints: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Set the available endpoints (equivalent to LW-EPP's `Datastore.ListEndpoints()`).
+    pub async fn set_endpoints(&self, endpoints: Vec<Endpoint>) {
+        *self.endpoints.write().await = endpoints;
     }
 
     /// Create a `tonic` service ready for registration on a gRPC server.
@@ -162,32 +182,21 @@ impl ExtProcServer {
     }
 
     /// Handle request headers phase.
+    /// Mirrors Go LW-EPP `handleRequestHeaders` in `server.go`.
     fn handle_request_headers(
-        &self,
         ctx: &mut RequestContext,
         hdr: &ext_proc::HttpHeaders,
     ) {
         ctx.request_received_at = Some(Instant::now());
 
-        let headers = hdr.headers.as_ref();
-
-        // If end_of_stream in request headers, this is a body-less request (e.g. GET).
-        // We skip routing (no body to parse) and just pass through.
         if hdr.end_of_stream {
-            // No body to route — generate a pass-through header response.
-            // The target_endpoint will be empty, signaling no routing was done.
-            ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
-                &ctx.target_endpoint,
-                None,
-                &ctx.request_headers,
-            ));
+            // Body-less request (e.g. GET) — will be picked in header-only path
             return;
         }
 
-        if let Some(header_map) = headers {
+        if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
 
-            // Extract request ID
             if let Some(id) = envoy_helpers::extract_header_value(
                 header_map,
                 metadata::REQUEST_ID_HEADER_KEY,
@@ -207,62 +216,71 @@ impl ExtProcServer {
         }
     }
 
-    /// Handle request body phase: parse JSON, tokenize, route.
+    /// Handle a header-only request (EndOfStream on headers, no body).
+    /// Mirrors Go LW-EPP `handleHeaderOnlyRequest`.
+    async fn handle_header_only_request(
+        picker: &P,
+        ctx: &mut RequestContext,
+        endpoints: &[Endpoint],
+    ) -> Result<(), ExtProcError> {
+        let req_info = RequestInfo {
+            headers: ctx.request_headers.clone(),
+            body: vec![],
+            model: String::new(),
+            candidate_subset: vec![],
+        };
+
+        let result = picker
+            .pick(&req_info, endpoints)
+            .await
+            .map_err(|e| ExtProcError::from_pick_error(e))?;
+
+        ctx.target_endpoint = result.endpoint.clone();
+        ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
+            &result.endpoint,
+            None,
+            &ctx.request_headers,
+        ));
+        Ok(())
+    }
+
+    /// Handle request body phase: extract model, call picker.
+    /// Mirrors Go LW-EPP `handleRequestBody`.
     async fn handle_request_body(
-        &self,
+        picker: &P,
         ctx: &mut RequestContext,
         raw_body: &[u8],
+        endpoints: &[Endpoint],
     ) -> Result<(), ExtProcError> {
         ctx.request_size = raw_body.len();
 
-        let body_str = std::str::from_utf8(raw_body)
-            .map_err(|e| ExtProcError::bad_request(format!("Invalid UTF-8 in request body: {e}")))?;
+        let model = extract_model_from_body(raw_body);
+        let candidate_subset = extract_candidate_subset(&ctx.request_metadata);
 
-        // Tokenize the request using the Dynamo preprocessor
-        let tokens = self
-            .router
-            .tokenize(body_str)
-            .map_err(|e| ExtProcError::bad_request(format!("Failed to tokenize request: {e}")))?;
+        let req_info = RequestInfo {
+            headers: ctx.request_headers.clone(),
+            body: raw_body.to_vec(),
+            model: model.clone(),
+            candidate_subset,
+        };
 
-        // Route the decode request
-        let (decode_worker, _overlap) = self
-            .router
-            .route_decode(&tokens, false, None)
+        let result = picker
+            .pick(&req_info, endpoints)
             .await
-            .map_err(|e| {
-                ExtProcError::service_unavailable(format!("Routing failed: {e}"))
-            })?;
+            .map_err(|e| ExtProcError::from_pick_error(e))?;
 
-        // Set the target endpoint. In the real deployment this maps worker_id → pod IP:port.
-        // For now, we store the worker_id as the target and let the caller/Envoy config
-        // map it via metadata. The Go EPP gets the endpoint from the datastore.
-        ctx.target_endpoint = format!("worker-{}", decode_worker.worker_id);
+        ctx.target_endpoint = result.endpoint.clone();
+        ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
 
         tracing::info!(
             request_id = %ctx.request_id,
-            decode_worker_id = decode_worker.worker_id,
-            decode_dp_rank = decode_worker.dp_rank,
-            token_count = tokens.len(),
-            "Routed request"
+            endpoint = %result.endpoint,
+            "Request routed"
         );
 
-        // Register the request for bookkeeping
-        if let Err(e) = self
-            .router
-            .add_request(
-                &ctx.request_id,
-                &tokens,
-                decode_worker.worker_id,
-                decode_worker.dp_rank,
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to register request with router");
-        }
-
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
-            &ctx.target_endpoint,
+            &result.endpoint,
             Some(ctx.request_size),
             &ctx.request_headers,
         ));
@@ -273,16 +291,13 @@ impl ExtProcServer {
 
     /// Handle response headers from the upstream model server.
     fn handle_response_headers(
-        &self,
         ctx: &mut RequestContext,
         hdr: &ext_proc::HttpHeaders,
     ) {
         if let Some(header_map) = &hdr.headers {
             for h in &header_map.headers {
                 let value = envoy_helpers::get_header_value(h);
-                if h.key == "status" && value != "200" {
-                    tracing::warn!(status = %value, "Model server returned non-200");
-                } else if h.key == "content-type" && value.contains("text/event-stream") {
+                if h.key == "content-type" && value.contains("text/event-stream") {
                     ctx.model_server_streaming = true;
                 }
                 ctx.response_headers.insert(h.key.clone(), value);
@@ -295,7 +310,6 @@ impl ExtProcServer {
 
     /// Handle response body from the upstream model server.
     fn handle_response_body(
-        &self,
         ctx: &mut RequestContext,
         body: &ext_proc::HttpBody,
     ) {
@@ -307,47 +321,34 @@ impl ExtProcServer {
             if end_of_stream {
                 ctx.response_complete = true;
             }
-            let rewritten =
-                envoy_helpers::rewrite_model_name(chunk, &ctx.target_model_name, &ctx.incoming_model_name);
+            let rewritten = envoy_helpers::rewrite_model_name(
+                chunk,
+                &ctx.target_model_name,
+                &ctx.incoming_model_name,
+            );
             ctx.resp_body_resp = envoy_helpers::build_response_body_responses(
                 &rewritten,
                 end_of_stream,
                 None,
             );
-        } else {
-            // Non-streaming: accumulate (handled as single chunk in practice)
-            if end_of_stream {
-                ctx.response_complete = true;
-                let rewritten = envoy_helpers::rewrite_model_name(
-                    chunk,
-                    &ctx.target_model_name,
-                    &ctx.incoming_model_name,
-                );
-                ctx.resp_body_resp = envoy_helpers::build_response_body_responses(
-                    &rewritten,
-                    true,
-                    None,
-                );
-            }
-        }
-    }
-
-    /// Clean up when stream ends.
-    async fn cleanup(&self, ctx: &RequestContext) {
-        if !ctx.request_id.is_empty() {
-            if let Err(e) = self.router.free_request(&ctx.request_id).await {
-                tracing::warn!(
-                    request_id = %ctx.request_id,
-                    error = %e,
-                    "Failed to free request on cleanup"
-                );
-            }
+        } else if end_of_stream {
+            ctx.response_complete = true;
+            let rewritten = envoy_helpers::rewrite_model_name(
+                chunk,
+                &ctx.target_model_name,
+                &ctx.incoming_model_name,
+            );
+            ctx.resp_body_resp = envoy_helpers::build_response_body_responses(
+                &rewritten,
+                true,
+                None,
+            );
         }
     }
 }
 
 #[tonic::async_trait]
-impl ExternalProcessor for ExtProcServer {
+impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
     type ProcessStream =
         Pin<Box<dyn Stream<Item = Result<ProcessingResponse, Status>> + Send + 'static>>;
 
@@ -356,16 +357,13 @@ impl ExternalProcessor for ExtProcServer {
         request: Request<Streaming<ProcessingRequest>>,
     ) -> Result<Response<Self::ProcessStream>, Status> {
         let mut inbound = request.into_inner();
-        let router = self.router.clone();
+        let picker = self.picker.clone();
+        let endpoints_lock = self.endpoints.clone();
 
-        // Channel for sending responses back to Envoy
         let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
         let output_stream = ReceiverStream::new(rx);
 
         tokio::spawn(async move {
-            let server = ExtProcServer {
-                router: router.clone(),
-            };
             let mut ctx = RequestContext::new();
             let mut body_buf: Vec<u8> = Vec::new();
             let mut resp_body_buf: Vec<u8> = Vec::new();
@@ -376,23 +374,20 @@ impl ExternalProcessor for ExtProcServer {
                         Status::unknown(format!("Cannot receive stream request: {e}"))
                     })?;
 
+                    ctx.request_metadata = envoy_helpers::extract_metadata_values(&req);
+
                     match req.request {
                         Some(processing_request::Request::RequestHeaders(ref hdr)) => {
-                            tracing::debug!(request_id = %ctx.request_id, "RequestHeaders received");
-                            server.handle_request_headers(&mut ctx, hdr);
-                        }
-                        Some(processing_request::Request::RequestBody(ref body)) => {
-                            tracing::debug!(
-                                request_id = %ctx.request_id,
-                                eos = body.end_of_stream,
-                                "RequestBody chunk received"
-                            );
-                            body_buf.extend_from_slice(&body.body);
+                            ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
-                            if body.end_of_stream {
-                                let raw_body = std::mem::take(&mut body_buf);
-                                if let Err(e) =
-                                    server.handle_request_body(&mut ctx, &raw_body).await
+                            if hdr.end_of_stream {
+                                let endpoints = endpoints_lock.read().await;
+                                if let Err(e) = ExtProcServer::handle_header_only_request(
+                                    &*picker,
+                                    &mut ctx,
+                                    &endpoints,
+                                )
+                                .await
                                 {
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
@@ -400,16 +395,33 @@ impl ExternalProcessor for ExtProcServer {
                                 }
                             }
                         }
-                        Some(processing_request::Request::RequestTrailers(_)) => {
-                            // Request trailers are currently unused
+                        Some(processing_request::Request::RequestBody(ref body)) => {
+                            body_buf.extend_from_slice(&body.body);
+
+                            if body.end_of_stream {
+                                let raw_body = std::mem::take(&mut body_buf);
+                                let endpoints = endpoints_lock.read().await;
+                                if let Err(e) = ExtProcServer::handle_request_body(
+                                    &*picker,
+                                    &mut ctx,
+                                    &raw_body,
+                                    &endpoints,
+                                )
+                                .await
+                                {
+                                    let resp = e.into_processing_response();
+                                    let _ = tx.send(Ok(resp)).await;
+                                    return Ok(());
+                                }
+                            }
                         }
+                        Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
-                            tracing::debug!(request_id = %ctx.request_id, "ResponseHeaders received");
-                            server.handle_response_headers(&mut ctx, hdr);
+                            ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
                             if ctx.model_server_streaming {
-                                server.handle_response_body(&mut ctx, body);
+                                ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
                                 resp_body_buf.extend_from_slice(&body.body);
                                 if body.end_of_stream {
@@ -419,7 +431,7 @@ impl ExternalProcessor for ExtProcServer {
                                         end_of_stream: true,
                                         ..Default::default()
                                     };
-                                    server.handle_response_body(&mut ctx, &synthetic);
+                                    ExtProcServer::<P>::handle_response_body(&mut ctx, &synthetic);
                                 }
                             }
                         }
@@ -433,7 +445,7 @@ impl ExternalProcessor for ExtProcServer {
                                         end_of_stream: true,
                                         ..Default::default()
                                     };
-                                    server.handle_response_body(&mut ctx, &synthetic);
+                                    ExtProcServer::<P>::handle_response_body(&mut ctx, &synthetic);
                                 }
                             }
                             ctx.resp_trailer_resp =
@@ -463,8 +475,6 @@ impl ExternalProcessor for ExtProcServer {
             if let Err(e) = result {
                 let _ = tx.send(Err(e)).await;
             }
-
-            server.cleanup(&ctx).await;
         });
 
         Ok(Response::new(Box::pin(output_stream)))
@@ -472,27 +482,86 @@ impl ExternalProcessor for ExtProcServer {
 }
 
 // ---------------------------------------------------------------------------
+// Request helpers (mirrors Go LW-EPP request.go)
+// ---------------------------------------------------------------------------
+
+/// Extract the "model" field from a JSON request body.
+/// Mirrors Go LW-EPP `extractModelFromBody`.
+fn extract_model_from_body(body: &[u8]) -> String {
+    #[derive(serde::Deserialize)]
+    struct ModelField {
+        model: Option<String>,
+    }
+
+    serde_json::from_slice::<ModelField>(body)
+        .ok()
+        .and_then(|m| m.model)
+        .unwrap_or_default()
+}
+
+/// Extract the candidate endpoint subset from ext-proc request metadata.
+/// Mirrors Go LW-EPP `extractCandidateSubset`.
+fn extract_candidate_subset(
+    request_metadata: &HashMap<String, prost_types::Struct>,
+) -> Vec<String> {
+    let ns = match request_metadata.get(metadata::SUBSET_FILTER_NAMESPACE) {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let subset_val = match ns.fields.get(metadata::SUBSET_FILTER_KEY) {
+        Some(v) => v,
+        None => return vec![],
+    };
+
+    if let Some(prost_types::value::Kind::StringValue(s)) = &subset_val.kind {
+        if s.is_empty() {
+            return vec![];
+        }
+        return s.split(',').map(|s| s.to_string()).collect();
+    }
+
+    if let Some(prost_types::value::Kind::ListValue(list)) = &subset_val.kind {
+        return list
+            .values
+            .iter()
+            .filter_map(|v| {
+                if let Some(prost_types::value::Kind::StringValue(s)) = &v.kind {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    vec![]
+}
+
+// ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
 
-/// Errors during ext_proc request processing, mapped to Envoy ImmediateResponse.
 struct ExtProcError {
     status_code: StatusCode,
     message: String,
 }
 
 impl ExtProcError {
-    fn bad_request(msg: String) -> Self {
-        Self {
-            status_code: StatusCode::BadRequest,
-            message: msg,
-        }
-    }
-
-    fn service_unavailable(msg: String) -> Self {
-        Self {
-            status_code: StatusCode::ServiceUnavailable,
-            message: msg,
+    fn from_pick_error(e: PickError) -> Self {
+        match e {
+            PickError::NoEndpoints => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            PickError::RoutingFailed(msg) => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: msg,
+            },
+            PickError::TokenizationFailed(msg) => Self {
+                status_code: StatusCode::BadRequest,
+                message: msg,
+            },
         }
     }
 
@@ -502,12 +571,12 @@ impl ExtProcError {
 }
 
 /// Start the ext_proc gRPC server on the given port.
-pub async fn run_ext_proc_server(
-    router: Arc<Router>,
+pub async fn run_ext_proc_server<P: EndpointPicker>(
+    picker: Arc<P>,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{port}").parse()?;
-    let server = ExtProcServer::new(router);
+    let server = ExtProcServer::new(picker);
 
     tracing::info!(%addr, "Starting ext_proc gRPC server");
 

@@ -19,7 +19,9 @@ dynamo-runtime = { workspace = true }
 anyhow = { workspace = true }
 prost = { version = "0.13.5" }
 prost-types = { version = "0.13.5" }
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { version = "0.13.1" }
