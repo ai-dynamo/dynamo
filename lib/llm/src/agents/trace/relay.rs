@@ -11,12 +11,13 @@
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::transports::event_plane::EventPublisher;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
-use super::{AgentToolEventPublisher, AgentTraceRecord, DEFAULT_TOOL_EVENTS_TOPIC};
+use super::{AgentTraceRecord, DEFAULT_TOOL_EVENTS_TOPIC};
 
 /// Relay from a local agent tool-event ZMQ PUB socket to the Dynamo event plane.
 pub struct AgentToolEventRelay {
@@ -67,8 +68,7 @@ impl AgentToolEventRelay {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let publisher =
-            AgentToolEventPublisher::for_namespace_with_topic(&namespace, topic).await?;
+        let publisher = EventPublisher::for_namespace(&namespace, topic).await?;
 
         rt.spawn(async move {
             Self::relay_loop(zmq_endpoint, zmq_topic, publisher, cancel_clone).await;
@@ -85,7 +85,7 @@ impl AgentToolEventRelay {
     async fn relay_loop(
         zmq_endpoint: String,
         zmq_topic: Option<String>,
-        publisher: AgentToolEventPublisher,
+        publisher: EventPublisher,
         cancel: CancellationToken,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, zmq_topic.as_deref()).await {
@@ -126,7 +126,12 @@ impl AgentToolEventRelay {
                                 }
                             };
 
-                            if let Err(error) = publisher.publish_record(&record).await {
+                            if let Err(error) = super::validate_tool_record(&record) {
+                                tracing::warn!(%error, "agent tool relay: dropping invalid record");
+                                continue;
+                            }
+
+                            if let Err(error) = publisher.publish(&record).await {
                                 tracing::warn!(%error, "agent tool relay: event plane publish failed");
                             }
                         }

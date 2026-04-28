@@ -4,7 +4,6 @@
 mod bus;
 pub mod config;
 mod integration;
-mod publisher;
 mod relay;
 mod sink;
 pub mod stream;
@@ -15,7 +14,6 @@ use tokio_util::sync::CancellationToken;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub(crate) use integration::{request_metrics, start_tool_event_ingest_from_policy};
-pub use publisher::AgentToolEventPublisher;
 pub use relay::AgentToolEventRelay;
 pub use types::{
     AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
@@ -80,23 +78,6 @@ pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetric
     publish(record);
 }
 
-pub fn emit_tool_event(
-    event_type: TraceEventType,
-    agent_context: AgentContext,
-    tool: AgentToolEvent,
-) {
-    let record = AgentTraceRecord {
-        schema: TraceSchema::V1,
-        event_type,
-        event_time_unix_ms: current_time_unix_ms(),
-        event_source: TraceEventSource::Harness,
-        agent_context,
-        request: None,
-        tool: Some(tool),
-    };
-    publish_tool_record(record);
-}
-
 pub fn publish_tool_record(record: AgentTraceRecord) {
     if let Err(error) = validate_tool_record(&record) {
         tracing::warn!(
@@ -131,13 +112,6 @@ fn validate_tool_record(record: &AgentTraceRecord) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn current_time_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -148,7 +122,7 @@ mod tests {
 
     use super::{
         AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
-        TraceEventType, TraceSchema, bus, emit_request_end, emit_tool_event, sink,
+        TraceEventType, TraceSchema, bus, emit_request_end, publish_tool_record, sink,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -219,15 +193,19 @@ mod tests {
             Some("llm-call-1")
         );
 
-        emit_tool_event(
-            TraceEventType::ToolEnd,
-            AgentContext {
+        publish_tool_record(AgentTraceRecord {
+            schema: TraceSchema::V1,
+            event_type: TraceEventType::ToolEnd,
+            event_time_unix_ms: 2000,
+            event_source: TraceEventSource::Harness,
+            agent_context: AgentContext {
                 workflow_type_id: "ms_agent".to_string(),
                 workflow_id: "run-1".to_string(),
                 program_id: "run-1:agent".to_string(),
                 parent_program_id: None,
             },
-            AgentToolEvent {
+            request: None,
+            tool: Some(AgentToolEvent {
                 tool_call_id: "tool-123".to_string(),
                 tool_class: "web_search".to_string(),
                 status: Some(AgentToolStatus::Succeeded),
@@ -236,8 +214,8 @@ mod tests {
                 output_bytes: Some(64),
                 tool_name_hash: None,
                 error_type: None,
-            },
-        );
+            }),
+        });
 
         let mut content = String::new();
         for _ in 0..100 {
