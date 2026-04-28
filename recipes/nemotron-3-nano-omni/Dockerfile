@@ -2,70 +2,44 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Two-stage build: stage 1 compiles the dynamo._core Rust wheel; stage 2
-# layers the wheel + dynamo Python package onto the upstream vLLM image.
-# Dynamo source is cloned from github at build time, so the build context is
-# small and the image is reproducible regardless of local working-tree state.
+# Layer the ai-dynamo wheel (and the omni multimodal extras) onto an upstream
+# vLLM image. Dynamo is installed from https://pypi.nvidia.com/ai-dynamo/ —
+# no source build, no Rust toolchain. Match DYNAMO_VERSION to a nightly that
+# targets the same vLLM minor as BASE_IMAGE (see the wheel's METADATA for the
+# pinned vllm version).
 #
 # Build:
 #   docker build -t <registry>/nemotron-omni-vllm:latest \
-#                -f recipes/nemotron-omni/Dockerfile recipes/nemotron-omni
+#                -f recipes/nemotron-3-nano-omni/Dockerfile \
+#                recipes/nemotron-3-nano-omni
 #
 # Override defaults with --build-arg, e.g.:
 #   --build-arg BASE_IMAGE=vllm/vllm-openai:v0.20.0
-#   --build-arg DYNAMO_COMMIT=<sha-or-branch>
+#   --build-arg DYNAMO_VERSION=1.2.0.dev20260427
 
 ARG BASE_IMAGE="vllm/vllm-openai:v0.20.0"
-ARG DYNAMO_COMMIT="main"
-ARG CARGO_BUILD_JOBS="16"
+ARG DYNAMO_VERSION="1.2.0.dev20260427"
 
-# ======== Stage 1: Builder (Rust toolchain + maturin wheel) ========
-FROM ${BASE_IMAGE} AS builder
-ARG DYNAMO_COMMIT
-ARG CARGO_BUILD_JOBS
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-
-USER root
-WORKDIR /build
-
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates curl build-essential pkg-config libclang-dev protobuf-compiler git && \
-    rm -rf /var/lib/apt/lists/* && \
-    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.93.1
-
-ENV CARGO_HOME=/root/.cargo \
-    RUSTUP_HOME=/root/.rustup \
-    PATH=/root/.cargo/bin:${PATH}
-
-RUN git clone https://github.com/ai-dynamo/dynamo.git /build/dynamo && \
-    cd /build/dynamo && git checkout ${DYNAMO_COMMIT}
-
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    pip install --no-cache-dir maturin && \
-    cd /build/dynamo/lib/bindings/python && \
-    maturin build --release && \
-    mkdir -p /build/dist && \
-    cp target/wheels/*.whl /build/dist/
-
-# ======== Stage 2: Final image ========
 FROM ${BASE_IMAGE}
 USER root
 
-COPY --from=builder /build/dynamo /workspace/dynamo
-COPY --from=builder /build/dist/*.whl /tmp/
+ARG DYNAMO_VERSION
 
-# Install the dynamo._core wheel, then the dynamo Python package in editable
-# mode (--no-deps preserves the base image's CUDA-aware vLLM/torch stack).
-# librosa + the deps in requirements.{common,vllm}.txt cover audio/video I/O
-# for the Nemotron Nano Omni multimodal pipeline.
-RUN pip install --no-cache-dir /tmp/*.whl && \
-    pip install --no-cache-dir librosa \
-        -r /workspace/dynamo/container/deps/requirements.common.txt \
-        -r /workspace/dynamo/container/deps/requirements.vllm.txt && \
-    cd /workspace/dynamo && pip install --no-cache-dir -e . --no-deps && \
-    rm -f /tmp/*.whl
+# Install ai-dynamo without its declared deps (so the base image's vLLM/torch
+# stack is preserved and we skip the heavy `nixl` and `ray` extras we don't
+# need for an aggregated single-GPU deployment), then install the runtime
+# wheel and the deps we actually want explicitly.
+RUN pip install --no-cache-dir --no-deps \
+      --extra-index-url https://pypi.nvidia.com \
+      ai-dynamo==${DYNAMO_VERSION} && \
+    pip install --no-cache-dir \
+      --extra-index-url https://pypi.nvidia.com \
+      ai-dynamo-runtime==${DYNAMO_VERSION} \
+      "kubernetes<33.0.0,>=32.0.1" \
+      "pydantic<2.13" "pydantic-settings<2.13.0" \
+      msgpack msgspec prometheus-client pyzmq transformers \
+      blake3 librosa soundfile uvloop \
+      av ftfy nvtx sentencepiece
 
 # vllm/vllm-openai's default ENTRYPOINT runs `vllm serve`; reset it so the
 # image behaves as a plain dynamo runtime image.

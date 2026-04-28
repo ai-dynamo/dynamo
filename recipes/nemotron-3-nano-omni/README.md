@@ -8,8 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 Serves [nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4)
 using vLLM with an aggregated Dynamo deployment.
 
-This recipe builds a custom container that layers Dynamo onto an upstream
-vLLM image. The Dynamo source is cloned from GitHub at build time.
+This recipe builds a custom container that layers the `ai-dynamo` wheel
+(from <https://pypi.nvidia.com/ai-dynamo/>) onto an upstream vLLM image — no
+source build, no Rust toolchain.
 
 ## Topology
 
@@ -30,15 +31,15 @@ vLLM image. The Dynamo source is cloned from GitHub at build time.
 ```bash
 docker build \
   -t <your-registry>/nemotron-omni-vllm:latest \
-  -f recipes/nemotron-omni/Dockerfile \
-  recipes/nemotron-omni
+  -f recipes/nemotron-3-nano-omni/Dockerfile \
+  recipes/nemotron-3-nano-omni
 docker push <your-registry>/nemotron-omni-vllm:latest
 ```
 
 Useful build args:
 
 - `BASE_IMAGE=<image>` — pin to a different vLLM base (default `vllm/vllm-openai:v0.20.0`).
-- `DYNAMO_COMMIT=<sha-or-branch>` — pin Dynamo to a specific revision (default `main`).
+- `DYNAMO_VERSION=<version>` — pin to a specific `ai-dynamo` release or nightly from <https://pypi.nvidia.com/ai-dynamo/>. Default tracks the latest tested nightly. Make sure the chosen wheel's `vllm` dependency matches `BASE_IMAGE`.
 
 ## Step 2: Download the Model
 
@@ -51,13 +52,13 @@ export NAMESPACE=<your-namespace>
 kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
 
 # First edit storageClassName in model-cache.yaml for your cluster.
-kubectl apply -f recipes/nemotron-omni/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-nano-omni/model-cache/model-cache.yaml -n ${NAMESPACE}
 
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN=<your-hf-token> \
   -n ${NAMESPACE}
 
-kubectl apply -f recipes/nemotron-omni/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-nano-omni/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 
@@ -71,7 +72,7 @@ If your registry is private, add the appropriate `imagePullSecrets` to the
 deployment.
 
 ```bash
-kubectl apply -f recipes/nemotron-omni/vllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-nano-omni/vllm/agg/deploy.yaml -n ${NAMESPACE}
 ```
 
 Monitor startup:
@@ -136,7 +137,7 @@ The request plane defaults to TCP already, so no further flags are needed.
 ## File Layout
 
 ```text
-recipes/nemotron-omni/
+recipes/nemotron-3-nano-omni/
   README.md
   Dockerfile
   model-cache/
