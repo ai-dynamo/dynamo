@@ -688,68 +688,49 @@ async fn create_kv_router_from_endpoint(
 
     // Look up the worker's model card so we can derive both model_name (required
     // for remote/served indexer) and Eagle routing semantics. When the model_name
-    // is required but no worker has registered yet, poll discovery until one
-    // appears so we don't race worker startup. Bounded by
+    // is required but no worker has registered yet, wait via the discovery watch
+    // stream until one appears so we don't race worker startup. Bounded by
     // `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
     let needs_model_name = kv_router_config
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let (model_name, enable_eagle) = {
-        let discovery = endpoint.inner.component().drt().discovery();
-        let query = rs::discovery::DiscoveryQuery::EndpointModels {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-        };
-
-        let lookup_card = || async {
-            let instances = discovery.list(query.clone()).await.map_err(to_pyerr)?;
-            let card = instances.into_iter().find_map(|inst| {
-                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
-                    .ok()
-            });
-            Ok::<_, PyErr>(card)
-        };
-
         let maybe_card = if needs_model_name {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
-            let mut warned = false;
-            loop {
-                match lookup_card().await {
-                    Ok(Some(card)) => break Some(card),
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            "Discovery lookup failed while waiting for worker model card; will retry"
-                        );
-                        if std::time::Instant::now() >= deadline {
-                            return Err(e);
-                        }
-                    }
-                }
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                if !warned {
-                    tracing::info!(
-                        namespace = %endpoint_id.namespace,
-                        component = %endpoint_id.component,
-                        endpoint = %endpoint_id.name,
-                        wait_secs,
-                        "No model card in discovery yet; waiting for worker registration (required for remote/served indexer)"
-                    );
-                    warned = true;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
+            tracing::info!(
+                namespace = %endpoint_id.namespace,
+                component = %endpoint_id.component,
+                endpoint = %endpoint_id.name,
+                wait_secs,
+                "Waiting for worker model card in discovery (required for remote/served indexer)"
+            );
+            llm_rs::discovery::wait_for_endpoint_model_card(
+                &endpoint.inner,
+                std::time::Duration::from_secs(wait_secs),
+                None,
+            )
+            .await
+            .map_err(to_pyerr)?
         } else {
-            lookup_card().await?
+            // Non-blocking snapshot — used only to detect Eagle routing semantics
+            // when a card happens to already be registered.
+            let discovery = endpoint.inner.component().drt().discovery();
+            let instances = discovery
+                .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace.clone(),
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
+                })
+                .await
+                .map_err(to_pyerr)?;
+            instances.into_iter().find_map(|inst| {
+                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                    .ok()
+            })
         };
 
         match maybe_card {
