@@ -33,6 +33,7 @@ def cache_handler() -> MultimodalEncodeWorkerHandler:
     handler._embedding_cache = MultimodalEmbeddingCacheManager(
         capacity_bytes=32 * 1024 * 1024
     )
+    handler._cache_publisher = None
     handler.encoder = SimpleNamespace(_encode=AsyncMock())
     return handler
 
