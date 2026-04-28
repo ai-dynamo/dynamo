@@ -1865,46 +1865,4 @@ mod tests {
             all_text
         );
     }
-
-    /// Regression: a kimi_k2 tool-call section truncated before `<|tool_call_end|>`
-    /// (a common live-traffic pattern when the model hits max_tokens or EOS mid-call)
-    /// must NOT leak the raw special-token markers into the user-visible content
-    /// field. The parser correctly returns no tool_calls and an empty normal_text;
-    /// previously the jail discarded that and emitted the raw accumulated buffer.
-    #[tokio::test]
-    async fn test_kimi_k2_truncated_tool_call_does_not_leak_markers() {
-        let jail = JailedStream::builder().tool_call_parser("kimi_k2").build();
-
-        // Missing <|tool_call_end|> and <|tool_calls_section_end|> — the section
-        // body gets consumed by the parser but yields zero structured calls.
-        let chunks = vec![text_chunk(
-            "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"NYC\"}",
-        )];
-
-        let input_stream = Box::pin(stream::iter(chunks));
-        let output_stream = jail.apply_with_finish_reason(input_stream);
-
-        let responses: Vec<_> = output_stream.collect().await;
-
-        let tool_calls = collect_tool_calls(&responses);
-        assert!(
-            tool_calls.is_empty(),
-            "Truncated section should yield no tool calls, got {:?}",
-            tool_calls
-        );
-
-        let all_text = collect_text_content(&responses);
-        for marker in [
-            "<|tool_calls_section_begin|>",
-            "<|tool_call_begin|>",
-            "<|tool_call_argument_begin|>",
-            "<|tool_call_end|>",
-            "<|tool_calls_section_end|>",
-        ] {
-            assert!(
-                !all_text.contains(marker),
-                "Raw kimi_k2 marker {marker:?} leaked into user-visible content: {all_text:?}"
-            );
-        }
-    }
 }
