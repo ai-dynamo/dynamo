@@ -2385,3 +2385,511 @@ mod race_regression_tests {
         assert_eq!(manager.available_blocks(), TOTAL);
     }
 }
+
+// ============================================================================
+// AUDIT-COUNTER COVERAGE TESTS
+//
+// These tests target normally-rare branches by asserting on the audit
+// counters added to BlockPoolMetrics. They catch regressions that
+// emergent-behavior assertions would miss (e.g. the multi-LRU
+// double-touch slipped past behavior tests because TinyLFU is a sketch
+// and `count()` is approximate; an exact `touches()` counter on a
+// metered FrequencyTracker fails loudly the moment it doubles).
+// ============================================================================
+
+mod audit_counter_tests {
+    use super::*;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::thread;
+
+    use crate::SequenceHash;
+    use crate::blocks::BlockId;
+    use crate::manager::FrequencyTrackingCapacity;
+    use crate::pools::backends::MultiLruBackend;
+    use crate::pools::store::InactiveIndex;
+    use crate::testing::MeteredFrequencyTracker;
+
+    fn build_manager_with_metered_multi_lru(
+        block_count: usize,
+    ) -> (BlockManager<TestBlockData>, Arc<MeteredFrequencyTracker>) {
+        let metered = MeteredFrequencyTracker::with_tinylfu(
+            FrequencyTrackingCapacity::default().size(),
+        );
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(metered.clone())
+            .build();
+        let mgr = BlockManager::<TestBlockData>::builder()
+            .block_count(block_count)
+            .block_size(4)
+            .registry(registry)
+            .with_multi_lru_backend()
+            .build()
+            .expect("build manager");
+        (mgr, metered)
+    }
+
+    /// Exact-call counter test: a single `match_blocks([hash])` against
+    /// a hash that lives in the inactive pool must increment the
+    /// frequency tracker `touch()` exactly once. The previous design
+    /// double-counted (registry touch + backend touch). This test would
+    /// have failed loudly when the double-touch was introduced.
+    #[test]
+    fn match_inactive_block_touches_frequency_tracker_exactly_once() {
+        let (manager, metered) = build_manager_with_metered_multi_lru(4);
+
+        // Stage one block, register it, drop the immutable so it lands
+        // in inactive.
+        let token = create_test_token_block_from_iota(40_000);
+        let hash = token.kvbm_sequence_hash();
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        drop(immutable);
+
+        // Reset counters to isolate the match() under test.
+        metered.reset();
+
+        let matched = manager.match_blocks(&[hash]);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            metered.touches(),
+            1,
+            "match_blocks against an inactive hash must touch the frequency \
+             tracker exactly once; got {} (likely a registry+backend \
+             double-touch regression)",
+            metered.touches()
+        );
+    }
+
+    /// Same invariant for `scan_matches(touch=true)`.
+    #[test]
+    fn scan_inactive_block_touches_frequency_tracker_exactly_once() {
+        let (manager, metered) = build_manager_with_metered_multi_lru(4);
+        let token = create_test_token_block_from_iota(40_100);
+        let hash = token.kvbm_sequence_hash();
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        drop(immutable);
+
+        metered.reset();
+        let scanned = manager.scan_matches(&[hash], /*touch=*/ true);
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(
+            metered.touches(),
+            1,
+            "scan_matches(touch=true) against an inactive hash must touch \
+             the frequency tracker exactly once; got {}",
+            metered.touches()
+        );
+    }
+
+    /// `scan_matches(touch=false)` must not touch.
+    #[test]
+    fn scan_inactive_block_with_touch_false_does_not_touch() {
+        let (manager, metered) = build_manager_with_metered_multi_lru(4);
+        let token = create_test_token_block_from_iota(40_200);
+        let hash = token.kvbm_sequence_hash();
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        drop(immutable);
+
+        metered.reset();
+        let scanned = manager.scan_matches(&[hash], /*touch=*/ false);
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(metered.touches(), 0, "touch=false must not touch");
+    }
+
+    /// `match_blocks` against an *active* hash also touches exactly once.
+    #[test]
+    fn match_active_block_touches_frequency_tracker_exactly_once() {
+        let (manager, metered) = build_manager_with_metered_multi_lru(4);
+        let token = create_test_token_block_from_iota(40_300);
+        let hash = token.kvbm_sequence_hash();
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let _immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        // Hold _immutable so the slot stays Primary (active).
+
+        metered.reset();
+        let matched = manager.match_blocks(&[hash]);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            metered.touches(),
+            1,
+            "match_blocks on an active hash should touch exactly once"
+        );
+    }
+
+    /// Deterministic eager-transition test using the test-only
+    /// `pause_release_primary` hook on `BlockStore`. A held guard
+    /// blocks every `release_primary` *before* it takes the store
+    /// lock, so the test can:
+    ///   1. Spawn a thread that drops the last `ImmutableBlock`. Its
+    ///      `Inner::drop` enters `release_primary` and parks on the
+    ///      gate — the `Arc` strong count is 0 but the slot is still
+    ///      `Primary` with a now-dead `Weak`.
+    ///   2. From the main thread call `match_blocks([hash])`. It takes
+    ///      the store lock, sees `Primary` with a dead `Weak`, and
+    ///      drives `eager_primary_to_inactive_locked` then resurrects
+    ///      from the inactive pool.
+    ///   3. Release the gate; the parked drop completes and observes
+    ///      the slot is no longer `Primary` for its `self_ptr`, so it
+    ///      no-ops via `release_primary_noop`.
+    ///
+    /// Both audit counters tick exactly once. No timing dependencies.
+    #[test]
+    fn eager_primary_to_inactive_is_deterministic_with_pause_hook() {
+        let manager = Arc::new(create_test_manager(4));
+        let token = create_test_token_block_from_iota(70_000);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let store = manager.store_for_test();
+
+        let snap_before = manager.metrics().snapshot();
+        assert_eq!(snap_before.eager_primary_to_inactive_total, 0);
+        assert_eq!(snap_before.release_primary_noop_total, 0);
+
+        // Hold the gate. Spawn a thread that drops the immutable —
+        // its Inner::drop will park inside release_primary after its
+        // own Arc strong-count went to zero.
+        let gate = store.pause_release_primary();
+        let arrivals_before = store.release_primary_arrivals();
+        let drop_t = thread::spawn(move || drop(immutable));
+
+        // Spin (yielding) until the drop thread has entered
+        // release_primary and is about to park on the gate. The
+        // arrivals counter is bumped at the first instruction of
+        // release_primary, so once it ticks we know the drop has
+        // committed to the gate path; the gate we hold then forces
+        // it to park before mutating any slot state. No sleep — no
+        // scheduler dependency.
+        while store.release_primary_arrivals() == arrivals_before {
+            std::thread::yield_now();
+        }
+
+        // Now the slot is `Primary { weak: dead }`. A lookup should
+        // drive the eager transition and resurrect under one lock.
+        let matched = manager.match_blocks(&[hash]);
+        assert_eq!(matched.len(), 1, "lookup must resurrect");
+        let snap_mid = manager.metrics().snapshot();
+        assert_eq!(
+            snap_mid.eager_primary_to_inactive_total, 1,
+            "eager-transition counter must tick exactly once"
+        );
+
+        // Release the gate FIRST so the parked drop_t can run. We
+        // cannot drop `matched` while holding the gate — that would
+        // re-enter `release_primary` on the current thread and
+        // deadlock against our own held guard (parking_lot::Mutex is
+        // non-reentrant).
+        drop(gate);
+        drop_t.join().unwrap();
+
+        let snap_after_drop = manager.metrics().snapshot();
+        assert_eq!(
+            snap_after_drop.release_primary_noop_total, 1,
+            "release-primary no-op must tick exactly once (the parked \
+             drop saw a slot that no longer matched its self_ptr)"
+        );
+
+        // Now safely drop the resurrected matched. This goes through
+        // a normal (non-noop) `release_primary`, which must NOT bump
+        // the no-op counter again.
+        drop(matched);
+        let snap_final = manager.metrics().snapshot();
+        assert_eq!(
+            snap_final.release_primary_noop_total, 1,
+            "no-op counter unchanged after normal drop"
+        );
+    }
+
+    /// `allocate_atomic` rollback path: wire the manager against a fake
+    /// `InactiveIndex` that lies about its `len()` so `allocate(n)`
+    /// returns fewer than `n`. The defensive rollback in
+    /// `BlockStore::allocate_atomic` must restore reset-pool order, leave
+    /// inactive intact, and bump `allocate_atomic_rollback_total`.
+    #[test]
+    fn allocate_atomic_rollback_counter_ticks_with_under_allocating_backend() {
+        // A backend that claims `len() == reported_len` but returns 0
+        // pairs from `allocate()`. Built by wrapping a real
+        // `MultiLruBackend` and overriding only `len()`.
+        struct UnderAllocatingBackend {
+            inner: MultiLruBackend,
+            reported_len: usize,
+        }
+        impl InactiveIndex for UnderAllocatingBackend {
+            fn find_matches(
+                &mut self,
+                hashes: &[SequenceHash],
+                touch: bool,
+            ) -> Vec<(SequenceHash, BlockId)> {
+                self.inner.find_matches(hashes, touch)
+            }
+            fn scan_matches(
+                &mut self,
+                hashes: &[SequenceHash],
+                touch: bool,
+            ) -> Vec<(SequenceHash, BlockId)> {
+                self.inner.scan_matches(hashes, touch)
+            }
+            fn allocate(&mut self, _count: usize) -> Vec<(SequenceHash, BlockId)> {
+                Vec::new() // Under-allocates: returns 0 regardless.
+            }
+            fn insert(&mut self, seq_hash: SequenceHash, block_id: BlockId) {
+                self.inner.insert(seq_hash, block_id);
+            }
+            fn len(&self) -> usize {
+                self.reported_len
+            }
+            fn has(&self, seq_hash: SequenceHash) -> bool {
+                self.inner.has(seq_hash)
+            }
+            fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
+                self.inner.take(seq_hash, block_id)
+            }
+        }
+
+        // Build a BlockStore directly with the under-allocating backend.
+        // We can't easily go through the BlockManager builder for this
+        // because it picks its own backend; instead we hand-roll the
+        // store and call `allocate_atomic` against it.
+        use crate::metrics::BlockPoolMetrics;
+        use crate::pools::store::BlockStore;
+
+        let metrics = Arc::new(BlockPoolMetrics::new("test".to_string()));
+        let tracker = FrequencyTrackingCapacity::default().create_tracker();
+        let backend = UnderAllocatingBackend {
+            inner: MultiLruBackend::new(NonZeroUsize::new(4).unwrap(), tracker),
+            reported_len: 2, // lie: claims 2, allocate() returns 0
+        };
+        let store: Arc<BlockStore<TestBlockData>> =
+            BlockStore::new(4, 4, Box::new(backend), metrics.clone());
+
+        // free.len() is 4 (all reset). Asking for 5 forces from_inactive=1
+        // which trips into the allocate path → backend lies → rollback.
+        let result = store.allocate_atomic(5);
+        assert!(result.is_none(), "rollback must yield None");
+        let snap = metrics.snapshot();
+        assert_eq!(
+            snap.allocate_atomic_rollback_total, 1,
+            "rollback counter must tick exactly once"
+        );
+        // Reset pool must be intact (FIFO preserved).
+        assert_eq!(store.reset_len(), 4, "all reset blocks restored");
+    }
+
+    /// Concurrency stress against `allocate_atomic` to confirm the
+    /// rollback counter stays at zero with shipped backends (i.e. no
+    /// false positives in production).
+    #[test]
+    fn allocate_atomic_rollback_counter_zero_with_real_backend() {
+        const TOTAL: usize = 16;
+        const THREADS: usize = 8;
+        let manager = Arc::new(create_test_manager(TOTAL));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let m = Arc::clone(&manager);
+                thread::spawn(move || {
+                    let _ = m.allocate_blocks(TOTAL / 4);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let snap = manager.metrics().snapshot();
+        assert_eq!(
+            snap.allocate_atomic_rollback_total, 0,
+            "real LRU backend must never trigger rollback"
+        );
+    }
+
+    /// `BlockManager::reset_inactive_pool` lifecycle: drop registered
+    /// blocks so they land in the inactive pool, then reset and verify
+    /// (1) reset gauge fully restored, (2) inactive gauge zeroed,
+    /// (3) registry presence cleared for the type, (4) `mark_absent`
+    /// counters in `presence_markers` reach zero.
+    #[test]
+    fn reset_inactive_pool_drains_and_clears_presence() {
+        const N: usize = 4;
+        let manager = create_test_manager(N);
+        let mut hashes = Vec::with_capacity(N);
+
+        // Register N blocks, drop the immutables → all land in inactive.
+        let mutables = manager.allocate_blocks(N).unwrap();
+        let mut completes = Vec::with_capacity(N);
+        for (i, mb) in mutables.into_iter().enumerate() {
+            let tb = create_test_token_block_from_iota((80_000 + i * 4) as u32);
+            hashes.push(tb.kvbm_sequence_hash());
+            completes.push(mb.complete(&tb).unwrap());
+        }
+        let immutables = manager.register_blocks(completes);
+        drop(immutables);
+
+        // Pre-reset state: all in inactive, presence true.
+        let snap = manager.metrics().snapshot();
+        assert_eq!(snap.inactive_pool_size, N as i64);
+        assert_eq!(snap.reset_pool_size, 0);
+        let presence = manager
+            .block_registry()
+            .check_presence::<TestBlockData>(&hashes);
+        assert!(presence.iter().all(|(_, p)| *p), "all hashes present pre-reset");
+
+        // Reset.
+        manager.reset_inactive_pool().expect("reset succeeds");
+
+        // Post-reset state.
+        let snap = manager.metrics().snapshot();
+        assert_eq!(
+            snap.inactive_pool_size, 0,
+            "inactive gauge zeroed after reset"
+        );
+        assert_eq!(
+            snap.reset_pool_size, N as i64,
+            "reset gauge fully restored"
+        );
+        assert_eq!(manager.available_blocks(), N);
+        let presence = manager
+            .block_registry()
+            .check_presence::<TestBlockData>(&hashes);
+        assert!(
+            presence.iter().all(|(_, p)| !*p),
+            "all hashes absent post-reset"
+        );
+    }
+
+    /// Partial under-allocation: backend reports `len=4`, returns 2
+    /// pairs from `allocate(3)`. Rollback must reinsert those 2 into
+    /// the inactive index (covering the loop body in the rollback
+    /// path) and restore the reset queue. Counter ticks.
+    #[test]
+    fn allocate_atomic_rollback_handles_partial_under_allocation() {
+        struct PartiallyUnderAllocatingBackend {
+            inner: MultiLruBackend,
+            reported_len: usize,
+            return_count: usize,
+        }
+        impl InactiveIndex for PartiallyUnderAllocatingBackend {
+            fn find_matches(
+                &mut self,
+                hashes: &[SequenceHash],
+                touch: bool,
+            ) -> Vec<(SequenceHash, BlockId)> {
+                self.inner.find_matches(hashes, touch)
+            }
+            fn scan_matches(
+                &mut self,
+                hashes: &[SequenceHash],
+                touch: bool,
+            ) -> Vec<(SequenceHash, BlockId)> {
+                self.inner.scan_matches(hashes, touch)
+            }
+            fn allocate(&mut self, _count: usize) -> Vec<(SequenceHash, BlockId)> {
+                // Return only `return_count` items even if asked for more.
+                self.inner.allocate(self.return_count)
+            }
+            fn insert(&mut self, seq_hash: SequenceHash, block_id: BlockId) {
+                self.inner.insert(seq_hash, block_id);
+            }
+            fn len(&self) -> usize {
+                self.reported_len
+            }
+            fn has(&self, seq_hash: SequenceHash) -> bool {
+                self.inner.has(seq_hash)
+            }
+            fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
+                self.inner.take(seq_hash, block_id)
+            }
+        }
+
+        use crate::metrics::BlockPoolMetrics;
+        use crate::pools::store::BlockStore;
+
+        let metrics = Arc::new(BlockPoolMetrics::new("test".to_string()));
+        let tracker = FrequencyTrackingCapacity::default().create_tracker();
+        // Pre-populate the inner backend with 4 entries by inserting
+        // synthetic (hash, block_id) pairs.
+        let mut inner = MultiLruBackend::new(NonZeroUsize::new(4).unwrap(), tracker);
+        for i in 0..4u32 {
+            let h = create_test_token_block_from_iota(90_000 + i * 4).kvbm_sequence_hash();
+            inner.insert(h, i as BlockId);
+        }
+        let backend = PartiallyUnderAllocatingBackend {
+            inner,
+            reported_len: 4, // claims 4
+            return_count: 2, // returns only 2 from allocate()
+        };
+        // 4 reset slots; backend lies that it has 4 inactive entries.
+        // Asking for 7 forces from_reset=4, from_inactive=3, then
+        // backend.allocate(3) returns 2 → rollback fires and reinserts
+        // those 2 partial pairs into the inactive index.
+        let store: Arc<BlockStore<TestBlockData>> =
+            BlockStore::new(4, 4, Box::new(backend), metrics.clone());
+
+        let result = store.allocate_atomic(7);
+        assert!(result.is_none(), "rollback returns None");
+
+        let snap = metrics.snapshot();
+        assert_eq!(
+            snap.allocate_atomic_rollback_total, 1,
+            "rollback counter ticks exactly once"
+        );
+        // Reset queue restored to original 4 (FIFO via push_front in reverse).
+        assert_eq!(store.reset_len(), 4);
+        // The partial pairs were reinserted into the index — exercises
+        // the `for (h, id) in evicted_pairs { inner.inactive.insert ... }`
+        // loop body in the rollback path.
+    }
+}

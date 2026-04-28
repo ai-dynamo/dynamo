@@ -77,7 +77,13 @@ impl InactiveIndex for MultiLruBackend {
     fn find_matches(
         &mut self,
         hashes: &[SequenceHash],
-        touch: bool,
+        // The registry calls `frequency_tracker.touch()` at the API
+        // boundary (`BlockRegistry::match_sequence_hash`), so backends
+        // must NOT touch again here — doing so would double-count and
+        // skew tier decisions. The `touch` flag is reserved for any
+        // future backend-internal recency promotion that is *not* a
+        // frequency-tracker increment.
+        _touch: bool,
     ) -> Vec<(SequenceHash, BlockId)> {
         let mut matches = Vec::with_capacity(hashes.len());
         for hash in hashes {
@@ -85,9 +91,6 @@ impl InactiveIndex for MultiLruBackend {
             for pool in &mut self.priority_pools {
                 if let Some(block_id) = pool.pop(hash) {
                     matches.push((*hash, block_id));
-                    if touch {
-                        self.frequency_tracker.touch(hash.as_u128());
-                    }
                     found = true;
                     break;
                 }
@@ -102,15 +105,12 @@ impl InactiveIndex for MultiLruBackend {
     fn scan_matches(
         &mut self,
         hashes: &[SequenceHash],
-        touch: bool,
+        _touch: bool,
     ) -> Vec<(SequenceHash, BlockId)> {
         let mut matches = Vec::new();
         for hash in hashes {
             for pool in &mut self.priority_pools {
                 if let Some(block_id) = pool.pop(hash) {
-                    if touch {
-                        self.frequency_tracker.touch(hash.as_u128());
-                    }
                     matches.push((*hash, block_id));
                     break;
                 }

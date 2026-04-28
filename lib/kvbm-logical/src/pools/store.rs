@@ -38,7 +38,6 @@ use crate::registry::BlockRegistrationHandle;
 
 /// Index trait for inactive-pool eviction backends. T-free: backends only
 /// need `(SequenceHash, BlockId)` pairs.
-#[allow(dead_code)]
 pub(crate) trait InactiveIndex: Send + Sync {
     /// Find blocks for the given hashes in order, stopping on first miss.
     /// Removes matched entries from the index.
@@ -63,6 +62,7 @@ pub(crate) trait InactiveIndex: Send + Sync {
 
     fn len(&self) -> usize;
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -165,6 +165,24 @@ pub(crate) struct BlockStore<T: BlockMetadata> {
     block_size: usize,
     total_blocks: usize,
     metrics: Arc<BlockPoolMetrics>,
+    /// Test-only hook to deterministically widen the
+    /// "Arc strong=0 but `release_primary` not yet run" race window.
+    /// `release_primary` acquires this gate *before* taking the store
+    /// mutex; while a test holds the gate via
+    /// `pause_release_primary()`, every `release_primary` call parks
+    /// here without ever inspecting slot state, leaving the slot in
+    /// `Primary { weak: dead }` for a concurrent lookup to observe.
+    /// Production builds elide the field entirely.
+    #[cfg(test)]
+    release_primary_gate: parking_lot::Mutex<()>,
+
+    /// Test-only arrival counter. Incremented at the very first
+    /// instruction of every `release_primary` call (before the gate
+    /// is contended). Tests use it to signal "the dropping thread has
+    /// reached `release_primary` and is about to park", replacing
+    /// scheduler-dependent sleeps in deterministic race tests.
+    #[cfg(test)]
+    release_primary_arrivals: std::sync::atomic::AtomicU64,
 }
 
 #[allow(dead_code)]
@@ -194,7 +212,30 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             block_size,
             total_blocks,
             metrics,
+            #[cfg(test)]
+            release_primary_gate: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            release_primary_arrivals: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Test-only: acquire a guard that pauses every subsequent
+    /// `release_primary` *before* it takes the store mutex, leaving
+    /// the slot in `Primary { weak: dead }` so a concurrent lookup
+    /// can drive the eager `Primary → Inactive` branch
+    /// deterministically. Drop the returned guard to resume.
+    #[cfg(test)]
+    pub(crate) fn pause_release_primary(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.release_primary_gate.lock()
+    }
+
+    /// Test-only: number of times `release_primary` has been entered
+    /// since construction. Useful as a signal in race tests to wait
+    /// for a drop thread to reach the gate without a sleep.
+    #[cfg(test)]
+    pub(crate) fn release_primary_arrivals(&self) -> u64 {
+        self.release_primary_arrivals
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn block_size(&self) -> usize {
@@ -279,13 +320,17 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         // Defensive runtime check: any backend that violates the
         // `len() >= n ⇒ allocate(n).len() == n` invariant must not
         // leave us partially committed. Roll back and return None.
+        // Restore FIFO order by re-inserting the popped reset IDs at the
+        // front in reverse — `pop_front` consumed `[a, b, c]`, so
+        // `push_front` in reverse `[c, b, a]` re-prepends `a, b, c`.
         if evicted_pairs.len() != from_inactive {
             for (h, id) in evicted_pairs {
                 inner.inactive.insert(h, id);
             }
-            for id in reset_ids {
-                inner.free.push_back(id);
+            for id in reset_ids.into_iter().rev() {
+                inner.free.push_front(id);
             }
+            self.metrics.inc_allocate_atomic_rollback();
             return None;
         }
 
@@ -449,7 +494,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         // Disarm the guard up front so the slot stays in `Staged` state
         // when we transition; we re-arm only on the Reject path.
         let mut block = block;
-        block.armed = false;
+        block.disarm();
 
         let mut inner = self.inner.lock();
         let existing = self.acquire_for_hash_locked(&mut inner, seq_hash, false);
@@ -490,7 +535,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                     self.metrics.inc_registration_dedup();
                     // Re-arm so the block guard's drop releases the slot
                     // (Staged → Reset) when it falls out of scope below.
-                    block.armed = true;
+                    block.rearm();
                     existing_primary
                 }
             }
@@ -557,6 +602,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         inner.inactive.insert(seq_hash, block_id);
         inner.active_by_hash.remove(&seq_hash);
         self.metrics.inc_inactive_pool_size();
+        self.metrics.inc_eager_primary_to_inactive();
         tracing::trace!(?seq_hash, block_id, "Eager Primary → Inactive (lookup-driven)");
     }
 
@@ -647,6 +693,19 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
     /// specific Inner. If a concurrent `acquire_for_hash` already eagerly
     /// transitioned the slot, this is a no-op.
     pub(crate) fn release_primary(&self, block_id: BlockId, self_ptr: *const ()) {
+        // Test-only deterministic race-window widening:
+        //   1. Bump the arrival counter so a coordinating test can
+        //      observe "the drop has entered release_primary" without
+        //      a sleep.
+        //   2. Acquire the gate. While a test holds it, this call
+        //      parks here *before* the store mutex is touched, so the
+        //      slot remains in `Primary { weak: dead }` and a
+        //      concurrent lookup can drive the eager-transition path.
+        #[cfg(test)]
+        self.release_primary_arrivals
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        #[cfg(test)]
+        let _gate = self.release_primary_gate.lock();
         let mut inner = self.inner.lock();
         let slot = &mut inner.slots[block_id];
         let (seq_hash, handle) = match &slot.state {
@@ -657,7 +716,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             } if weak.as_ptr() as *const () == self_ptr => (*seq_hash, handle.clone()),
             // Eager lookup-driven transition already ran, OR this slot has
             // since been resurrected to a different Inner. No-op.
-            _ => return,
+            _ => {
+                self.metrics.inc_release_primary_noop();
+                return;
+            }
         };
         slot.state = SlotState::Inactive {
             seq_hash,
@@ -684,7 +746,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                 // Slot has moved on (this should not normally happen for
                 // duplicates since they cannot be resurrected, but guard
                 // defensively).
-                _ => return,
+                _ => {
+                    self.metrics.inc_release_duplicate_noop();
+                    return;
+                }
             };
             slot.state = SlotState::Reset;
             inner.free.push_back(block_id);

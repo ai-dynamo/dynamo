@@ -18,13 +18,13 @@ use crate::pools::BlockStore;
 
 /// RAII guard for a block in the **Staged** state.
 pub struct CompleteBlock<T: BlockMetadata> {
-    pub(crate) store: Arc<BlockStore<T>>,
-    pub(crate) block_id: BlockId,
-    pub(crate) block_size: usize,
-    pub(crate) seq_hash: SequenceHash,
+    store: Arc<BlockStore<T>>,
+    block_id: BlockId,
+    block_size: usize,
+    seq_hash: SequenceHash,
     /// `false` once the guard has been consumed by `reset` or by
     /// `BlockManager::register_block`; Drop becomes a no-op.
-    pub(crate) armed: bool,
+    armed: bool,
 }
 
 impl<T: BlockMetadata + Sync> CompleteBlock<T> {
@@ -63,6 +63,21 @@ impl<T: BlockMetadata + Sync> CompleteBlock<T> {
         self.store.transition_back_to_mutable(self.block_id);
         self.armed = false;
         MutableBlock::from_store(self.store.clone(), self.block_id, self.block_size)
+    }
+
+    /// Disarm the guard so Drop is a no-op. Used by registration when
+    /// the slot will be transitioned `Staged → Primary` / `Duplicate`
+    /// under the store mutex; the caller takes responsibility for the
+    /// slot's onward state.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Re-arm a previously disarmed guard so Drop releases the slot
+    /// `Staged → Reset`. Used by the registration `Reject` path after
+    /// the lookup commits to dropping the staged block.
+    pub(crate) fn rearm(&mut self) {
+        self.armed = true;
     }
 }
 

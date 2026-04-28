@@ -247,4 +247,12 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     pub fn metrics(&self) -> &Arc<BlockPoolMetrics> {
         &self.metrics
     }
+
+    /// Test-only accessor for the underlying [`BlockStore`]. Used to
+    /// reach test hooks like `BlockStore::pause_release_primary` from
+    /// race-window tests.
+    #[cfg(test)]
+    pub(crate) fn store_for_test(&self) -> &Arc<BlockStore<T>> {
+        &self.store
+    }
 }

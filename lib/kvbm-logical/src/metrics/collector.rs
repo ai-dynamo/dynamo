@@ -59,6 +59,25 @@ const COUNTER_DEFS: &[(&str, &str)] = &[
         "kvbm_scan_blocks_returned_total",
         "Total blocks returned from scan_matches calls",
     ),
+    (
+        "kvbm_eager_primary_to_inactive_total",
+        "Lookup-driven Primary→Inactive transitions \
+         (race-window branch — sustained non-zero rate is a hot-contention signal)",
+    ),
+    (
+        "kvbm_allocate_atomic_rollback_total",
+        "Atomic-allocation rollbacks due to inactive backend under-allocation \
+         (should be 0 in production; non-zero indicates a backend invariant violation)",
+    ),
+    (
+        "kvbm_release_primary_noop_total",
+        "ImmutableBlockInner drop transitions that no-op'd because a concurrent \
+         lookup already eagerly transitioned the slot",
+    ),
+    (
+        "kvbm_release_duplicate_noop_total",
+        "Duplicate-block drop transitions that no-op'd due to slot-identity mismatch",
+    ),
 ];
 
 const GAUGE_DEFS: &[(&str, &str)] = &[
@@ -185,7 +204,7 @@ impl Collector for MetricsAggregator {
             }
 
             // Counter values in order matching COUNTER_DEFS
-            let counter_values: [u64; 11] = [
+            let counter_values: [u64; 15] = [
                 snap.allocations,
                 snap.allocations_from_reset,
                 snap.evictions,
@@ -197,6 +216,10 @@ impl Collector for MetricsAggregator {
                 snap.match_blocks_returned,
                 snap.scan_hashes_requested,
                 snap.scan_blocks_returned,
+                snap.eager_primary_to_inactive_total,
+                snap.allocate_atomic_rollback_total,
+                snap.release_primary_noop_total,
+                snap.release_duplicate_noop_total,
             ];
 
             for (i, (name, help)) in COUNTER_DEFS.iter().enumerate() {

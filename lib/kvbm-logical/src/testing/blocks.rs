@@ -7,6 +7,8 @@
 //! Higher-level tests construct guards (`MutableBlock`, `CompleteBlock`,
 //! `ImmutableBlock`) by going through a [`BlockManager`](crate::BlockManager).
 
+#![allow(dead_code)]
+
 use crate::BlockId;
 use crate::KvbmSequenceHashProvider;
 use crate::pools::SequenceHash;

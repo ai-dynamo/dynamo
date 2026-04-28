@@ -3,6 +3,8 @@
 
 //! Test pool setup builder.
 
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use derive_builder::Builder;

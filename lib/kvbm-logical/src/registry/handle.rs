@@ -123,6 +123,16 @@ impl BlockRegistrationHandle {
 
     /// Returns `true` if at least one `Block<T, Registered>` exists for
     /// this sequence hash (i.e., the refcount is > 0).
+    ///
+    /// This is a **refcounted shadow** of authoritative `BlockStore<T>`
+    /// state, not a linearizable snapshot. The store is updated under
+    /// its own mutex; this counter is incremented/decremented in a
+    /// separate critical section that runs after the store lock is
+    /// released. In steady state the shadow agrees with the store; while
+    /// a registration, eviction, or duplicate drop is mid-flight it can
+    /// briefly report the pre-update value. Callers who need the exact
+    /// current state should go through `BlockManager::match_blocks`
+    /// (which consults the store directly).
     pub fn has_block<T: BlockMetadata>(&self) -> bool {
         let type_id = TypeId::of::<T>();
         let attachments = self.inner.attachments.lock();
