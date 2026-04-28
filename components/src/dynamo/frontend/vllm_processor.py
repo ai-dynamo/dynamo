@@ -13,6 +13,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -22,6 +23,7 @@ from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
+from vllm.v1.engine.parallel_sampling import ParentRequest
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.mm_kwargs_transfer import (
@@ -367,21 +369,6 @@ class VllmProcessor:
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
-        if sp.n != 1:
-            logger.error("Unsupported SamplingParams.n=%d, only n=1 is supported", sp.n)
-            yield {
-                "error": {
-                    "message": (
-                        f"Unsupported value: 'n={sp.n}'. "
-                        "This endpoint currently supports only n=1."
-                    ),
-                    "type": "invalid_request_error",
-                    "param": "n",
-                    "code": "unsupported_value",
-                }
-            }
-            return
-
         dynamo_preproc = {
             "model": request["model"],
             "token_ids": tokens,
@@ -444,15 +431,23 @@ class VllmProcessor:
                     "mm_processor_kwargs"
                 ] = request_for_sampling.mm_processor_kwargs
 
-            post = StreamingPostProcessor(
-                tokenizer=self.tokenizer,
-                request_for_sampling=request_for_sampling,
-                sampling_params=sampling_params,
-                prompt_token_ids=tokens,
-                tool_parser=tool_parser,
-                reasoning_parser_class=self.reasoning_parser_class,
-                chat_template_kwargs=chat_template_kwargs,
-            )
+            def new_post_processor() -> StreamingPostProcessor:
+                return StreamingPostProcessor(
+                    tokenizer=self.tokenizer,
+                    request_for_sampling=request_for_sampling,
+                    sampling_params=sampling_params,
+                    prompt_token_ids=tokens,
+                    tool_parser=tool_parser,
+                    reasoning_parser_class=self.reasoning_parser_class,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+
+            # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
+            # parallel choices must not share one instance. Keep one state machine
+            # per choice index while the backend interleaves n>1 token chunks.
+            post_processors = {
+                output_idx: new_post_processor() for output_idx in range(sp.n)
+            }
 
             async for item in self._generate_and_stream(
                 request_id,
@@ -460,7 +455,7 @@ class VllmProcessor:
                 dynamo_preproc,
                 tokens,
                 vllm_preproc,
-                post,
+                post_processors,
                 mm_routing_info=mm_routing_info,
             ):
                 yield item
@@ -475,10 +470,55 @@ class VllmProcessor:
         dynamo_preproc: dict[str, Any],
         tokens: list[int],
         vllm_preproc: EngineCoreRequest,
-        post: StreamingPostProcessor,
+        post_processors: dict[int, StreamingPostProcessor],
         mm_routing_info: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        self.output_processor.add_request(vllm_preproc, None)
+        sp = vllm_preproc.sampling_params
+        output_request_ids: dict[int, str]
+        registered_request_ids: list[str]
+
+        if sp.n == 1:
+            self.output_processor.add_request(vllm_preproc, None)
+            output_request_ids = {0: vllm_preproc.request_id}
+            registered_request_ids = [vllm_preproc.request_id]
+        else:
+            # vLLM's normal engine path fans out SamplingParams.n>1 into
+            # ParentRequest children before registering with OutputProcessor.
+            # Dynamo bypasses that path here: the backend generates indexed
+            # token chunks and this frontend feeds those chunks directly into
+            # vLLM's OutputProcessor. Recreate the same parent/child request
+            # state so each choice has its own request id, sampling params,
+            # detokenizer/logprob state, and OpenAI choice index.
+            #
+            # See vLLM's implementation:
+            # https://github.com/vllm-project/vllm/blob/v0.19.1/vllm/v1/engine/async_llm.py
+            # https://github.com/vllm-project/vllm/blob/v0.19.1/vllm/v1/engine/output_processor.py
+            # https://github.com/vllm-project/vllm/blob/v0.19.1/vllm/v1/engine/parallel_sampling.py
+            parent_preproc = vllm_preproc
+            if parent_preproc.external_req_id is None:
+                parent_preproc = msgspec_replace(
+                    parent_preproc, external_req_id=parent_preproc.request_id
+                )
+            parent_req = ParentRequest(parent_preproc)
+            output_request_ids = {}
+            registered_request_ids = []
+            for output_idx in range(sp.n):
+                child_request_id, child_sampling_params = parent_req.get_child_info(
+                    output_idx
+                )
+                child_preproc = msgspec_replace(
+                    parent_preproc,
+                    request_id=child_request_id,
+                    sampling_params=child_sampling_params,
+                )
+                self.output_processor.add_request(
+                    child_preproc,
+                    None,
+                    parent_req=parent_req,
+                    request_index=output_idx,
+                )
+                output_request_ids[output_idx] = child_request_id
+                registered_request_ids.append(child_request_id)
 
         try:
             rng_route = _nvtx.start_range("mm_frontend:kv_router_generate", color="red")
@@ -543,12 +583,26 @@ class VllmProcessor:
                     yield handle_engine_error(engine_response, request_id, logger)
                     break
 
+                output_idx = engine_response.get("index", 0) or 0
+                output_request_id = output_request_ids.get(output_idx)
+                if output_request_id is None:
+                    yield {
+                        "error": {
+                            "message": (
+                                f"Invalid engine choice index {output_idx} "
+                                f"for request {request_id}"
+                            ),
+                            "type": "internal_error",
+                        }
+                    }
+                    break
+
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
 
                 vllm_response = EngineCoreOutput(
-                    request_id=vllm_preproc.request_id,
+                    request_id=output_request_id,
                     new_token_ids=engine_response["token_ids"],
                     finish_reason=finish_reason,
                     stop_reason=stop_reason,
@@ -565,6 +619,18 @@ class VllmProcessor:
                 if not vllm_out.request_outputs:
                     continue
                 for output in vllm_out.request_outputs[0].outputs:
+                    post = post_processors.get(output.index)
+                    if post is None:
+                        yield {
+                            "error": {
+                                "message": (
+                                    f"Invalid postprocessor choice index {output.index} "
+                                    f"for request {request_id}"
+                                ),
+                                "type": "internal_error",
+                            }
+                        }
+                        break
                     choice = post.process_output(output)
                     if choice:
                         choices.append(choice)
@@ -586,10 +652,11 @@ class VllmProcessor:
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))
         finally:
-            if vllm_preproc.request_id in self.output_processor.request_states:
-                self.output_processor.abort_requests(
-                    [vllm_preproc.request_id], internal=True
-                )
+            for output_request_id in registered_request_ids:
+                if output_request_id in self.output_processor.request_states:
+                    self.output_processor.abort_requests(
+                        [output_request_id], internal=True
+                    )
 
 
 class EngineFactory:

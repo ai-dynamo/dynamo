@@ -114,6 +114,7 @@ class ChatPayload(BasePayload):
     """Payload for chat completions endpoint."""
 
     endpoint: str = "/v1/chat/completions"
+    expected_num_choices: Optional[int] = None
 
     @staticmethod
     def extract_content(response):
@@ -164,6 +165,20 @@ class ChatPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ChatPayload.extract_content(response)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        if self.expected_num_choices is None:
+            return
+
+        result = response.json()
+        choices = result.get("choices")
+        assert isinstance(choices, list), f"Missing choices list: {result}"
+        assert len(choices) == self.expected_num_choices, (
+            f"Expected {self.expected_num_choices} choices, "
+            f"got {len(choices)}: {result}"
+        )
 
 
 @dataclass

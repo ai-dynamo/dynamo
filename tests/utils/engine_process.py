@@ -170,7 +170,6 @@ class EngineProcess(ManagedProcess):
             env.update(config.env)
         if extra_env:
             env.update(extra_env)
-
         frontend_checks = [
             (
                 f"http://localhost:{config.frontend_port}/v1/models",

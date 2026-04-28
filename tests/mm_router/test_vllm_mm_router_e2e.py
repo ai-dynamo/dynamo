@@ -44,6 +44,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
 ]
 

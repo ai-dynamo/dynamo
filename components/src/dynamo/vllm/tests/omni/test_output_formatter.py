@@ -21,6 +21,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
 ]
 
