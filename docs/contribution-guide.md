@@ -62,7 +62,7 @@ Ready to write code? See the [Contribution Workflow](#contribution-workflow) sec
 
 Not all contributions are code. You can also:
 
-- Answer questions on Discord or CNCF Slack
+- Answer questions on [Discord](https://discord.gg/nvidia-dynamo) or in the `#ai-dynamo` channel on [CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf)
 - Review pull requests
 - Share how you're using Dynamo -- blog posts, talks, or social media
 - Star the [repository](https://github.com/ai-dynamo/dynamo)
