@@ -157,6 +157,9 @@ class TrtllmLLMEngine(LLMEngine):
                     output_idx = getattr(output, "index", 0) or 0
                     tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
                     next_total = len(output.token_ids)
+                    # The engine returns all tokens generated so far for this
+                    # choice. Calculate only the new tokens generated in this
+                    # iteration to create the delta.
                     out: GenerateChunk = {
                         "token_ids": output.token_ids[tokens_so_far:],
                         "index": output_idx,
@@ -178,6 +181,8 @@ class TrtllmLLMEngine(LLMEngine):
                             "total_tokens": prompt_tokens + total_completion_tokens,
                         }
 
+                    # Yield the chunk to the client and update the token count
+                    # for this output choice.
                     yield out
                     output_tokens_per_choice[output_idx] = next_total
         finally:

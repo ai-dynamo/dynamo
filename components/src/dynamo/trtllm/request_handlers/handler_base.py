@@ -1141,13 +1141,17 @@ class HandlerBase(BaseGenerativeHandler):
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
                         next_total_toks = len(output.token_ids)
 
+                        # The engine returns all tokens generated so far for
+                        # this choice. Calculate only the new tokens generated
+                        # in this iteration to create the delta.
                         out = {
                             "token_ids": output.token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
 
-                        # Logprobs are aligned with the cumulative token list,
-                        # so use the same per-choice cursor as token_ids.
+                        # Extract logprobs from the output. Logprobs are
+                        # aligned with the cumulative token list, so use the
+                        # same per-choice cursor as token_ids.
                         log_probs, top_logprobs = self._extract_logprobs(
                             output, tokens_so_far
                         )
@@ -1161,6 +1165,8 @@ class HandlerBase(BaseGenerativeHandler):
                         if output.stop_reason:
                             out["stop_reason"] = output.stop_reason
                         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                            # Return the disaggregated params only when
+                            # operating in prefill mode.
                             params_dict = self._encode_and_pack_disaggregated_params(
                                 output,
                                 disaggregated_params,
@@ -1211,6 +1217,8 @@ class HandlerBase(BaseGenerativeHandler):
                                 "this indicates a possible bug"
                             )
 
+                        # Yield the chunk to the client and update the token
+                        # count for this output choice.
                         yield out
                         output_tokens_per_choice[output_idx] = next_total_toks
 
