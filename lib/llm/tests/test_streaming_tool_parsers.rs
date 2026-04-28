@@ -1475,5 +1475,13 @@ mod tests {
              Got: {:?}",
             aggregated.normal_content
         );
+
+        // finish_reason should pass through unchanged from the source chunk
+        // (Stop in this case). Locks the contract that the no-tool-calls
+        // branch doesn't remap the reason.
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason should pass through as Stop when no tool calls are emitted"
+        );
     }
 }
