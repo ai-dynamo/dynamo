@@ -141,16 +141,16 @@ jobs:
           - 9000:9000
           - 9001:9001
     steps:
-      - name: Print Storage before Run
-        if: inputs.debug_mode
-        shell: bash
-        run: |
-          echo "--- Storage ---"
-          df -h
-          echo "--- End Storage ---"
-          echo "--- Storage ---"
-          du -h -d 1 /scratch/.cache/huggingface/hub || true
-          echo "--- End Storage ---"
+      # - name: Print Storage before Run
+      #   if: inputs.debug_mode
+      #   shell: bash
+      #   run: |
+      #     echo "--- Storage ---"
+      #     df -h
+      #     echo "--- End Storage ---"
+      #     echo "--- Storage ---"
+      #     du -h -d 1 /scratch/.cache/huggingface/hub || true
+      #     echo "--- End Storage ---"
 
 
       - name: Checkout repository
@@ -202,14 +202,14 @@ jobs:
           parallel_mode: ${{ inputs.gpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
           gpu_tests: 'true'
-          seed_model_names: '' # ${{ inputs.seed_model_names }}
-      - name: Print Storage After Run to confirm nvme and models dir usage 
-        if: always()
-        shell: bash
-        run: |
-          echo "--- Storage ---"
-          df -h
-          echo "--- End Storage ---"
-          echo "--- Storage ---"
-          du -h -d 1 /scratch/.cache/huggingface/hub || true
-          echo "--- End Storage ---"
+          seed_model_names: ${{ inputs.seed_model_names }}
+      # - name: Print Storage After Run to confirm nvme and models dir usage 
+      #   if: always()
+      #   shell: bash
+      #   run: |
+      #     echo "--- Storage ---"
+      #     df -h
+      #     echo "--- End Storage ---"
+      #     echo "--- Storage ---"
+      #     du -h -d 1 /scratch/.cache/huggingface/hub || true
+      #     echo "--- End Storage ---"
