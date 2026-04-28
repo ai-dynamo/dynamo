@@ -93,38 +93,59 @@ impl BlockRegistrationHandle {
             .unwrap_or(false)
     }
 
-    /// Mark that a Block<T, Registered> exists for this sequence hash.
-    /// Called when transitioning from Complete to Registered state.
+    /// Increment the refcounted presence marker for tier `T`. Each
+    /// presence-bearing slot transition (`Staged → Primary`,
+    /// `Staged → Duplicate`) calls this exactly once.
     pub(crate) fn mark_present<T: BlockMetadata>(&self) {
         let type_id = TypeId::of::<T>();
         let mut attachments = self.inner.attachments.lock();
-        attachments.presence_markers.insert(type_id, ());
+        *attachments.presence_markers.entry(type_id).or_insert(0) += 1;
     }
 
-    /// Mark that Block<T, Registered> no longer exists for this sequence hash.
-    /// Called when transitioning from Registered to Reset state.
+    /// Decrement the refcounted presence marker for tier `T`. Each
+    /// presence-removing slot transition (`Inactive → Mutable` via
+    /// eviction, `Duplicate → Reset` via last-duplicate drop) calls this
+    /// exactly once. The entry is removed on reaching zero.
     pub(crate) fn mark_absent<T: BlockMetadata>(&self) {
         let type_id = TypeId::of::<T>();
         let mut attachments = self.inner.attachments.lock();
-        attachments.presence_markers.remove(&type_id);
+        match attachments.presence_markers.get_mut(&type_id) {
+            Some(count) => {
+                debug_assert!(*count > 0, "mark_absent on zero-count presence marker");
+                *count -= 1;
+                if *count == 0 {
+                    attachments.presence_markers.remove(&type_id);
+                }
+            }
+            None => debug_assert!(false, "mark_absent with no presence marker present"),
+        }
     }
 
-    /// Check if a Block<T, Registered> currently exists for this sequence hash.
-    /// Returns true if block exists in active or inactive pool, false otherwise.
+    /// Returns `true` if at least one `Block<T, Registered>` exists for
+    /// this sequence hash (i.e., the refcount is > 0).
     pub fn has_block<T: BlockMetadata>(&self) -> bool {
         let type_id = TypeId::of::<T>();
         let attachments = self.inner.attachments.lock();
-        attachments.presence_markers.contains_key(&type_id)
+        attachments
+            .presence_markers
+            .get(&type_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
     }
 
-    /// Check if a Block exists for any of the specified metadata types.
-    /// Returns true if a block exists for at least one of the types.
-    /// Acquires the lock only once for efficiency.
+    /// Returns `true` if a block exists for at least one of the
+    /// specified metadata-tier `TypeId`s.
     pub fn has_any_block(&self, type_ids: &[TypeId]) -> bool {
         let attachments = self.inner.attachments.lock();
-        type_ids
-            .iter()
-            .any(|type_id| attachments.presence_markers.contains_key(type_id))
+        type_ids.iter().any(|type_id| {
+            attachments
+                .presence_markers
+                .get(type_id)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        })
     }
 
     /// Register a callback to be invoked when this handle is touched.

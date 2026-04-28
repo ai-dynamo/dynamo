@@ -6,7 +6,6 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 
 use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
 use crate::{pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
@@ -394,7 +393,6 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             duplication_policy: self
                 .duplication_policy
                 .unwrap_or(BlockDuplicationPolicy::Allow),
-            allocate_mutex: Mutex::new(()),
             total_blocks: block_count,
             block_size,
             metrics,

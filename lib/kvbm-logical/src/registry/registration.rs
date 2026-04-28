@@ -4,10 +4,9 @@
 //! Block registration logic.
 //!
 //! Implemented as inherent methods on [`BlockRegistrationHandle`] that
-//! interact with the unified [`BlockStore`]. The previous dual-weak-ref
-//! resurrection scheme is gone — the single store mutex serializes drop
-//! and resurrection, so a single `Weak<ImmutableBlockInner<T>>` per handle
-//! is sufficient.
+//! delegate to the unified [`BlockStore`]. Lookup and slot transition
+//! happen under a single store-mutex acquisition, closing the
+//! register-vs-register race for the same sequence hash.
 
 use std::sync::Arc;
 
@@ -32,56 +31,20 @@ impl BlockRegistrationHandle {
             self.seq_hash(),
             "Attempted to register block with different sequence hash"
         );
-
-        let block_id = block.block_id();
-        let seq_hash = block.sequence_hash();
-
-        // Look for an existing primary (live in active or evictable in inactive).
-        let existing = upgrade_or_resurrect::<T>(self, store);
-
-        if let Some(existing_primary) = existing {
-            if existing_primary.block_id() == block_id {
-                panic!("Attempted to register block with same block_id as existing");
-            }
-            match duplication_policy {
-                BlockDuplicationPolicy::Allow => {
-                    // Disarm the CompleteBlock guard — store will own the
-                    // slot via the new Duplicate state. `transition_to_duplicate`
-                    // emits `inc_duplicate_blocks` inside its critical section.
-                    let mut block = block;
-                    block.armed = false;
-                    drop(block);
-                    store.transition_to_duplicate(
-                        block_id,
-                        seq_hash,
-                        self.clone(),
-                        existing_primary,
-                    )
-                }
-                BlockDuplicationPolicy::Reject => {
-                    store.metrics().inc_registration_dedup();
-                    // Drop the CompleteBlock — it returns the slot to Reset.
-                    drop(block);
-                    existing_primary
-                }
-            }
-        } else {
-            // Fresh primary.
-            let mut block = block;
-            block.armed = false;
-            drop(block);
-            store.transition_to_primary(block_id, seq_hash, self.clone())
-        }
+        store.register_completed_block(block, self.clone(), duplication_policy)
     }
 
     /// Try to fetch a strong [`ImmutableBlockInner`] for this handle —
     /// either an alive existing inner (fast path) or a resurrected one
-    /// pulled out of the inactive pool (slow path).
+    /// pulled out of the inactive pool (slow path). `touch` is forwarded
+    /// to the inactive resurrection path so frequency tracking sees the
+    /// hit even when an active-pool lookup absorbs an inactive entry.
     #[inline]
     pub(crate) fn try_get_inner<T: BlockMetadata + Sync>(
         &self,
         store: &Arc<BlockStore<T>>,
+        touch: bool,
     ) -> Option<Arc<ImmutableBlockInner<T>>> {
-        upgrade_or_resurrect::<T>(self, store)
+        upgrade_or_resurrect::<T>(self, store, touch)
     }
 }

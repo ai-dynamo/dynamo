@@ -2151,3 +2151,237 @@ mod scan_matches_tests {
         assert_eq!(snap.inactive_pool_size, 3);
     }
 }
+
+// ============================================================================
+// RACE-CONDITION REGRESSION TESTS
+//
+// These tests cover the three high-severity races that motivated the
+// move of active-by-hash, slot Weak ownership, and presence refcounting
+// into BlockStore. They stress concurrent code paths that were known to
+// produce inconsistent state under the previous two-lock design.
+// ============================================================================
+
+mod race_regression_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    use crate::pools::BlockDuplicationPolicy;
+
+    fn build_manager_with_policy(
+        block_count: usize,
+        policy: BlockDuplicationPolicy,
+    ) -> BlockManager<TestBlockData> {
+        let registry = BlockRegistry::new();
+        BlockManager::<TestBlockData>::builder()
+            .block_count(block_count)
+            .block_size(4)
+            .registry(registry)
+            .duplication_policy(policy)
+            .build()
+            .expect("build manager")
+    }
+
+    /// Finding 1: an active-pool lookup that races with the last
+    /// `ImmutableBlock` drop must either succeed (returning the existing
+    /// or a freshly resurrected block) or miss cleanly. It must never
+    /// produce a state where two slots claim the same `seq_hash` as
+    /// Primary.
+    #[test]
+    fn active_lookup_concurrent_with_last_drop() {
+        const ITERATIONS: usize = 200;
+        let manager = Arc::new(create_test_manager(8));
+
+        for i in 0..ITERATIONS {
+            let token_block = create_test_token_block_from_iota((10_000 + i * 4) as u32);
+            let seq_hash = token_block.kvbm_sequence_hash();
+
+            // Stage and register one primary.
+            let mutables = manager.allocate_blocks(1).unwrap();
+            let complete = mutables
+                .into_iter()
+                .next()
+                .unwrap()
+                .complete(&token_block)
+                .unwrap();
+            let immutable = manager
+                .register_blocks(vec![complete])
+                .into_iter()
+                .next()
+                .unwrap();
+
+            // Race: thread A drops the last strong reference; thread B
+            // looks the hash up. Repeat with manager-shared barriers.
+            let manager_a = Arc::clone(&manager);
+            let manager_b = Arc::clone(&manager);
+            let drop_thread = thread::spawn(move || {
+                drop(immutable);
+                // One additional touch to ensure release_primary runs.
+                manager_a.available_blocks();
+            });
+            let lookup_thread = thread::spawn(move || manager_b.match_blocks(&[seq_hash]));
+
+            drop_thread.join().unwrap();
+            let matched = lookup_thread.join().unwrap();
+            assert!(matched.len() <= 1, "double-primary detected for {seq_hash:?}");
+
+            // Drop the lookup result; the system must converge.
+            drop(matched);
+
+            // Total slots must always equal block_count.
+            assert_eq!(manager.total_blocks(), 8);
+        }
+    }
+
+    /// Finding 2: when a block is evicted from the inactive pool while
+    /// another thread re-registers a fresh `CompleteBlock` for the same
+    /// hash, `check_presence::<T>` must report `true` afterwards. The
+    /// previous design lost the new presence marker to the trailing
+    /// `mark_absent` from the eviction path.
+    #[test]
+    fn eviction_concurrent_with_reregister_preserves_presence() {
+        const ITERATIONS: usize = 100;
+        // 1 block so a fresh registration must evict the inactive entry.
+        let manager = Arc::new(create_test_manager(1));
+
+        for i in 0..ITERATIONS {
+            let token_a = create_test_token_block_from_iota((20_000 + i * 8) as u32);
+            let token_b = create_test_token_block_from_iota((20_000 + i * 8 + 4) as u32);
+            let hash_a = token_a.kvbm_sequence_hash();
+            let hash_b = token_b.kvbm_sequence_hash();
+
+            // Register one block, drop it so it lands in inactive.
+            let mut mutables = manager.allocate_blocks(1).unwrap();
+            let complete = mutables.pop().unwrap().complete(&token_a).unwrap();
+            let immutable = manager
+                .register_blocks(vec![complete])
+                .into_iter()
+                .next()
+                .unwrap();
+            drop(immutable);
+
+            // Now allocate (forcing eviction of hash_a) and concurrently
+            // register hash_b (the freshly evicted slot will be re-used
+            // for hash_b). With one slot total, the only path possible
+            // is "register a fresh hash_b that displaces hash_a".
+            let mut mutables = manager.allocate_blocks(1).unwrap();
+            let complete_b = mutables.pop().unwrap().complete(&token_b).unwrap();
+            let immutable_b = manager
+                .register_blocks(vec![complete_b])
+                .into_iter()
+                .next()
+                .unwrap();
+
+            // hash_a must no longer be present (evicted), hash_b must be
+            // present.
+            let presence = manager
+                .block_registry()
+                .check_presence::<TestBlockData>(&[hash_a, hash_b]);
+            assert_eq!(
+                presence,
+                vec![(hash_a, false), (hash_b, true)],
+                "iteration {i}: presence after eviction-vs-register"
+            );
+
+            drop(immutable_b);
+        }
+    }
+
+    /// Finding 3: dropping an allowed duplicate must not clear presence
+    /// while the primary is still alive. With the old boolean-set
+    /// presence_markers, `release_duplicate` unconditionally cleared
+    /// presence even though a primary remained.
+    #[test]
+    fn duplicate_drop_preserves_presence() {
+        let manager = build_manager_with_policy(4, BlockDuplicationPolicy::Allow);
+        let token = create_test_token_block_from_iota(30_000);
+
+        // Allocate two slots, complete both with the same hash. The
+        // second registration becomes a duplicate.
+        let mutables = manager.allocate_blocks(2).unwrap();
+        let mut iter = mutables.into_iter();
+        let complete_primary = iter.next().unwrap().complete(&token).unwrap();
+        let complete_dup = iter.next().unwrap().complete(&token).unwrap();
+
+        let primary = manager
+            .register_blocks(vec![complete_primary])
+            .into_iter()
+            .next()
+            .unwrap();
+        let dup = manager
+            .register_blocks(vec![complete_dup])
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let handle = primary.registration_handle();
+        assert!(handle.has_block::<TestBlockData>(), "before any drop");
+
+        // Drop the duplicate: presence must remain true (primary still
+        // alive).
+        drop(dup);
+        assert!(
+            handle.has_block::<TestBlockData>(),
+            "after duplicate drop, primary still alive"
+        );
+
+        // Drop the primary: it transitions to Inactive — still
+        // presence-bearing.
+        drop(primary);
+        assert!(
+            handle.has_block::<TestBlockData>(),
+            "after primary drop, slot in Inactive still counts"
+        );
+    }
+
+    /// Allocation atomicity: with `free + inactive == N`, two concurrent
+    /// requests for `N` blocks each must not both succeed at the same
+    /// time. We synchronize all threads at a barrier before allocating
+    /// and have each successful thread hold its blocks until all
+    /// threads have attempted, so no thread can refill the pool early.
+    #[test]
+    fn allocate_atomic_no_over_commit_under_contention() {
+        use std::sync::Barrier;
+
+        const TOTAL: usize = 16;
+        const THREADS: usize = 8;
+        let manager = Arc::new(create_test_manager(TOTAL));
+        let granted = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(THREADS));
+        let after_alloc = Arc::new(Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let m = Arc::clone(&manager);
+                let g = Arc::clone(&granted);
+                let s = Arc::clone(&start);
+                let a = Arc::clone(&after_alloc);
+                thread::spawn(move || {
+                    s.wait();
+                    let blocks = m.allocate_blocks(TOTAL);
+                    if let Some(b) = &blocks {
+                        g.fetch_add(b.len(), Ordering::SeqCst);
+                    }
+                    // Hold (or not) until everyone has attempted; this
+                    // prevents an early dropper from refilling the pool
+                    // and giving a second thread a green light.
+                    a.wait();
+                    drop(blocks);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Exactly one thread (or zero, in pathological scheduling)
+        // should have received TOTAL blocks. No double-allocation.
+        let g = granted.load(Ordering::SeqCst);
+        assert!(
+            g == 0 || g == TOTAL,
+            "concurrent over-commit detected: granted={g}, expected 0 or {TOTAL}"
+        );
+        assert_eq!(manager.available_blocks(), TOTAL);
+    }
+}

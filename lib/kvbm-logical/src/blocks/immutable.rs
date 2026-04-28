@@ -82,10 +82,15 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
 
 impl<T: BlockMetadata> Drop for ImmutableBlockInner<T> {
     fn drop(&mut self) {
+        // self_ptr identifies *this* Inner so the store can verify slot
+        // identity before transitioning. If a concurrent
+        // `acquire_for_hash` already eagerly completed the transition,
+        // the store call is a no-op.
+        let self_ptr = self as *const ImmutableBlockInner<T> as *const ();
         if self.is_primary {
-            self.store.release_primary(self.block_id);
+            self.store.release_primary(self.block_id, self_ptr);
         } else {
-            self.store.release_duplicate(self.block_id);
+            self.store.release_duplicate(self.block_id, self_ptr);
         }
     }
 }
@@ -183,7 +188,7 @@ impl<T: BlockMetadata + Sync> WeakBlock<T> {
         if let Some(strong) = self.inner.upgrade() {
             return Some(ImmutableBlock::from_inner(strong));
         }
-        let inner = upgrade_or_resurrect::<T>(&self.handle, &self.store)?;
+        let inner = upgrade_or_resurrect::<T>(&self.handle, &self.store, false)?;
         Some(ImmutableBlock::from_inner(inner))
     }
 

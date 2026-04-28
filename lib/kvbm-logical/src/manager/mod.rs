@@ -20,8 +20,6 @@ pub use builder::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
 use crate::blocks::{BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock};
 use crate::metrics::BlockPoolMetrics;
 use crate::pools::{BlockDuplicationPolicy, BlockStore, SequenceHash};
@@ -34,7 +32,6 @@ pub struct BlockManager<T: BlockMetadata> {
     pub(crate) store: Arc<BlockStore<T>>,
     pub(crate) block_registry: BlockRegistry,
     pub(crate) duplication_policy: BlockDuplicationPolicy,
-    pub(crate) allocate_mutex: Mutex<()>,
     pub(crate) total_blocks: usize,
     pub(crate) block_size: usize,
     pub(crate) metrics: Arc<BlockPoolMetrics>,
@@ -61,25 +58,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         &self,
         count: usize,
     ) -> Option<(Vec<MutableBlock<T>>, Vec<SequenceHash>)> {
-        let _guard = self.allocate_mutex.lock();
-        let from_reset = self.store.allocate_reset_blocks(count);
-        let from_reset_count = from_reset.len();
-        let mut blocks = from_reset;
-
-        let remaining_needed = count - blocks.len();
-        match self.store.evict_to_mutable(remaining_needed) {
-            Some((remaining, evicted)) => {
-                blocks.extend(remaining);
-
-                self.metrics.inc_allocations(blocks.len() as u64);
-                self.metrics
-                    .inc_allocations_from_reset(from_reset_count as u64);
-                // `inc_evictions` is emitted inside `evict_to_mutable`.
-
-                Some((blocks, evicted))
-            }
-            None => None,
-        }
+        self.store.allocate_atomic(count)
     }
 
     /// Drain the inactive pool, returning all blocks to the reset pool.
@@ -174,7 +153,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
 
         let mut result = HashMap::new();
 
-        let active_found = self.scan_active_matches(seq_hashes);
+        let active_found = self.scan_active_matches(seq_hashes, touch);
         for (hash, inner) in active_found {
             result.insert(hash, ImmutableBlock::from_inner(inner));
         }
@@ -207,7 +186,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         let mut matches = Vec::with_capacity(hashes.len());
         for hash in hashes {
             if let Some(handle) = self.block_registry.match_sequence_hash(*hash, touch) {
-                if let Some(inner) = handle.try_get_inner::<T>(&self.store) {
+                if let Some(inner) = handle.try_get_inner::<T>(&self.store, touch) {
                     matches.push(inner);
                 } else {
                     break;
@@ -223,15 +202,16 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     fn scan_active_matches(
         &self,
         hashes: &[SequenceHash],
+        touch: bool,
     ) -> Vec<(SequenceHash, Arc<crate::blocks::ImmutableBlockInner<T>>)> {
         hashes
             .iter()
             .filter_map(|hash| {
                 self.block_registry
-                    .match_sequence_hash(*hash, false)
+                    .match_sequence_hash(*hash, touch)
                     .and_then(|handle| {
                         handle
-                            .try_get_inner::<T>(&self.store)
+                            .try_get_inner::<T>(&self.store, touch)
                             .map(|inner| (*hash, inner))
                     })
             })
