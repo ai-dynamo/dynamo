@@ -293,7 +293,9 @@ func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.Dynam
 	}
 	if v, ok := slaMap["optimizationType"].(string); ok {
 		ot := v1beta1.OptimizationType(v)
-		dst.SLA.OptimizationType = &ot
+		if ot == v1beta1.OptimizationTypeLatency || ot == v1beta1.OptimizationTypeThroughput {
+			dst.SLA.OptimizationType = &ot
+		}
 	}
 
 	if v, ok := slaMap["isl"].(float64); ok {
@@ -478,6 +480,9 @@ func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blo
 		}
 		if src.SLA.ITL != nil {
 			slaMap["itl"] = *src.SLA.ITL
+		}
+		if src.SLA.OptimizationType != nil {
+			slaMap["optimizationType"] = string(*src.SLA.OptimizationType)
 		}
 	}
 	if src.Workload != nil {
