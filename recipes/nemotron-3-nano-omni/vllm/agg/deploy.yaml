@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Nemotron Nano Omni aggregated vLLM deployment.
+#
+# Prerequisites:
+#   - Dynamo Platform installed
+#   - Model weights downloaded into the model-cache PVC
+#   - Container built from recipes/nemotron-3-nano-omni/Dockerfile
+#   - HF_TOKEN secret created:
+#       kubectl create secret generic hf-token-secret \
+#         --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#
+# Replace image references before applying:
+#   <your-registry>/nemotron-omni-vllm:latest
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-omni-vllm-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      envFromSecret: hf-token-secret
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-store
+      extraPodSpec:
+        mainContainer:
+          image: <your-registry>/nemotron-omni-vllm:latest
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          env:
+            - name: HF_HOME
+              value: /model-store
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - >-
+              exec python3 -m dynamo.frontend
+              --router-mode kv
+              --no-kv-events
+              --http-port 8000
+
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-store
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: <your-registry>/nemotron-omni-vllm:latest
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 120
+          env:
+            - name: HF_HOME
+              value: /model-store
+            # Match the --media-io-kwargs num_frames so dynamo's multimodal
+            # preprocessor and vLLM agree on the video frame ceiling.
+            - name: DYN_MM_VIDEO_NUM_FRAMES
+              value: "512"
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - >-
+              exec python3 -m dynamo.vllm
+              --model nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+              --served-model-name nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+              --max-model-len 131072
+              --enable-multimodal
+              --media-io-kwargs '{"video": {"num_frames": 512, "fps": 1}}'
+              --trust-remote-code
+              --video-pruning-rate 0.5
+              --dyn-tool-call-parser nemotron_nano
+              --dyn-reasoning-parser nemotron_nano
