@@ -1177,7 +1177,14 @@ class HandlerBase(BaseGenerativeHandler):
                             if params_dict is not None:
                                 out["disaggregated_params"] = params_dict
 
-                        if out.get("finish_reason"):
+                        if out.get("finish_reason") or res.finished:
+                            if not out.get("finish_reason"):
+                                out["finish_reason"] = "unknown"
+                                logging.warning(
+                                    "Request finished with no finish reason set - "
+                                    "this indicates a possible bug"
+                                )
+
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
@@ -1210,13 +1217,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 "prompt_tokens_details": prompt_tokens_details,
                             }
 
-                        if res.finished and not out.get("finish_reason"):
-                            out["finish_reason"] = "unknown"
-                            logging.warning(
-                                "Request finished with no finish reason set - "
-                                "this indicates a possible bug"
-                            )
-
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
                         yield out
@@ -1242,7 +1242,7 @@ class HandlerBase(BaseGenerativeHandler):
                                         # non-zero kv_cache_transfer_{start,end} in timing
                                         # metrics. Count the success counter on the same
                                         # signal so it stays in lock-step with the sibling
-                                        # histograms' _count. DYN-2781.
+                                        # histograms' _count for the same transfer event.
                                         if metrics_collector.record_kv_transfer_perf(
                                             tm
                                         ):
