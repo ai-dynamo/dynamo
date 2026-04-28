@@ -111,4 +111,5 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install --requirement /tmp/requirements.test.txt
 
+COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
