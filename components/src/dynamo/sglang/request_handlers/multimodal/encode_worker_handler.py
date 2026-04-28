@@ -537,7 +537,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     data.pop("text", None)
                 yield data
 
-            await transfer_future
+            if transfer_future is not None:
+                await transfer_future
 
         except Exception as e:
             logger.error(f"Error processing request: {e}")
