@@ -79,8 +79,9 @@ runs:
               --exclude "*.msgpack" \
               --exclude "*.pth" \
               --exclude "*.pt" \
-              --exclude "onnx/*" \
-              --exclude "blobs/*" \
+              --exclude "*/onnx/*" \
+              --exclude "*/blobs/*" \
+              --exclude "*/ci-local/*" \
               "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
             echo "  ✅ ${model_name} ($(( $(date +%s) - t0 ))s)"
             COPIED=$((COPIED+1))
