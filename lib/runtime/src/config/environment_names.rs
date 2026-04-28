@@ -312,6 +312,22 @@ pub mod llm {
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
+
+    /// Agent trace configuration
+    pub mod agent_trace {
+        /// Local JSONL sink path for normalized agent trace records.
+        pub const DYN_AGENT_TRACE_JSONL: &str = "DYN_AGENT_TRACE_JSONL";
+
+        /// In-process trace bus capacity.
+        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
+
+        /// JSONL sink buffer size in bytes.
+        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
+
+        /// JSONL sink periodic flush interval in milliseconds.
+        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
+    }
 }
 
 /// Model loading and caching environment variables
@@ -522,6 +538,10 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL,
+            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
