@@ -18,6 +18,7 @@ spec:
         - name: model-download
           image: python:3.10-slim
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
             seccompProfile:

@@ -5,7 +5,7 @@
 # Prerequisites:
 #   - Dynamo Platform installed
 #   - Model weights downloaded into the model-cache PVC
-#   - Container built from recipes/nemotron-omni/Dockerfile
+#   - Container built from recipes/nemotron-3-nano-omni/Dockerfile
 #   - HF_TOKEN secret created:
 #       kubectl create secret generic hf-token-secret \
 #         --from-literal=HF_TOKEN=<your-token> -n <namespace>
@@ -81,7 +81,8 @@ spec:
           env:
             - name: HF_HOME
               value: /model-store
-            # DYN-2884
+            # Match the --media-io-kwargs num_frames so dynamo's multimodal
+            # preprocessor and vLLM agree on the video frame ceiling.
             - name: DYN_MM_VIDEO_NUM_FRAMES
               value: "512"
           command:
