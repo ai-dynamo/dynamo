@@ -361,6 +361,60 @@ func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, 
 	}
 }
 
+func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil {
+		return
+	}
+	if dst.SubComponentType == "" {
+		dst.SubComponentType = preserved.SubComponentType
+	}
+	if dst.DynamoNamespace == nil && preserved.DynamoNamespace != nil {
+		dst.DynamoNamespace = ptr.To(*preserved.DynamoNamespace)
+	}
+	if dst.Autoscaling == nil && preserved.Autoscaling != nil {
+		cp := *preserved.Autoscaling
+		dst.Autoscaling = &cp
+	}
+	if dst.Ingress == nil && preserved.Ingress != nil {
+		cp := *preserved.Ingress
+		dst.Ingress = &cp
+	}
+	if len(dst.Annotations) == 0 {
+		dst.Annotations = maps.Clone(preserved.Annotations)
+	}
+	if len(dst.Labels) == 0 {
+		dst.Labels = maps.Clone(preserved.Labels)
+	}
+	if dst.EnvFromSecret == nil && preserved.EnvFromSecret != nil {
+		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
+	}
+	if dst.ExtraPodSpec == nil && preserved.ExtraPodSpec != nil {
+		cp := *preserved.ExtraPodSpec.DeepCopy()
+		dst.ExtraPodSpec = &cp
+	}
+	if dst.ExtraPodSpec != nil && dst.ExtraPodSpec.MainContainer != nil &&
+		dst.ExtraPodSpec.MainContainer.Name == "" &&
+		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
+		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
+	}
+}
+
+func hasSharedAlphaOnlyFields(src *DynamoComponentDeploymentSharedSpec) bool {
+	if src == nil {
+		return false
+	}
+	return src.SubComponentType != "" ||
+		src.DynamoNamespace != nil ||
+		src.Autoscaling != nil ||
+		src.Ingress != nil ||
+		len(src.Annotations) > 0 ||
+		len(src.Labels) > 0 ||
+		src.EnvFromSecret != nil ||
+		(src.ExtraPodSpec != nil &&
+			src.ExtraPodSpec.MainContainer != nil &&
+			src.ExtraPodSpec.MainContainer.Name != "")
+}
+
 // convertSharedSpecFrom performs the inverse: v1beta1 -> v1alpha1.
 func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
 	if src == nil || dst == nil {

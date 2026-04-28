@@ -78,6 +78,135 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
+func TestDCD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				ServiceName:   "edit",
+				ComponentType: string(v1beta1.ComponentTypeWorker),
+			},
+		},
+	}
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	hub.Spec.ComponentType = v1beta1.ComponentTypePlanner
+
+	restored := &DynamoComponentDeployment{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if restored.Spec.ComponentType != string(v1beta1.ComponentTypePlanner) {
+		t.Fatalf("componentType = %q, want %q", restored.Spec.ComponentType, v1beta1.ComponentTypePlanner)
+	}
+}
+
+func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				ServiceName:   "hub-only-edit",
+				ComponentType: string(v1beta1.ComponentTypeWorker),
+			},
+		},
+	}
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	hub.Spec.PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "worker:edited"}},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if _, ok := spoke.Annotations[annDCDHubSpec]; !ok {
+		t.Fatalf("expected current hub-only edit to be preserved in %q", annDCDHubSpec)
+	}
+
+	restored := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(hub.Spec.PodTemplate, restored.Spec.PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch after preserving hub-only edit (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
+	original := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-edit", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "alpha-only-edit",
+				ComponentType: v1beta1.ComponentTypeWorker,
+			},
+		},
+	}
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+
+	spoke.Spec.Autoscaling = &Autoscaling{Enabled: true, MinReplicas: 1, MaxReplicas: 3}
+
+	restoredHub := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	restoredSpoke := &DynamoComponentDeployment{}
+	if err := restoredSpoke.ConvertFrom(restoredHub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(spoke.Spec.Autoscaling, restoredSpoke.Spec.Autoscaling); diff != "" {
+		t.Fatalf("autoscaling mismatch after preserving alpha-only edit (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_IntermediateSpokeExtraPodSpecEditsSurvivePreservedHub(t *testing.T) {
+	original := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "extra-pod-spec-edit", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "extra-pod-spec-edit",
+				ComponentType: v1beta1.ComponentTypeWorker,
+			},
+		},
+	}
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+
+	spoke.Spec.ExtraPodSpec = &ExtraPodSpec{
+		MainContainer: &corev1.Container{
+			Name:  "custom-main",
+			Image: "worker:edited",
+		},
+	}
+
+	restoredHub := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	restoredSpoke := &DynamoComponentDeployment{}
+	if err := restoredSpoke.ConvertFrom(restoredHub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(spoke.Spec.ExtraPodSpec, restoredSpoke.Spec.ExtraPodSpec); diff != "" {
+		t.Fatalf("extraPodSpec mismatch after preserving alpha-only edit (-want +got):\n%s", diff)
+	}
+}
+
 func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},

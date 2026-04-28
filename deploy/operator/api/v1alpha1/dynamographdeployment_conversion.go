@@ -51,6 +51,7 @@ const (
 	annDGDHubSpec     = "nvidia.com/dgd-hub-spec"
 	annDGDSpokeSpec   = "nvidia.com/dgd-spoke-spec"
 	annDGDSpokeStatus = "nvidia.com/dgd-spoke-status"
+	annDGDSpokeHub    = "nvidia.com/dgd-spoke-hub"
 	annDGDHubOrigin   = "nvidia.com/dgd-hub-origin"
 )
 
@@ -104,14 +105,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		}
 		setAnnOnObj(&dst.ObjectMeta, annDGDPVCs, string(data))
 	}
-	if !hubOrigin {
-		if data, err := marshalDGDSpokeSpec(&src.Spec); err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeSpec, string(data))
-		}
-		if data, err := json.Marshal(src.Status); err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, string(data))
-		}
-	}
+	preserveSpoke := !hubOrigin || dgdHasAlphaOnlyFields(&src.Spec)
 
 	// Components: v1alpha1 map -> v1beta1 list. Sort by name for a deterministic
 	// emission order; the unordered map cannot faithfully represent the
@@ -161,7 +155,20 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		scrubDGDInternalAnnotations(&dst.ObjectMeta)
 	}
 	convertDGDStatusTo(&src.Status, &dst.Status)
+	if preserveSpoke {
+		preserveDGDSpoke(src, dst)
+		preserveDGDSpokeHub(dst)
+	}
 	return nil
+}
+
+func preserveDGDSpoke(src *DynamoGraphDeployment, dst *v1beta1.DynamoGraphDeployment) {
+	if data, err := marshalDGDSpokeSpec(&src.Spec); err == nil {
+		setAnnOnObj(&dst.ObjectMeta, annDGDSpokeSpec, string(data))
+	}
+	if data, err := json.Marshal(src.Status); err == nil {
+		setAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, string(data))
+	}
 }
 
 func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta1.DynamoGraphDeploymentSpec) {
@@ -188,6 +195,85 @@ func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta
 	}
 }
 
+type preservedDGDHubSnapshot struct {
+	Spec   string                              `json:"spec"`
+	Status v1beta1.DynamoGraphDeploymentStatus `json:"status"`
+}
+
+func preserveDGDSpokeHub(dst *v1beta1.DynamoGraphDeployment) {
+	spec, err := marshalDGDHubSpec(&dst.Spec)
+	if err != nil {
+		return
+	}
+	data, err := json.Marshal(preservedDGDHubSnapshot{
+		Spec:   string(spec),
+		Status: dst.Status,
+	})
+	if err == nil {
+		setAnnOnObj(&dst.ObjectMeta, annDGDSpokeHub, string(data))
+	}
+}
+
+func dgdSpokeHubUnmodified(src *v1beta1.DynamoGraphDeployment) bool {
+	raw, ok := getAnnFromObj(&src.ObjectMeta, annDGDSpokeHub)
+	if !ok || raw == "" {
+		return false
+	}
+	spec, err := marshalDGDHubSpec(&src.Spec)
+	if err != nil {
+		return false
+	}
+	current, err := json.Marshal(preservedDGDHubSnapshot{
+		Spec:   string(spec),
+		Status: src.Status,
+	})
+	if err != nil {
+		return false
+	}
+	return string(current) == raw
+}
+
+func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *DynamoGraphDeploymentStatus, preservedSpec *DynamoGraphDeploymentSpec, preservedStatus *DynamoGraphDeploymentStatus) {
+	if preservedSpec != nil {
+		if len(dstSpec.PVCs) == 0 {
+			dstSpec.PVCs = slices.Clone(preservedSpec.PVCs)
+		}
+		for name, dstComp := range dstSpec.Services {
+			if dstComp == nil || preservedSpec.Services == nil {
+				continue
+			}
+			fillSharedAlphaOnlyFromPreserved(dstComp, preservedSpec.Services[name])
+		}
+	}
+	if preservedStatus != nil {
+		for name, dstSvc := range dstStatus.Services {
+			preservedSvc, ok := preservedStatus.Services[name]
+			if !ok {
+				continue
+			}
+			if dstSvc.ComponentName == "" {
+				dstSvc.ComponentName = preservedSvc.ComponentName
+			}
+			dstStatus.Services[name] = dstSvc
+		}
+	}
+}
+
+func dgdHasAlphaOnlyFields(src *DynamoGraphDeploymentSpec) bool {
+	if src == nil {
+		return false
+	}
+	if len(src.PVCs) > 0 {
+		return true
+	}
+	for _, svc := range src.Services {
+		if hasSharedAlphaOnlyFields(svc) {
+			return true
+		}
+	}
+	return false
+}
+
 // ConvertFrom converts from the hub (v1beta1) DynamoGraphDeployment into this
 // v1alpha1 instance.
 func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
@@ -198,17 +284,30 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
+	var preservedSpokeSpec *DynamoGraphDeploymentSpec
+	var preservedSpokeStatus *DynamoGraphDeploymentStatus
 	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec); ok && raw != "" {
 		if spec, ok := restoreDGDSpokeSpec(raw); ok {
-			dst.Spec = spec
-			if rawStatus, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus); ok && rawStatus != "" {
-				_ = json.Unmarshal([]byte(rawStatus), &dst.Status)
-			} else {
-				convertDGDStatusFrom(&src.Status, &dst.Status)
-			}
-			scrubDGDInternalAnnotations(&dst.ObjectMeta)
-			return nil
+			preservedSpokeSpec = &spec
 		}
+	}
+	if rawStatus, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus); ok && rawStatus != "" {
+		var status DynamoGraphDeploymentStatus
+		if err := json.Unmarshal([]byte(rawStatus), &status); err == nil {
+			preservedSpokeStatus = &status
+		}
+	}
+	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
+	// matching means no hub fields changed. Metadata was copied above and rides along.
+	if preservedSpokeSpec != nil && dgdSpokeHubUnmodified(src) {
+		dst.Spec = *preservedSpokeSpec.DeepCopy()
+		if preservedSpokeStatus != nil {
+			dst.Status = *preservedSpokeStatus.DeepCopy()
+		} else {
+			convertDGDStatusFrom(&src.Status, &dst.Status)
+		}
+		scrubDGDInternalAnnotations(&dst.ObjectMeta)
+		return nil
 	}
 
 	dst.Spec.Annotations = maps.Clone(src.Spec.Annotations)
@@ -285,7 +384,13 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	convertDGDStatusFrom(&src.Status, &dst.Status)
+	fillDGDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus)
 	scrubStaleDGDAnnotations(&dst.ObjectMeta, dst.Spec.Services)
+	if preservedSpokeSpec != nil || preservedSpokeStatus != nil {
+		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec)
+		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus)
+		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeHub)
+	}
 	if dgdNeedsHubSpecPreservation(&src.Spec) {
 		if data, err := marshalDGDHubSpec(&src.Spec); err == nil {
 			setAnnOnObj(&dst.ObjectMeta, annDGDHubSpec, string(data))
@@ -352,6 +457,7 @@ func hasDGDInternalAnnotations(annotations map[string]string) bool {
 			key == annDGDHubSpec ||
 			key == annDGDSpokeSpec ||
 			key == annDGDSpokeStatus ||
+			key == annDGDSpokeHub ||
 			strings.HasPrefix(key, annDGDCompPrefix) {
 			return true
 		}
@@ -366,6 +472,7 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 		annDGDHubSpec,
 		annDGDSpokeSpec,
 		annDGDSpokeStatus,
+		annDGDSpokeHub,
 		annDGDHubOrigin,
 	} {
 		delAnnFromObj(obj, key)

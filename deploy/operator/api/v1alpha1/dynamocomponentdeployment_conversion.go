@@ -34,6 +34,7 @@ const (
 	annDCDHubSpec     = "nvidia.com/dcd-hub-spec"
 	annDCDSpokeSpec   = "nvidia.com/dcd-spoke-spec"
 	annDCDSpokeStatus = "nvidia.com/dcd-spoke-status"
+	annDCDSpokeHub    = "nvidia.com/dcd-spoke-hub"
 	annDCDHubOrigin   = "nvidia.com/dcd-hub-origin"
 )
 
@@ -81,24 +82,31 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		dst.Spec = semantic
 	}
 
-	if !hubOrigin {
-		if data, err := marshalDCDSpokeSpec(&src.Spec); err == nil {
-			if dst.ObjectMeta.Annotations == nil {
-				dst.ObjectMeta.Annotations = map[string]string{}
-			}
-			dst.ObjectMeta.Annotations[annDCDSpokeSpec] = string(data)
-		}
-		if data, err := json.Marshal(src.Status); err == nil {
-			if dst.ObjectMeta.Annotations == nil {
-				dst.ObjectMeta.Annotations = map[string]string{}
-			}
-			dst.ObjectMeta.Annotations[annDCDSpokeStatus] = string(data)
-		}
-	} else {
+	preserveSpoke := !hubOrigin || hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec)
+	if hubOrigin {
 		scrubDCDAnnotations(&dst.ObjectMeta)
 	}
 	convertDCDStatusTo(&src.Status, &dst.Status)
+	if preserveSpoke {
+		preserveDCDSpoke(src, dst)
+		preserveDCDSpokeHub(dst)
+	}
 	return nil
+}
+
+func preserveDCDSpoke(src *DynamoComponentDeployment, dst *v1beta1.DynamoComponentDeployment) {
+	if data, err := marshalDCDSpokeSpec(&src.Spec); err == nil {
+		if dst.ObjectMeta.Annotations == nil {
+			dst.ObjectMeta.Annotations = map[string]string{}
+		}
+		dst.ObjectMeta.Annotations[annDCDSpokeSpec] = string(data)
+	}
+	if data, err := json.Marshal(src.Status); err == nil {
+		if dst.ObjectMeta.Annotations == nil {
+			dst.ObjectMeta.Annotations = map[string]string{}
+		}
+		dst.ObjectMeta.Annotations[annDCDSpokeStatus] = string(data)
+	}
 }
 
 func overlayDCDHubSpec(base *v1beta1.DynamoComponentDeploymentSpec, semantic *v1beta1.DynamoComponentDeploymentSpec) {
@@ -118,6 +126,53 @@ func overlayDCDHubSpec(base *v1beta1.DynamoComponentDeploymentSpec, semantic *v1
 	}
 }
 
+func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus *DynamoComponentDeploymentStatus, preservedSpec *DynamoComponentDeploymentSpec, preservedStatus *DynamoComponentDeploymentStatus) {
+	if preservedSpec != nil {
+		fillSharedAlphaOnlyFromPreserved(&dstSpec.DynamoComponentDeploymentSharedSpec, &preservedSpec.DynamoComponentDeploymentSharedSpec)
+	}
+	if preservedStatus != nil && dstStatus.Service != nil && preservedStatus.Service != nil && dstStatus.Service.ComponentName == "" {
+		dstStatus.Service.ComponentName = preservedStatus.Service.ComponentName
+	}
+}
+
+type preservedDCDHubSnapshot struct {
+	Spec   string                                  `json:"spec"`
+	Status v1beta1.DynamoComponentDeploymentStatus `json:"status"`
+}
+
+func preserveDCDSpokeHub(dst *v1beta1.DynamoComponentDeployment) {
+	spec, err := marshalDCDHubSpec(&dst.Spec)
+	if err != nil {
+		return
+	}
+	data, err := json.Marshal(preservedDCDHubSnapshot{
+		Spec:   string(spec),
+		Status: dst.Status,
+	})
+	if err == nil {
+		setAnnOnObj(&dst.ObjectMeta, annDCDSpokeHub, string(data))
+	}
+}
+
+func dcdSpokeHubUnmodified(src *v1beta1.DynamoComponentDeployment) bool {
+	raw, ok := src.ObjectMeta.Annotations[annDCDSpokeHub]
+	if !ok || raw == "" {
+		return false
+	}
+	spec, err := marshalDCDHubSpec(&src.Spec)
+	if err != nil {
+		return false
+	}
+	current, err := json.Marshal(preservedDCDHubSnapshot{
+		Spec:   string(spec),
+		Status: src.Status,
+	})
+	if err != nil {
+		return false
+	}
+	return string(current) == raw
+}
+
 // ConvertFrom converts from the hub (v1beta1) DynamoComponentDeployment into
 // this v1alpha1 instance.
 func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
@@ -129,18 +184,31 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 	dst.Spec.BackendFramework = src.Spec.BackendFramework
 
+	var preservedSpokeSpec *DynamoComponentDeploymentSpec
+	var preservedSpokeStatus *DynamoComponentDeploymentStatus
 	if raw, ok := dst.ObjectMeta.Annotations[annDCDSpokeSpec]; ok && raw != "" {
 		if spec, ok := restoreDCDSpokeSpec(raw); ok {
-			dst.Spec = spec
-			if rawStatus, ok := dst.ObjectMeta.Annotations[annDCDSpokeStatus]; ok && rawStatus != "" {
-				_ = json.Unmarshal([]byte(rawStatus), &dst.Status)
-			} else {
-				convertDCDStatusFrom(&src.Status, &dst.Status)
-			}
-			scrubDCDAnnotations(&dst.ObjectMeta)
-			delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
-			return nil
+			preservedSpokeSpec = &spec
 		}
+	}
+	if rawStatus, ok := dst.ObjectMeta.Annotations[annDCDSpokeStatus]; ok && rawStatus != "" {
+		var status DynamoComponentDeploymentStatus
+		if err := json.Unmarshal([]byte(rawStatus), &status); err == nil {
+			preservedSpokeStatus = &status
+		}
+	}
+	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
+	// matching means no hub fields changed. Metadata was copied above and rides along.
+	if preservedSpokeSpec != nil && dcdSpokeHubUnmodified(src) {
+		dst.Spec = *preservedSpokeSpec.DeepCopy()
+		if preservedSpokeStatus != nil {
+			dst.Status = *preservedSpokeStatus.DeepCopy()
+		} else {
+			convertDCDStatusFrom(&src.Status, &dst.Status)
+		}
+		scrubDCDAnnotations(&dst.ObjectMeta)
+		delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
+		return nil
 	}
 
 	generatedPodTemplate := src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
@@ -151,6 +219,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	convertDCDStatusFrom(&src.Status, &dst.Status)
+	fillDCDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus)
 	scrubDCDAnnotations(&dst.ObjectMeta)
 	if dcdNeedsHubSpecPreservation(&src.Spec, generatedPodTemplate) {
 		data, err := marshalDCDHubSpec(&src.Spec)
@@ -161,7 +230,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			dst.ObjectMeta.Annotations = map[string]string{}
 		}
 		dst.ObjectMeta.Annotations[annDCDHubSpec] = string(data)
-	} else {
+	} else if preservedSpokeSpec == nil {
 		if dst.ObjectMeta.Annotations == nil {
 			dst.ObjectMeta.Annotations = map[string]string{}
 		}

@@ -102,6 +102,154 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
+func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ServiceName:   "worker",
+					ComponentType: string(v1beta1.ComponentTypeWorker),
+				},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	hub.Spec.Components[0].ComponentType = v1beta1.ComponentTypePlanner
+
+	restored := &DynamoGraphDeployment{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if restored.Spec.Services["worker"].ComponentType != string(v1beta1.ComponentTypePlanner) {
+		t.Fatalf("componentType = %q, want %q", restored.Spec.Services["worker"].ComponentType, v1beta1.ComponentTypePlanner)
+	}
+}
+
+func TestDGD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ServiceName:   "worker",
+					ComponentType: string(v1beta1.ComponentTypeWorker),
+				},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	hub.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "worker:edited"}},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if _, ok := spoke.Annotations[annDGDHubSpec]; !ok {
+		t.Fatalf("expected current hub-only edit to be preserved in %q", annDGDHubSpec)
+	}
+
+	restored := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(hub.Spec.Components[0].PodTemplate, restored.Spec.Components[0].PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch after preserving hub-only edit (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
+	original := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-edit", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+				},
+			},
+		},
+	}
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+
+	createTrue := true
+	name := "edited-pvc"
+	spoke.Spec.PVCs = []PVC{
+		{
+			Create:           &createTrue,
+			Name:             &name,
+			StorageClass:     "standard",
+			Size:             resource.MustParse("10Gi"),
+			VolumeAccessMode: corev1.ReadWriteOnce,
+		},
+	}
+
+	restoredHub := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	restoredSpoke := &DynamoGraphDeployment{}
+	if err := restoredSpoke.ConvertFrom(restoredHub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(spoke.Spec.PVCs, restoredSpoke.Spec.PVCs); diff != "" {
+		t.Fatalf("PVCs mismatch after preserving alpha-only edit (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-edit", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ServiceName:   "worker",
+					ComponentType: string(v1beta1.ComponentTypeWorker),
+				},
+			},
+		},
+		Status: DynamoGraphDeploymentStatus{
+			Services: map[string]ServiceReplicaStatus{
+				"worker": {
+					ComponentName:  "worker-old",
+					ComponentNames: []string{"worker-old"},
+				},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	status := hub.Status.Components["worker"]
+	status.ComponentNames = []string{"worker-new"}
+	hub.Status.Components["worker"] = status
+
+	restored := &DynamoGraphDeployment{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if got := restored.Status.Services["worker"].ComponentName; got != "worker-new" {
+		t.Fatalf("componentName = %q, want worker-new", got)
+	}
+}
+
 func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},
