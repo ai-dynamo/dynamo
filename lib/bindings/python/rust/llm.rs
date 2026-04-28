@@ -24,6 +24,7 @@
 use super::*;
 
 pub mod aic_callback;
+pub mod agents;
 pub mod entrypoint;
 pub mod fpm;
 pub mod kv;

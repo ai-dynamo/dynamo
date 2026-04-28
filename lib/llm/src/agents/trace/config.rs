@@ -19,16 +19,21 @@ pub struct AgentTracePolicy {
     pub tool_events_enabled: bool,
     pub tool_events_topic: String,
     pub tool_events_namespace: Option<String>,
+    pub tool_events_zmq_endpoint: Option<String>,
+    pub tool_events_zmq_topic: Option<String>,
 }
 
 static POLICY: OnceLock<AgentTracePolicy> = OnceLock::new();
 
 fn load_from_env() -> AgentTracePolicy {
     let jsonl_path = non_empty_env("DYN_AGENT_TRACE_JSONL");
-    let tool_events_enabled = env_truthy("DYN_AGENT_TRACE_TOOL_EVENTS");
     let tool_events_topic = non_empty_env("DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC")
         .unwrap_or_else(|| DEFAULT_TOOL_EVENTS_TOPIC.to_string());
     let tool_events_namespace = non_empty_env("DYN_AGENT_TRACE_NAMESPACE");
+    let tool_events_zmq_endpoint = non_empty_env("DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT");
+    let tool_events_zmq_topic = non_empty_env("DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC");
+    let tool_events_enabled =
+        env_truthy("DYN_AGENT_TRACE_TOOL_EVENTS") || tool_events_zmq_endpoint.is_some();
     let capacity = env_parse("DYN_AGENT_TRACE_CAPACITY", DEFAULT_CAPACITY);
     let jsonl_buffer_bytes = env_parse(
         "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES",
@@ -47,6 +52,8 @@ fn load_from_env() -> AgentTracePolicy {
         tool_events_enabled,
         tool_events_topic,
         tool_events_namespace,
+        tool_events_zmq_endpoint,
+        tool_events_zmq_topic,
     }
 }
 

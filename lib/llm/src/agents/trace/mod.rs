@@ -5,6 +5,7 @@ mod bus;
 pub mod config;
 mod integration;
 mod publisher;
+mod relay;
 mod sink;
 pub mod stream;
 pub mod types;
@@ -15,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub(crate) use integration::{request_metrics, start_tool_event_ingest_from_policy};
 pub use publisher::AgentToolEventPublisher;
+pub use relay::AgentToolEventRelay;
 pub use types::{
     AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
     TraceEventType, TraceSchema, WorkerInfo,
