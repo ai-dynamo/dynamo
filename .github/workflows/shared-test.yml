@@ -158,7 +158,7 @@ jobs:
       - name: Get Models from S3 and seed them to NVMe
         uses: ./.github/actions/get-test-models
         with:
-          nvme_dir: '/scratch'
+          nvme_dir: '/tmp'
           seed_model_names: ${{ inputs.seed_model_names }}
       # - name: Run Sanity Check on Runtime Image
       #   shell: bash
