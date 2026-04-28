@@ -70,7 +70,7 @@ runs:
 
           t0=$(date +%s)
           echo "  ⏳ Downloading ${model_name}..."
-          CONCURRENCY=256
+          CONCURRENCY=32
           if ${S5CMD_BIN} sync \
               --concurrency ${CONCURRENCY} \
               --exclude "*.bin" \
