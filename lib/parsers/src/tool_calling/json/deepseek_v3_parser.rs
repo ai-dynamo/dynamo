@@ -274,7 +274,7 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[test]
+    #[test] // CASE.2
     fn test_parse_tool_calls_deepseek_v3_basic() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(args["location"], "Paris");
     }
 
-    #[test]
+    #[test] // CASE.13
     fn test_parse_tool_calls_deepseek_v3_with_normal_text() {
         let text = r#"The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(args["location"], "New York");
     }
 
-    #[test]
+    #[test] // CASE.4 — recovery from missing start
     fn test_parse_tool_calls_deepseek_v3_without_tool_call_start_token() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
 ```json
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test]
+    #[test] // CASE.2, CASE.7
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_multiple_args() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(args["radius"], 50);
     }
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_tool_calls_deepseek_v3_with_invalid_json() {
         // Everything is normal text in case of invalid json
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather}{location": "HongKong"}
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test]
+    #[test] // CASE.2, CASE.13
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_normal_text() {
         // Everything is normal text in case of invalid json
         let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test]
+    #[test] // CASE.7, CASE.22
     fn test_parse_tool_calls_deepseek_v3_with_multiline_json() {
         let text = r#"I'll help you understand this Xiaohongshu codebase. Let me start by exploring the structure
   and key files to provide you with a comprehensive
@@ -474,7 +474,7 @@ mod tests {
 mod detect_parser_tests {
     use super::super::config::ToolCallConfig;
     use super::*;
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start_deepseek_v3_chunk_with_tool_call_start_token() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}"#;
         let config = match ToolCallConfig::deepseek_v3().parser_config {
@@ -485,7 +485,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start_deepseek_v3_chunk_without_tool_call_start_token() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}"#;
         let config = match ToolCallConfig::deepseek_v3().parser_config {
@@ -496,7 +496,7 @@ mod detect_parser_tests {
         assert!(!result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start_deepseek_v3_chunk_with_tool_call_start_token_in_middle() {
         let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}"#;
         let config = match ToolCallConfig::deepseek_v3().parser_config {
@@ -507,7 +507,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.8
     fn test_detect_tool_call_start_deepseek_v3_partial_tokens() {
         // Test partial token detection for streaming scenarios with unicode characters
         let config = match ToolCallConfig::deepseek_v3().parser_config {

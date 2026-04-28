@@ -33,6 +33,7 @@ inputs:
   enable_coverage:
     description: 'Enable coverage collection (true/false)'
     required: false
+    type: string
     default: 'false'
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
