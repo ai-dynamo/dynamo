@@ -285,6 +285,44 @@ async def test_connector_set_replicas_success(connector):
 
 
 @pytest.mark.asyncio
+async def test_connector_set_replicas_rejected(connector):
+    """REJECTED is a budget-gate outcome — must not raise, must log a warning."""
+    target_replicas = [
+        TargetReplica(
+            sub_component_type=SubComponentType.PREFILL,
+            component_name="prefill-svc",
+            desired_replicas=2,
+        )
+    ]
+
+    with patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "ns"}
+    ):
+        mock_response = ScaleResponse(
+            status=ScaleStatus.REJECTED,
+            message="budget exceeded",
+            current_replicas={},
+        )
+        mock_client = AsyncMock()
+        mock_client.send_scale_request = AsyncMock(return_value=mock_response)
+        connector.remote_client = mock_client
+
+        with patch("dynamo.planner.connectors.global_planner.logger") as mock_logger:
+            # Must not raise — REJECTED is a legitimate business outcome.
+            await connector.set_component_replicas(target_replicas, blocking=False)
+
+            # Warning logged, not error.
+            mock_logger.warning.assert_called_once()
+            warning_msg = mock_logger.warning.call_args[0][0]
+            assert "rejected" in warning_msg.lower()
+            assert "budget exceeded" in warning_msg
+            mock_logger.error.assert_not_called()
+
+        # Client was still called — execution continued normally.
+        mock_client.send_scale_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_connector_error_handling(connector):
     """Test GlobalPlannerConnector error handling"""
     # Empty list
@@ -323,11 +361,64 @@ async def test_connector_unsupported_and_noop_operations(connector):
     with pytest.raises(NotImplementedError, match="batch operations"):
         await connector.remove_component(SubComponentType.DECODE)
 
-    # No-op operations
+    # validate_deployment remains a local no-op (GlobalPlanner validates).
     await connector.validate_deployment(
         prefill_component_name="p", decode_component_name="d"
     )
+
+    # wait_for_deployment_ready with no local k8s connector available must
+    # degrade to a no-op rather than raise, so out-of-cluster callers still
+    # work.
+    connector._local_k8s_connector = None
+    connector._local_k8s_init_attempted = True
     await connector.wait_for_deployment_ready()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_planner", [False, True])
+async def test_connector_wait_for_deployment_ready_delegates_to_local_k8s(
+    connector_runtime, include_planner
+):
+    """wait_for_deployment_ready must wait for the pool's own workers to be
+    ready before returning. Without this, _async_init returns within
+    milliseconds and get_worker_info races with MDC registration, caching a
+    fallback WorkerInfo (context_length/max_kv_tokens unset) for the pod's
+    lifetime and silently disabling load scaling.
+
+    Parametrized to guard against a refactor that hardcodes ``include_planner``
+    or drops the kwarg when forwarding.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.wait_for_deployment_ready = AsyncMock()
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    await c.wait_for_deployment_ready(include_planner=include_planner)
+    fake_local.wait_for_deployment_ready.assert_awaited_once_with(
+        include_planner=include_planner
+    )
+
+
+@pytest.mark.asyncio
+async def test_connector_wait_for_deployment_ready_propagates_exceptions(
+    connector_runtime,
+):
+    """A TimeoutError (or similar) from the pool-local wait must propagate so
+    _async_init surfaces a broken pool DGD rather than silently swallowing the
+    failure and falling back into the original bug (fallback WorkerInfo cached
+    forever). Mirrors the standalone environment=kubernetes behavior.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.wait_for_deployment_ready = AsyncMock(
+        side_effect=TimeoutError("workers not ready")
+    )
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    with pytest.raises(TimeoutError, match="workers not ready"):
+        await c.wait_for_deployment_ready(include_planner=False)
 
 
 def test_connector_model_name_and_predicted_load(connector_runtime):

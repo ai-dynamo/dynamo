@@ -42,7 +42,7 @@ class DiffusionConfig:
     endpoint: str = "generate"
     discovery_backend: str = "etcd"
     request_plane: str = "tcp"
-    event_plane: str = "nats"
+    event_plane: Optional[str] = None
 
     # Model config
     model_path: str = DEFAULT_VIDEO_MODEL_PATH

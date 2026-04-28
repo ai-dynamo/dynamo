@@ -154,13 +154,15 @@ impl ListenerLoop {
                 .data_parallel_rank
                 .map_or(dp_rank, |rank| rank.cast_unsigned());
             for raw_event in batch.events {
-                let placement_event = convert_event(
+                let Some(placement_event) = convert_event(
                     raw_event,
                     seq,
                     block_size,
                     WorkerWithDpRank::new(worker_id, effective_dp_rank),
                     warning_count,
-                );
+                ) else {
+                    continue;
+                };
                 if !placement_event.placement.is_local_gpu() {
                     continue;
                 }
@@ -223,13 +225,15 @@ impl ListenerLoop {
             .data_parallel_rank
             .map_or(self.dp_rank, |rank| rank.cast_unsigned());
         for raw_event in batch.events {
-            let placement_event = convert_event(
+            let Some(placement_event) = convert_event(
                 raw_event,
                 seq,
                 self.block_size,
                 WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
                 &self.warning_count,
-            );
+            ) else {
+                continue;
+            };
             if !placement_event.placement.is_local_gpu() {
                 continue;
             }

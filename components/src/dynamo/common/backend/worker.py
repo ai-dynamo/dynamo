@@ -36,7 +36,7 @@ class WorkerConfig:
     endpoint_types: str = "chat,completions"
     discovery_backend: str = "etcd"
     request_plane: str = "tcp"
-    event_plane: str = "nats"
+    event_plane: Optional[str] = None
     use_kv_events: bool = False
     custom_jinja_template: Optional[str] = None
     metrics_labels: list = field(default_factory=list)
@@ -98,6 +98,8 @@ class Worker:
             async for chunk in self.engine.generate(request, context):
                 if context.is_stopped():
                     break
+                if "index" not in chunk:
+                    chunk["index"] = 0
                 yield chunk
         except DynamoException:
             raise
