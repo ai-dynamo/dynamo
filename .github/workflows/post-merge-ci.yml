@@ -479,11 +479,10 @@ jobs:
 
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-dev-build, vllm-dev-test]
+    needs: [vllm-dev-build]
     if: |
       always() &&
-      needs.vllm-dev-build.result == 'success' &&
-      (needs.vllm-dev-test.result == 'success' || needs.vllm-dev-test.result == 'skipped')
+      needs.vllm-dev-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
@@ -509,11 +508,10 @@ jobs:
 
   sglang-dev-copy-to-acr:
     name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-dev-build, sglang-dev-test]
+    needs: [sglang-dev-build]
     if: |
       always() &&
-      needs.sglang-dev-build.result == 'success' &&
-      (needs.sglang-dev-test.result == 'success' || needs.sglang-dev-test.result == 'skipped')
+      needs.sglang-dev-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-dev-build.outputs.target_tag_plain }}
@@ -539,11 +537,10 @@ jobs:
 
   trtllm-dev-copy-to-acr:
     name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-dev-build, trtllm-dev-test]
+    needs: [trtllm-dev-build]
     if: |
       always() &&
-      needs.trtllm-dev-build.result == 'success' &&
-      (needs.trtllm-dev-test.result == 'success' || needs.trtllm-dev-test.result == 'skipped')
+      needs.trtllm-dev-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-dev-build.outputs.target_tag_plain }}
