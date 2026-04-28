@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.common.utils.output_modalities import RequestType
+
 try:
     from dynamo.vllm.omni import stage_router
 except ImportError:
@@ -336,7 +338,9 @@ class TestStageRouterContextNormalization:
         )
 
         request = {"prompt": "hi", "data_source": "url", "response_format": "mp3"}
-        p1, p2 = _patched_generate(router, request)
+        p1, p2 = _patched_generate(
+            router, request, request_type=RequestType.AUDIO_GENERATION
+        )
         with p1, p2:
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()
@@ -370,7 +374,9 @@ class TestStageRouterContextNormalization:
         )
 
         request = {"prompt": "hi", "data_source": "b64_json", "response_format": "opus"}
-        p1, p2 = _patched_generate(router, request)
+        p1, p2 = _patched_generate(
+            router, request, request_type=RequestType.AUDIO_GENERATION
+        )
         with p1, p2:
             with patch.object(
                 stage_router, "shm_deserialize", return_value=SimpleNamespace()

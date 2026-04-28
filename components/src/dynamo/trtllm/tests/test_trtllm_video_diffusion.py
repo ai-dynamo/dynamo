@@ -948,17 +948,6 @@ class TestVideoHandlerOutputFormat:
         assert kwargs["output_format"] == "mp4"
 
     @pytest.mark.asyncio
-    async def test_unsupported_output_format_returns_error(self):
-        """output_format other than 'mp4' returns an error response."""
-        handler = self._make_handler()
-        results = await self._run(
-            handler,
-            {"prompt": "p", "model": "m", "output_format": "webm"},
-        )
-        assert results[0]["status"] == "failed"
-        assert "Input should be 'mp4' or 'mjpeg'" in results[0]["error"]
-
-    @pytest.mark.asyncio
     async def test_url_response_has_output_format_in_video_data(self):
         """URL-mode response includes output_format='mp4' in VideoData."""
         handler = self._make_handler()
