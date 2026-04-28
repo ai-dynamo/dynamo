@@ -140,19 +140,21 @@ class DiffusionFormatter:
         try:
             start_time = time.time()
             frame_list = normalize_video_frames(images)
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
+            with tempfile.NamedTemporaryFile(
+                suffix=f".{output_format}", delete=True
+            ) as tmp:
                 await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
                 video_bytes = tmp.read()
 
             if response_format == "b64_json":
                 video_data = VideoData(
-                    output_format="mp4",
+                    output_format=output_format,
                     b64_json=base64.b64encode(video_bytes).decode("utf-8"),
                 )
             else:
                 video_url = await upload_to_fs(
                     self._media_fs,
-                    f"videos/{request_id}.mp4",
+                    f"videos/{request_id}.{output_format}",
                     video_bytes,
                     self._media_http_url,
                 )

@@ -44,9 +44,9 @@ class TestNvCreateVideoRequest:
         req = NvCreateVideoRequest(prompt="p", model="m", output_format="mjpeg")
         assert req.output_format == "mjpeg"
 
-    def test_output_format_invalid_raises(self):
-        with pytest.raises(ValidationError):
-            NvCreateVideoRequest(prompt="p", model="m", output_format="webm")
+    def test_output_format_arbitrary_string(self):
+        req = NvCreateVideoRequest(prompt="p", model="m", output_format="webm")
+        assert req.output_format == "webm"
 
     def test_response_format_optional(self):
         req = NvCreateVideoRequest(prompt="p", model="m")
@@ -120,6 +120,10 @@ class TestVideoData:
         assert d.output_format == "mp4"
         assert d.url is None
         assert d.b64_json is None
+
+    def test_output_format_arbitrary_string(self):
+        d = VideoData(output_format="webm")
+        assert d.output_format == "webm"
 
     def test_with_url(self):
         d = VideoData(output_format="mp4", url="http://example.com/v.mp4")

@@ -77,8 +77,8 @@ class NvCreateVideoRequest(BaseModel):
     """How the generated data should be returned: 'url' or 'b64_json'.
     If unset, handlers default to 'url'."""
 
-    output_format: Optional[Literal["mp4", "mjpeg"]] = None
-    """Requested container format. Only 'mp4' and 'mjpeg' are currently supported.
+    output_format: Optional[str] = None
+    """Requested container format (e.g. 'mp4', 'mjpeg').
     This is a hint; check output_format in the response data for the actual format."""
 
     stream: Optional[bool] = None
@@ -94,7 +94,7 @@ class VideoData(BaseModel):
     Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
     """
 
-    output_format: Literal["mp4", "mjpeg"]
+    output_format: str
     """Actual container format of this video."""
 
     url: Optional[str] = None
