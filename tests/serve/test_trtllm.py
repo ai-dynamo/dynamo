@@ -616,7 +616,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(300)
