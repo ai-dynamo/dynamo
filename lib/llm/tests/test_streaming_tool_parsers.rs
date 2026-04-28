@@ -1418,6 +1418,10 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
+    /// `CASE.5` + `CASE.8` + `CASE.16` — kimi-k2 truncated mid-argument
+    /// (no `<|tool_call_end|>`), streaming, customer regression. Also
+    /// validates `CASE.12` finish_reason=stop passthrough.
+    ///
     /// Repro for the production leak observed against kimi-k2-6: the
     /// model stops mid-argument with
     /// `finish_reason: stop` (not max_tokens), having emitted
