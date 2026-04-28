@@ -150,7 +150,7 @@ class TrtllmLLMEngine(LLMEngine):
             output_tokens_per_choice: dict[int, int] = {}
             async for res in generation_result:
                 if not res.outputs and not res.finished:
-                    yield {"finish_reason": "error", "token_ids": []}
+                    yield {"finish_reason": "error", "token_ids": [], "index": 0}
                     break
 
                 for output in res.outputs:

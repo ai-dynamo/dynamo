@@ -476,7 +476,9 @@ class InstrumentedScheduler(AsyncScheduler):
           async precondition — see ``Scheduler._is_blocked_waiting_status`` /
           ``Scheduler._enqueue_waiting_request``:
 
-              WAITING_FOR_FSM             -- grammar/structured-output compile
+              WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+                                          -- grammar/structured-output compile
+                                          -- WAITING_FOR_FSM on older vLLM
               WAITING_FOR_REMOTE_KVS      -- disagg decode-engine KV transfer
               WAITING_FOR_STREAMING_REQ   -- streaming request handshake
 
@@ -487,8 +489,9 @@ class InstrumentedScheduler(AsyncScheduler):
         (see ``Scheduler.schedule`` at the ``load_kv_async`` branch), so it is
         the correct decode-KV-context value for FPM purposes.
 
-        ``WAITING_FOR_FSM`` / ``WAITING_FOR_STREAMING_REQ`` have no KV computed
-        yet — they are queued prefill requests blocked on a precondition.
+        ``WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR`` /
+        ``WAITING_FOR_STREAMING_REQ`` have no KV computed yet — they are queued
+        prefill requests blocked on a precondition.
 
         Only iterating ``self.waiting`` (the previous behaviour) silently
         misses every ``WAITING_FOR_REMOTE_KVS`` request on the decode engine
@@ -511,8 +514,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 # start generating -- count as queued decode.
                 decode_kv.add(request.num_computed_tokens)
             else:
-                # WAITING_FOR_FSM / WAITING_FOR_STREAMING_REQ: no KV yet,
-                # essentially a queued prefill awaiting a precondition.
+                # Structured-output waits / WAITING_FOR_STREAMING_REQ:
+                # no KV yet, essentially a queued prefill awaiting a
+                # precondition.
                 prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(
