@@ -15,19 +15,6 @@ inputs:
   seed_model_names:
     description: 'Space-delimited list of HuggingFace hub model directory names to copy from local_models_dir to NVMe before GPU tests (e.g. "models--Org--Name"). When empty, no seed is performed.'
     required: true
-    default: >-
-      models--Qwen--Qwen3-0.6B
-      models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B
-      models--openai--gpt-oss-20b
-      models--Qwen--Qwen3-Embedding-4B
-      models--silence09--DeepSeek-R1-Small-2layers
-      models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
-      models--Tongyi-MAI--Z-Image-Turbo
-      models--Qwen--Qwen3-VL-2B-Instruct
-      models--Qwen--Qwen2-VL-7B-Instruct
-      models--codelion--Qwen3-0.6B-accuracy-recovery-lora
-      models--llava-hf--llava-1.5-7b-hf
-
 runs:
   using: "composite"
   steps:
@@ -83,7 +70,7 @@ runs:
 
           t0=$(date +%s)
           echo "  ⏳ Downloading ${model_name}..."
-          CONCURRENCY=32
+          CONCURRENCY=256
           if ${S5CMD_BIN} sync --concurrency ${CONCURRENCY} "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
             echo "  ✅ ${model_name} ($(( $(date +%s) - t0 ))s)"
             COPIED=$((COPIED+1))
