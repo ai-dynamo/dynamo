@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-backend-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared runtime glue for Rust LLM backends."
+# examples/mocker is its own workspace member crate, not a cargo-auto-discovered example.
+autoexamples = false
+
+[features]
+# Enables the conformance test kit (testing.rs). Intended for `[dev-dependencies]`
+# in backend crates — adds no weight to production binaries.
+testing = []
+
+[dependencies]
+dynamo-runtime = { workspace = true }
+dynamo-llm = { workspace = true }
+dynamo-protocols = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -146,13 +146,14 @@ class TrtllmLLMEngine(LLMEngine):
             num_output_tokens_so_far = 0
             async for res in generation_result:
                 if not res.outputs and not res.finished:
-                    yield {"finish_reason": "error", "token_ids": []}
+                    yield {"finish_reason": "error", "token_ids": [], "index": 0}
                     break
 
                 output = res.outputs[0]
                 next_total = len(output.token_ids)
                 out: GenerateChunk = {
-                    "token_ids": output.token_ids[num_output_tokens_so_far:]
+                    "token_ids": output.token_ids[num_output_tokens_so_far:],
+                    "index": 0,
                 }
 
                 if output.finish_reason:

@@ -101,7 +101,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_json so that the jail passes the
     /// entire group to the parser rather than emitting the second (and later) calls
     /// as raw trailing text.
-    #[test]
+    #[test] // CASE.2, CASE.20
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<tool_call>".to_string()],
