@@ -472,6 +472,7 @@ sglang_configs = {
             pytest.mark.profiled_vram_gib(19.3),
             pytest.mark.timeout(240),
             pytest.mark.pre_merge,
+            pytest.mark.skip, # Model size issues in CI, long download times leading to timeouts
         ],
         model="Tongyi-MAI/Z-Image-Turbo",
         env={},
@@ -511,6 +512,7 @@ sglang_configs = {
             pytest.mark.profiled_vram_gib(17.6),
             pytest.mark.timeout(180),
             pytest.mark.pre_merge,
+            pytest.mark.skip, # Model size issues in CI, long download times leading to timeouts
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         env={},
