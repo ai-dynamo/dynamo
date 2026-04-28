@@ -16,6 +16,10 @@ keywords = ["profiling", "tracing", "perfetto", "nvtx", "distributed"]
 name = "dynamo-sysprofile-merge"
 path = "src/bin/merge.rs"
 
+[[bin]]
+name = "dynamo-sysprofile-demo"
+path = "src/bin/demo.rs"
+
 [features]
 default = []
 nvtx = ["dep:cudarc"]
