@@ -33,11 +33,7 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Env var controlling the default for `LocalModelBuilder::self_host_metadata`.
-/// Falsy: `0` / `false` / `no` / `off` / empty string (case-insensitive).
-/// Anything else, including unset, leaves the default ON. Explicit setter
-/// calls win. Workers without a `system_status_server` (no `DYN_SYSTEM_PORT`)
-/// gracefully skip the self-host rewrite — see [`move_to_self_host`].
+/// Default for `LocalModelBuilder::self_host_metadata`. Falsy values opt out.
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
@@ -161,11 +157,8 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in or out of self-hosting MDC artifacts on this worker's
-    /// `system_status_server`. Default `true`; flipped via
-    /// [`ENV_SELF_HOST_METADATA`] (falsy values opt out). When enabled
-    /// but `DYN_SYSTEM_PORT` isn't set, [`move_to_self_host`] logs a
-    /// warning and silently no-ops.
+    /// Opt in or out of self-hosting MDC artifacts. Default `true`.
+    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -574,7 +567,7 @@ impl LocalModel {
             };
             // Canonicalize so `Url::from_file_path` accepts it and the
             // registry holds an absolute path.
-            let absolute = match std::fs::canonicalize(&local_path) {
+            let absolute = match fs::canonicalize(&local_path) {
                 Ok(p) => p,
                 Err(err) => {
                     tracing::warn!(

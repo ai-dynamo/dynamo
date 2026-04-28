@@ -365,14 +365,16 @@ async fn stream_to_tmp(
     let stream = response.bytes_stream().map_err(std::io::Error::other);
     // `cap + 1` so a body of exactly `cap` passes but anything
     // larger trips the `written > cap` check below.
-    let mut reader = StreamReader::new(stream).take(cap.saturating_add(1));
+    let mut reader = StreamReader::new(stream).take(cap + 1);
     let mut file = tokio::fs::File::create(tmp)
         .await
         .with_context(|| format!("creating {}", tmp.display()))?;
     let written = tokio::io::copy(&mut reader, &mut file)
         .await
         .with_context(|| format!("streaming body from {uri} to {}", tmp.display()))?;
-    file.flush().await.ok();
+    file.flush()
+        .await
+        .with_context(|| format!("flushing {}", tmp.display()))?;
     if written > cap {
         anyhow::bail!("{uri} body exceeds cap {cap}");
     }
@@ -937,7 +939,7 @@ impl ModelDeploymentCard {
             symlink_force(&blob, &slug_dir.join(filename))?;
         }
 
-        tracing::info!(
+        tracing::debug!(
             display_name = %self.display_name,
             artifact_count = entries.len(),
             fetched,
