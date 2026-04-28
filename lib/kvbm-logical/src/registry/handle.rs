@@ -12,7 +12,14 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
+// Under `#[cfg(test)]`, swap in `tracing-mutex`'s parking_lot wrapper
+// so the test suite enforces the documented `attachments → store`
+// lock-acquisition ordering at runtime via a global DAG. Identical API
+// in release builds; zero cost.
+#[cfg(not(test))]
 use parking_lot::Mutex;
+#[cfg(test)]
+use tracing_mutex::parkinglot::Mutex;
 
 /// Handle that represents a block registration in the global registry.
 /// This handle is cloneable and can be shared across pools.

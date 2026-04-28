@@ -26,7 +26,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 
+// Under `#[cfg(test)]` use `tracing-mutex`'s parking_lot wrapper, which
+// is API-identical to `parking_lot::Mutex` but builds a global
+// lock-acquisition DAG and panics on order inversions or cycles. This
+// turns the documented `attachments → store` ordering invariant into
+// runtime-enforced behaviour during the test suite. In release/non-test
+// builds the alias resolves to plain `parking_lot::Mutex` — zero cost.
+#[cfg(not(test))]
 use parking_lot::Mutex;
+#[cfg(test)]
+use tracing_mutex::parkinglot::Mutex;
 
 use crate::BlockId;
 use crate::blocks::{
@@ -175,7 +184,7 @@ pub(crate) struct BlockStore<T: BlockMetadata> {
     /// `Primary { weak: dead }` for a concurrent lookup to observe.
     /// Production builds elide the field entirely.
     #[cfg(test)]
-    release_primary_gate: parking_lot::Mutex<()>,
+    release_primary_gate: Mutex<()>,
 
     /// Test-only arrival counter. Incremented at the very first
     /// instruction of every `release_primary` call (before the gate
@@ -214,7 +223,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             total_blocks,
             metrics,
             #[cfg(test)]
-            release_primary_gate: parking_lot::Mutex::new(()),
+            release_primary_gate: Mutex::new(()),
             #[cfg(test)]
             release_primary_arrivals: std::sync::atomic::AtomicU64::new(0),
         })
@@ -226,7 +235,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
     /// can drive the eager `Primary → Inactive` branch
     /// deterministically. Drop the returned guard to resume.
     #[cfg(test)]
-    pub(crate) fn pause_release_primary(&self) -> parking_lot::MutexGuard<'_, ()> {
+    pub(crate) fn pause_release_primary(&self) -> tracing_mutex::parkinglot::MutexGuard<'_, ()> {
         self.release_primary_gate.lock()
     }
 

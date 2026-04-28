@@ -4580,6 +4580,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-mutex",
  "tracing-subscriber",
  "xxhash-rust",
 ]
@@ -8976,6 +8977,17 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-mutex"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ab88ec7082243b1c0b6087242d8d52d07fefc7c5bd1961f1ad50c6853faac76"
+dependencies = [
+ "autocfg",
+ "lock_api",
+ "parking_lot",
 ]
 
 [[package]]

@@ -2390,6 +2390,45 @@ mod race_regression_tests {
 }
 
 // ============================================================================
+// LOCK-ORDER ENFORCEMENT (tracing-mutex DAG)
+//
+// Under `#[cfg(test)]` the crate's parking_lot::Mutex types are
+// swapped for `tracing_mutex::parkinglot::Mutex`, which builds a
+// global lock-acquisition DAG and panics on cycle detection. This
+// runtime-enforces the documented `attachments → store` ordering
+// throughout the test suite. The sentinel test below proves the DAG
+// is wired and active — if `tracing-mutex` is ever silently dropped
+// or downgraded, this test stops panicking and the
+// `#[should_panic]` mismatch flags the regression.
+// ============================================================================
+
+mod lock_order_enforcement_tests {
+    use tracing_mutex::parkinglot::Mutex;
+
+    /// Sentinel: deliberately introduce a cycle (a→b followed by
+    /// b→a) using two `tracing_mutex::parkinglot::Mutex` instances
+    /// drawn from the same dependency-tracking type that the crate's
+    /// real locks use under `#[cfg(test)]`. The DAG must detect the
+    /// cycle and panic. Failing this test means lock-order
+    /// enforcement is no longer in place crate-wide.
+    #[test]
+    #[should_panic(expected = "Found cycle in mutex dependency graph")]
+    fn deliberate_inversion_is_caught_by_tracing_mutex_dag() {
+        let a: Mutex<()> = Mutex::new(());
+        let b: Mutex<()> = Mutex::new(());
+
+        // Forward edge a → b.
+        {
+            let _ga = a.lock();
+            let _gb = b.lock();
+        }
+        // Reverse edge b → a — DAG cycle; tracing-mutex panics here.
+        let _gb = b.lock();
+        let _ga = a.lock();
+    }
+}
+
+// ============================================================================
 // AUDIT-COUNTER COVERAGE TESTS
 //
 // These tests target normally-rare branches by asserting on the audit

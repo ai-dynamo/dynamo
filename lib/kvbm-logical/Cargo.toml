@@ -41,4 +41,9 @@ rand_chacha = "0.9"
 rstest = "0.26"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# `tracing-mutex` wraps parking_lot's primitives and builds a runtime
+# lock-acquisition DAG, panicking on order inversions / cycles. Used
+# only under `#[cfg(test)]` because the per-acquire global-DAG cost is
+# unacceptable on production hot paths.
+tracing-mutex = { version = "0.3", features = ["parking_lot"] }
 tracing-subscriber = { workspace = true }
