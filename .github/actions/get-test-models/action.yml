@@ -54,11 +54,11 @@ runs:
         fi
         ${S5CMD_BIN} version
 
-    - name: sleep
-      shell: bash
-      run: |
-        set +e
-        sleep 30000
+    # - name: sleep
+    #   shell: bash
+    #   run: |
+    #     set +e
+    #     sleep 30000
 
     - name: Seed model cache to NVMe
       shell: bash
