@@ -49,52 +49,79 @@ jobs:
   # FRAMEWORK PIPELINES (build-only)
   # ============================================================================
 
-  vllm-pipeline:
+  vllm-build:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init]
     if: inputs.build_vllm
-    uses: ./.github/workflows/build-flavor.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-      push_image: true
-      run_compliance_scan: false
-      copy_to_acr: true
     secrets: inherit
 
-  sglang-pipeline:
+  sglang-build:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [init]
     if: inputs.build_sglang
-    uses: ./.github/workflows/build-flavor.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-      push_image: true
-      run_compliance_scan: false
-      copy_to_acr: true
     secrets: inherit
 
-  trtllm-pipeline:
+  trtllm-build:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [init]
     if: inputs.build_trtllm
-    uses: ./.github/workflows/build-flavor.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
+      cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
-      push_image: true
-      run_compliance_scan: false
-      copy_to_acr: true
+    secrets: inherit
+
+  vllm-copy-to-acr:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  sglang-copy-to-acr:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  trtllm-copy-to-acr:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
     secrets: inherit
 
   # ============================================================================
@@ -167,7 +194,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
