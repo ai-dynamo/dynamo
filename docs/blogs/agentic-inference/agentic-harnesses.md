@@ -213,6 +213,8 @@ The measured impact was large. On a Dynamo B200 deployment with a 52K-token prom
 
 Carrying reasoning into the next turn does not have one universal correct form. Some models intentionally drop prior thinking on ordinary assistant turns. Agentic turns with interleaved tool calls are different: there, the reasoning and tool sequence often needs to persist to the next turn in the same order. The real contract is model-specific and turn-specific.
 
+Anthropic's [April 23 Claude Code postmortem](https://www.anthropic.com/engineering/april-23-postmortem) gives a concrete production example of this policy: thinking from previous turns can be cleared on session resume to reduce the prefill burden after the cached prompt has expired.
+
 Contemporary reasoning models tend to produce two different kinds of assistant turns:
 - reasoning followed by a direct response to the user
 - reasoning followed by one or more tool calls
@@ -314,16 +316,16 @@ data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function"
 
 That event tells the harness, in one shot, that the tool call is ready to execute. No harness-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness. This makes Dynamo more easily compatible with custom harnesses.
 
-## Anthropic API Fidelity
+## Anthropic API Fidelity for Claude Code and OpenClaw
 
-Claude Code compatibility is more than text generation behind an Anthropic endpoint. For matching the user experience, the harness depends on a collection of smaller behaviors that are easy to miss in ad hoc testing:
+Claude Code and OpenClaw both exercise the Anthropic Messages API rather than only text generation behind an endpoint. Matching the harness experience depends on a collection of smaller behaviors that are easy to miss in ad hoc testing:
 
 - model metadata at both `GET /v1/models` and `GET /v1/models/{model_id}`
 - correct handling of slashed model IDs
 - useful `input_tokens` in `message_start`
 - acceptance of `cache_control`
 
-Once the frontend is reachable and compliant, pointing a harness at Dynamo is straightforward and does not have to replace any existing model configuration:
+Once the frontend is reachable and compliant, both harnesses can point at Dynamo's Anthropic-compatible endpoint:
 
 ```bash
 ANTHROPIC_API_KEY=local-dev-token \
@@ -331,6 +333,10 @@ ANTHROPIC_BASE_URL=http://localhost:8000 \
 ANTHROPIC_CUSTOM_MODEL_OPTION=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
 ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Dynamo NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" \
 claude --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+
+ANTHROPIC_API_KEY=local-dev-token \
+ANTHROPIC_BASE_URL=http://localhost:8000 \
+npx openclaw agent --local -m "Say ok" --json
 ```
 
 The fixes in this area brought the custom deployment closer to the native backend behavior.
@@ -347,24 +353,21 @@ Another example is `message_start` reporting `input_tokens: 0` even when the fin
 The Codex-facing version of the same problem lives on the `v1/responses` side. Passing compliance tests is not enough to provide parity in user experience.
 We found that a Responses API request could not survive an internal round-trip without losing the fields that made it a Responses request rather than a chat completions request. Preserving those fields turned out to be an architectural concern, not just a serializer concern. The relevant changes live in Dynamo's `ResponseParams` path and the upstream type-alignment work in [PR #6089](https://github.com/ai-dynamo/dynamo/pull/6089).
 
-Codex should point at Dynamo through the OpenAI-compatible Responses API:
+Codex should point at Dynamo through the OpenAI-compatible Responses API with request compression enabled:
 
 ```bash
-OPENAI_API_KEY=local-dev-token codex exec -c 'openai_base_url="http://localhost:8000/v1"' -m nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 "Say ok"
-```
-
-## OpenClaw over the Anthropic Messages API
-
-The same Anthropic API work also translates to OpenClaw. OpenClaw does not need a Dynamo-specific adapter; it can use Dynamo's Anthropic-compatible Messages API for the thinking blocks, tool-use blocks, and streaming tool-call dispatch described above:
-
-```bash
-ANTHROPIC_API_KEY=local-dev-token ANTHROPIC_BASE_URL=http://localhost:8000 npx openclaw agent --local -m "Say ok" --json
+OPENAI_API_KEY=local-dev-token \
+codex exec \
+  -c 'openai_base_url="http://localhost:8000/v1"' \
+  -c 'features.enable_request_compression=true' \
+  -m nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+  "Say ok"
 ```
 
 ## What's Next
 
 Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, and `speculative_prefill`. Those fields give the harness a way to say more about the turn than the prompt alone. A session waiting on a user reply is not the same as one working through a long background tool sequence, and the API can now carry some of that difference.
 
-In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, LLM, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, `dynamo-llm`, and `dynamo-tokens`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
+In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, and `dynamo-tokenizers`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
 
 This is also the bridge to longer-running systems such as AutoResearch. The first post explained why agentic workloads stress the serving stack. This post shows the harness-facing contract needed to run those workloads correctly and sets the stage for efficient long-running agents backed by Dynamo endpoints.
