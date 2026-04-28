@@ -60,30 +60,6 @@ func createTestDGD(name string, services map[string]*nvidiacomv1alpha1.DynamoCom
 	}
 }
 
-// createTestReconciler creates a DynamoGraphDeploymentReconciler for testing
-func createTestReconciler(objs ...runtime.Object) *DynamoGraphDeploymentReconciler {
-	scheme := runtime.NewScheme()
-	_ = nvidiacomv1alpha1.AddToScheme(scheme)
-	_ = corev1.AddToScheme(scheme)
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithRuntimeObjects(objs...).
-		Build()
-
-	return &DynamoGraphDeploymentReconciler{
-		Client:        fakeClient,
-		Recorder:      record.NewFakeRecorder(10),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &commonController.RuntimeConfig{},
-		DockerSecretRetriever: &mockDockerSecretRetriever{
-			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
-				return []string{}, nil
-			},
-		},
-	}
-}
-
 type testReconcilerOption func(*fake.ClientBuilder)
 
 // withObjects seeds the fake client with additional runtime objects beyond the DGD.
@@ -94,15 +70,13 @@ func withObjects(objs ...runtime.Object) testReconcilerOption {
 }
 
 // withInterceptor routes all client method calls through the supplied
-// interceptor.Funcs, letting tests inject API errors on specific code paths
+// interceptor.Funcs, letting tests inject API errors on specific code paths.
 func withInterceptor(funcs interceptor.Funcs) testReconcilerOption {
 	return func(b *fake.ClientBuilder) {
 		b.WithInterceptorFuncs(funcs)
 	}
 }
 
-// createTestReconcilerWithStatus builds a reconciler whose fake client supports
-// the DGD status subresource
 func createTestReconcilerWithStatus(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, opts ...testReconcilerOption) *DynamoGraphDeploymentReconciler {
 	scheme := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(scheme)
@@ -117,8 +91,15 @@ func createTestReconcilerWithStatus(dgd *nvidiacomv1alpha1.DynamoGraphDeployment
 	}
 
 	return &DynamoGraphDeploymentReconciler{
-		Client:   builder.Build(),
-		Recorder: record.NewFakeRecorder(10),
+		Client:        builder.Build(),
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commonController.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
 	}
 }
 
@@ -190,7 +171,7 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: tt.existingHash}
 			}
 
-			r := createTestReconciler(dgd)
+			r := createTestReconcilerWithStatus(dgd)
 			result := r.shouldTriggerRollingUpdate(dgd)
 
 			if result != tt.expected {
@@ -211,7 +192,7 @@ func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
 	})
 
 	// Create reconciler with DGD already in the fake client (simulates existing resource)
-	r := createTestReconciler(dgd)
+	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
 	// Initialize the hash
@@ -242,7 +223,7 @@ func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
 	}
 
 	// Create reconciler with DGD already in the fake client
-	r := createTestReconciler(dgd)
+	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
 	// Initialize should be a no-op
@@ -282,7 +263,7 @@ func TestSupportsManagedRollingUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dgd := createTestDGD("test-dgd", tt.services)
-			r := createTestReconciler(dgd)
+			r := createTestReconcilerWithStatus(dgd)
 
 			result := r.supportsManagedRollingUpdate(dgd)
 			if result != tt.expected {
@@ -379,7 +360,7 @@ func TestGetOrCreateRollingUpdateStatus(t *testing.T) {
 			})
 			dgd.Status.RollingUpdate = tt.existingStatus
 
-			r := createTestReconciler(dgd)
+			r := createTestReconcilerWithStatus(dgd)
 			status := r.getOrCreateRollingUpdateStatus(dgd)
 
 			assert.NotNil(t, status)
@@ -428,7 +409,7 @@ func TestIsRollingUpdateInProgress(t *testing.T) {
 			})
 			dgd.Status.RollingUpdate = tt.status
 
-			r := createTestReconciler(dgd)
+			r := createTestReconcilerWithStatus(dgd)
 			result := r.isRollingUpdateInProgress(dgd)
 
 			assert.Equal(t, tt.expected, result)
@@ -499,7 +480,7 @@ func TestGetDesiredWorkerReplicas(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dgd := createTestDGD("test-dgd", tt.services)
-			r := createTestReconciler(dgd)
+			r := createTestReconcilerWithStatus(dgd)
 
 			result := r.getDesiredWorkerReplicas(dgd)
 			assert.Equal(t, tt.expected, result)
@@ -548,7 +529,7 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, oldDCD1, newDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD1, newDCD))
 	ctx := context.Background()
 
 	// Delete old worker DCDs
@@ -570,7 +551,7 @@ func TestDeleteOldWorkerDCDs_NoDCDsToDelete(t *testing.T) {
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 
-	r := createTestReconciler(dgd)
+	r := createTestReconcilerWithStatus(dgd)
 	ctx := context.Background()
 
 	// Delete old worker DCDs when there are none - should not error
@@ -970,7 +951,7 @@ func TestGetWorkerInfoForWorkerHash(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, prefillDCD, decodeDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(prefillDCD, decodeDCD))
 	ctx := context.Background()
 
 	status, err := r.getWorkerInfoForWorkerHash(ctx, dgd, workerHash)
@@ -1176,7 +1157,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, oldDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD))
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
@@ -1203,7 +1184,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 		})
 
-		r := createTestReconciler(dgd)
+		r := createTestReconcilerWithStatus(dgd)
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
@@ -1263,7 +1244,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, frontendDCD, workerDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD, workerDCD))
 		ctx := context.Background()
 
 		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
@@ -1300,7 +1281,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, frontendDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
 		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
@@ -1335,7 +1316,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, frontendDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
 		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
@@ -1374,7 +1355,7 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, workerDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(workerDCD))
 		ctx := context.Background()
 
 		isReady, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, "worker")
@@ -1406,7 +1387,7 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, frontendDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
 		isReady, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, "frontend")
@@ -1439,7 +1420,7 @@ func TestCheckComponentServiceFullyUpdated(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, workerDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(workerDCD))
 		ctx := context.Background()
 
 		isReady, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, "worker")
@@ -1475,7 +1456,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, legacyWorkerDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(legacyWorkerDCD))
 	ctx := context.Background()
 
 	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
@@ -1556,7 +1537,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, legacyPrefillDCD, legacyDecodeDCD, frontendDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(legacyPrefillDCD, legacyDecodeDCD, frontendDCD))
 	ctx := context.Background()
 
 	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
@@ -1603,7 +1584,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, legacyDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
 		ctx := context.Background()
 
 		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
@@ -1632,7 +1613,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, frontendDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
 		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
@@ -1661,7 +1642,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, hashedDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(hashedDCD))
 		ctx := context.Background()
 
 		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
@@ -1689,7 +1670,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, otherDGDWorkerDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(otherDGDWorkerDCD))
 		ctx := context.Background()
 
 		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
@@ -1702,7 +1683,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
-		r := createTestReconciler(dgd)
+		r := createTestReconcilerWithStatus(dgd)
 		ctx := context.Background()
 
 		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
@@ -1735,7 +1716,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, legacyDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
 		ctx := context.Background()
 
 		result, err := r.listOldWorkerDCDs(ctx, dgd, "newhash1")
@@ -1766,7 +1747,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, currentDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(currentDCD))
 		ctx := context.Background()
 
 		result, err := r.listOldWorkerDCDs(ctx, dgd, "abc12345")
@@ -1815,7 +1796,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, frontendDCD, workerDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD, workerDCD))
 		ctx := context.Background()
 
 		result, err := r.listOldWorkerDCDs(ctx, dgd, testNewWorkerHash)
@@ -1853,7 +1834,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, legacyDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
@@ -1877,7 +1858,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
-		r := createTestReconciler(dgd)
+		r := createTestReconcilerWithStatus(dgd)
 		ctx := context.Background()
 
 		// Empty OldWorkerReplicas = not in progress
@@ -1917,7 +1898,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, legacyDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
@@ -1973,7 +1954,7 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 			},
 		}
 
-		r := createTestReconciler(dgd, legacyDCD)
+		r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
@@ -1999,7 +1980,7 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 			},
 		})
 
-		r := createTestReconciler(dgd)
+		r := createTestReconcilerWithStatus(dgd)
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
@@ -2053,7 +2034,7 @@ func TestDeleteOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, legacyDCD, newDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD, newDCD))
 	ctx := context.Background()
 
 	err := r.deleteOldWorkerDCDs(ctx, dgd, "abc12345")
@@ -2124,7 +2105,7 @@ func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, legacyDCD, genBDCD, currentDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD, genBDCD, currentDCD))
 	ctx := context.Background()
 
 	err := r.deleteOldWorkerDCDs(ctx, dgd, "hashcccc")
@@ -2198,7 +2179,7 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, genADCD, genBDCD, genCDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(genADCD, genBDCD, genCDCD))
 	ctx := context.Background()
 
 	result, err := r.listOldWorkerDCDs(ctx, dgd, "hashcccc")
@@ -2261,7 +2242,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 		},
 	}
 
-	r := createTestReconciler(dgd, genADCD, genBDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(genADCD, genBDCD))
 	ctx := context.Background()
 
 	// oldNeeded = 2: newest old (B) should get 2, oldest (A) should get 0
@@ -2349,7 +2330,7 @@ func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) 
 		},
 	}
 
-	r := createTestReconciler(dgd, genADCD, genBDCD)
+	r := createTestReconcilerWithStatus(dgd, withObjects(genADCD, genBDCD))
 	ctx := context.Background()
 
 	rollingUpdateCtx := dynamo.RollingUpdateContext{
