@@ -174,7 +174,56 @@ jobs:
             S5CMD_BIN="/tmp/s5cmd"
             chmod +x "${S5CMD_BIN}"
           fi
-          s5cmd version
+          ${S5CMD_BIN} version
+
+      - name: Seed model cache to NVMe
+        # if: inputs.gpu_tests == 'true' && inputs.seed_model_names != ''
+        shell: bash
+        run: |
+          set +e
+          S5CMD_BIN="/tmp/s5cmd"
+          NVME_ROOT="${{ inputs.nvme_dir }}"
+          [[ -z "${NVME_ROOT}" || ! -d "${NVME_ROOT}" ]] && NVME_ROOT="/tmp"
+
+          HUB_DEST="${NVME_ROOT}/.cache/huggingface/hub"
+          mkdir -p "${HUB_DEST}"
+
+          S3_BASE_URI="s3://dynamo-infra-utils/ci/models"
+
+          echo "📦 Seeding models: ${S3_BASE_URI} → ${HUB_DEST}"
+          declare -A _pids _t0s
+          COPIED=0
+          FAILED=0
+
+          for model_name in ${{ inputs.seed_model_names }}; do
+            dest="${HUB_DEST}/${model_name}"
+            mkdir -p "${dest}"
+
+            _t0s["${model_name}"]=$(date +%s)
+            
+            # 2. Sync directly from S3
+            # We pipe output to a log file per model to keep the console clean
+            ${S5CMD_BIN} sync "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1 &
+            _pids["${model_name}"]=$!
+          done
+
+          # Wait and collect results
+          for model_name in "${!_pids[@]}"; do
+            if wait "${_pids[$model_name]}"; then
+              echo "  ✅ ${model_name} ($(( $(date +%s) - ${_t0s[$model_name]} ))s)"
+              COPIED=$((COPIED+1))
+            else
+              echo "  ❌ ${model_name} download failed!"
+              echo "  --- ERROR LOG FOR ${model_name} ---"
+              cat "/tmp/s5cmd_${model_name}.log"
+              echo "  -----------------------------------"
+              FAILED=$((FAILED+1))
+            fi
+          done
+          
+          du -h -d 1 /scratch/.cache/huggingface/hub || true # todo: remove this
+          
+          echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"
 
       # - name: Checkout repository
       #   uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
