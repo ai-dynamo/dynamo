@@ -1,13 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Endpoint picker trait and types, mirroring the Go LW-EPP interface from
-//! GAIE `pkg/epp-light/picker.go` (issue #2834 / PR #2842).
-//!
-//! The `EndpointPicker` trait is the central abstraction for endpoint selection.
-//! Implementations receive request metadata and a list of available endpoints,
-//! and return the chosen endpoint(s). The ext_proc server handles all Envoy
-//! protocol details; this trait only handles the selection decision.
+//! Defines the `EndpointPicker` trait and its associated types (`Endpoint`,
+//! `RequestInfo`, `PickResult`, `PickError`). This mirrors the Go LW-EPP's
+//! `EndpointPicker` interface from GAIE #2834. The ext_proc server is generic
+//! over this trait — it handles the Envoy protocol, the picker handles the
+//! routing decision.
 
 use std::collections::HashMap;
 
