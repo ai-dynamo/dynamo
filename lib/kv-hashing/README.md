@@ -42,7 +42,9 @@ Bytewise compatibility with vLLM's hashing is impossible regardless: vLLM uses S
 
 Adopting PLH everywhere is **not a wholesale change in *kind* of hashing for the router** (which is already chain-positional via parent chaining). It's a change in *encoding*, plus salt canonicalization, plus MM coverage.
 
-**PLH is self-extending.** PLH now carries the full 64-bit current sequence hash inline, alongside the position and a parent-fragment. A child PLH is built from a parent PLH plus the child's `BlockHash` via `PositionalLineageHash::extend(child_block_hash)` — no out-of-band `SequenceHash` needs to be tracked. The chain recurrence is `xxh3([parent_seq_u64, child_block_hash], 0)`; salt is already mixed into `block_hash` (via `xxh3(tokens, salt_hash)`) and into `seq_hash[0]`, so it propagates through every parent without needing to seed each chain step.
+**PLH is self-extending.** PLH carries the full 64-bit current sequence hash inline, alongside the position and a parent-fragment. A child PLH is built from a parent PLH plus the child's `BlockHash` via `PositionalLineageHash::extend(child_block_hash)` — no out-of-band `SequenceHash` needs to be tracked.
+
+**Salt enters the chain only at the root.** `BlockHash` (a `LocalBlockHash`) is content-only: `xxh3(block_bytes, LOCAL_BLOCK_HASH_SEED)` with a fixed seed shared with the kv-router (`XXH3_SEED = 1337`). Salt is mixed in once, at `PositionalLineageHash::root_with_salt(local, salt, block_size)`, where the root's `current = xxh3([salt.0, local_block_hash.0], 0)`. Every subsequent `extend(child_block_hash)` is `xxh3([parent_seq_u64, child_block_hash], 0)` with seed `0` — salt baked into `current` at the root propagates through every parent thereafter. Two sequences with identical tokens but different salts diverge starting at the root; identical tokens + identical salt produce bit-identical chains. The content-only `BlockHash` stays request-independent so it remains compatible with the kv-router's `tokens_hash` indexing.
 
 ```rust
 pub struct UniversalBlock {
@@ -56,7 +58,7 @@ impl UniversalBlock {
 }
 ```
 
-Salt is a per-request constant (identical for every block in a sequence), so it is not stored on `UniversalBlock`. Read it once from `Request::salt_hash()`.
+Salt is a per-request constant (identical for every block in a sequence), so it is not stored on `UniversalBlock`. Read it once from `Request::salt_hash(block_size)` — `block_size` is mixed into the salt so two requests with identical tokens but different `block_size` cannot collide on per-block hashes.
 
 Wire formats that carry only PLH (e.g., a slimmed-down `KvCacheEvent`) are now sufficient on their own — receivers do not need a side table mapping PLH → u64. The consolidator's translation layer collapses to a thin pass-through.
 

@@ -13,9 +13,13 @@ use crate::request::Request;
 use crate::salt::compute_salt_hash;
 
 impl Request {
-    /// Returns the canonical [`SaltHash`] for this request.
-    pub fn salt_hash(&self) -> Result<SaltHash, KvHashingError> {
-        compute_salt_hash(self.salt(), self.lora_name())
+    /// Returns the canonical [`SaltHash`] for this request at the given `block_size`.
+    ///
+    /// `block_size` is mixed into the salt so two requests with different block sizes
+    /// can never produce the same `SaltHash` — and therefore never collide on
+    /// per-block hashes — even with otherwise identical inputs.
+    pub fn salt_hash(&self, block_size: u32) -> Result<SaltHash, KvHashingError> {
+        compute_salt_hash(self.salt(), self.lora_name(), block_size)
     }
 
     /// Returns the rich per-block result.
@@ -24,7 +28,7 @@ impl Request {
     /// token stream (placeholder slots count toward `block_size`). A trailing partial
     /// block — fewer than `block_size` slots — is not hashed and not returned.
     pub fn into_blocks(&self, block_size: u32) -> Result<Vec<UniversalBlock>, KvHashingError> {
-        let salt_hash = self.salt_hash()?;
+        let salt_hash = self.salt_hash(block_size)?;
         let token_mm = self.token_mm_info();
         let seq = TokenBlockSequence::new_with_mm(
             Tokens::from(self.tokens.clone()),

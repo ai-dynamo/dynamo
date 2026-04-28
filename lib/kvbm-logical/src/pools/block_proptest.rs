@@ -20,13 +20,21 @@ pub(crate) mod tests {
     use dynamo_tokens::{TokenBlock, TokenBlockSequence};
     use proptest::prelude::*;
 
-    /// Helper function to create a TokenBlock from a token sequence
+    /// Helper function to create a TokenBlock from a token sequence.
+    ///
+    /// `block_size` must be a power of two (the PLH layout requires it). Non-PoW2
+    /// token counts are rejected by returning `None`; callers that don't care about
+    /// matching block_size to token count will treat that as "skip this case."
     fn create_token_block_from_sequence(tokens: &[u32]) -> Option<TokenBlock> {
-        if tokens.is_empty() {
+        if tokens.is_empty() || !(tokens.len() as u32).is_power_of_two() {
             return None;
         }
 
-        let sequence = TokenBlockSequence::from_slice(tokens, tokens.len() as u32, Some(dynamo_tokens::SaltHash(42)));
+        let sequence = TokenBlockSequence::from_slice(
+            tokens,
+            tokens.len() as u32,
+            Some(dynamo_tokens::SaltHash(42)),
+        );
 
         // If we have a complete block, return it
         if let Some(block) = sequence.blocks().first() {

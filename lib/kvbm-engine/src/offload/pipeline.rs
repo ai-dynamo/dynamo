@@ -2013,7 +2013,7 @@ mod tests {
     }
 
     fn test_hash(n: u64) -> SequenceHash {
-        SequenceHash::new(n, None, 0)
+        SequenceHash::new(n, None, 0, 16)
     }
 
     #[tokio::test]

@@ -56,11 +56,11 @@ impl<T: BlockMetadata> LineageNode<T> {
 /// A backend that manages blocks using a lineage graph and evicts from the leaves.
 pub struct LineageBackend<T: BlockMetadata> {
     /// Map from (position, fragment) to Node.
-    nodes: HashMap<u64, HashMap<u64, LineageNode<T>>>,
+    nodes: HashMap<u32, HashMap<u64, LineageNode<T>>>,
 
     /// Sorted queue of leaf nodes, keyed by (last_used, position, fragment).
     /// Smallest key (oldest tick) is popped first.
-    leaf_queue: BTreeMap<(u64, u64, u64), ()>,
+    leaf_queue: BTreeMap<(u64, u32, u64), ()>,
 
     /// Total number of blocks currently stored (excluding ghost nodes).
     count: usize,
@@ -236,7 +236,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     /// Internal method to remove a block from the graph.
     /// Returns the block if one existed at that node.
     /// Handles ghost cleanup iteratively.
-    fn remove_block(&mut self, position: u64, fragment: u64) -> Option<Block<T, Registered>> {
+    fn remove_block(&mut self, position: u32, fragment: u64) -> Option<Block<T, Registered>> {
         let node_block = {
             let level = self.nodes.get_mut(&position)?;
             let node = level.get_mut(&fragment)?;

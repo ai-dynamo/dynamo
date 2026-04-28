@@ -7,10 +7,10 @@
 use dynamo_kv_hashing::{Request, RequestMmObjectInfo, Token, UniversalBlock};
 
 fn sample_blocks() -> Vec<UniversalBlock> {
-    let tokens: Vec<Token> = (0..16).collect();
+    let tokens: Vec<Token> = (0..32).collect();
     let mm = vec![RequestMmObjectInfo {
         mm_hash: 0x1234_5678_9ABC_DEF0,
-        offset: 4,
+        offset: 16,
         length: 6,
     }];
     let r = Request::builder()
@@ -20,7 +20,7 @@ fn sample_blocks() -> Vec<UniversalBlock> {
         .mm_info(mm)
         .build()
         .unwrap();
-    r.into_blocks(4).unwrap()
+    r.into_blocks(16).unwrap()
 }
 
 #[test]

@@ -973,8 +973,8 @@ mod tests {
 
     #[test]
     fn test_block_metadata_direct_build_infos() {
-        let hash1 = SequenceHash::new(1, None, 100);
-        let hash2 = SequenceHash::new(2, None, 200);
+        let hash1 = SequenceHash::new(1, None, 100, 16);
+        let hash2 = SequenceHash::new(2, None, 200, 16);
 
         let mut map = HashMap::new();
         map.insert(hash1, LayoutHandle::new(0, 1));
@@ -1009,8 +1009,8 @@ mod tests {
 
     #[test]
     fn test_block_metadata_remove_all() {
-        let hash1 = SequenceHash::new(1, None, 100);
-        let hash2 = SequenceHash::new(2, None, 200);
+        let hash1 = SequenceHash::new(1, None, 100, 16);
+        let hash2 = SequenceHash::new(2, None, 200, 16);
 
         let mut map = HashMap::new();
         map.insert(hash1, LayoutHandle::new(0, 1));

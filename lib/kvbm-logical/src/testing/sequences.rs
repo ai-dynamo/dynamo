@@ -32,7 +32,10 @@ enum BuilderMode<T: BlockMetadata> {
     /// Build individual blocks with custom configuration
     Individual { blocks: Vec<TestBlockBuilder<T>> },
     /// Build from a token sequence (more realistic)
-    TokenSequence { tokens: Vec<u32>, salt: Option<dynamo_tokens::SaltHash> },
+    TokenSequence {
+        tokens: Vec<u32>,
+        salt: Option<dynamo_tokens::SaltHash>,
+    },
 }
 
 impl<T: BlockMetadata + std::fmt::Debug> BlockSequenceBuilder<T> {

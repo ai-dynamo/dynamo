@@ -320,6 +320,16 @@ impl KvManager {
                         UseOutcome::ActiveHit
                     } else {
                         // Not active: try inactive via PLH lookup, else allocate fresh.
+                        //
+                        // TODO(prefix-caching=false): when the caller signals
+                        // caching-disabled, skip `match_blocks` /
+                        // `register_block` entirely and route block ownership
+                        // through the sequence rather than the kvbm-logical
+                        // pool's PLH index. Pairs with the
+                        // `synthetic_unique` removal in
+                        // `lib/mocker/src/common/sequence.rs` and the eventual
+                        // deletion of
+                        // `PositionalLineageHash::synthetic_unique`.
                         let plh = plhs[plh_idx];
                         plh_idx += 1;
                         let matched = self.block_manager.match_blocks(&[plh]);
@@ -463,6 +473,13 @@ impl KvManager {
             .expect("Promote: partial block not found");
 
         // Detect collision: seq_hash already has registered handles (active or inactive).
+        //
+        // TODO(prefix-caching=false): when the caller signals caching-disabled,
+        // skip `match_blocks` / `register_block` entirely (and the
+        // `registered_plhs.insert` below) — route block ownership through
+        // the sequence directly so we never need to mint a synthetic PLH at
+        // promote time. Pairs with the TODO in `process_use` and the
+        // `synthetic_unique` removal in `common/sequence.rs`.
         let is_new = if let Some(vec) = self.active_full.get_mut(&seq_hash) {
             // Collision on active pool — drop MutableBlock, clone existing handle.
             drop(mutable);
@@ -589,6 +606,7 @@ mod tests {
 
     use super::*;
     use crate::common::protocols::KvCacheEventSink;
+    use dynamo_tokens::PlhFlags;
 
     /// Capturing event sink for router-publication assertions.
     #[derive(Default)]
@@ -628,26 +646,40 @@ mod tests {
         )
     }
 
+    const TEST_BS: u32 = 16;
+
+    /// Build a hand-shaped PLH directly from the desired `current` / `parent` /
+    /// `position` for tests that exercise registry / pool semantics on
+    /// pre-known PLH inputs. Real callers use `root_with_salt` + `extend`.
+    fn raw_plh(current: u64, parent: u64, position: u32) -> PositionalLineageHash {
+        PositionalLineageHash::from_raw_parts(
+            current,
+            parent,
+            position,
+            PlhFlags::for_block_size(TEST_BS).raw(),
+        )
+    }
+
     fn plh(v: u64) -> PositionalLineageHash {
-        PositionalLineageHash::new(v, None, 0)
+        raw_plh(v, 0, 0)
     }
 
     fn lineage_plh(id: u64) -> PositionalLineageHash {
         match id {
-            0 => PositionalLineageHash::new(0, None, 0),
-            1 => PositionalLineageHash::new(1, Some(0), 1),
-            2 => PositionalLineageHash::new(2, Some(1), 2),
-            3 => PositionalLineageHash::new(3, Some(2), 3),
-            4 => PositionalLineageHash::new(4, Some(3), 4),
-            5 => PositionalLineageHash::new(5, Some(1), 2),
-            6 => PositionalLineageHash::new(6, Some(5), 3),
-            7 => PositionalLineageHash::new(7, Some(2), 3),
-            8 => PositionalLineageHash::new(8, Some(7), 4),
-            9 => PositionalLineageHash::new(9, Some(8), 5),
-            10 => PositionalLineageHash::new(10, None, 0),
-            11 => PositionalLineageHash::new(11, Some(10), 1),
-            12 => PositionalLineageHash::new(12, Some(11), 2),
-            13 => PositionalLineageHash::new(13, None, 0),
+            0 => raw_plh(0, 0, 0),
+            1 => raw_plh(1, 0, 1),
+            2 => raw_plh(2, 1, 2),
+            3 => raw_plh(3, 2, 3),
+            4 => raw_plh(4, 3, 4),
+            5 => raw_plh(5, 1, 2),
+            6 => raw_plh(6, 5, 3),
+            7 => raw_plh(7, 2, 3),
+            8 => raw_plh(8, 7, 4),
+            9 => raw_plh(9, 8, 5),
+            10 => raw_plh(10, 0, 0),
+            11 => raw_plh(11, 10, 1),
+            12 => raw_plh(12, 11, 2),
+            13 => raw_plh(13, 0, 0),
             _ => plh(id),
         }
     }
@@ -746,7 +778,14 @@ mod tests {
         let mut mgr = make_mgr(10, 16);
         let uuid = Uuid::new_v4();
         use_partial(&mut mgr, uuid);
-        mgr.process(&MoveBlock::Promote(uuid, 42, None, BlockHash(0), plh(500), None));
+        mgr.process(&MoveBlock::Promote(
+            uuid,
+            42,
+            None,
+            BlockHash(0),
+            plh(500),
+            None,
+        ));
         assert_eq!(mgr.num_active_blocks(), 1);
         assert!(mgr.active_partial.is_empty());
         assert!(mgr.active_full.contains_key(&42));

@@ -26,4 +26,8 @@ pub enum KvHashingError {
     /// A required field was not set on the [`crate::RequestBuilder`].
     #[error("RequestBuilder missing required field: {0}")]
     MissingField(&'static str),
+
+    /// `block_size` was not a supported power of two in 16..=1024.
+    #[error("block_size must be a power of two in 16..=1024 to be mixable into the salt, got {0}")]
+    InvalidBlockSize(u32),
 }

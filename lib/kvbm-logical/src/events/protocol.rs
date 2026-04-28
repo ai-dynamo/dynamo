@@ -100,7 +100,11 @@ mod tests {
     #[test]
     fn test_event_serialization() {
         let tokens = vec![1u32, 2, 3, 4];
-        let seq = TokenBlockSequence::from_slice(&tokens, tokens.len() as u32, Some(dynamo_tokens::SaltHash(1337)));
+        let seq = TokenBlockSequence::from_slice(
+            &tokens,
+            tokens.len() as u32,
+            Some(dynamo_tokens::SaltHash(1337)),
+        );
         let seq_hash = seq.blocks()[0].kvbm_sequence_hash();
 
         let create_event = KvCacheEvent::Create(seq_hash);
@@ -137,7 +141,11 @@ mod tests {
     #[tokio::test]
     async fn test_release_handle_drop() {
         let tokens = vec![1u32, 2, 3, 4];
-        let seq = TokenBlockSequence::from_slice(&tokens, tokens.len() as u32, Some(dynamo_tokens::SaltHash(1337)));
+        let seq = TokenBlockSequence::from_slice(
+            &tokens,
+            tokens.len() as u32,
+            Some(dynamo_tokens::SaltHash(1337)),
+        );
         let seq_hash = seq.blocks()[0].kvbm_sequence_hash();
 
         let (tx, rx) = broadcast::channel(16);

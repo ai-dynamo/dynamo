@@ -51,7 +51,7 @@ impl TieredBlock {
 
     /// Get the position in the sequence (for ordering).
     pub fn position(&self) -> u64 {
-        self.sequence_hash().position()
+        self.sequence_hash().position() as u64
     }
 
     /// Check if this is a G2 block.

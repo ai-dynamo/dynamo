@@ -25,11 +25,23 @@ fn create_sequence_cache(
             unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
             plhs.push(block.positional_lineage_hash());
         } else {
+            // TODO(prefix-caching=false): replace synthetic_unique with no-op
+            // registration. Cross-request prefix sharing is already disabled
+            // here (the random mint guarantees no `match_blocks` hit), but we
+            // still pay the registration cost to keep the *same-sequence*
+            // preempt-retry path working — see
+            // `test_random_plh_stable_across_preempt_retry` in
+            // `kvbm_backend.rs`. The future shape is to thread
+            // `enable_prefix_caching` through `MoveBlock::{Use,Promote}` so
+            // the backend can skip `match_blocks` / `register_block` entirely
+            // and have `ActiveSequence` hold its own block handles across
+            // preempt instead of looking them up by PLH. That removes the
+            // only legitimate need for a non-canonical PLH mint, and
+            // `PositionalLineageHash::synthetic_unique` can then go away.
             unique_blocks.push(UniqueBlock::FullBlock(random::<u64>()));
-            plhs.push(PositionalLineageHash::new(
-                random::<u64>(),
-                None,
-                pos as u64,
+            plhs.push(PositionalLineageHash::synthetic_unique(
+                pos as u32,
+                block_size as u32,
             ));
         }
     }
@@ -229,10 +241,18 @@ impl ActiveSequence {
             // two identical prompts must not share blocks, so the PLH we promote
             // with must also be unique — otherwise `process_promote`'s
             // `match_blocks(&[plh])` lookup would reuse another request's block.
+            //
+            // TODO(prefix-caching=false): see the matching TODO in
+            // `create_sequence_cache`. The durable answer is to skip
+            // `register_block` / `match_blocks` entirely on this path and
+            // delete `PositionalLineageHash::synthetic_unique`.
             let last_plh = if self.enable_prefix_caching {
                 last_complete.positional_lineage_hash()
             } else {
-                PositionalLineageHash::new(random::<u64>(), None, self.block_hashes.len() as u64)
+                PositionalLineageHash::synthetic_unique(
+                    self.block_hashes.len() as u32,
+                    self.block_size as u32,
+                )
             };
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())

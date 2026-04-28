@@ -31,7 +31,7 @@ pub struct UniversalBlock {
 impl UniversalBlock {
     /// Block index in the sequence (zero-based).
     #[inline]
-    pub fn position(&self) -> u64 {
+    pub fn position(&self) -> u32 {
         self.plh.position()
     }
 

@@ -35,7 +35,7 @@ fn validate_contiguous_positions(seq_hashes: &[SequenceHash]) -> Result<()> {
     }
 
     // Collect and sort positions
-    let mut positions: Vec<u64> = seq_hashes.iter().map(|h| h.position()).collect();
+    let mut positions: Vec<u32> = seq_hashes.iter().map(|h| h.position()).collect();
     positions.sort();
 
     // Check monotonically increasing with no holes: X, X+1, X+2, ...

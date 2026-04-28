@@ -16,20 +16,32 @@ use serde::Serialize;
 
 use crate::error::KvHashingError;
 
+/// Production block-size range mixed into the salt. Power-of-two only, in `16..=1024`.
+pub const MIN_BLOCK_SIZE: u32 = 16;
+/// Maximum production block size mixed into the salt.
+pub const MAX_BLOCK_SIZE: u32 = 1024;
+
 /// Stable JSON shape of the salt payload.
 ///
 /// The wire layout is intentionally minimal so future additions (e.g., model_arch tag,
 /// quantization scheme) can be appended as new optional fields without invalidating
 /// existing salt hashes when those fields are absent.
+///
+/// `block_size` is mixed into the salt so two requests with different block_sizes
+/// silently cannot collide, even if their tokens are identical. The accompanying
+/// [`PositionalLineageHash`](dynamo_tokens::PositionalLineageHash) also carries the
+/// `block_size` as plaintext metadata, but the salt-mix is the load-bearing safety
+/// mechanism — runtime equality checks would not catch dropped/forged metadata.
 #[derive(Debug, Serialize)]
 pub(crate) struct SaltPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) salt: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lora_name: Option<&'a str>,
+    pub(crate) block_size: u32,
 }
 
-/// Computes the canonical [`SaltHash`] from `(salt, lora_name)`.
+/// Computes the canonical [`SaltHash`] from `(salt, lora_name, block_size)`.
 ///
 /// `compute_hash_v2(json_bytes, 0)` over the canonical [`SaltPayload`] JSON.
 ///
@@ -38,13 +50,24 @@ pub(crate) struct SaltPayload<'a> {
 /// `lib/kv-router/src/protocols.rs:84` (`options.lora_name.filter(|n| !n.is_empty())`)
 /// so a client that sends `lora_name = ""` shares the cache with a client that sends
 /// `lora_name = None`.
+///
+/// `block_size` must be a power of two in [`MIN_BLOCK_SIZE`]..=[`MAX_BLOCK_SIZE`]; this
+/// is the cache-safety check ensuring different block sizes never collide.
 pub(crate) fn compute_salt_hash(
     salt: Option<&str>,
     lora_name: Option<&str>,
+    block_size: u32,
 ) -> Result<SaltHash, KvHashingError> {
+    if !(block_size.is_power_of_two() && (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size)) {
+        return Err(KvHashingError::InvalidBlockSize(block_size));
+    }
     let salt = salt.filter(|s| !s.is_empty());
     let lora_name = lora_name.filter(|s| !s.is_empty());
-    let payload = SaltPayload { salt, lora_name };
+    let payload = SaltPayload {
+        salt,
+        lora_name,
+        block_size,
+    };
     let bytes = serde_json::to_vec(&payload)?;
     Ok(compute_salt_hash_from_bytes(&bytes))
 }
