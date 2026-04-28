@@ -233,6 +233,57 @@ If the assistant turn is reconstructed as one generic reasoning block followed b
 
 In addition to the reordering bug, we also found that reasoning was often being dropped too aggressively before the next turn. For some models, dropping prior thinking on turns without tool calls is an established behavior and part of the model's fine-tuning (DeepSeek-R1 is the clearest example). But that same behavior is wrong for interleaved agentic turns where the prior reasoning explains the tool sequence. This issue was difficult to spot because users could see reasoning being decoded correctly in the outgoing response while it was still being *silently malformed* or dropped before the next turn.
 
+We validated this against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A12B-NVFP4 on 4x B200 with TP=4, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, `--enable-streaming-tool-dispatch`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
+
+### Combined Reasoning and Tool Calls
+
+The hardest parsing test is when both parsers have to operate on the same token stream. A model that reasons before calling a tool generates a response where `<think>` content flows first, followed by `<tool_call>` XML. Two different parsers, `nemotron_deci` for reasoning and `qwen3_coder` for tool calls, have to split that stream into the correct Anthropic Messages API content blocks without interfering with each other.
+
+We sent the same prompt five times through the Anthropic Messages API: a system prompt instructing the model to think step by step, two tool definitions (calculator and weather), and the user message "Think carefully about what 15 * 23 equals, then use the calculator to verify." The response structure from a representative round:
+
+```json
+{
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "I need to calculate 15 * 23. Let me think: 15 * 20 = 300, and 15 * 3 = 45, so 300 + 45 = 345. I'll use the calculator to verify.\n"
+    },
+    {
+      "type": "tool_use",
+      "id": "call-a3364797-3160-4e84-b567-5c495694d502",
+      "name": "calculator",
+      "input": { "expression": "15 * 23" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": { "input_tokens": 403, "output_tokens": 95 }
+}
+```
+
+### Streaming Two Parsers at Once
+
+The streaming path makes the parser interaction more visible. A streaming request produces a sequence of SSE events, and the event type sequence shows exactly how the two parsers carve up the token stream:
+
+```text
+   1ms  message_start
+  82ms  content_block_start  type=thinking
+  82ms  content_block_delta  (thinking tokens stream here, ~7ms apart)
+   ...  (~70 thinking deltas over ~520ms)
+ 602ms  content_block_stop
+ 602ms  content_block_start  type=text
+ 602ms  content_block_delta
+ 800ms  content_block_stop
+ 800ms  content_block_start  type=tool_use
+ 800ms  content_block_delta
+ 800ms  content_block_stop
+ 814ms  message_delta        stop_reason=tool_use
+ 814ms  message_stop
+```
+
+The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
+
+Inspecting that event stream turned a parser concern into a repeatable integration test. The question was no longer "did the model answer?" It was "did every thinking, text, and tool-use boundary arrive in the shape the harness needs?"
+
 This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The fix had three parts:
 
 1. **One owner for reasoning parsing**: reasoning parsing used to happen at multiple competing layers. The backend parser could split model output into `reasoning_content` and normal `content`, while the Anthropic streaming converter still tried to infer `<think>` boundaries when mapping the same stream into Anthropic content blocks. PR #7358 made ownership explicit. If a backend path has already produced structured reasoning deltas, the Anthropic converter trusts them and only maps them into the response format.
@@ -301,67 +352,16 @@ We found that a Responses API request could not survive an internal round-trip w
 Codex should point at Dynamo through the OpenAI-compatible Responses API:
 
 ```bash
-OPENAI_API_KEY=local-dev-token codex exec -c 'model_providers.dynamo={ name = "Dynamo", base_url = "http://localhost:8000/v1", wire_api = "responses", env_key = "OPENAI_API_KEY" }' -c model_provider="dynamo" -m nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 "Say ok"
+OPENAI_API_KEY=local-dev-token codex exec -c 'openai_base_url="http://localhost:8000/v1"' -m nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 "Say ok"
 ```
 
 ## OpenClaw over the Anthropic Messages API
 
-The same Anthropic API work also translates to a smooth OpenClaw experience. OpenClaw does not need a Dynamo-specific adapter; it can use Dynamo's Anthropic-compatible Messages API for thinking blocks, tool-use blocks, and streaming tool-call dispatch. With `--enable-anthropic-api` on the frontend, pointing OpenClaw at Dynamo is a one-line change:
+The same Anthropic API work also translates to OpenClaw. OpenClaw does not need a Dynamo-specific adapter; it can use Dynamo's Anthropic-compatible Messages API for the thinking blocks, tool-use blocks, and streaming tool-call dispatch described above:
 
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:8000 ANTHROPIC_API_KEY=local-dev-token npx openclaw
+ANTHROPIC_API_KEY=local-dev-token ANTHROPIC_BASE_URL=http://localhost:8000 npx openclaw agent --local -m "Say ok" --json
 ```
-
-We ran experiments against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A12B-NVFP4 on 4x B200 with TP=4, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, `--enable-streaming-tool-dispatch`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
-
-### Combined Reasoning and Tool Calls
-
-The hardest parsing test is when both parsers have to operate on the same token stream. A model that reasons before calling a tool generates a response where `<think>` content flows first, followed by `<tool_call>` XML. Two different parsers, `nemotron_deci` for reasoning and `qwen3_coder` for tool calls, have to split that stream into the correct Anthropic Messages API content blocks without interfering with each other.
-
-We sent the same prompt five times through the Anthropic Messages API: a system prompt instructing the model to think step by step, two tool definitions (calculator and weather), and the user message "Think carefully about what 15 * 23 equals, then use the calculator to verify." The response structure from a representative round:
-
-```json
-{
-  "content": [
-    {
-      "type": "thinking",
-      "thinking": "I need to calculate 15 * 23. Let me think: 15 * 20 = 300, and 15 * 3 = 45, so 300 + 45 = 345. I'll use the calculator to verify.\n"
-    },
-    {
-      "type": "tool_use",
-      "id": "call-a3364797-3160-4e84-b567-5c495694d502",
-      "name": "calculator",
-      "input": { "expression": "15 * 23" }
-    }
-  ],
-  "stop_reason": "tool_use",
-  "usage": { "input_tokens": 403, "output_tokens": 95 }
-}
-```
-
-### Streaming Two Parsers at Once
-
-The streaming path makes the parser interaction more visible. A streaming request produces a sequence of SSE events, and the event type sequence shows exactly how the two parsers carve up the token stream:
-
-```text
-   1ms  message_start
-  82ms  content_block_start  type=thinking
-  82ms  content_block_delta  (thinking tokens stream here, ~7ms apart)
-   ...  (~70 thinking deltas over ~520ms)
- 602ms  content_block_stop
- 602ms  content_block_start  type=text
- 602ms  content_block_delta
- 800ms  content_block_stop
- 800ms  content_block_start  type=tool_use
- 800ms  content_block_delta
- 800ms  content_block_stop
- 814ms  message_delta        stop_reason=tool_use
- 814ms  message_stop
-```
-
-The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
-
-Because OpenClaw makes the event stream easy to inspect, it helped turn a parser concern into a repeatable integration test. The question was no longer "did the model answer?" It was "did every thinking, text, and tool-use boundary arrive in the shape the harness needs?"
 
 ## What's Next
 
