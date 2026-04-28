@@ -282,8 +282,6 @@ The streaming path makes the parser interaction more visible. A streaming reques
 
 The thinking block streams token by token from `82ms` to `602ms`. Then a brief text block appears (the whitespace between the thinking and tool call regions of the raw token stream). Then the tool_use block arrives at `800ms` as a single structured unit. The `message_stop` follows at `814ms`.
 
-Inspecting that event stream turned a parser concern into a repeatable integration test. The question was no longer "did the model answer?" It was "did every thinking, text, and tool-use boundary arrive in the shape the harness needs?"
-
 This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The fix had three parts:
 
 1. **One owner for reasoning parsing**: reasoning parsing used to happen at multiple competing layers. The backend parser could split model output into `reasoning_content` and normal `content`, while the Anthropic streaming converter still tried to infer `<think>` boundaries when mapping the same stream into Anthropic content blocks. PR #7358 made ownership explicit. If a backend path has already produced structured reasoning deltas, the Anthropic converter trusts them and only maps them into the response format.
