@@ -78,6 +78,23 @@ on:
         required: false
         type: boolean
         default: true
+      seed_model_names:
+        description: 'Space-delimited list of HuggingFace hub model directory names to copy from local_models_dir to NVMe before GPU tests (e.g. "models--Org--Name"). When empty, no seed is performed.'
+        required: false
+        type: string
+        default: >-
+          models--Qwen--Qwen3-0.6B
+          models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B
+          models--openai--gpt-oss-20b
+          models--Qwen--Qwen3-Embedding-4B
+          models--silence09--DeepSeek-R1-Small-2layers
+          models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
+          models--Tongyi-MAI--Z-Image-Turbo
+          models--Qwen--Qwen3-VL-2B-Instruct
+          models--Qwen--Qwen2-VL-7B-Instruct
+          models--codelion--Qwen3-0.6B-accuracy-recovery-lora
+          models--llava-hf--llava-1.5-7b-hf
+
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -182,7 +199,7 @@ jobs:
           parallel_mode: ${{ inputs.gpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
           gpu_tests: 'true'
-          local_models_dir: ''
+          seed_model_names: ${{ inputs.seed_model_names }}
       - name: Print Storage After Run to confirm nvme and models dir usage 
         if: inputs.debug_mode
         shell: bash

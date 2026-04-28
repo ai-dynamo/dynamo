@@ -48,6 +48,10 @@ inputs:
     description: 'Path to the NVMe directory on the runner. When set, the NVME_ROOT environment variable is set to this path.'
     required: false
     default: '/scratch'
+  seed_model_names:
+    description: 'Space-delimited list of HuggingFace hub model directory names (e.g. "models--Org--Name models--Org2--Name2") to copy from local_models_dir to NVMe before running tests. When empty, no seed is performed. Only used when gpu_tests=true.'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -92,30 +96,47 @@ runs:
         print(f"GPU Name: {name}")
         if not available:
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
-    - name: Verify local model cache
-      if: inputs.gpu_tests == 'true'
+    - name: Seed model cache to NVMe
+      if: inputs.gpu_tests == 'true' && inputs.seed_model_names != ''
       shell: bash
       run: |
         set +e
-        if [[ -d "${{ inputs.local_models_dir }}" ]]; then
-          echo "🔍 Verifying local model cache: ${{ inputs.local_models_dir }}"
-          echo "--------------------------------"
-          FOUND=0; MISSING=0
-          for model_dir in "${{ inputs.local_models_dir }}"/models--*; do
-            [[ -d "$model_dir" ]] || continue
-            model_name=$(basename "$model_dir" | sed 's/^models--//' | tr -- '-' '/')
-            if [[ -d "$model_dir/snapshots" && -d "$model_dir/refs" ]]; then
-              echo "  ✅ $model_name"
-              FOUND=$((FOUND+1))
+        if [[ -d "${{ inputs.nvme_dir }}" ]]; then
+          NVME_ROOT="${{ inputs.nvme_dir }}"
+        else
+          NVME_ROOT="/tmp"
+        fi
+
+        HUB_DEST="${NVME_ROOT}/.cache/huggingface/hub"
+        mkdir -p "${HUB_DEST}"
+
+        if [[ ! -d "${{ inputs.local_models_dir }}" ]]; then
+          echo "⚠️  local_models_dir '${{ inputs.local_models_dir }}' not found — skipping model seed"
+        else
+          echo "📦 Seeding models: ${{ inputs.local_models_dir }} → ${HUB_DEST}"
+          declare -A _pids _t0s
+          COPIED=0
+          FAILED=0
+          for model_name in ${{ inputs.seed_model_names }}; do
+            src="${{ inputs.local_models_dir }}/${model_name}"
+            if [[ ! -d "${src}" ]]; then
+              echo "  ⚠️  ${model_name} not found in local_models_dir — skipping"
+              continue
+            fi
+            _t0s["${model_name}"]=$(date +%s)
+            cp -rn "${src}" "${HUB_DEST}/" &
+            _pids["${model_name}"]=$!
+          done
+          for model_name in "${!_pids[@]}"; do
+            if wait "${_pids[$model_name]}"; then
+              echo "  ✅ ${model_name} ($(( $(date +%s) - ${_t0s[$model_name]} ))s)"
+              COPIED=$((COPIED+1))
             else
-              echo "  ⚠️  $model_name (incomplete — missing snapshots/ or refs/)"
-              MISSING=$((MISSING+1))
+              echo "  ❌ ${model_name} copy failed"
+              FAILED=$((FAILED+1))
             fi
           done
-          echo "--------------------------------"
-          echo "📊 Cache check: $FOUND complete, $MISSING incomplete"
-        else
-          echo "❌ Models directory not found: ${{ inputs.local_models_dir }}"
+          echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"
         fi
     - name: Run pytest
       shell: bash
@@ -143,7 +164,7 @@ runs:
           echo "✅ NVMe scratch available — caches will use ${NVME_ROOT}"
         else
           NVME_ROOT="/tmp"
-          echo "⚠️  No ${{ inputs.nvme_dir }} — falling back to /tmp (CPU runner)"
+          echo "⚠️  No ${{ inputs.nvme_dir }} — falling back to /tmp (Probably aCPU runner)"
         fi
 
         # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
@@ -155,15 +176,6 @@ runs:
         # HF cache → NVMe when available (model weight reads are the largest I/O)
         export HF_HOME="${NVME_ROOT}/.cache/huggingface"
         mkdir -p "${HF_HOME}"
-        for IMG_CACHE in /home/dynamo/.cache/huggingface /root/.cache/huggingface; do
-          if [ -d "${IMG_CACHE}" ]; then
-            echo "📦 Seeding HF cache: ${IMG_CACHE} → ${HF_HOME}"
-            _SEED_T0=$(date +%s)
-            cp -rn "${IMG_CACHE}/." "${HF_HOME}/" 2>/dev/null || true
-            echo "📦 Cache seed complete in $(( $(date +%s) - _SEED_T0 ))s"
-            break
-          fi
-        done
         echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
 
         # XDG cache (flashinfer JIT, torch compile) → NVMe when available
@@ -177,9 +189,15 @@ runs:
         # (no network downloads) and sets HF_HUB_OFFLINE=1 for the test session.
         # Only enabled for GPU tests (verify_gpu=true); CPU tests do not need it.
         MODELS_DIR_ARG=""
-        if [[ "${{ inputs.gpu_tests }}" == "true" && -d "${{ inputs.local_models_dir }}" ]]; then
-          MODELS_DIR_ARG="--models-dir=${{ inputs.local_models_dir }}"
-          echo "📁 Using pre-staged model cache at ${{ inputs.local_models_dir }} (offline mode)"
+        if [[ "${{ inputs.gpu_tests }}" == "true" ]]; then
+          NVME_HUB="${NVME_ROOT}/.cache/huggingface/hub"
+          if [[ -d "${NVME_HUB}" ]]; then
+            MODELS_DIR_ARG="--models-dir=${NVME_HUB}"
+            echo "📁 Using NVMe model cache at ${NVME_HUB} (offline mode)"
+          elif [[ -d "${{ inputs.local_models_dir }}" ]]; then
+            MODELS_DIR_ARG="--models-dir=${{ inputs.local_models_dir }}"
+            echo "📁 Falling back to S3 model cache at ${{ inputs.local_models_dir }} (offline mode)"
+          fi
         fi
 
         CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
