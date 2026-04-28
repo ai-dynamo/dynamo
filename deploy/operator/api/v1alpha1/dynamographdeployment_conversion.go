@@ -274,6 +274,39 @@ func dgdHasAlphaOnlyFields(src *DynamoGraphDeploymentSpec) bool {
 	return false
 }
 
+func decodeDGDSpokePreserved(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus) {
+	var preservedSpokeSpec *DynamoGraphDeploymentSpec
+	var preservedSpokeStatus *DynamoGraphDeploymentStatus
+	if raw, ok := getAnnFromObj(obj, annDGDSpokeSpec); ok && raw != "" {
+		if spec, ok := restoreDGDSpokeSpec(raw); ok {
+			preservedSpokeSpec = &spec
+		}
+	}
+	if rawStatus, ok := getAnnFromObj(obj, annDGDSpokeStatus); ok && rawStatus != "" {
+		var status DynamoGraphDeploymentStatus
+		if err := json.Unmarshal([]byte(rawStatus), &status); err == nil {
+			preservedSpokeStatus = &status
+		}
+	}
+	return preservedSpokeSpec, preservedSpokeStatus
+}
+
+func restoreDGDSpokeFastPath(dst *DynamoGraphDeployment, src *v1beta1.DynamoGraphDeployment, preservedSpec *DynamoGraphDeploymentSpec, preservedStatus *DynamoGraphDeploymentStatus) bool {
+	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
+	// matching means no hub fields changed. Metadata was copied above and rides along.
+	if preservedSpec == nil || !dgdSpokeHubUnmodified(src) {
+		return false
+	}
+	dst.Spec = *preservedSpec.DeepCopy()
+	if preservedStatus != nil {
+		dst.Status = *preservedStatus.DeepCopy()
+	} else {
+		convertDGDStatusFrom(&src.Status, &dst.Status)
+	}
+	scrubDGDInternalAnnotations(&dst.ObjectMeta)
+	return true
+}
+
 // ConvertFrom converts from the hub (v1beta1) DynamoGraphDeployment into this
 // v1alpha1 instance.
 func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
@@ -284,29 +317,8 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
-	var preservedSpokeSpec *DynamoGraphDeploymentSpec
-	var preservedSpokeStatus *DynamoGraphDeploymentStatus
-	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec); ok && raw != "" {
-		if spec, ok := restoreDGDSpokeSpec(raw); ok {
-			preservedSpokeSpec = &spec
-		}
-	}
-	if rawStatus, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus); ok && rawStatus != "" {
-		var status DynamoGraphDeploymentStatus
-		if err := json.Unmarshal([]byte(rawStatus), &status); err == nil {
-			preservedSpokeStatus = &status
-		}
-	}
-	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
-	// matching means no hub fields changed. Metadata was copied above and rides along.
-	if preservedSpokeSpec != nil && dgdSpokeHubUnmodified(src) {
-		dst.Spec = *preservedSpokeSpec.DeepCopy()
-		if preservedSpokeStatus != nil {
-			dst.Status = *preservedSpokeStatus.DeepCopy()
-		} else {
-			convertDGDStatusFrom(&src.Status, &dst.Status)
-		}
-		scrubDGDInternalAnnotations(&dst.ObjectMeta)
+	preservedSpokeSpec, preservedSpokeStatus := decodeDGDSpokePreserved(&dst.ObjectMeta)
+	if restoreDGDSpokeFastPath(dst, src, preservedSpokeSpec, preservedSpokeStatus) {
 		return nil
 	}
 
