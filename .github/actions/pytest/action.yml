@@ -1,4 +1,4 @@
-name: 'Pytest'
+﻿name: 'Pytest'
 description: 'Run pytest on pre-built container images'
 inputs:
   pytest_marks:
@@ -33,6 +33,7 @@ inputs:
   enable_coverage:
     description: 'Enable coverage collection (true/false)'
     required: false
+    type: string
     default: 'false'
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
@@ -76,24 +77,20 @@ runs:
         MINIO_ACCESS_KEY: minioadmin
         MINIO_SECRET_KEY: minioadmin
       run: |
-        # Reuse an existing MinIO service when available; only start one if needed.
-        echo "🗄️  Checking MinIO service..."
+        # Start MinIO for S3-compatible object storage (used by LoRA tests)
+        echo "🗄️  Starting MinIO service..."
 
-        MAX_ATTEMPTS=30
-        ATTEMPT=0
+        # Check container state
+        CONTAINER_STATE=$(docker inspect --format '{{.State.Status}}' "${MINIO_CONTAINER_NAME}" 2>/dev/null || echo "absent")
 
-        if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-          echo "✅ Reusing existing MinIO service on localhost:9000"
+        if [[ "${CONTAINER_STATE}" == "running" ]]; then
+          echo "✅ MinIO container is already running, skipping start"
           exit 0
-        fi
-
-        if docker ps --filter "name=^/${MINIO_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${MINIO_CONTAINER_NAME}"; then
-          echo "♻️  Found running MinIO container ${MINIO_CONTAINER_NAME}, waiting for readiness..."
-        elif docker ps -a --filter "name=^/${MINIO_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${MINIO_CONTAINER_NAME}"; then
-          echo "♻️  Found existing stopped MinIO container ${MINIO_CONTAINER_NAME}, starting it..."
-          docker start "${MINIO_CONTAINER_NAME}" > /dev/null
+        elif [[ "${CONTAINER_STATE}" == "exited" || "${CONTAINER_STATE}" == "created" || "${CONTAINER_STATE}" == "paused" ]]; then
+          echo "▶️  MinIO container exists but is stopped (${CONTAINER_STATE}), starting it..."
+          docker start "${MINIO_CONTAINER_NAME}"
         else
-          echo "🚀 No existing MinIO container found, starting a new container..."
+          echo "🆕 No MinIO container found, creating a new one..."
           docker run -d \
             --name "${MINIO_CONTAINER_NAME}" \
             -p 9000:9000 \
@@ -103,7 +100,10 @@ runs:
             quay.io/minio/minio server /data --console-address ':9001'
         fi
 
+        # Wait for MinIO to be ready
         echo "⏳ Waiting for MinIO to be ready..."
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
         while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
           if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
             echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
@@ -157,7 +157,9 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            # Model predownload on XPU can exceed default pytest-timeout in CI.
+            PYTEST_CMD="${PYTEST_CMD} --timeout=600"
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -175,7 +177,6 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
@@ -249,12 +250,15 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            PYTEST_TIMEOUT_OPT="--timeout=600"
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
+            PYTEST_TIMEOUT_OPT=""
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
+            PYTEST_TIMEOUT_OPT=""
           fi
 
           # Determine parallelization based on parallel_mode input
@@ -288,7 +292,6 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
@@ -297,7 +300,6 @@ runs:
         # Pre-cleanup: remove any leftover containers with the same name
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
         docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
-
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \

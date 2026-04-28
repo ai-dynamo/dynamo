@@ -589,7 +589,7 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start() {
         let config = XmlParserConfig::default();
         assert!(detect_tool_call_start_xml("<tool_call>", &config));
@@ -600,7 +600,7 @@ mod tests {
         assert!(!detect_tool_call_start_xml("toolcall", &config));
     }
 
-    #[test]
+    #[test] // CASE.20
     fn test_find_tool_call_end_position() {
         let config = XmlParserConfig::default();
         let text = "<tool_call><function=test></function></tool_call>more text";
@@ -617,7 +617,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_xml so that the jail passes the
     /// entire group to extract_tool_calls rather than emitting the second (and later)
     /// calls as raw trailing text.
-    #[test]
+    #[test] // CASE.2, CASE.20
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = XmlParserConfig::default();
 
@@ -658,7 +658,7 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[rstest] // CASE.18 — helper
     #[case(r#"{"key": "value"}"#, serde_json::json!({"key": "value"}), "JSON object")]
     #[case(r#"[1, 2, 3]"#, serde_json::json!([1, 2, 3]), "JSON array")]
     #[case("42", serde_json::json!(42), "integer")]
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(safe_parse_value(input), expected);
     }
 
-    #[rstest]
+    #[rstest] // CASE.17 — helper
     #[case("&lt;div&gt;", "<div>", "HTML tags")]
     #[case("a &amp; b", "a & b", "ampersand")]
     #[case("&quot;quoted&quot;", "\"quoted\"", "quotes")]
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(html_unescape(input), expected);
     }
 
-    #[test]
+    #[test] // CASE.1
     fn test_parse_simple_tool_call() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -704,7 +704,7 @@ pwd && ls
         assert_eq!(args["command"], "pwd && ls");
     }
 
-    #[test]
+    #[test] // CASE.1, CASE.7
     fn test_parse_multiple_parameters() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -730,7 +730,7 @@ fahrenheit
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test]
+    #[test] // CASE.13
     fn test_parse_with_normal_text() {
         let input = r#"I'll help you with that. <tool_call>
 <function=get_weather>
@@ -750,7 +750,7 @@ Dallas
         );
     }
 
-    #[test]
+    #[test] // CASE.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -778,7 +778,7 @@ Orlando
         assert_eq!(args1["city"], "Orlando");
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_json_parameter_value() {
         // With schema-aware parsing, we need to provide a schema to parse JSON objects
         let tools = vec![ToolDefinition {
@@ -809,7 +809,7 @@ Orlando
         assert_eq!(args["config"]["count"], 42);
     }
 
-    #[test]
+    #[test] // CASE.3
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
         let (calls, normal) =
@@ -818,7 +818,7 @@ Orlando
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_malformed_tool_call() {
         let input = r#"<tool_call>
 <function=incomplete>
@@ -831,7 +831,7 @@ value
         assert!(result.is_ok());
     }
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_missing_parameter_closing_tag() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -848,7 +848,7 @@ ls -la
         assert_eq!(args["command"], "ls -la");
     }
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_missing_function_closing_tag() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -865,7 +865,7 @@ Boston
         assert_eq!(args["city"], "Boston");
     }
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_missing_both_closing_tags() {
         let input = r#"<tool_call>
 <function=run_query>
@@ -882,7 +882,7 @@ SELECT * FROM users
         assert_eq!(args["sql"], "SELECT * FROM users\n</tool_call>");
     }
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_multiple_parameters_missing_closing_tags() {
         let input = r#"<tool_call>
 <function=search>
@@ -902,7 +902,7 @@ rust programming
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
     }
 
-    #[test]
+    #[test] // CASE.18
     fn test_schema_aware_type_conversion() {
         // This test matches the Python test_parse_streaming_increment_multiple_parameters
         // from the diff, showing schema-aware type conversion
@@ -972,7 +972,7 @@ rust programming
         );
     }
 
-    #[test]
+    #[test] // CASE.18
     fn test_schema_aware_type_conversion_fallback() {
         // Test that invalid values fall back to strings with warnings
         let tools = vec![ToolDefinition {
@@ -1008,7 +1008,7 @@ rust programming
         assert_eq!(args["bool_param"], false);
     }
 
-    #[test]
+    #[test] // CASE.18
     fn test_anyof_param_parsed_as_object_not_string() {
         // When a tool parameter uses "anyOf" instead of a direct "type", the value
         // should be JSON-parsed (treated as object), not double-encoded as a string.
@@ -1062,7 +1062,7 @@ rust programming
         assert_eq!(args["location"]["city"], "Paris");
     }
 
-    #[test]
+    #[test] // CASE.18
     fn test_no_schema_fallback_behavior() {
         // Without schema, behavior should match old safe_parse_value logic
         let input = r#"<tool_call>

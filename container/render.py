@@ -16,7 +16,8 @@ def parse_platform(platform_str: str) -> str:
     """Normalize a --platform value to the template variable used by Jinja2.
 
     Accepts Docker-style values (linux/amd64, linux/arm64) or short form (amd64,
-    arm64), and comma-separated lists for multi-arch (linux/amd64,linux/arm64).
+    arm64, x86_64), and comma-separated lists for multi-arch
+    (linux/amd64,linux/arm64).
 
     Returns one of: 'amd64', 'arm64', or 'multi'.
 

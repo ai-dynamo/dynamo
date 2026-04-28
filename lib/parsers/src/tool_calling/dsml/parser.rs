@@ -274,7 +274,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start() {
         let config = get_test_config();
         assert!(detect_tool_call_start_dsml(
@@ -290,7 +290,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // DeepSeek V4 coverage (see lib/parsers/TESTING.md for CASE.* taxonomy).
+    // DeepSeek V4 coverage (see lib/parsers/TEST_CASES.md for CASE.* taxonomy).
     //
     // Covered by the V4 tests below (or by a shared DSML generic test):
     //   - CASE.1   single-call            (parsers.rs :: test_deepseek_v4_single_tool_call)
@@ -341,7 +341,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// `CASE.8` — streaming start-token detection (V4 variant).
-    #[test]
+    #[test] // CASE.20, CASE.23 — V4 token variant
     fn test_detect_tool_call_start_v4() {
         let config = get_v4_test_config();
         assert!(detect_tool_call_start_dsml("<｜DSML｜tool_calls>", &config));
@@ -357,7 +357,7 @@ mod tests {
         assert!(!detect_tool_call_start_dsml("no tool call here", &config));
     }
 
-    #[test]
+    #[test] // CASE.20
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
         let text = "<｜DSML｜function_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜function_calls>more";
@@ -366,7 +366,7 @@ mod tests {
     }
 
     /// `CASE.8` — streaming end-position lookup (V4 variant).
-    #[test]
+    #[test] // CASE.20, CASE.23 — V4 token variant
     fn test_find_tool_call_end_position_v4() {
         let config = get_v4_test_config();
         let text = "<｜DSML｜tool_calls><｜DSML｜invoke name=\"test\"></｜DSML｜invoke></｜DSML｜tool_calls>more";
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(&text[pos..], "more");
     }
 
-    #[test]
+    #[test] // CASE.1
     fn test_parse_single_tool_call_string_param() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="get_weather">
@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[test]
+    #[test] // CASE.1, CASE.7
     fn test_parse_single_tool_call_mixed_params() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="search">
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(args["topn"], 10);
     }
 
-    #[test]
+    #[test] // CASE.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="get_weather">
@@ -448,7 +448,7 @@ mod tests {
     }
 
     /// `CASE.2` multi-calls + `CASE.13` interleaved-text (prefix text before the block).
-    #[test]
+    #[test] // CASE.2, CASE.23 — V4 variant
     fn test_parse_deepseek_v4_multiple_tool_calls() {
         let input = r#"Let's check this. <｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_favorite_tourist_spot">
@@ -478,7 +478,7 @@ mod tests {
     }
 
     /// `CASE.6` — empty args (no-parameter invoke).
-    #[test]
+    #[test] // CASE.6, CASE.23 — V4 variant
     fn test_parse_deepseek_v4_no_parameters() {
         let input = r#"<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_current_time">
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    #[test]
+    #[test] // CASE.13
     fn test_parse_with_normal_text() {
         let input = r#"Here's the result: <｜DSML｜function_calls>
 <｜DSML｜invoke name="test">
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(normal, Some("Here's the result:".to_string()));
     }
 
-    #[test]
+    #[test] // CASE.3
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
         let config = get_test_config();
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_json_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="process">
@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(args["config"]["count"], 42);
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_array_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="process">
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(args["items"][2], 3);
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_boolean_parameters() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="config">
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(args["disabled"], false);
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_number_parameters() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="calculate">
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(args["negative"], -100);
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_mixed_types_realistic() {
         // Realistic example based on test data
         let input = r#"<｜DSML｜function_calls>
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(args["source"], "web");
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_nested_object_parameter() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="configure">
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(args["settings"]["endpoints"][0], "a");
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_empty_string_parameter() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="test">
@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(args["empty"], "");
     }
 
-    #[test]
+    #[test] // CASE.7, CASE.14
     fn test_parse_null_parameter() {
         let input = r#"<｜DSML｜function_calls>
 <｜DSML｜invoke name="test">
@@ -683,7 +683,7 @@ mod tests {
     /// parser gained end-token recovery; see
     /// `kimi_k2_parser.rs::test_parse_malformed_no_section_end` for the
     /// post-fix recovery pattern.
-    #[test]
+    #[test] // CASE.5, CASE.23 — V4 variant
     fn test_parse_deepseek_v4_missing_end_token() {
         // Start fence + complete invoke, but no </｜DSML｜tool_calls>.
         let input = "<｜DSML｜tool_calls>\n\
@@ -713,7 +713,7 @@ mod tests {
     /// absence of the closing fence prevents the block regex from matching.
     /// All calls are dropped. If the parser ever gains partial-block
     /// recovery, this test will fail and force an intentional update.
-    #[test]
+    #[test] // CASE.2, CASE.5, CASE.23
     fn test_parse_deepseek_v4_missing_end_token_multiple_calls() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"a\">\n\
@@ -738,7 +738,7 @@ mod tests {
     /// (unwrap_or_else → Value::String). Pin the fallback so removing it
     /// (which would cause the whole call to 500 on ragged-edge JSON) is a
     /// deliberate change.
-    #[test]
+    #[test] // CASE.4, CASE.23
     fn test_parse_deepseek_v4_malformed_json_value_falls_back_to_string() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\
@@ -762,7 +762,7 @@ mod tests {
     /// `CASE.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
     /// intact). The invoke regex requires its own close tag, so the call is
     /// silently dropped. Pin the behavior.
-    #[test]
+    #[test] // CASE.4, CASE.23
     fn test_parse_deepseek_v4_missing_invoke_close_drops_call() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"test\">\n\

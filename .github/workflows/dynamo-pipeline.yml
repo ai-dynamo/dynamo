@@ -69,7 +69,7 @@ jobs:
     with:
       framework: dynamo
       target: runtime
-      cuda_version: '["${{ inputs.cuda_version }}"]'
+      version_selector: '["${{ inputs.cuda_version }}"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ inputs.builder_name }}
       fresh_builder: ${{ inputs.fresh_builder }}
@@ -186,7 +186,7 @@ jobs:
       test_type: parallel
       amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
-      cuda_version: '["${{ inputs.cuda_version }}"]'
+      version_selector: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
@@ -205,7 +205,7 @@ jobs:
       test_type: sequential
       amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
-      cuda_version: '["${{ inputs.cuda_version }}"]'
+      version_selector: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
@@ -224,7 +224,7 @@ jobs:
       test_type: gpu
       amd_runner: prod-tester-amd-gpu-v1
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
-      cuda_version: '["${{ inputs.cuda_version }}"]'
+      version_selector: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'
       run_sanity_check: false
       run_cpu_only_tests: false
