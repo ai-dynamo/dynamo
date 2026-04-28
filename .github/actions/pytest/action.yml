@@ -265,6 +265,7 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
         # TEMP DIAGNOSTIC (revert before merge): force live stdout, dump trace on fatal signals.
+        DOCKER_ENV_FLAGS+=(--env "HF_HUB_ENABLE_HF_TRANSFER=1")
         DOCKER_ENV_FLAGS+=(--env "PYTHONUNBUFFERED=1" --env "PYTHONFAULTHANDLER=1")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
