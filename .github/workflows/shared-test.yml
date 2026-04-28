@@ -217,3 +217,4 @@ jobs:
           echo "--- Storage ---"
           du -h -d 1 /scratch/.cache/huggingface/hub
           echo "--- End Storage ---"
+          ls -lhR /scratch/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B
