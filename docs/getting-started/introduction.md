@@ -9,7 +9,7 @@ sidebar-title: Introduction
 Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
 
 > [!TIP]
-> Looking to get started right away? See the [Quickstart](quickstart.md) to install and run Dynamo in minutes.
+> Looking to get started right away? See the [Quickstart](quickstart.mdx) to install and run Dynamo in minutes.
 
 ## Why Dynamo?
 
@@ -158,3 +158,5 @@ Explore the following resources to go deeper:
 - [Kubernetes Deployment](../kubernetes/README.md) -- Deploy at scale with Grove
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
 - [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
+
+**Further reading:** [Dynamo engineering blog](../blogs/README.md).
