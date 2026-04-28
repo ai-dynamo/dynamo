@@ -12,6 +12,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use rmp_serde as rmps;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -47,6 +48,10 @@ impl<'de> Deserialize<'de> for KvEventBatch {
             data_parallel_rank: arr.2,
         })
     }
+}
+
+pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::Error> {
+    rmps::from_slice(payload)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -100,6 +105,49 @@ pub enum RawKvEvent {
     },
     AllBlocksCleared,
     Ignored,
+}
+
+impl RawKvEvent {
+    pub fn is_ignored(&self) -> bool {
+        matches!(self, Self::Ignored)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ZmqEventNormalizer {
+    kv_block_size: u32,
+    warning_count: Arc<AtomicU32>,
+}
+
+impl ZmqEventNormalizer {
+    pub fn new(kv_block_size: u32) -> Self {
+        Self {
+            kv_block_size,
+            warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    pub fn with_warning_count(kv_block_size: u32, warning_count: Arc<AtomicU32>) -> Self {
+        Self {
+            kv_block_size,
+            warning_count,
+        }
+    }
+
+    pub fn normalize(
+        &self,
+        raw: RawKvEvent,
+        event_id: u64,
+        worker: WorkerWithDpRank,
+    ) -> Option<PlacementEvent> {
+        convert_event(
+            raw,
+            event_id,
+            self.kv_block_size,
+            worker,
+            &self.warning_count,
+        )
+    }
 }
 
 /// Parse MM hash from extra_keys string:
