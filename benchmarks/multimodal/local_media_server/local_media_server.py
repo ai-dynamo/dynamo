@@ -27,8 +27,7 @@ class LocalMediaServer(BaseHTTPRequestHandler):
         cls.image_store = dict(images)
 
     def do_GET(self) -> None:
-        if self.processing_time_ms > 0:
-            time.sleep(self.processing_time_ms / 1000.0)
+        start = time.monotonic()
 
         parsed_path = urlparse(self.path)
         resource = parsed_path.path.lstrip("/")
@@ -42,6 +41,10 @@ class LocalMediaServer(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Image not found")
+
+        remaining = self.processing_time_ms / 1000.0 - (time.monotonic() - start)
+        if remaining > 0:
+            time.sleep(remaining)
 
 
 def run_server(port: int, images: dict[str, bytes], processing_time_ms: int) -> None:
