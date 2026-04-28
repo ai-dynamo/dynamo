@@ -132,9 +132,28 @@ class KvIndexer:
         logger.info("KvIndexer: subscribed to worker %s at %s", worker_id, zmq_endpoint)
 
     def discover_workers(
-        self, instance_ids: list[int], kv_event_base_port: int | None = None
+        self,
+        instance_ids: list[int],
+        kv_event_base_port: int | None = None,
+        worker_endpoints: dict[int, str] | None = None,
     ) -> None:
-        """Auto-discover workers by instance IDs and sequential ZMQ ports."""
+        """Subscribe to workers' KV event streams.
+
+        If ``worker_endpoints`` is provided it takes precedence and is treated
+        as an authoritative ``{worker_id: "tcp://host:port"}`` mapping. This
+        is the cross-host path (e.g. k8s, where each worker pod binds the
+        same port on its own pod IP).
+
+        Otherwise the single-host fallback runs: each worker in sorted
+        instance-id order is reached at ``tcp://127.0.0.1:{base + idx}``.
+        This matches the local multi-worker layout where every worker
+        shares a host and needs a distinct port offset.
+        """
+        if worker_endpoints:
+            for wid, endpoint in worker_endpoints.items():
+                self.add_worker(wid, endpoint)
+            return
+
         if kv_event_base_port is None:
             kv_event_base_port = int(os.environ.get("KV_EVENT_BASE_PORT", "20080"))
 
