@@ -1418,8 +1418,8 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
-    /// Repro for the production leak observed against kimi-k2-6 on
-    /// `astraprd01-ocp-pdx04`: the model stops mid-argument with
+    /// Repro for the production leak observed against kimi-k2-6: the
+    /// model stops mid-argument with
     /// `finish_reason: stop` (not max_tokens), having emitted
     /// `<|tool_calls_section_begin|>`, `<|tool_call_begin|>`, the function id,
     /// `<|tool_call_argument_begin|>`, and the JSON value — but **never**
@@ -1465,21 +1465,15 @@ mod tests {
             "Truly truncated call (no call_end) should not produce structured tool_calls"
         );
 
-        // Critical: the jail MUST NOT re-emit the raw `<|tool_calls_section_begin|>`
-        // / `<|tool_call_begin|>` / `<|tool_call_argument_begin|>` markers as
-        // user-visible content. Before the fix, these leaked through.
-        let leaked_markers = [
-            "<|tool_calls_section_begin|>",
-            "<|tool_call_begin|>",
-            "<|tool_call_argument_begin|>",
-        ];
-        for marker in leaked_markers {
-            assert!(
-                !aggregated.normal_content.contains(marker),
-                "Internal special-token marker {marker:?} leaked to user-visible content. \
-                 Got normal_content: {:?}",
-                aggregated.normal_content
-            );
-        }
+        // The parser consumes the section body, so normal_text is expected
+        // to be empty. Asserting equality (not just marker-absence) locks the
+        // contract: any future regression that produced *other* garbage in
+        // normal_text would still fail this assertion.
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Truncated tool-call section should produce empty normal_content. \
+             Got: {:?}",
+            aggregated.normal_content
+        );
     }
 }

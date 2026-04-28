@@ -1008,16 +1008,18 @@ impl JailedStream {
                         )
                     }
                     Err(e) => {
-                        // Parser couldn't run at all — last-resort fallback to the raw
-                        // buffer so a misconfigured parser doesn't silently drop output.
+                        // Parser errored — emit empty content rather than the raw buffer.
+                        // accumulated_content may still contain tool-call markers, and
+                        // surfacing those to the user is the leak we're guarding against.
+                        // The warn! gives operators visibility into the failure.
                         tracing::warn!(
                             error = %e,
-                            "tool-call parser errored; emitting raw buffered content as fallback"
+                            "tool-call parser errored; dropping buffered content to avoid marker leak"
                         );
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            accumulated_content,
+                            "",
                             None,
                             base_choice.finish_reason,
                             base_choice.stop_reason.clone(),
