@@ -368,24 +368,28 @@ fn spawn_worker_thread(
                     .and_then(|ctx| ctx.pci_bdf_address());
 
                 if let Some(ref bdf) = pci_bdf {
-                    if let Some(node) = dynamo_memory::numa::get_numa_node_for_pci_address(bdf) {
-                        if matches!(backend, DeviceBackend::Cuda) {
-                            // CUDA: try CPU-set subdivision (uses NVML for all-GPU enumeration)
-                            if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
-                                eprintln!(
-                                    "[GPU {device_id}] Worker pinned to CPUs: {} (PCI {bdf})",
-                                    format_cpu_set(&cpus)
-                                );
-                                pin_thread_to_cpus(&cpus);
-                            } else {
-                                eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node} (PCI {bdf})");
-                                let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
-                            }
-                        } else {
-                            // XPU/SYCL: pin to NUMA node directly
-                            eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node} (PCI {bdf})");
-                            let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
-                        }
+                    // Map kvbm-physical backend to dynamo-memory's lightweight enum
+                    let backend_kind = match backend {
+                        DeviceBackend::Cuda => dynamo_memory::numa::DeviceBackendKind::Cuda,
+                        DeviceBackend::Sycl => dynamo_memory::numa::DeviceBackendKind::Sycl,
+                    };
+
+                    // Try CPU-set subdivision (works for all backends now)
+                    if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(backend_kind, bdf) {
+                        let numa_node = dynamo_memory::numa::get_numa_node_for_pci_address(bdf);
+                        let numa_str = match numa_node {
+                            Some(n) => format!("NUMA node {n}"),
+                            None => "NUMA unknown".to_string(),
+                        };
+                        eprintln!(
+                            "[GPU {device_id}] Worker pinned to CPUs: {} (PCI {bdf}, {numa_str})",
+                            format_cpu_set(&cpus)
+                        );
+                        pin_thread_to_cpus(&cpus);
+                    } else if let Some(node) = dynamo_memory::numa::get_numa_node_for_pci_address(bdf) {
+                        // Fallback: pin to whole NUMA node
+                        eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node} (PCI {bdf})");
+                        let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
                     } else {
                         eprintln!("[GPU {device_id}] No NUMA affinity for PCI {bdf}");
                     }
