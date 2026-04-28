@@ -93,7 +93,33 @@ DYN_KVBM_CPU_CACHE_GB=20 \
     --enforce-eager
 ```
 
+### Offload Policies
 
+KVBM v2 runs two independent offload pipelines; each filters blocks through a list of policies (implicit AND). Defaults are:
+
+| Tier | Default | Rationale |
+|------|---------|-----------|
+| G1→G2 | `presence` | Offload any GPU block not already on host and not already in flight. |
+| G2→G3 | `presence` | Offload any host block not already on disk and not already in flight. |
+
+Available policy types:
+
+- `pass_all` — no filtering, every block is offloaded
+- `presence` — skip blocks already in the destination tier or currently in flight
+- `presence_lfu` — `presence` plus a TinyLFU access-count threshold; offloads when `count > min_lfu_count` (default `1`)
+
+Override per tier via env vars (the value is JSON):
+
+```bash
+# Opt into LFU-on-admission for G2→G3 (useful when disk write bandwidth is precious, or SSD lifespan is a concern)
+KVBM_OFFLOAD_G2_TO_G3_POLICIES='["presence_lfu"]'
+
+# Tune the LFU threshold (default 1; e.g. require 4+ hits before offload)
+KVBM_OFFLOAD_G2_TO_G3_PRESENCE_LFU_MIN_LFU_COUNT=3
+
+# Force every block through (helpful for smoke-testing or observing G3 traffic)
+KVBM_OFFLOAD_G2_TO_G3_POLICIES='["pass_all"]'
+```
 
 ## Benchmarking
 

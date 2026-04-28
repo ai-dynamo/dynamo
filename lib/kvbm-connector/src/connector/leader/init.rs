@@ -485,12 +485,16 @@ impl ConnectorLeader {
             .auto_chain(has_downstream_tier)
             .build();
 
-        // Build G2→G3 policy from config (or defaults if not configured)
-        // Default: PresenceLfu filter for presence + LFU frequency check (pending auto-wired)
+        // Build G2→G3 policy from config (or defaults if not configured).
+        // Default: Presence — symmetric with G1→G2. Promote any block not already
+        // on disk and not already in flight; let G3's eviction backend handle
+        // cold-block churn under pressure. Opt into LFU-on-admission for
+        // workloads where disk write amplification matters by setting
+        // KVBM_OFFLOAD_G2_TO_G3_POLICIES='["presence_lfu"]'.
         let g2_to_g3_config = if offload_config.g2_to_g3.policies.is_empty() {
-            tracing::debug!("No G2→G3 policies configured, using default: [PresenceLfu]");
+            tracing::debug!("No G2→G3 policies configured, using default: [Presence]");
             kvbm_config::TierOffloadConfig {
-                policies: vec![kvbm_config::PolicyType::PresenceLfu],
+                policies: vec![kvbm_config::PolicyType::Presence],
                 ..Default::default()
             }
         } else {
