@@ -174,13 +174,18 @@ echo "\n=== Installing vLLM-Omni ==="
 # torch/transformers stack after vLLM is installed, which can leave vllm._C ABI-mismatched.
 # vLLM should remain the final owner of the runtime stack in this environment.
 if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
+    OMNI_TORCH_ARGS=""
+    if [ "$DEVICE" = "cuda" ]; then
+        OMNI_TORCH_ARGS="--torch-backend=${TORCH_BACKEND}"
+    fi
+
     # Try PyPI first, fall back to building from source
-    if uv pip install vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+    if uv pip install ${OMNI_TORCH_ARGS} vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
     else
         echo "⚠ PyPI install failed, building from source..."
         git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
-        uv pip install $INSTALLATION_DIR/vllm-omni
+        uv pip install ${OMNI_TORCH_ARGS} $INSTALLATION_DIR/vllm-omni
         rm -rf $INSTALLATION_DIR/vllm-omni
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
     fi
