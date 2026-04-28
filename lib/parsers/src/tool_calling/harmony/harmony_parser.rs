@@ -210,7 +210,7 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[tokio::test]
+    #[tokio::test] // CASE.1, CASE.19
     async fn test_parse_tool_calls_harmony_complete_basic() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
         let (tool_calls, normal_content) =
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(args["format"], "celsius");
     }
 
-    #[tokio::test]
+    #[tokio::test] // CASE.4, CASE.19
     async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(tool_calls.len(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test] // CASE.7, CASE.9, CASE.19
     async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[tokio::test]
+    #[tokio::test] // CASE.9, CASE.13, CASE.19
     async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[tokio::test]
+    #[tokio::test] // CASE.4, CASE.19
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
@@ -290,7 +290,7 @@ mod tests {
 mod detect_parser_tests {
     use super::*;
 
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start_harmony_chunk_with_tool_call_start_token() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json"#;
         let config = JsonParserConfig {
@@ -302,7 +302,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20
     fn test_detect_tool_call_start_harmony_chunk_without_tool_call_start_token() {
         // This is a warkaround for now. Right now everything is treated as tool call start token.
         // We need to improve this in the future.
@@ -316,7 +316,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.8
     fn test_detect_tool_call_start_harmony_partial_tokens() {
         // Test partial token detection for streaming scenarios
         let config = JsonParserConfig {
