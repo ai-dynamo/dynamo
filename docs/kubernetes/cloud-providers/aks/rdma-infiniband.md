@@ -335,11 +335,7 @@ helm install gpu-operator nvidia/gpu-operator \
   --namespace gpu-operator --create-namespace \
   --set nfd.enabled=false \
   --set driver.rdma.enabled=true \
-  --set driver.rdma.useHostMofed=true \
-  --set migManager.enabled=false \
-  --set vgpuDeviceManager.enabled=false \
-  --set vfioManager.enabled=false \
-  --set sandboxDevicePlugin.enabled=false
+  --set driver.rdma.useHostMofed=true
 ```
 
 Key differences from a standard GPU Operator install:
@@ -347,7 +343,6 @@ Key differences from a standard GPU Operator install:
 - `nfd.enabled=false` — Network Operator already deploys Node Feature Discovery; running two NFD instances causes conflicts
 - `driver.rdma.enabled=true` — enables GPUDirect RDMA support; causes the driver daemonset to build and load `nvidia_peermem`
 - `driver.rdma.useHostMofed=true` — tells the GPU Operator to use the MOFED driver installed by the Network Operator (Step 1) rather than its own; required when the Network Operator manages OFED
-- `migManager`, `vgpuDeviceManager`, `vfioManager`, `sandboxDevicePlugin` disabled — not needed for InfiniBand workloads, reduces overhead
 
 Wait for the GPU Operator pods to reach `Running` state:
 

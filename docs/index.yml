@@ -112,26 +112,30 @@ navigation:
             path: kubernetes/topology-aware-scheduling.md
       - section: Cloud Provider Guides
         contents:
-          - section: Amazon EKS
-            path: kubernetes/cloud-providers/eks/eks.md
+          - section: AWS
             contents:
-              - page: EFS Setup
+              - page: EKS Setup
+                path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFS
                 path: kubernetes/cloud-providers/eks/efs.md
-          - section: Azure AKS
-            path: kubernetes/cloud-providers/aks/aks.md
+              - page: ECS
+                path: kubernetes/cloud-providers/ecs/ecs.md
+          - section: Azure
             contents:
+              - page: AKS Setup
+                path: kubernetes/cloud-providers/aks/aks.md
               - page: RDMA / InfiniBand
                 path: kubernetes/cloud-providers/aks/rdma-infiniband.md
-              - page: Storage for Model Caching
+              - page: AKS Storage
                 path: kubernetes/cloud-providers/aks/storage.md
               - page: Azure Lustre CSI Driver
                 path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
               - page: Spot VMs
                 path: kubernetes/cloud-providers/aks/spot-vms.md
-          - page: Google GKE
-            path: kubernetes/cloud-providers/gke/gke.md
-          - page: Amazon ECS
-            path: kubernetes/cloud-providers/ecs/ecs.md
+          - section: GCP
+            contents:
+              - page: GKE Setup
+                path: kubernetes/cloud-providers/gke/gke.md
 
   # ==================== User Guides ====================
   - section: User Guides

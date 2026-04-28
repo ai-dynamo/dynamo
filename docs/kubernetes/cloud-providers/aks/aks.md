@@ -98,12 +98,21 @@ Follow the [Installation Guide](../../installation-guide.md) to install the Dyna
 
 ## Additional Guides
 
-| Guide | Description |
-|-------|-------------|
-| [RDMA / InfiniBand](rdma-infiniband.md) | Set up RDMA over InfiniBand for disaggregated inference |
-| [Storage for Model Caching](storage.md) | Azure storage options (Lustre, Azure Files, Disk, Blob) and PVC configuration |
-| [Azure Lustre CSI Driver](azure-lustre-csi.md) | Install and configure the Lustre CSI driver for high-performance shared storage |
-| [Spot VMs](spot-vms.md) | Run Dynamo on Spot VM node pools for cost savings |
+### [RDMA / InfiniBand](rdma-infiniband.md)
+
+Required for disaggregated inference in production. Without RDMA, KV cache transfers between prefill and decode workers fall back to TCP with severe latency degradation (~98s TTFT vs ~200–500ms with RDMA). ND-series VMs (e.g., `Standard_ND96asr_v4`, `Standard_ND96isr_H100_v5`) include Mellanox ConnectX InfiniBand NICs but require additional setup beyond the GPU Operator: the NVIDIA Network Operator, a NicClusterPolicy for MOFED drivers, an `ib-node-config` DaemonSet to configure kernel modules and memlock limits, and an RDMA Shared Device Plugin to expose the NICs to pods.
+
+### [Storage for Model Caching](storage.md)
+
+Prevents each pod from independently downloading model weights on startup. Without shared storage, large models take hours to load per pod and will hit HuggingFace rate limits at scale. Covers Azure Managed Lustre, Azure Files, Azure Disk, and Local CSI options with per-cache-type recommendations (model cache, compilation cache, performance cache).
+
+### [Azure Lustre CSI Driver](azure-lustre-csi.md)
+
+The recommended storage for large multi-node models requiring high-throughput shared access. Azure Managed Lustre is not installed by default — this guide covers installing and configuring the Lustre CSI driver before you can use it as a PVC storage class.
+
+### [Spot VMs](spot-vms.md)
+
+Significantly reduces GPU compute costs by running on preemptible Spot VM node pools. AKS automatically taints Spot nodes with `kubernetes.azure.com/scalesetpriority=spot:NoSchedule`, so Dynamo components need explicit tolerations. The Dynamo Helm chart includes a pre-built `values-aks-spot.yaml` that handles this.
 
 ## Clean Up Resources
 

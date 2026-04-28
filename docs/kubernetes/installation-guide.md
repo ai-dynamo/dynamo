@@ -91,6 +91,7 @@ helm install dynamo-platform \
   --version $RELEASE_VERSION \
   --namespace $NAMESPACE \
   --create-namespace
+  # Note: add \ to --create-namespace above when uncommenting any optional flags below
   #
   # Grove + KAI Scheduler — uncomment if using multinode or disaggregated inference.
   # Option A (install=true): Dynamo installs and manages Grove/KAI as bundled subcharts (dev/testing):
