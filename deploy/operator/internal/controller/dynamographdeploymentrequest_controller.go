@@ -1761,7 +1761,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) getDGDPodImagePullErrors(ctx co
 
 	var msgs []string
 	for _, pod := range podList.Items {
-		for _, cs := range pod.Status.ContainerStatuses {
+		statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+		statuses = append(statuses, pod.Status.InitContainerStatuses...)
+		statuses = append(statuses, pod.Status.ContainerStatuses...)
+
+		for _, cs := range statuses {
 			if cs.State.Waiting == nil {
 				continue
 			}
