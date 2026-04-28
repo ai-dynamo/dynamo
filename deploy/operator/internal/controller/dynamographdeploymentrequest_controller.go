@@ -1307,6 +1307,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Value: string(dgdr.UID),
 			},
 		}
+		if r.Config.Infrastructure.PrometheusEndpoint != "" {
+			profilerEnv = append(profilerEnv, corev1.EnvVar{
+				Name:  "PROMETHEUS_ENDPOINT",
+				Value: r.Config.Infrastructure.PrometheusEndpoint,
+			})
+		}
 
 		// Build volume mounts
 		volumeMounts := []corev1.VolumeMount{
