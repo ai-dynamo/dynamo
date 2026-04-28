@@ -501,7 +501,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
+      cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 20
     secrets: inherit
@@ -515,7 +515,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-dev-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
+      cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
