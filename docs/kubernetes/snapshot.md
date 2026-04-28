@@ -145,7 +145,7 @@ spec:
             ...
 ```
 
-Leave `spec.gpuMemoryService.enabled` unset or `false`. Snapshot plus GPU Memory Service is not yet available, and admission rejects `DynamoCheckpoint` objects with `spec.gpuMemoryService.enabled: true`. See [Shadow Engine Failover](shadow-engine-failover.md) for the current GMS support status.
+GMS + Snapshot support is currently disabled.
 
 For a full working example, see [deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml).
 
@@ -287,7 +287,7 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
 
 ## Failover Restore
 
-Failover restore is not yet available. The current Snapshot flow does not support Snapshot plus GMS, so do not use failover restore as a supported checkpoint/restore path. For current GMS and active/passive failover guidance, see [Shadow Engine Failover](shadow-engine-failover.md).
+Failover restore is not yet available. The current Snapshot flow does not support GMS + Snapshot, so do not use failover restore as a supported checkpoint/restore path. For current GMS and active/passive failover guidance, see [Shadow Engine Failover](shadow-engine-failover.md).
 
 ## Lower-Level Testing With `snapshotctl`
 
@@ -404,7 +404,7 @@ status:
 - **Backend support is limited**: checkpoint/restore currently supports vLLM workers only, and that support is still a limited preview.
 - **Worker coverage is narrow**: specialized workers such as multimodal, embedding, and diffusion are not supported.
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
-- **GMS restore is not yet available**: Snapshot plus GPU Memory Service is blocked by admission.
+- **GMS restore remains experimental**: GMS + Snapshot is currently disabled.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.
 - **Privileged DaemonSet required**: `snapshot-agent` must run privileged to execute CRIU and `cuda-checkpoint`. Workload pods do not need to be privileged.
 

@@ -83,7 +83,14 @@ func ResolveCheckpointForService(
 			return nil, fmt.Errorf("failed to get referenced checkpoint %s: %w", *config.CheckpointRef, err)
 		}
 
-		return checkpointInfoFromObject(ckpt)
+		info, err := checkpointInfoFromObject(ckpt)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateResolvedGMSSnapshotGate(info); err != nil {
+			return nil, err
+		}
+		return info, nil
 	case config.Identity == nil:
 		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
 	}
@@ -109,6 +116,16 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
+	if err := validateResolvedGMSSnapshotGate(info); err != nil {
+		return nil, err
+	}
 	info.Identity = config.Identity
 	return info, nil
+}
+
+func validateResolvedGMSSnapshotGate(info *CheckpointInfo) error {
+	if info == nil {
+		return nil
+	}
+	return ValidateGMSSnapshotGate("checkpoint.gpuMemoryService", info.Enabled, info.GPUMemoryService)
 }

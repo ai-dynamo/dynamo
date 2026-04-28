@@ -35,6 +35,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -72,6 +73,7 @@ func checkpointTestScheme() *runtime.Scheme {
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
+	_ = resourcev1.AddToScheme(s)
 	return s
 }
 
@@ -474,6 +476,36 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 		assert.Empty(t, updated.Status.Message)
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
+	})
+
+	t.Run("GMS snapshot fails when gate is disabled", func(t *testing.T) {
+		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "")
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
+		r := makeCheckpointReconciler(s, ckpt)
+
+		result, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+		assert.Contains(t, updated.Status.Message, "GMS + Snapshot is temporarily disabled")
+
+		jobs := &batchv1.JobList{}
+		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
+		assert.Empty(t, jobs.Items)
+
+		claimTemplates := &resourcev1.ResourceClaimTemplateList{}
+		require.NoError(t, r.List(ctx, claimTemplates, client.InNamespace(testNamespace)))
+		assert.Empty(t, claimTemplates.Items)
+
+		serviceAccounts := &corev1.ServiceAccountList{}
+		require.NoError(t, r.List(ctx, serviceAccounts, client.InNamespace(testNamespace)))
+		assert.Empty(t, serviceAccounts.Items)
 	})
 
 	t.Run("Ready phase is a no-op", func(t *testing.T) {
