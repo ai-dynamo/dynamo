@@ -1,5 +1,10 @@
-// Minimal subset of envoy/type/v3/http_status.proto
-// Wire-compatible with upstream Envoy proto.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored minimal subset of envoy/type/v3/http_status.proto.
+// Wire-compatible with the upstream Envoy proto: same package name and field
+// numbers produce identical protobuf encoding on the wire. Annotation imports
+// are stripped to avoid the full Envoy proto dependency tree.
 
 syntax = "proto3";
 

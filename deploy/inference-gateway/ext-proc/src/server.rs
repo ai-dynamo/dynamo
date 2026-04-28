@@ -57,7 +57,7 @@ struct RequestContext {
     response_complete: bool,
     model_server_streaming: bool,
 
-    request_headers: HashMap<String, String>,
+    request_headers: Vec<(String, String)>,
     request_metadata: HashMap<String, prost_types::Struct>,
     response_headers: HashMap<String, String>,
 
@@ -83,7 +83,7 @@ impl RequestContext {
             response_size: 0,
             response_complete: false,
             model_server_streaming: false,
-            request_headers: HashMap::new(),
+            request_headers: Vec::new(),
             request_metadata: HashMap::new(),
             response_headers: HashMap::new(),
             req_header_resp: None,
@@ -209,10 +209,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
         if ctx.request_id.is_empty() {
             ctx.request_id = uuid::Uuid::new_v4().to_string();
-            ctx.request_headers.insert(
+            ctx.request_headers.push((
                 metadata::REQUEST_ID_HEADER_KEY.to_string(),
                 ctx.request_id.clone(),
-            );
+            ));
         }
     }
 
@@ -297,7 +297,9 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         if let Some(header_map) = &hdr.headers {
             for h in &header_map.headers {
                 let value = envoy_helpers::get_header_value(h);
-                if h.key == "content-type" && value.contains("text/event-stream") {
+                if h.key.eq_ignore_ascii_case("content-type")
+                    && value.contains("text/event-stream")
+                {
                     ctx.model_server_streaming = true;
                 }
                 ctx.response_headers.insert(h.key.clone(), value);

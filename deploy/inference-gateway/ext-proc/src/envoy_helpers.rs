@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::proto::envoy::config::core::v3::{HeaderMap, HeaderValue, HeaderValueOption};
+use crate::proto::envoy::config::core::v3::{
+    header_value_option::HeaderAppendAction, HeaderMap, HeaderValue, HeaderValueOption,
+};
 use crate::proto::envoy::service::ext_proc::v3::{
     BodyMutation, BodyResponse, CommonResponse, HeaderMutation, HeadersResponse,
     ImmediateResponse, ProcessingRequest, ProcessingResponse, StreamedBodyResponse,
@@ -45,6 +47,19 @@ pub fn is_system_owned_header(key: &str) -> bool {
     SYSTEM_OWNED_HEADERS.iter().any(|h| *h == lower)
 }
 
+/// Build a `HeaderValueOption` that **replaces** any existing value for the key.
+fn header_overwrite(key: &str, raw_value: &[u8]) -> HeaderValueOption {
+    HeaderValueOption {
+        header: Some(HeaderValue {
+            key: key.to_string(),
+            raw_value: raw_value.to_vec(),
+            ..Default::default()
+        }),
+        append_action: HeaderAppendAction::OverwriteIfExistsOrAdd.into(),
+        ..Default::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Header helpers
 // ---------------------------------------------------------------------------
@@ -58,7 +73,7 @@ pub fn get_header_value(header: &HeaderValue) -> String {
     }
 }
 
-/// Case-insensitive header lookup in a ProcessingRequest's request_headers.
+/// Case-insensitive header lookup in a HeaderMap.
 pub fn extract_header_value(headers: &HeaderMap, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     headers
@@ -76,13 +91,24 @@ pub fn extract_metadata_values(req: &ProcessingRequest) -> HashMap<String, prost
         .unwrap_or_default()
 }
 
-/// Collect all request headers into a HashMap.
-pub fn collect_headers(header_map: &HeaderMap) -> HashMap<String, String> {
+/// Preserve the full header list from the incoming request, retaining
+/// duplicate keys. Returns a `Vec` of `(key, value)` pairs rather than
+/// collapsing into a `HashMap` which would discard repeated headers.
+pub fn collect_headers(header_map: &HeaderMap) -> Vec<(String, String)> {
     header_map
         .headers
         .iter()
         .map(|h| (h.key.clone(), get_header_value(h)))
         .collect()
+}
+
+/// Lookup a header value from a collected header list (case-insensitive).
+pub fn find_header<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    let key_lower = key.to_ascii_lowercase();
+    headers
+        .iter()
+        .find(|(k, _)| k.to_ascii_lowercase() == key_lower)
+        .map(|(_, v)| v.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -93,26 +119,14 @@ pub fn collect_headers(header_map: &HeaderMap) -> HashMap<String, String> {
 pub fn build_request_header_response(
     target_endpoint: &str,
     content_length: Option<usize>,
-    extra_headers: &HashMap<String, String>,
+    extra_headers: &[(String, String)],
 ) -> ProcessingResponse {
-    let mut set_headers: Vec<HeaderValueOption> = vec![HeaderValueOption {
-        header: Some(HeaderValue {
-            key: metadata::DESTINATION_ENDPOINT_KEY.to_string(),
-            raw_value: target_endpoint.as_bytes().to_vec(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }];
+    let mut set_headers: Vec<HeaderValueOption> = vec![
+        header_overwrite(metadata::DESTINATION_ENDPOINT_KEY, target_endpoint.as_bytes()),
+    ];
 
     if let Some(len) = content_length {
-        set_headers.push(HeaderValueOption {
-            header: Some(HeaderValue {
-                key: "Content-Length".to_string(),
-                raw_value: len.to_string().into_bytes(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
+        set_headers.push(header_overwrite("Content-Length", len.to_string().as_bytes()));
     }
 
     for (key, value) in extra_headers {
@@ -151,28 +165,13 @@ pub fn build_request_header_response(
     }
 }
 
-/// Build the response-header response (pass-through with debug header).
+/// Build the response-header response (pass-through, no mutations).
 pub fn build_response_header_response() -> ProcessingResponse {
-    let set_headers = vec![HeaderValueOption {
-        header: Some(HeaderValue {
-            key: "x-went-into-resp-headers".to_string(),
-            raw_value: b"true".to_vec(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }];
-
     ProcessingResponse {
         response: Some(
             crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ResponseHeaders(
                 HeadersResponse {
-                    response: Some(CommonResponse {
-                        header_mutation: Some(HeaderMutation {
-                            set_headers,
-                            remove_headers: vec![],
-                        }),
-                        ..Default::default()
-                    }),
+                    response: Some(CommonResponse::default()),
                 },
             ),
         ),
@@ -363,7 +362,6 @@ pub fn rewrite_model_name(body: &[u8], target_model: &str, incoming_model: &str)
         return replaced.into_bytes();
     }
 
-    // Also handle JSON with space after colon
     let old_spaced = format!("\"model\": \"{target_model}\"");
     let new_spaced = format!("\"model\": \"{incoming_model}\"");
     body_str.replace(&old_spaced, &new_spaced).into_bytes()

@@ -1,6 +1,12 @@
-// Minimal subset of envoy/service/ext_proc/v3/external_processor.proto
-// Wire-compatible with upstream Envoy proto (same package, field numbers).
-// Stripped of validation annotations and xds/udpa options.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored minimal subset of envoy/service/ext_proc/v3/external_processor.proto.
+// Wire-compatible with the upstream Envoy proto: same package name and field
+// numbers produce identical protobuf encoding on the wire. Validation, xds,
+// and udpa annotation imports are stripped to avoid pulling in the full Envoy
+// proto dependency tree (~6 repos). If Dynamo upgrades to tonic/prost 0.14 the
+// envoy-grpc-ext-proc crate can be used as a drop-in replacement.
 
 syntax = "proto3";
 

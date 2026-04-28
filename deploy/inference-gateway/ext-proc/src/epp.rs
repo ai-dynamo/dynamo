@@ -232,7 +232,7 @@ impl Router {
             let overlap_blocks = decode_router
                 .get_overlap_blocks(&tokens, None, worker, None)
                 .await
-                .unwrap_or(0);
+                .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
 
             let cached_tokens =
                 overlap_blocks as usize * decode_router.block_size() as usize;
@@ -249,9 +249,11 @@ impl Router {
                     Some(&router_config_override),
                 )
                 .await;
+
+            Ok(())
         })
         .await
-        .map_err(|_| anyhow::anyhow!("add_request timed out"))
+        .map_err(|_| anyhow::anyhow!("add_request timed out"))?
     }
 
     /// Mark prefill as completed for a request.
@@ -260,16 +262,13 @@ impl Router {
         let request_id = request_id.to_owned();
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            if let Err(e) = decode_router.mark_prefill_completed(&request_id).await {
-                tracing::warn!(
-                    request_id = %request_id,
-                    error = %e,
-                    "Failed to mark prefill complete"
-                );
-            }
+            decode_router
+                .mark_prefill_completed(&request_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))
         })
         .await
-        .map_err(|_| anyhow::anyhow!("mark_prefill_complete timed out"))
+        .map_err(|_| anyhow::anyhow!("mark_prefill_complete timed out"))?
     }
 
     /// Free a request from the router's bookkeeping.
@@ -278,16 +277,13 @@ impl Router {
         let request_id = request_id.to_owned();
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            if let Err(e) = decode_router.free(&request_id).await {
-                tracing::warn!(
-                    request_id = %request_id,
-                    error = %e,
-                    "Failed to free request"
-                );
-            }
+            decode_router
+                .free(&request_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("free failed: {e}"))
         })
         .await
-        .map_err(|_| anyhow::anyhow!("free_request timed out"))
+        .map_err(|_| anyhow::anyhow!("free_request timed out"))?
     }
 
     pub fn runtime(&self) -> &Runtime {

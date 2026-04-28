@@ -36,8 +36,9 @@ impl Endpoint {
 /// Mirrors Go `epplight.RequestInfo`.
 #[derive(Debug, Clone)]
 pub struct RequestInfo {
-    /// HTTP request headers
-    pub headers: HashMap<String, String>,
+    /// HTTP request headers, preserved as ordered pairs so that repeated
+    /// header keys (valid in HTTP) are not silently collapsed.
+    pub headers: Vec<(String, String)>,
     /// Raw request body (empty for GET)
     pub body: Vec<u8>,
     /// Model name extracted from the request body

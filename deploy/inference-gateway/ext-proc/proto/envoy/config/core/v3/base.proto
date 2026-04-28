@@ -1,6 +1,12 @@
-// Minimal subset of envoy/config/core/v3/base.proto
-// Wire-compatible with the upstream Envoy proto (same package, field numbers).
-// Only includes types used by the ext_proc service.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored minimal subset of envoy/config/core/v3/base.proto.
+// Wire-compatible with the upstream Envoy proto: same package name and field
+// numbers produce identical protobuf encoding on the wire. Only includes types
+// used by the ext_proc service (HeaderValue, HeaderValueOption, HeaderMap,
+// Metadata). Annotation imports are stripped to avoid the full Envoy proto
+// dependency tree.
 
 syntax = "proto3";
 
