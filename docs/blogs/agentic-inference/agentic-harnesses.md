@@ -217,34 +217,35 @@ Contemporary reasoning models tend to produce two different kinds of assistant t
 - reasoning followed by a direct response to the user
 - reasoning followed by one or more tool calls
 
-Agentic models are especially good at producing turns where many reasoning and tool-call segments appear within a single response. In those cases, the interleaving often follows the pattern:
+Agentic models are especially good at producing turns where many reasoning and tool-call segments appear within a single response in the pattern of:
 
 ```text
 <think>reasoning_0</think> tool_call_0 <think>reasoning_1</think> tool_call_1
 ```
 
-That structure matters on the next turn. Each reasoning span needs to stay attached to the tool call or tool result it explains. If the assistant turn is reconstructed as one generic reasoning block followed by one blob of tool state, the model still has tokens but loses the sequence that made them meaningful. Dynamo now supports this interleaved format fully. Previously, the same turn could be reconstructed as:
+On the next turn each reasoning span needs to stay attached to the tool call it explains. Dynamo now supports this interleaved format fully. Previously, the same turn could be reconstructed as:
 
 ```text
 <think>reasoning_0 reasoning_1</think> tool_call_0 tool_call_1
 ```
-That older shape came from legacy models that emitted only a single reasoning span and a single tool-call pass per turn. Some models instead package the conclusion of each command into the tool response itself, which changes what needs to be carried into the next turn.
+
+If the assistant turn is reconstructed as one generic reasoning block followed by one blob of tool calls, the model still has all the same tokens but loses the sequence and delimiters that made them meaningful. This grouped ordering came from legacy models that emitted only a single reasoning span and a single tool-call pass per turn.
 
 In addition to the reordering bug, we also found that reasoning was often being dropped too aggressively before the next turn. For some models, dropping prior thinking on turns without tool calls is an established behavior and part of the model's fine-tuning (DeepSeek-R1 is the clearest example). But that same behavior is wrong for interleaved agentic turns where the prior reasoning explains the tool sequence. This issue was difficult to spot because users could see reasoning being decoded correctly in the outgoing response while it was still being *silently malformed* or dropped before the next turn.
 
 This round-trip was broken until [PR #7358](https://github.com/ai-dynamo/dynamo/pull/7358). The fix had three parts:
 
-1. **Single parser ownership**: the Anthropic streaming handler used to apply a second reasoning parser even when the engine stream had already split `reasoning_content` from normal `content`. That second pass could classify post-reasoning text as reasoning because the original `</think>` boundary had already been consumed. The fix makes the parser boundary explicit: once a backend path has produced structured reasoning deltas, the Anthropic converter consumes them as-is instead of parsing the text again.
+1. **One owner for reasoning parsing**: reasoning parsing used to happen at multiple competing layers. The backend parser could split model output into `reasoning_content` and normal `content`, while the Anthropic streaming converter still tried to infer `<think>` boundaries when mapping the same stream into Anthropic content blocks. PR #7358 made ownership explicit. If a backend path has already produced structured reasoning deltas, the Anthropic converter trusts them and only maps them into the response format.
 
-2. **Conditional next-turn reasoning**: the next prompt is no longer "always render reasoning" or "never render reasoning." Dynamo checks whether the active chat template knows how to read `reasoning_content`. If it does, as with Nemotron and Qwen3-style templates, the field is left intact and the template decides how to render it. If it does not, Dynamo injects the reasoning back into `content` as `<think>` blocks before template rendering. That fallback exists on both the Rust preprocessor path (`ModelInput::Tokens`) and the Python worker path (`ModelInput::Text`), and it removes the original field after injection so the same reasoning cannot be rendered twice.
+2. **Template-native reasoning when available**: Dynamo now checks whether the active chat template knows how to read `reasoning_content`. Templates like Nemotron and Qwen3 read that field directly, so Dynamo leaves it alone and lets the template decide how much prior thinking to keep. If the template only understands `content`, Dynamo falls back to the legacy representation: preserve reasoning by inserting `<think>` blocks into `content`, or leave it out when the model/parser policy says prior thinking should not carry into the next turn. Both the Rust preprocessor path (`ModelInput::Tokens`) and the Python worker path (`ModelInput::Text`) use this same conditional rule.
 
-3. **Per-request thinking controls**: some templates can also decide whether the next assistant turn should think at all and whether older thinking should stay in the history. Nemotron's template, for example, defaults `truncate_history_thinking` to `true`, which saves context in ordinary chat but loses the reasoning that explains prior tool calls. The Anthropic path now sets `enable_thinking=true` and `truncate_history_thinking=false` only when a reasoning parser is configured and the client has not explicitly disabled thinking. That gives agentic next-turn prompts the context they need without forcing reasoning into requests or models that asked to run without it.
+3. **Respect per-request thinking controls**: Many templates default `truncate_history_thinking=true` to save context. That is reasonable for ordinary chat, but it removes the reasoning behind prior tool calls in agent workflows. Dynamo now changes that behavior only for requests where reasoning is actually in play: when a reasoning parser is configured and the client has not disabled thinking, the Anthropic path sets `enable_thinking=true` and `truncate_history_thinking=false`. That keeps the next-turn context agents need without changing the default for requests or models that should run without thinking.
 
-Once the parser and template path were fixed, the expected behavior finally appeared. In our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, the unchanged next-turn prefix landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the next-turn prefix. The point of that measurement is not that every model should preserve all prior reasoning. It is that, in the cases where reasoning remains part of the next-turn prefix, mutating it has a measurable cost.
+In our B200 experiment with a 52K-token system prompt and an assistant turn containing about 500 tokens of thinking, the unchanged next-turn prefix landed at `167ms` TTFT while mutated thinking landed at `322ms`. That is a `1.9x` increase, or about `155ms` per request, from changing the reasoning content inside the next-turn prefix.
 
-The key takeaway is that the harness, parser, and template path must agree on each model's expected reasoning behavior. Dropping thinking on ordinary turns may be correct for one model and wrong for another. Preserving interleaved reasoning on tool-calling turns may be essential even when ordinary turns are allowed to strip it. In practice, you should not assume that the tokens produced on turn `N` will automatically arrive unchanged as the prefix of turn `N+1`. Whether that is true depends on the reasoning parser, tool parser, and chat template for the model you are serving.
+The key takeaway is that the harness, parser, and template path must agree on each model's expected reasoning behavior. Dropping thinking on ordinary turns may be correct for one model and wrong for another. Preserving interleaved reasoning on tool-calling turns may be essential even when ordinary turns are allowed to strip it. **In practice, you should not assume that the tokens produced on turn `N` will automatically arrive unchanged as the prefix of turn `N+1`.** Whether that is true depends on the reasoning parser, tool parser, and chat template for the model you are serving.
 
-## Streaming Actionable State
+## Streaming Tool Calls
 
 Streaming tokens make the user experience feel more responsive and dynamic. The hard part is preserving that streaming behavior while still emitting tool calls as coherent blocks. In the older Dynamo path, reasoning tokens streamed back normally, but tool calls stayed buffered until the very end of the turn before being released all at once to the harness. That reduces responsiveness and delays tool execution even when the model has already decided what to call.
 
@@ -262,11 +263,9 @@ event: tool_call_dispatch
 data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function","function":{"name":"calculator","arguments":"{\"expression\":\"42 * 17\"}"}}}
 ```
 
-That event tells the harness, in one shot, that the tool call is ready to execute. No client-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness.
+That event tells the harness, in one shot, that the tool call is ready to execute. No harness-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness. This makes Dynamo more easily compatible with custom harnesses.
 
-The stream now carries the state transitions an agent harness actually needs, and that `tool_call_dispatch` turns those transitions into something a client can consume without maintaining its own parser.
-
-## Anthropic and Claude Code API Fidelity
+## Anthropic API Fidelity
 
 Claude Code compatibility is more than text generation behind an Anthropic endpoint. For matching the user experience, the harness depends on a collection of smaller behaviors that are easy to miss in ad hoc testing:
 
@@ -275,7 +274,7 @@ Claude Code compatibility is more than text generation behind an Anthropic endpo
 - useful `input_tokens` in `message_start`
 - acceptance of `cache_control`
 
-Once the frontend is reachable, the client side is intentionally plain. For a local Dynamo endpoint, Claude Code needs only the endpoint, key, and model:
+Once the frontend is reachable and compliant, pointing a harness at Dynamo is straightforward and does not have to replace any existing model configuration:
 
 ```bash
 ANTHROPIC_API_KEY=local-dev-token \
@@ -285,37 +284,35 @@ ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Dynamo NVIDIA-Nemotron-3-Super-120B-A12B-NVF
 claude --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 ```
 
-The fixes in this area brought the custom deployment closer to the behavior Claude Code expects from its backend.
-One concrete example shows the flavor of these bugs better than a long checklist. Claude Code asks for the connected model directly. On the measured deployment, that lookup failed:
+The fixes in this area brought the custom deployment closer to the native backend behavior.
+One concrete example shows the flavor of these bugs better than a long checklist. During startup, the harness asks for details about the selected model directly, but Dynamo did not yet serve that endpoint:
 
 ```text
 GET /v1/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 HTTP/1.1 404 Not Found
 ```
-
-Another example is `message_start` reporting `input_tokens: 0` even when the final response later contains the real count. This can make the token count in the harness temporarily drop to `0` every time a new turn starts.
+Another example is `message_start` reporting `input_tokens: 0` even when the final response later contains the real count. This can make the token count in the harness temporarily drop to `0` every time a new turn starts. [PR #7234](https://github.com/ai-dynamo/dynamo/pull/7234) fixed that Anthropic path by populating `input_tokens` before the stream begins. The broader tokenizer-service work landed separately in [PR #7699](https://github.com/ai-dynamo/dynamo/pull/7699), which added `/v1/tokenize` and `/v1/detokenize` endpoints for accurate token counts before a request is processed by the engine.
 
 ## Responses and Codex Fidelity
 
 The Codex-facing version of the same problem lives on the `v1/responses` side. Passing compliance tests is not enough to provide parity in user experience.
 We found that a Responses API request could not survive an internal round-trip without losing the fields that made it a Responses request rather than a chat completions request. Preserving those fields turned out to be an architectural concern, not just a serializer concern. The relevant changes live in Dynamo's `ResponseParams` path and the upstream type-alignment work in [PR #6089](https://github.com/ai-dynamo/dynamo/pull/6089).
 
-## OpenClaw: Integration Testing and Parser Discovery
-
-Claude Code stress-tests the system prompt and single-session tool loop. OpenClaw stress-tests what happens when sessions stay alive across channels, turns accumulate over hours, and the client is a background loop rather than an interactive terminal. But the most useful thing OpenClaw gave us was a structured integration test for the hardest parsing problem in the stack: combined reasoning and tool calls in a single response.
-
-OpenClaw is a multi-channel AI chat client that connects to the same backend over Telegram, WhatsApp, and web chat simultaneously. Unlike Claude Code, which starts a fresh session per task and sends a large system prompt once, OpenClaw keeps conversations alive indefinitely. That makes it a good vehicle for testing whether the full parsing pipeline holds up under realistic multi-turn conditions with tools and thinking interleaved.
-
-The client path is the same Anthropic-compatible surface:
+Codex should point at Dynamo through the OpenAI-compatible Responses API:
 
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:8000 \
-npx openclaw
+OPENAI_API_KEY=local-dev-token codex exec -c 'model_providers.dynamo={ name = "Dynamo", base_url = "http://localhost:8000/v1", wire_api = "responses", env_key = "OPENAI_API_KEY" }' -c model_provider="dynamo" -m nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 "Say ok"
+```
+
+## OpenClaw over the Anthropic Messages API
+
+The same Anthropic API work also translates to a smooth OpenClaw experience. OpenClaw does not need a Dynamo-specific adapter; it can use Dynamo's Anthropic-compatible Messages API for thinking blocks, tool-use blocks, and streaming tool-call dispatch. With `--enable-anthropic-api` on the frontend, pointing OpenClaw at Dynamo is a one-line change:
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8000 ANTHROPIC_API_KEY=local-dev-token npx openclaw
 ```
 
 We ran experiments against a Dynamo + TRT-LLM deployment: Nemotron-3-Super-120B-A12B-NVFP4 on 4x B200 with TP=4, with `--enable-anthropic-api`, `--strip-anthropic-preamble`, `--enable-streaming-tool-dispatch`, the `nemotron_deci` reasoning parser, and the `qwen3_coder` tool call parser.
-
-Nemotron-3-Super ships with a reasoning format that uses `<think>` tags and a tool call format that uses `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>` XML. The tool call parser that handles the XML format is called `qwen3_coder`, because Qwen models popularized that output shape.
 
 ### Combined Reasoning and Tool Calls
 
@@ -372,8 +369,4 @@ Dynamo now has `nvext.agent_hints`: `latency_sensitivity`, `priority`, `osl`, an
 
 In the v1.1.0 line, Dynamo is also making more of the agent stack available as reusable pieces. The protocol, parser, LLM, and tokenizer layers are versioned as standalone crates, including `dynamo-protocols`, `dynamo-parsers`, `dynamo-llm`, and `dynamo-tokens`. That gives teams a way to build or customize a harness-facing serving path without copying Dynamo internals into a separate project.
 
-This is also the bridge to longer-running systems such as AutoResearch. The first post explained why agentic workloads stress the serving stack. This post shows the harness-facing contract needed to run those workloads correctly. A research loop is not a single chat completion; it is a sequence of searches, tool calls, intermediate claims, retries, and summaries.
-
-## Closing the Loop
-
-These integration fixes are what make the architecture from the first post show up in actual user-facing behavior. The frontend will keep carrying more of this harness context as explicit protocol state instead of forcing each client to infer it from token streams. That is the practical direction: make Claude Code, Codex, OpenClaw, and new agent harnesses work through well-defined APIs, then expose the pieces so teams can reuse them in their own stacks.
+This is also the bridge to longer-running systems such as AutoResearch. The first post explained why agentic workloads stress the serving stack. This post shows the harness-facing contract needed to run those workloads correctly and sets the stage for efficient long-running agents backed by Dynamo endpoints.
