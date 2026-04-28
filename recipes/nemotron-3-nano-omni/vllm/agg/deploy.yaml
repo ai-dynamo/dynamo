@@ -90,8 +90,8 @@ spec:
           args:
             - >-
               exec python3 -m dynamo.vllm
-              --model nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4
-              --served-model-name nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4
+              --model nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+              --served-model-name nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
               --max-model-len 131072
               --enable-multimodal
               --media-io-kwargs '{"video": {"num_frames": 512, "fps": 1}}'

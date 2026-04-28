@@ -3,13 +3,13 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Nemotron Nano Omni NVFP4 - Aggregated vLLM
+# Nemotron 3 Nano Omni NVFP4
 
-Serves [nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4](https://huggingface.co/nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4)
+Serves [nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4)
 using vLLM with an aggregated Dynamo deployment.
 
-This recipe requires a custom container because it layers Dynamo from this
-source tree onto a vLLM nightly base image.
+This recipe builds a custom container that layers Dynamo onto an upstream
+vLLM image. The Dynamo source is cloned from GitHub at build time.
 
 ## Topology
 
@@ -22,23 +22,23 @@ source tree onto a vLLM nightly base image.
 
 - A Kubernetes cluster with the [Dynamo Operator](../../docs/kubernetes/README.md) installed
 - One NVIDIA GPU per worker replica
-- Access to the vLLM nightly base image configured in `Dockerfile`
 - Shared PVC storage for the Hugging Face model cache
-- Hugging Face access to `nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4`
+- Hugging Face access to `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`
 
 ## Step 1: Build the Container
-
-Use the command below to build a container with the necessary dependencies:
 
 ```bash
 docker build \
   -t <your-registry>/nemotron-omni-vllm:latest \
-  -f recipes/nemotron-omni/Dockerfile .
+  -f recipes/nemotron-omni/Dockerfile \
+  recipes/nemotron-omni
 docker push <your-registry>/nemotron-omni-vllm:latest
 ```
 
-Set `BASE_IMAGE=<image>` if you need to build from a different compatible
-vLLM base image.
+Useful build args:
+
+- `BASE_IMAGE=<image>` — pin to a different vLLM base (default `vllm/vllm-openai:v0.20.0`).
+- `DYNAMO_COMMIT=<sha-or-branch>` — pin Dynamo to a specific revision (default `main`).
 
 ## Step 2: Download the Model
 
@@ -92,7 +92,7 @@ In another terminal, send a minimal text request:
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4",
+    "model": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 128
   }'
@@ -108,6 +108,30 @@ curl http://localhost:8000/v1/chat/completions \
   reasoning parsing.
 - The frontend uses `--router-mode kv --no-kv-events`, which approximates
   KV-aware routing with prefix hashing without requiring backend KV events.
+
+## Optional: Run without NATS
+
+The Dynamo runtime defaults to NATS for the event plane and connects to a
+NATS server if `NATS_SERVER` is set in the environment (the operator
+auto-injects this on most clusters). On clusters without NATS — or where
+you'd rather avoid the dependency — you can run on TCP request plane + ZMQ
+event plane only. Add to both Frontend and VllmWorker:
+
+```yaml
+mainContainer:
+  env:
+    - name: DYN_EVENT_PLANE
+      value: zmq
+  command: ["/bin/bash", "-lc"]
+  args:
+    # Operator-injected NATS_SERVER takes effect even when set to ""; we have
+    # to actually unset it before the runtime reads env.
+    - >-
+      unset NATS_SERVER &&
+      exec python3 -m dynamo.frontend ...   # or dynamo.vllm
+```
+
+The request plane defaults to TCP already, so no further flags are needed.
 
 ## File Layout
 

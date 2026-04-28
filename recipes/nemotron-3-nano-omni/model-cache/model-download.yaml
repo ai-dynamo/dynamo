@@ -28,7 +28,7 @@ spec:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: nvidia/Nemotron-Nano-V3-Omni-GA0420-NVFP4
+              value: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
             - name: HF_HOME
               value: /model-store
             - name: HF_XET_HIGH_PERFORMANCE
