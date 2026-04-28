@@ -77,8 +77,8 @@ runs:
 
           t0=$(date +%s)
           echo "  ⏳ Downloading ${model_name}..."
-          
-          if ${S5CMD_BIN} sync "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
+          CONCURRENCY=32
+          if ${S5CMD_BIN} sync --concurrency ${CONCURRENCY} "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
             echo "  ✅ ${model_name} ($(( $(date +%s) - t0 ))s)"
             COPIED=$((COPIED+1))
           else
