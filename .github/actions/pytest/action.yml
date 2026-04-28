@@ -157,6 +157,8 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        # TEMP DIAGNOSTIC (revert before merge): force live stdout, dump trace on fatal signals.
+        DOCKER_ENV_FLAGS+=(--env "PYTHONUNBUFFERED=1" --env "PYTHONFAULTHANDLER=1")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
@@ -246,7 +248,10 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # TEMP DIAGNOSTIC (revert before merge): -vv -s, live log streaming with
+          # millisecond timestamps so we can see how long each fixture / download takes.
+          # Tracking sglang gpu_1 cuda13 step that goes silent for 30 min.
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -vv -s --tb=long --showlocals --log-cli-level=INFO --log-cli-format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s' --log-cli-date-format='%H:%M:%S' --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -259,6 +264,8 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        # TEMP DIAGNOSTIC (revert before merge): force live stdout, dump trace on fatal signals.
+        DOCKER_ENV_FLAGS+=(--env "PYTHONUNBUFFERED=1" --env "PYTHONFAULTHANDLER=1")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
