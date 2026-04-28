@@ -6,7 +6,9 @@
 use super::*;
 use crate::SystemHealth;
 use crate::config::HealthStatus;
-use crate::logging::TraceParent;
+use crate::logging::{
+    DEPRECATED_DYNAMO_REQUEST_ID_HEADER, REQUEST_ID_HEADER, TraceParent, X_REQUEST_ID_HEADER,
+};
 use anyhow::Result;
 use axum::{
     Router,
@@ -299,21 +301,21 @@ impl TraceParent {
             traceparent.tracestate = Some(s.to_string());
         }
 
-        if let Some(value) = headers.get("x-request-id")
+        if let Some(value) = headers.get(X_REQUEST_ID_HEADER)
             && let Ok(s) = value.to_str()
         {
             traceparent.x_request_id = Some(s.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
+        // Read canonical request-id first, with fallback to deprecated x-dynamo-request-id.
         if let Some(s) = headers
-            .get("request-id")
+            .get(REQUEST_ID_HEADER)
             .and_then(|v| v.to_str().ok())
             .filter(|s| uuid::Uuid::parse_str(s).is_ok())
         {
             traceparent.request_id = Some(s.to_string());
         } else if let Some(s) = headers
-            .get("x-dynamo-request-id")
+            .get(DEPRECATED_DYNAMO_REQUEST_ID_HEADER)
             .and_then(|v| v.to_str().ok())
             .filter(|s| uuid::Uuid::parse_str(s).is_ok())
         {
@@ -379,9 +381,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("traceparent", "test-trace-id".parse().unwrap());
         headers.insert("tracestate", "test-state".parse().unwrap());
-        headers.insert("x-request-id", "req-123".parse().unwrap());
+        headers.insert(X_REQUEST_ID_HEADER, "req-123".parse().unwrap());
         headers.insert(
-            "x-dynamo-request-id",
+            REQUEST_ID_HEADER,
+            "b856c851-478c-46f3-86f3-46a6ab704bbb".parse().unwrap(),
+        );
+        headers.insert(
+            DEPRECATED_DYNAMO_REQUEST_ID_HEADER,
             "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
         );
 
@@ -391,7 +397,7 @@ mod tests {
         assert_eq!(traceparent.x_request_id, Some("req-123".to_string()));
         assert_eq!(
             traceparent.request_id,
-            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+            Some("b856c851-478c-46f3-86f3-46a6ab704bbb".to_string())
         );
     }
 

@@ -12,9 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub use types::{
-    AgentRequestMetrics, AgentTraceRecord, TraceEventSource, TraceEventType, TraceSchema,
-    WorkerInfo,
+    AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
+    TraceEventType, TraceSchema, WorkerInfo,
 };
+
+pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
 
 pub async fn init_from_env() -> anyhow::Result<()> {
     init_from_env_with_shutdown(CancellationToken::new()).await
@@ -36,6 +38,10 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
 
 pub fn publish(rec: AgentTraceRecord) {
     bus::publish(rec);
+}
+
+pub fn subscribe() -> tokio::sync::broadcast::Receiver<AgentTraceRecord> {
+    bus::subscribe()
 }
 
 pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetrics) {
@@ -60,9 +66,52 @@ pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetric
         event_time_unix_ms,
         event_source: TraceEventSource::Dynamo,
         agent_context,
-        request,
+        request: Some(request),
+        tool: None,
     };
     publish(record);
+}
+
+pub fn emit_tool_event(
+    event_type: TraceEventType,
+    agent_context: AgentContext,
+    tool: AgentToolEvent,
+) {
+    let record = AgentTraceRecord {
+        schema: TraceSchema::V1,
+        event_type,
+        event_time_unix_ms: current_time_unix_ms(),
+        event_source: TraceEventSource::Harness,
+        agent_context,
+        request: None,
+        tool: Some(tool),
+    };
+    publish_tool_record(record);
+}
+
+pub fn publish_tool_record(record: AgentTraceRecord) {
+    if !record.event_type.is_tool_event() {
+        tracing::warn!(
+            event_type = ?record.event_type,
+            "dropping non-tool record from agent tool event path"
+        );
+        return;
+    }
+    if record.tool.is_none() {
+        tracing::warn!(
+            event_type = ?record.event_type,
+            "dropping agent tool record without tool payload"
+        );
+        return;
+    }
+    publish(record);
+}
+
+fn current_time_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -74,8 +123,8 @@ mod tests {
     use crate::context::AgentContext;
 
     use super::{
-        AgentRequestMetrics, AgentTraceRecord, TraceEventSource, TraceEventType, TraceSchema, bus,
-        emit_request_end, sink,
+        AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
+        TraceEventType, TraceSchema, bus, emit_request_end, emit_tool_event, sink,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -100,6 +149,7 @@ mod tests {
             },
             AgentRequestMetrics {
                 request_id: "req-123".to_string(),
+                x_request_id: Some("llm-call-1".to_string()),
                 model: "test-model".to_string(),
                 input_tokens: Some(42),
                 output_tokens: Some(7),
@@ -135,5 +185,54 @@ mod tests {
         assert_eq!(record.schema, TraceSchema::V1);
         assert_eq!(record.event_type, TraceEventType::RequestEnd);
         assert_eq!(record.event_source, TraceEventSource::Dynamo);
+        assert_eq!(
+            record.request.unwrap().x_request_id.as_deref(),
+            Some("llm-call-1")
+        );
+
+        emit_tool_event(
+            TraceEventType::ToolEnd,
+            AgentContext {
+                workflow_type_id: "ms_agent".to_string(),
+                workflow_id: "run-1".to_string(),
+                program_id: "run-1:agent".to_string(),
+                parent_program_id: None,
+            },
+            AgentToolEvent {
+                tool_call_id: "tool-123".to_string(),
+                tool_class: "web_search".to_string(),
+                status: Some(AgentToolStatus::Succeeded),
+                duration_ms: Some(12.5),
+                output_tokens: Some(9),
+                output_bytes: Some(64),
+                tool_name_hash: None,
+                error_type: None,
+            },
+        );
+
+        let mut content = String::new();
+        for _ in 0..100 {
+            content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            if content.contains("\"event_type\":\"tool_end\"")
+                && content.contains("\"tool_call_id\":\"tool-123\"")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(content.contains("\"event_type\":\"tool_end\""));
+        assert!(content.contains("\"tool_call_id\":\"tool-123\""));
+        assert!(content.contains("\"tool_class\":\"web_search\""));
+
+        let record: AgentTraceRecord = serde_json::from_str(content.lines().nth(1).unwrap())
+            .expect("jsonl record should deserialize");
+        assert_eq!(record.schema, TraceSchema::V1);
+        assert_eq!(record.event_type, TraceEventType::ToolEnd);
+        assert_eq!(record.event_source, TraceEventSource::Harness);
+        assert!(record.request.is_none());
+        assert_eq!(
+            record.tool.unwrap().status,
+            Some(AgentToolStatus::Succeeded)
+        );
     }
 }

@@ -3,11 +3,19 @@
 
 //! Dynamo LLM integration helpers for agent trace records.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::local_model::LocalModel;
 use crate::protocols::common::timing::RequestTracker;
-use dynamo_agents::trace::{AgentRequestMetrics, WorkerInfo};
+use dynamo_agents::trace::{AgentRequestMetrics, AgentTraceRecord, WorkerInfo};
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::transports::event_plane::EventSubscriber;
+
+static TOOL_EVENT_INGEST_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn request_metrics(
     request_id: String,
+    x_request_id: Option<String>,
     model: String,
     tracker: Option<&RequestTracker>,
 ) -> AgentRequestMetrics {
@@ -23,6 +31,7 @@ pub(crate) fn request_metrics(
 
     AgentRequestMetrics {
         request_id,
+        x_request_id,
         model,
         input_tokens: tracker.and_then(|tracker| tracker.isl_tokens().map(|v| v as u64)),
         output_tokens: tracker.map(RequestTracker::osl_tokens),
@@ -46,6 +55,70 @@ pub(crate) fn request_metrics(
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
         worker,
     }
+}
+
+pub(crate) async fn start_tool_event_ingest_from_policy(
+    drt: DistributedRuntime,
+    local_model: &LocalModel,
+) -> anyhow::Result<()> {
+    let policy = dynamo_agents::trace::policy().clone();
+    if !policy.tool_events_enabled {
+        return Ok(());
+    }
+
+    let namespace_name = policy
+        .tool_events_namespace
+        .clone()
+        .or_else(|| local_model.namespace().map(str::to_string))
+        .unwrap_or_else(|| local_model.endpoint_id().namespace.clone());
+
+    let namespace = drt.namespace(namespace_name.clone())?;
+    let mut subscriber =
+        EventSubscriber::for_namespace(&namespace, policy.tool_events_topic.clone())
+            .await?
+            .typed::<AgentTraceRecord>();
+
+    if TOOL_EVENT_INGEST_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::debug!("agent tool event ingest already started");
+        return Ok(());
+    }
+
+    let topic = policy.tool_events_topic;
+    let shutdown = drt.child_token();
+    drt.runtime().secondary().spawn(async move {
+        tracing::info!(
+            namespace = %namespace_name,
+            topic = %topic,
+            "Agent tool event ingest started"
+        );
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    tracing::debug!("agent tool event ingest stopping");
+                    break;
+                }
+                next = subscriber.next() => {
+                    match next {
+                        Some(Ok((_envelope, record))) => {
+                            dynamo_agents::trace::publish_tool_record(record);
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(%error, "agent tool event ingest failed to decode event");
+                        }
+                        None => {
+                            tracing::warn!("agent tool event ingest stream ended");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -75,11 +148,13 @@ mod tests {
 
         let metrics = request_metrics(
             "req-1".to_string(),
+            Some("llm-call-1".to_string()),
             "test-model".to_string(),
             Some(&tracker),
         );
 
         assert_eq!(metrics.request_id, "req-1");
+        assert_eq!(metrics.x_request_id.as_deref(), Some("llm-call-1"));
         assert_eq!(metrics.model, "test-model");
         assert_eq!(metrics.input_tokens, Some(128));
         assert_eq!(metrics.output_tokens, Some(5));
@@ -101,9 +176,15 @@ mod tests {
 
     #[test]
     fn test_request_metrics_without_tracker_is_partial() {
-        let metrics = request_metrics("req-1".to_string(), "test-model".to_string(), None);
+        let metrics = request_metrics(
+            "req-1".to_string(),
+            Some("llm-call-1".to_string()),
+            "test-model".to_string(),
+            None,
+        );
 
         assert_eq!(metrics.request_id, "req-1");
+        assert_eq!(metrics.x_request_id.as_deref(), Some("llm-call-1"));
         assert_eq!(metrics.model, "test-model");
         assert_eq!(metrics.input_tokens, None);
         assert_eq!(metrics.output_tokens, None);

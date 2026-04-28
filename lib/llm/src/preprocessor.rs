@@ -1401,6 +1401,8 @@ impl
         let agent_context = common_request.agent_context.clone();
         let request_model = common_request.model.clone();
         let request_tracker = tracker.clone();
+        let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
+            .and_then(|context| context.x_request_id);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1486,6 +1488,7 @@ impl
                 }
                 let metrics = crate::agent_trace::request_metrics(
                     request_id,
+                    x_request_id,
                     request_model,
                     request_tracker.as_deref(),
                 );

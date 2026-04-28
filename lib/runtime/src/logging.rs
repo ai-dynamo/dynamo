@@ -102,6 +102,15 @@ const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 /// Default service name
 const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
 
+/// Canonical per-inference request ID header.
+pub const REQUEST_ID_HEADER: &str = "request-id";
+
+/// Application-level request correlation header. This does not set the Dynamo request ID.
+pub const X_REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Deprecated per-inference request ID header retained for compatibility.
+pub const DEPRECATED_DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
 
@@ -257,13 +266,12 @@ impl TraceParent {
         let mut parent_id = None;
         let mut tracestate = None;
         let mut x_request_id = None;
-        let mut request_id = None;
 
         if let Some(header_value) = headers.get("traceparent") {
             (trace_id, parent_id) = parse_traceparent(header_value);
         }
 
-        if let Some(header_value) = headers.get("x-request-id") {
+        if let Some(header_value) = headers.get(X_REQUEST_ID_HEADER) {
             x_request_id = Some(header_value.to_string());
         }
 
@@ -271,14 +279,10 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
-        if let Some(header_value) = headers.get("request-id") {
-            request_id = Some(header_value.to_string());
-        } else if let Some(header_value) = headers.get("x-dynamo-request-id") {
-            request_id = Some(header_value.to_string());
-        }
+        // Read canonical request-id first, with fallback to deprecated x-dynamo-request-id.
+        let request_id = valid_uuid_header(headers, REQUEST_ID_HEADER)
+            .or_else(|| valid_uuid_header(headers, DEPRECATED_DYNAMO_REQUEST_ID_HEADER));
 
-        let request_id = request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
         TraceParent {
             trace_id,
             parent_id,
@@ -287,6 +291,13 @@ impl TraceParent {
             request_id,
         }
     }
+}
+
+fn valid_uuid_header<H: GenericHeaders>(headers: &H, key: &str) -> Option<String> {
+    headers
+        .get(key)
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .map(str::to_string)
 }
 
 /// Create a span for inference request endpoints (completions, chat, embeddings, etc.).
@@ -469,10 +480,10 @@ pub fn make_handle_payload_span_from_tcp_headers(
     instance_id: u64,
 ) -> Span {
     let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_tcp_headers(headers);
-    let x_request_id = headers.get("x-request-id").cloned();
+    let x_request_id = headers.get(X_REQUEST_ID_HEADER).cloned();
     let request_id = headers
-        .get("request-id")
-        .or_else(|| headers.get("x-dynamo-request-id"))
+        .get(REQUEST_ID_HEADER)
+        .or_else(|| headers.get(DEPRECATED_DYNAMO_REQUEST_ID_HEADER))
         .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         .cloned();
     let tracestate = headers.get("tracestate").cloned();
@@ -635,10 +646,10 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
 
         // Inject custom request IDs
         if let Some(x_request_id) = trace_context.x_request_id {
-            headers.insert("x-request-id".to_string(), x_request_id);
+            headers.insert(X_REQUEST_ID_HEADER.to_string(), x_request_id);
         }
         if let Some(request_id) = trace_context.request_id {
-            headers.insert("request-id".to_string(), request_id);
+            headers.insert(REQUEST_ID_HEADER.to_string(), request_id);
         }
     }
 }
@@ -1525,6 +1536,53 @@ pub mod tests {
         if let Some(my_ctx) = get_distributed_tracing_context() {
             tracing::info!(my_trace_id = my_ctx.trace_id);
         }
+    }
+
+    #[test]
+    fn traceparent_uses_request_id_header_before_deprecated_header() {
+        let request_id = "b856c851-478c-46f3-86f3-46a6ab704bbb";
+        let deprecated_request_id = "550e8400-e29b-41d4-a716-446655440000";
+        let mut headers = http::HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER, request_id.parse().unwrap());
+        headers.insert(
+            DEPRECATED_DYNAMO_REQUEST_ID_HEADER,
+            deprecated_request_id.parse().unwrap(),
+        );
+        headers.insert(X_REQUEST_ID_HEADER, "app-request-1".parse().unwrap());
+
+        let trace_parent = TraceParent::from_headers(&headers);
+
+        assert_eq!(trace_parent.request_id.as_deref(), Some(request_id));
+        assert_eq!(trace_parent.x_request_id.as_deref(), Some("app-request-1"));
+    }
+
+    #[test]
+    fn traceparent_falls_back_to_deprecated_header_when_request_id_is_invalid() {
+        let deprecated_request_id = "550e8400-e29b-41d4-a716-446655440000";
+        let mut headers = http::HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER, "not-a-uuid".parse().unwrap());
+        headers.insert(
+            DEPRECATED_DYNAMO_REQUEST_ID_HEADER,
+            deprecated_request_id.parse().unwrap(),
+        );
+
+        let trace_parent = TraceParent::from_headers(&headers);
+
+        assert_eq!(
+            trace_parent.request_id.as_deref(),
+            Some(deprecated_request_id)
+        );
+    }
+
+    #[test]
+    fn traceparent_does_not_use_x_request_id_as_dynamo_request_id() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "app-request-1".parse().unwrap());
+
+        let trace_parent = TraceParent::from_headers(&headers);
+
+        assert_eq!(trace_parent.x_request_id.as_deref(), Some("app-request-1"));
+        assert_eq!(trace_parent.request_id, None);
     }
 
     pub fn load_log(file_name: &str) -> Result<Vec<serde_json::Value>> {

@@ -29,6 +29,7 @@ kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
+dynamo-agents = { path = "../../agents" }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }

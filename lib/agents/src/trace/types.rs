@@ -12,7 +12,10 @@ pub struct AgentTraceRecord {
     pub event_time_unix_ms: u64,
     pub event_source: TraceEventSource,
     pub agent_context: AgentContext,
-    pub request: AgentRequestMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<AgentRequestMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<AgentToolEvent>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,17 +28,33 @@ pub enum TraceSchema {
 pub enum TraceEventType {
     #[serde(rename = "request_end")]
     RequestEnd,
+    #[serde(rename = "tool_start")]
+    ToolStart,
+    #[serde(rename = "tool_end")]
+    ToolEnd,
+    #[serde(rename = "tool_error")]
+    ToolError,
+}
+
+impl TraceEventType {
+    pub fn is_tool_event(self) -> bool {
+        matches!(self, Self::ToolStart | Self::ToolEnd | Self::ToolError)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TraceEventSource {
     #[serde(rename = "dynamo")]
     Dynamo,
+    #[serde(rename = "harness", alias = "ms_agent")]
+    Harness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRequestMetrics {
     pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_request_id: Option<String>,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -72,4 +91,34 @@ pub struct WorkerInfo {
     pub decode_worker_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_dp_rank: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentToolEvent {
+    pub tool_call_id: String,
+    pub tool_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<AgentToolStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentToolStatus {
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "succeeded", alias = "ok", alias = "success")]
+    Succeeded,
+    #[serde(rename = "error", alias = "failed")]
+    Error,
+    #[serde(rename = "cancelled", alias = "timeout", alias = "canceled")]
+    Cancelled,
 }

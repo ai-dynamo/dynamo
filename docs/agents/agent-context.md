@@ -11,12 +11,23 @@ request belongs to without changing routing, scheduling, or cache behavior.
 
 When agent tracing is enabled, Dynamo joins this identity with request-side
 metrics such as token counts, timing, cache hits, queue depth, and worker IDs.
-The result is a JSONL trace that can be correlated with harness-side tool-call
-events.
+Harnesses can also publish tool lifecycle records into Dynamo's event plane.
+Dynamo normalizes both sources onto one trace bus, with JSONL as an optional
+local sink.
 
 ## Request Contract
 
 Set `nvext.agent_context` on chat completion requests.
+
+For exact per-LLM-call correlation, also set the HTTP `x-request-id` header to
+the harness-generated `llm_call_id`. This ID is separate from `agent_context`:
+`agent_context` groups requests into workflow/program lineage, while
+`x-request-id` identifies one harness LLM call. Dynamo still records its own
+`request_id` for the inference request.
+
+```text
+x-request-id: llm-call-42
+```
 
 ```json
 {
@@ -49,10 +60,15 @@ Set `nvext.agent_context` on chat completion requests.
 [`agent_hints`](../components/frontend/nvext.md#agent-hints), which describe
 what Dynamo may do with the request.
 
+Do not put workflow or program identity in `x-request-id`; use
+`nvext.agent_context` for that. The deprecated `x-dynamo-request-id` header is
+retained only for compatibility with older clients that supplied Dynamo request
+IDs directly.
+
 ## Trace Sink
 
 Set `DYN_AGENT_TRACE_JSONL` before starting Dynamo to write one JSON object per
-completed agent request.
+normalized trace event.
 
 ```bash
 export DYN_AGENT_TRACE_JSONL=/tmp/dynamo-agent-trace.jsonl
@@ -64,6 +80,22 @@ in-process broadcast buffer used by the best-effort trace sink.
 
 The sink is best-effort telemetry. It is intended for profiling and correlation,
 not durable audit logging.
+
+To ingest harness tool events through Dynamo's event plane, also enable the
+tool-event subscriber:
+
+```bash
+export DYN_AGENT_TRACE_TOOL_EVENTS=1
+export DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC=agent-tool-events
+export DYN_AGENT_TRACE_NAMESPACE=<dynamo-namespace>
+```
+
+`DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC` defaults to `agent-tool-events`.
+`DYN_AGENT_TRACE_NAMESPACE` is optional; when omitted, Dynamo uses the configured
+model namespace or the local model endpoint namespace.
+
+Python harnesses can publish through `dynamo.llm.AgentTraceEventPublisher` so
+they do not need to implement the event-plane wire format directly.
 
 ## Trace Record
 
@@ -84,6 +116,7 @@ dropped.
   },
   "request": {
     "request_id": "cmpl-123",
+    "x_request_id": "llm-call-42",
     "model": "my-model",
     "input_tokens": 4096,
     "output_tokens": 512,
@@ -108,18 +141,48 @@ dropped.
 
 Optional fields are omitted when Dynamo did not observe them for a request.
 
-## Correlating With Tool Events
+Harnesses publish tool lifecycle records with the same schema to the configured
+event-plane topic. Dynamo relays valid `tool_start`, `tool_end`, and
+`tool_error` records onto the normalized trace bus:
 
-Agent harnesses usually know when tools start and finish. Dynamo knows when LLM
-requests start, finish, and which workers served them. Use the shared
-`workflow_id`, `program_id`, and `parent_program_id` fields to join both views:
+```json
+{
+  "schema": "dynamo.agent.trace.v1",
+  "event_type": "tool_end",
+  "event_time_unix_ms": 1777312801500,
+  "event_source": "harness",
+  "agent_context": {
+    "workflow_type_id": "deep_research",
+    "workflow_id": "research-run-42",
+    "program_id": "research-run-42:researcher",
+    "parent_program_id": "research-run-42:planner"
+  },
+  "tool": {
+    "tool_call_id": "call-abc",
+    "tool_class": "web_search",
+    "status": "succeeded",
+    "duration_ms": 420.5,
+    "output_tokens": 96,
+    "output_bytes": 2048
+  }
+}
+```
+
+## Correlating Events
+
+Agent harnesses know tool boundaries. Dynamo knows LLM request timing and worker
+placement. Use the shared `workflow_id`, `program_id`, and `parent_program_id`
+fields to build the workflow tree, and use `x_request_id` to join a harness LLM
+call to Dynamo request metrics when the harness sets `x-request-id`:
 
 ```text
-harness tool events:
-  tool_start / tool_end(program_id, parent_program_id)
+harness:
+  tool_start / tool_end / tool_error(agent_context)
+  llm_call_id
 
-Dynamo request events:
-  request_end(agent_context, tokens, timing, cache, worker)
+Dynamo normalized trace bus:
+  request_end(agent_context, request_id, x_request_id, tokens, timing, cache, worker)
+  tool_start / tool_end / tool_error(agent_context, tool_call_id, duration, status)
 
 joined profile:
   workflow -> programs -> LLM calls + tool calls + subagent lineage
@@ -128,11 +191,53 @@ joined profile:
 This gives an offline profile of agent execution without changing request
 serving behavior.
 
+## Using The Trace
+
+The first user journey is offline analysis. Run the agent harness and Dynamo
+with Dynamo trace JSONL enabled, then read one normalized workflow timeline.
+
+```text
+Dynamo trace JSONL:
+  request_end events with request_id, x_request_id, tokens, timing, cache, and worker fields
+  tool_start / tool_end / tool_error events ingested from the event plane
+
+Joined report:
+  workflow timeline, program/subagent tree, LLM time, tool time, cache misses,
+  prompt growth, queueing, and latency outliers
+```
+
+If the harness sets the `x-request-id` header, join LLM calls exactly:
+
+```text
+harness.llm_call_id == dynamo.request.x_request_id
+```
+
+Otherwise, join by `workflow_id`, `program_id`, and event ordering or nearest
+timestamps. That is usually sufficient for sequential reason/tool loops, but it
+can be ambiguous for retries, parallel LLM calls, cancellations, or subagents.
+
+A useful first report should answer:
+
+- Which programs and subagents ran under the workflow?
+- How many LLM calls and tool calls did each program make?
+- Where did wall time go: LLM prefill, decode, queueing, tool wait, or subagent wait?
+- Which requests had the largest `input_tokens`, uncached tokens, TTFT, or total time?
+- Did tool results or conversation history cause prompt growth between turns?
+- Did repeated turns get cache hits, or did requests miss expected prefix cache?
+- Which worker served each request?
+
+For repeated runs, group reports by `workflow_type_id`. Those grouped traces are
+the input to a workflow profile: expected LLM turns, output lengths, tool gaps,
+cache behavior, and subagent fanout for that reusable workload class. Later
+runtime features can use that profile to fill missing scheduling hints or choose
+cache actions, but the current trace path is analysis-only.
+
 ## Current Scope
 
 - `agent_context` is passive metadata in the current implementation.
-- Dynamo emits request-end trace records only when `DYN_AGENT_TRACE_JSONL` is
-  set.
+- Dynamo emits request-end trace records when agent tracing is enabled.
+- Dynamo can ingest harness tool lifecycle records from the event plane when
+  `DYN_AGENT_TRACE_TOOL_EVENTS=1`.
 - The trace sink is local JSONL output. It does not publish durable audit
   records.
 - Scheduling and cache-control decisions should continue to use existing

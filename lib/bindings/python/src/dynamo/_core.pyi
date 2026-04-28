@@ -808,6 +808,37 @@ class KvEventPublisher:
         ...
 
 
+class AgentTraceEventPublisher:
+    """
+    Publishes normalized agent trace records to Dynamo's event plane.
+    """
+
+    def __init__(
+        self,
+        runtime: DistributedRuntime,
+        namespace: str,
+        topic: Optional[str] = None,
+    ) -> None:
+        """
+        Create a namespace-scoped agent trace event publisher.
+
+        Args:
+            runtime: Dynamo runtime configured for the target event plane.
+            namespace: Dynamo namespace that the frontend subscribes to.
+            topic: Event-plane topic. Defaults to "agent-tool-events".
+        """
+        ...
+
+    async def publish(self, record: Dict[str, Any]) -> None:
+        """
+        Publish a normalized agent trace record.
+
+        The record should use schema "dynamo.agent.trace.v1" and an event_type
+        such as "tool_start", "tool_end", or "tool_error".
+        """
+        ...
+
+
 class FpmEventRelay:
     """
     Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
