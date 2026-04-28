@@ -3,6 +3,7 @@
 
 pub mod config;
 mod integration;
+mod relay;
 pub mod sink;
 pub mod types;
 
@@ -14,12 +15,16 @@ use crate::agents::context::AgentContext;
 use crate::telemetry::bus::TelemetryBus;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
-pub(crate) use integration::{record_llm_metric_tokens, request_metrics};
+pub(crate) use integration::{
+    record_llm_metric_tokens, request_metrics, start_tool_event_ingest_from_policy,
+};
+pub use relay::AgentToolEventRelay;
 pub use types::{
-    AgentRequestMetrics, AgentTraceRecord, TraceEventSource, TraceEventType, TraceSchema,
-    WorkerInfo,
+    AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
+    TraceEventType, TraceSchema, WorkerInfo,
 };
 
+pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
 pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "agent_trace.x_request_id";
 
 static BUS: TelemetryBus<AgentTraceRecord> = TelemetryBus::new();
@@ -91,14 +96,52 @@ pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetric
         event_source: TraceEventSource::Dynamo,
         agent_context,
         request: Some(request),
+        tool: None,
     });
+}
+
+pub fn publish_tool_record(record: AgentTraceRecord) {
+    if let Err(error) = validate_tool_record(&record) {
+        tracing::warn!(
+            %error,
+            event_type = ?record.event_type,
+            "dropping invalid agent tool record"
+        );
+        return;
+    }
+    publish(record);
+}
+
+fn validate_tool_record(record: &AgentTraceRecord) -> anyhow::Result<()> {
+    if record.schema != TraceSchema::V1 {
+        anyhow::bail!("unsupported agent trace schema: {:?}", record.schema);
+    }
+    if record.event_source != TraceEventSource::Harness {
+        anyhow::bail!(
+            "agent tool records must be harness-originated, got {:?}",
+            record.event_source
+        );
+    }
+    if !record.event_type.is_tool_event() {
+        anyhow::bail!("expected tool event, got {:?}", record.event_type);
+    }
+    if record.tool.is_none() {
+        anyhow::bail!("missing tool payload");
+    }
+    if record.request.is_some() {
+        anyhow::bail!("tool event must not include request metrics");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use crate::agents::context::AgentContext;
 
-    use super::{AgentRequestMetrics, BUS, emit_request_end};
+    use super::{
+        AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, BUS,
+        TraceEventSource, TraceEventType, TraceSchema, emit_request_end, publish_tool_record,
+    };
 
     #[tokio::test]
     async fn test_emit_request_end_sanitizes_non_finite_metrics() {
@@ -142,5 +185,45 @@ mod tests {
         assert_eq!(request.avg_itl_ms, None);
         assert_eq!(request.kv_hit_rate, None);
         assert_eq!(request.kv_transfer_estimated_latency_ms, None);
+    }
+
+    #[tokio::test]
+    async fn test_publish_tool_record_accepts_valid_tool_record() {
+        BUS.init(16);
+        let mut rx = BUS.subscribe();
+
+        publish_tool_record(AgentTraceRecord {
+            schema: TraceSchema::V1,
+            event_type: TraceEventType::ToolEnd,
+            event_time_unix_ms: 2000,
+            event_source: TraceEventSource::Harness,
+            agent_context: AgentContext {
+                workflow_type_id: "ms_agent".to_string(),
+                workflow_id: "run-1".to_string(),
+                program_id: "run-1:agent".to_string(),
+                parent_program_id: None,
+            },
+            request: None,
+            tool: Some(AgentToolEvent {
+                tool_call_id: "tool-123".to_string(),
+                tool_class: "web_search".to_string(),
+                status: Some(AgentToolStatus::Succeeded),
+                duration_ms: Some(12.5),
+                output_tokens: Some(9),
+                output_bytes: Some(64),
+                tool_name_hash: None,
+                error_type: None,
+            }),
+        });
+
+        let record = rx.recv().await.expect("tool record should publish");
+        assert_eq!(record.schema, TraceSchema::V1);
+        assert_eq!(record.event_type, TraceEventType::ToolEnd);
+        assert_eq!(record.event_source, TraceEventSource::Harness);
+        assert!(record.request.is_none());
+        assert_eq!(
+            record.tool.unwrap().status,
+            Some(AgentToolStatus::Succeeded)
+        );
     }
 }

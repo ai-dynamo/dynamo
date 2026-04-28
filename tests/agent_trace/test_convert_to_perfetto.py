@@ -225,3 +225,110 @@ def test_convert_records_splits_overlapping_program_requests_into_lanes():
         if event.get("cat") == "dynamo.llm"
     }
     assert request_tids["req-1"] != request_tids["req-2"]
+
+
+def test_convert_records_emits_tool_duration_slices():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1250,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_type_id": "ms_agent",
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "web_search",
+                        "status": "succeeded",
+                        "duration_ms": 250,
+                        "output_bytes": 2048,
+                    },
+                },
+            }
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    tool_events = [
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    ]
+    assert len(tool_events) == 1
+    tool_event = tool_events[0]
+    assert tool_event["name"] == "Tool: web_search"
+    assert tool_event["ts"] == 1_000_000
+    assert tool_event["dur"] == 250_000
+    assert tool_event["args"]["tool_call_id"] == "call-1"
+    assert tool_event["args"]["output_bytes"] == 2048
+
+    thread_names = [
+        event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event.get("name") == "thread_name"
+    ]
+    assert thread_names == ["workflow-1:searcher tools"]
+
+
+def test_convert_records_pairs_tool_start_and_end_without_duration():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_start",
+                    "event_time_unix_ms": 1000,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "web_search",
+                        "status": "running",
+                    },
+                },
+            },
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1250,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "web_search",
+                        "status": "succeeded",
+                    },
+                },
+            },
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    assert not [
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool.marker"
+    ]
+    tool_event = next(
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    )
+    assert tool_event["ts"] == 1_000_000
+    assert tool_event["dur"] == 250_000

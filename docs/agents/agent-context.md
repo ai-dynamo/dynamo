@@ -7,7 +7,8 @@ subtitle: Attach workflow identity to agentic requests
 
 Dynamo supports passive agent request tracing. An agent harness can attach
 identity metadata to each LLM request, and Dynamo can write normalized
-`request_end` records to configured trace sinks.
+`request_end` records to configured trace sinks. Harness tool lifecycle events
+can also enter through a Dynamo-owned ZMQ relay and land on the same trace bus.
 
 This is observability only. It does not change routing, scheduling, or cache
 behavior.
@@ -76,6 +77,11 @@ export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
 | `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member. |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES` | No | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes. |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES` | No | unset | Optional `jsonl_gz` segment roll threshold in records. |
+| `DYN_AGENT_TRACE_TOOL_EVENTS` | No | unset | Enables event-plane ingestion for harness tool events. |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC` | No | `agent-tool-events` | Event-plane topic for harness tool events. |
+| `DYN_AGENT_TRACE_NAMESPACE` | No | local model namespace | Optional namespace override for harness tool events. |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | No | unset | Local ZMQ endpoint for harness tool events. Setting this also enables tool event ingestion. |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | No | unset | Optional ZMQ topic filter for harness tool events. |
 
 The `jsonl` sink writes one recorder JSON object per line:
 `{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The
@@ -145,12 +151,15 @@ Open `/tmp/dynamo-agent-trace.perfetto.json` in
 slice grouped by workflow and program lane. The slice args include request IDs,
 model, token counts, cache metrics, TTFT, average ITL, queue depth, and worker
 IDs. By default, the converter stacks prefill wait, prefill, and decode slices
-under each request when those timings are present. Add `--include-markers` to
-emit first-token instant markers, `--no-stages` for a compact request-only
-view, or `--separate-stage-tracks` to place stages on adjacent tracks when
-debugging Perfetto nesting or label rendering. Stage slice boundaries are
-normalized to avoid same-thread overlap caused by independent metric rounding;
-raw timing fields remain available in event args.
+under each request when those timings are present. Harness `tool_end` and
+`tool_error` records become tool slices on adjacent tool tracks when duration is
+available. If a terminal tool event has no duration, the converter pairs it with
+the matching `tool_start` record when present. Add `--include-markers` to emit
+first-token instant markers, `--no-stages` for a compact request-only view, or
+`--separate-stage-tracks` to place stages on adjacent tracks when debugging
+Perfetto nesting or label rendering. Stage slice boundaries are normalized to
+avoid same-thread overlap caused by independent metric rounding; raw timing
+fields remain available in event args.
 
 ## Operator Notes
 
@@ -232,10 +241,54 @@ finish reason, error status, or OpenTelemetry/OpenInference attributes. Use the
 audit sink for request/response payload capture and OTEL export for span-based
 observability.
 
+## Tool Event Relay
+
+For harness tool events, Dynamo owns the event-plane publishing path. Start
+Dynamo with a local ZMQ source endpoint:
+
+```bash
+export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC=
+```
+
+The ZMQ wire format is:
+
+```text
+[topic, seq_be_u64, msgpack(AgentTraceRecord)]
+```
+
+Only harness-originated `tool_start`, `tool_end`, and `tool_error` records are
+accepted. Dynamo republishes valid records onto the runtime event plane and
+then feeds them into the same in-process trace bus as request-end records.
+
+```json
+{
+  "schema": "dynamo.agent.trace.v1",
+  "event_type": "tool_end",
+  "event_time_unix_ms": 1777312801500,
+  "event_source": "harness",
+  "agent_context": {
+    "workflow_type_id": "deep_research",
+    "workflow_id": "research-run-42",
+    "program_id": "research-run-42:researcher"
+  },
+  "tool": {
+    "tool_call_id": "call-abc",
+    "tool_class": "web_search",
+    "status": "succeeded",
+    "duration_ms": 420.5,
+    "output_bytes": 2048
+  }
+}
+```
+
 ## Current Scope
 
 - `agent_context` is passive metadata.
 - Dynamo emits request-end trace records when agent tracing is enabled.
 - `jsonl`, `jsonl_gz`, and `stderr` are local debug/profiling sinks.
+- Trace records are best-effort profiling data, not durable audit records.
+- Tool events enter through a Dynamo-owned ZMQ relay, not through a generic
+  Python event-plane publisher.
 - Trace records are best-effort profiling data, not durable audit records.
 - Future scheduler/profiler consumers should read the normalized trace bus.

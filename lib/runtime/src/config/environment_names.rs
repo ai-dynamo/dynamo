@@ -339,6 +339,23 @@ pub mod llm {
 
         /// Rotating gzip JSONL sink roll threshold in record lines.
         pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
+
+        /// Enable event-plane ingestion for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS: &str = "DYN_AGENT_TRACE_TOOL_EVENTS";
+
+        /// Event-plane topic for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC: &str = "DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC";
+
+        /// Optional namespace override for harness tool events.
+        pub const DYN_AGENT_TRACE_NAMESPACE: &str = "DYN_AGENT_TRACE_NAMESPACE";
+
+        /// Local ZMQ endpoint for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+
+        /// Optional ZMQ topic filter for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
 }
 
@@ -557,6 +574,11 @@ mod tests {
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC,
+            llm::agent_trace::DYN_AGENT_TRACE_NAMESPACE,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
