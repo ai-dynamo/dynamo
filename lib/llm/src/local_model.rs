@@ -33,21 +33,21 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Env var flipping the default for `LocalModelBuilder::self_host_metadata`.
-/// Truthy: `1` / `true` / `yes` / `on` (case-insensitive). Explicit setter
-/// calls win.
+/// Env var controlling the default for `LocalModelBuilder::self_host_metadata`.
+/// Falsy: `0` / `false` / `no` / `off` / empty string (case-insensitive).
+/// Anything else, including unset, leaves the default ON. Explicit setter
+/// calls win. Workers without a `system_status_server` (no `DYN_SYSTEM_PORT`)
+/// gracefully skip the self-host rewrite — see [`move_to_self_host`].
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
-    std::env::var(ENV_SELF_HOST_METADATA)
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    match std::env::var(ENV_SELF_HOST_METADATA) {
+        Ok(v) => !matches!(
+            v.trim().to_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        ),
+        Err(_) => true,
+    }
 }
 
 pub struct LocalModelBuilder {
@@ -546,7 +546,18 @@ impl LocalModel {
         &mut self,
         drt: &dynamo_runtime::DistributedRuntime,
     ) -> anyhow::Result<()> {
-        let base_url = self_host_base_url(drt)?;
+        let Some(base_url) = self_host_base_url(drt)? else {
+            // Default-on behavior on a worker without DYN_SYSTEM_PORT —
+            // no server to register against. Frontends still resolve
+            // each CheckedFile through whatever URI is naturally there
+            // (`hf://` after `move_to_url`, or synthesized `file://`).
+            tracing::info!(
+                model_slug = %self.card.slug(),
+                "self_host_metadata enabled but system_status_server is not \
+                 running (DYN_SYSTEM_PORT unset); skipping http rewrites",
+            );
+            return Ok(());
+        };
         let model_slug = self.card.slug().to_string();
         let registry = drt.metadata_artifacts();
 
@@ -650,9 +661,11 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     }
 }
 
-/// `http://<host>:<port>` advertising this worker's
-/// `/v1/metadata/...` route. Errors if the system_status_server
-/// isn't running.
+/// `Some("http://<host>:<port>")` advertising this worker's
+/// `/v1/metadata/...` route, or `None` when the `system_status_server`
+/// isn't running (no `DYN_SYSTEM_PORT`). Returning `None` rather than
+/// erroring lets the default-on behavior degrade gracefully on
+/// deployments that don't run the status server.
 ///
 /// Host selection mirrors the request plane: when the bind address is
 /// a wildcard, defer to `ip_resolver::get_local_ip_for_advertise()`,
@@ -660,11 +673,10 @@ fn internal_endpoint(engine: &str) -> EndpointId {
 /// addresses for URL safety.
 pub(crate) fn self_host_base_url(
     drt: &dynamo_runtime::DistributedRuntime,
-) -> anyhow::Result<String> {
-    let info = drt.system_status_server_info().context(
-        "self_host_metadata=True requires DYN_SYSTEM_PORT to be set so the \
-         system_status_server is running",
-    )?;
+) -> anyhow::Result<Option<String>> {
+    let Some(info) = drt.system_status_server_info() else {
+        return Ok(None);
+    };
 
     let configured = dynamo_runtime::RuntimeConfig::from_settings()
         .unwrap_or_default()
@@ -676,7 +688,7 @@ pub(crate) fn self_host_base_url(
         _ => configured,
     };
 
-    Ok(format!("http://{host}:{}", info.port()))
+    Ok(Some(format!("http://{host}:{}", info.port())))
 }
 
 #[cfg(test)]
@@ -685,13 +697,18 @@ mod env_self_host_metadata_tests {
 
     #[serial_test::serial]
     #[test]
-    fn truthy_values_flip_default() {
-        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
+    fn unset_or_truthy_keeps_default_on() {
+        // SAFETY: serialized via serial_test.
+        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
+        assert!(env_self_host_metadata_default(), "unset → default ON");
+        assert!(LocalModelBuilder::default().self_host_metadata);
+
+        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON", "garbage"] {
             // SAFETY: serialized via serial_test.
             unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
             assert!(
                 env_self_host_metadata_default(),
-                "expected truthy for {v:?}"
+                "expected ON for {v:?} (anything non-falsy keeps default)"
             );
             assert!(
                 LocalModelBuilder::default().self_host_metadata,
@@ -704,18 +721,17 @@ mod env_self_host_metadata_tests {
 
     #[serial_test::serial]
     #[test]
-    fn falsy_or_missing_keeps_default_off() {
-        // SAFETY: serialized via serial_test.
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
-        assert!(!env_self_host_metadata_default());
-        assert!(!LocalModelBuilder::default().self_host_metadata);
-
-        for v in ["0", "false", "no", "off", "", "garbage"] {
+    fn falsy_values_disable_default() {
+        for v in ["0", "false", "FALSE", "no", "NO", "off", "OFF", ""] {
             // SAFETY: serialized via serial_test.
             unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
             assert!(
                 !env_self_host_metadata_default(),
-                "expected falsy for {v:?}"
+                "expected OFF for {v:?}"
+            );
+            assert!(
+                !LocalModelBuilder::default().self_host_metadata,
+                "builder default must follow env for {v:?}"
             );
         }
         // SAFETY: serialized via serial_test.
