@@ -6,6 +6,7 @@
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -23,7 +24,6 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
-from types import SimpleNamespace
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]

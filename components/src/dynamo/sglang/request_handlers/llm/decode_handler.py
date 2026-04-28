@@ -72,9 +72,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[str, Any] = (
-            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
-        )
+        self._routed_experts_kwargs: Dict[
+            str, Any
+        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
