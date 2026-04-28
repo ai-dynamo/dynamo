@@ -355,6 +355,245 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDGDR_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	hub.Spec.Model = "edited-model"
+	hub.Spec.Image = "edited-image"
+	hub.Status.Phase = v1beta1.DGDRPhaseFailed
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if restored.Spec.Model != "edited-model" {
+		t.Fatalf("model = %q, want edited-model", restored.Spec.Model)
+	}
+	if restored.Spec.ProfilingConfig.ProfilerImage != "edited-image" {
+		t.Fatalf("profiler image = %q, want edited-image", restored.Spec.ProfilingConfig.ProfilerImage)
+	}
+	if restored.Status.State != DGDRStateFailed {
+		t.Fatalf("state = %q, want %q", restored.Status.State, DGDRStateFailed)
+	}
+}
+
+func TestDGDR_IntermediateHubStatusWinsOverPreservedSpokeStatus(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	hub.Status.Phase = v1beta1.DGDRPhasePending
+	hub.Status.DGDName = "edited-dgd"
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if restored.Status.State != DGDRStatePending {
+		t.Fatalf("state = %q, want %q", restored.Status.State, DGDRStatePending)
+	}
+	if restored.Status.Deployment == nil {
+		t.Fatalf("deployment status is nil")
+	}
+	if restored.Status.Deployment.Name != "edited-dgd" {
+		t.Fatalf("deployment name = %q, want edited-dgd", restored.Status.Deployment.Name)
+	}
+	if restored.Status.Deployment.Created {
+		t.Fatalf("deployment created = true, want false")
+	}
+	if restored.Status.Deployment.Namespace != original.Status.Deployment.Namespace {
+		t.Fatalf("deployment namespace = %q, want %q", restored.Status.Deployment.Namespace, original.Status.Deployment.Namespace)
+	}
+}
+
+func TestDGDR_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	hub.Spec.SearchStrategy = v1beta1.SearchStrategyThorough
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if _, ok := spoke.Annotations[annDGDRHubSpec]; !ok {
+		t.Fatalf("expected current hub-only edit to be preserved in %q", annDGDRHubSpec)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.SearchStrategy != v1beta1.SearchStrategyThorough {
+		t.Fatalf("searchStrategy = %q, want %q", restored.Spec.SearchStrategy, v1beta1.SearchStrategyThorough)
+	}
+}
+
+func TestDGDR_IntermediateSpokeEditsWinOverPreservedHub(t *testing.T) {
+	original := newV1beta1DGDR()
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	spoke.Spec.Model = "edited-model"
+	spoke.Spec.ProfilingConfig.ProfilerImage = "edited-image"
+	spoke.Spec.UseMocker = false
+	spoke.Status.State = DGDRStateFailed
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.Model != "edited-model" {
+		t.Fatalf("model = %q, want edited-model", restored.Spec.Model)
+	}
+	if restored.Spec.Image != "edited-image" {
+		t.Fatalf("image = %q, want edited-image", restored.Spec.Image)
+	}
+	if restored.Spec.Features != nil && restored.Spec.Features.Mocker != nil && restored.Spec.Features.Mocker.Enabled {
+		t.Fatalf("mocker enabled = true, want false")
+	}
+	if restored.Status.Phase != v1beta1.DGDRPhaseFailed {
+		t.Fatalf("phase = %q, want %q", restored.Status.Phase, v1beta1.DGDRPhaseFailed)
+	}
+}
+
+func TestDGDR_IntermediateProfilingJobAnnotationWinsOverPreservedHub(t *testing.T) {
+	original := newV1beta1DGDR()
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	spoke.Annotations[annDGDRProfilingJobName] = "edited-profiling-job"
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Status.ProfilingJobName != "edited-profiling-job" {
+		t.Fatalf("profilingJobName = %q, want edited-profiling-job", restored.Status.ProfilingJobName)
+	}
+}
+
+func TestDGDR_IntermediateSpokeAlphaOnlyStatusEditsSurvivePreservedHub(t *testing.T) {
+	original := newV1beta1DGDR()
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	spoke.Status.Backend = "edited-backend"
+	spoke.Status.ProfilingResults = "configmap/edited-results"
+	if spoke.Status.Deployment == nil {
+		spoke.Status.Deployment = &DeploymentStatus{}
+	}
+	spoke.Status.Deployment.Namespace = "edited-namespace"
+	spoke.Status.Deployment.State = DGDStateFailed
+
+	restoredHub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	restoredSpoke := &DynamoGraphDeploymentRequest{}
+	if err := restoredSpoke.ConvertFrom(restoredHub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if restoredSpoke.Status.Backend != "edited-backend" {
+		t.Fatalf("backend = %q, want edited-backend", restoredSpoke.Status.Backend)
+	}
+	if restoredSpoke.Status.ProfilingResults != "configmap/edited-results" {
+		t.Fatalf("profilingResults = %q, want configmap/edited-results", restoredSpoke.Status.ProfilingResults)
+	}
+	if restoredSpoke.Status.Deployment == nil {
+		t.Fatalf("deployment status is nil")
+	}
+	if restoredSpoke.Status.Deployment.Namespace != "edited-namespace" {
+		t.Fatalf("deployment namespace = %q, want edited-namespace", restoredSpoke.Status.Deployment.Namespace)
+	}
+	if restoredSpoke.Status.Deployment.State != DGDStateFailed {
+		t.Fatalf("deployment state = %q, want %q", restoredSpoke.Status.Deployment.State, DGDStateFailed)
+	}
+}
+
+func TestDGDR_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
+	original := newV1beta1DGDR()
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	spoke.Spec.ProfilingConfig.ConfigMapRef = &ConfigMapKeySelector{Name: "edited-config", Key: "profile.yaml"}
+	spoke.Spec.ProfilingConfig.OutputPVC = "edited-output-pvc"
+
+	restoredHub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	restoredSpoke := &DynamoGraphDeploymentRequest{}
+	if err := restoredSpoke.ConvertFrom(restoredHub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if restoredSpoke.Spec.ProfilingConfig.ConfigMapRef == nil {
+		t.Fatalf("configMapRef is nil")
+	}
+	if got := restoredSpoke.Spec.ProfilingConfig.ConfigMapRef.Name; got != "edited-config" {
+		t.Fatalf("configMapRef.name = %q, want edited-config", got)
+	}
+	if got := restoredSpoke.Spec.ProfilingConfig.OutputPVC; got != "edited-output-pvc" {
+		t.Fatalf("outputPVC = %q, want edited-output-pvc", got)
+	}
+}
+
+func TestDGDR_IntermediateSpokeProfilingConfigModelCacheEditWins(t *testing.T) {
+	original := newV1beta1DGDR()
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"deployment": map[string]interface{}{
+			"modelCache": map[string]interface{}{
+				"pvcName":        "edited-pvc",
+				"modelPathInPvc": "edited-path",
+				"pvcMountPath":   "/edited",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal profiling config: %v", err)
+	}
+	spoke.Spec.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: raw}
+
+	restoredHub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restoredHub.Spec.ModelCache == nil {
+		t.Fatalf("ModelCache is nil")
+	}
+	if got := restoredHub.Spec.ModelCache.PVCName; got != "edited-pvc" {
+		t.Fatalf("ModelCache.PVCName = %q, want edited-pvc", got)
+	}
+	if got := restoredHub.Spec.ModelCache.PVCModelPath; got != "edited-path" {
+		t.Fatalf("ModelCache.PVCModelPath = %q, want edited-path", got)
+	}
+	if got := restoredHub.Spec.ModelCache.PVCMountPath; got != "/edited" {
+		t.Fatalf("ModelCache.PVCMountPath = %q, want /edited", got)
+	}
+}
+
 // TestConvertTo_InvalidProfilingConfigJSON verifies that malformed or arbitrary
 // RawExtension bytes in ProfilingConfig.Config are preserved rather than
 // rejected. The v1alpha1 field is an opaque extension point; typed v1beta1
