@@ -15,6 +15,36 @@ Aggregated-serving recipe for **DeepSeek-V4-Flash** on Dynamo. Three backends ar
 
 Status: **Experimental** (Day-0). Modality: text only.
 
+## What works today
+
+All three backends serve V4-Flash's core path on B200x4: chat completion (incl. streaming), tool calling, and reasoning extraction. The main differences are about **packaging maturity** (which container you can pull vs. build) and a couple of feature caveats.
+
+| Capability | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) | TensorRT-LLM (`trtllm-agg`) |
+|---|:---:|:---:|:---:|
+| **Use a prebuilt image (no build)** | ❌ build it | ✅ pull it | ❌ build it |
+| Chat completion (sync + streaming) | ✅ | ✅ | ✅ |
+| Tool calling (`message.tool_calls`) | ✅ | ✅ | ✅ |
+| Reasoning extraction (`message.reasoning_content`) | ✅ | ✅ | ✅ |
+| Speculative decoding (EAGLE MTP) | — | ✅ | — |
+| KV-cache event publishing | ✅ | ✅ | ❌ not yet |
+
+**TL;DR.** Want it running with the least friction? Pick **SGLang** — the manifest pulls a prebuilt NGC image and works as-is. The **vLLM** and **TensorRT-LLM** variants both require a one-time custom container build until V4 support lands in their public images.
+
+### Known limitations per backend
+
+**TensorRT-LLM** (`trtllm-agg`):
+- 🔧 *Custom image required for now.* The public `tensorrtllm-runtime` image will bundle V4 once [TensorRT-LLM PR #13568](https://github.com/NVIDIA/TensorRT-LLM/pull/13568) lands (lifts `TOKENIZER_ALIASES` to module level).
+- 📌 *Snapshot SHA pinned in the YAML.* `--model-path` points at a specific HuggingFace snapshot directory — a workaround for [`huggingface/transformers#44843`](https://github.com/huggingface/transformers/issues/44843) (offline-mode regression in transformers 4.57.x). If HuggingFace publishes a new commit for `deepseek-ai/DeepSeek-V4-Flash`, update the SHA in `trtllm/agg/deploy.yaml` before applying. See the pre-flight check in [TensorRT-LLM-specific notes](#tensorrt-llm-specific).
+- ❌ *KV-cache event publishing not yet supported.* V4's sparse-MLA cache manager asserts the event buffer is off, so `--publish-events-and-metrics` is intentionally omitted from the worker args.
+
+**vLLM** (`vllm-agg`):
+- 🔧 *Custom image required for now.* Render and build the standard Dynamo vLLM runtime image — see [Prerequisites](#prerequisites) step 4.
+- 🐢 *First launch is slow (~60 min)* — weight load + FlashInfer autotune + cudagraph warmup. The startup probe is sized for this.
+
+**SGLang** (`sglang-agg`):
+- ✅ *No image build needed.* The manifest pulls `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly.
+- 🐢 *First launch is slow (~60 min)* — weight load + DeepGEMM warmup + cudagraph warmup. The startup probe is sized for this.
+
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
@@ -37,7 +67,7 @@ Status: **Experimental** (Day-0). Modality: text only.
 
 ## Quick Start
 
-Common setup (run once — applies to both variants):
+Common setup (run once — applies to all three variants):
 
 ```bash
 export NAMESPACE=dynamo-demo
@@ -194,7 +224,7 @@ Recipe-level (per-variant) settings:
 
 ## Verifying Reasoning
 
-Same flow on both variants — same model, same `--dyn-reasoning-parser deepseek_v4`:
+Same flow on all three variants — same model, same `--dyn-reasoning-parser deepseek_v4`:
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -216,7 +246,7 @@ If `reasoning_content` is `null` and `</think>` appears in `content`, the reason
 
 ## Verifying Tool Calling
 
-Same flow on both variants:
+Same flow on all three variants:
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
