@@ -794,7 +794,7 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) dynamo.RollingUpdateContext {
+) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
 	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
@@ -805,13 +805,12 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			NewWorkerHash:     newWorkerHash,
 			OldWorkerReplicas: make(map[string]int32),
 			NewWorkerReplicas: make(map[string]int32),
-		}
+		}, nil
 	}
 
 	oldStates, err := r.getOldWorkerServiceStates(ctx, dgd, newWorkerHash)
 	if err != nil {
-		logger.Error(err, "Failed to get old worker service states, falling back to empty")
-		oldStates = make(map[string]dcdServiceState)
+		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker service states: %w", err)
 	}
 
 	oldWorkerReplicas := make(map[string]int32)
@@ -835,18 +834,21 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
 			newState = dcdServiceStateFromDCD(newDCD)
+		} else if !apierrors.IsNotFound(err) {
+			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
 
 		oldState := oldStates[serviceName]
 
-		// Old target: shared budget for scale-down, allocated to unhealthy cleanup then healthy drain.
 		newUnavailable := max(int32(0), newState.spec-newState.available)
+		// maxScaledDown is the maximum number of old replicas that can be scaled down
 		maxScaledDown := max(int32(0), (oldState.spec+newState.spec)-minAvailable-newUnavailable)
 		oldUnhealthy := max(int32(0), oldState.spec-oldState.available)
+		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
 		availableSurplus := max(int32(0), (oldState.available+newState.available)-minAvailable)
 		oldTarget := max(int32(0), oldState.spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
 
-		// New target: surge-gated using actual pod counts (includes Terminating pods holding resources).
+		// scaleUpBudget is how many extra replicas we can scale up, based on actual pod counts
 		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.actual-newState.actual)
 		newTarget := min(desired, newState.spec+scaleUpBudget)
 
@@ -869,7 +871,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		NewWorkerHash:     newWorkerHash,
 		OldWorkerReplicas: oldWorkerReplicas,
 		NewWorkerReplicas: newWorkerReplicas,
-	}
+	}, nil
 }
 
 // mergeWorkerServiceStatuses merges old worker service statuses into the existing service statuses.
