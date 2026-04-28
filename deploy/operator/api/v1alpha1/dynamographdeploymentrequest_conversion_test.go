@@ -352,25 +352,30 @@ func TestHubRoundTrip(t *testing.T) {
 }
 
 func TestDGDR_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
+	const (
+		editedModel = "edited-model"
+		editedImage = "edited-image"
+	)
+
 	original := newV1alpha1DGDR()
 	hub := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := original.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
 
-	hub.Spec.Model = "edited-model"
-	hub.Spec.Image = "edited-image"
+	hub.Spec.Model = editedModel
+	hub.Spec.Image = editedImage
 	hub.Status.Phase = v1beta1.DGDRPhaseFailed
 
 	restored := &DynamoGraphDeploymentRequest{}
 	if err := restored.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom() error = %v", err)
 	}
-	if restored.Spec.Model != "edited-model" {
-		t.Fatalf("model = %q, want edited-model", restored.Spec.Model)
+	if restored.Spec.Model != editedModel {
+		t.Fatalf("model = %q, want %s", restored.Spec.Model, editedModel)
 	}
-	if restored.Spec.ProfilingConfig.ProfilerImage != "edited-image" {
-		t.Fatalf("profiler image = %q, want edited-image", restored.Spec.ProfilingConfig.ProfilerImage)
+	if restored.Spec.ProfilingConfig.ProfilerImage != editedImage {
+		t.Fatalf("profiler image = %q, want %s", restored.Spec.ProfilingConfig.ProfilerImage, editedImage)
 	}
 	if restored.Status.State != DGDRStateFailed {
 		t.Fatalf("state = %q, want %q", restored.Status.State, DGDRStateFailed)
