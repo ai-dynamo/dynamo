@@ -183,6 +183,7 @@ runs:
 
         docker buildx build \
           --progress=plain \
+          --builder "${BUILDX_BUILDER_NAME:-default}" \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
           -f ./container/rendered.Dockerfile \
