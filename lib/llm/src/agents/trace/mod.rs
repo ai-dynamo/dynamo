@@ -3,20 +3,23 @@
 
 mod bus;
 pub mod config;
+mod integration;
 mod sink;
 pub mod stream;
 pub mod types;
 
-use crate::context::AgentContext;
+use crate::agents::context::AgentContext;
 use tokio_util::sync::CancellationToken;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
+pub(crate) use integration::{request_metrics, start_tool_event_ingest_from_policy};
 pub use types::{
     AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
     TraceEventType, TraceSchema, WorkerInfo,
 };
 
 pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
+pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "agent_trace.x_request_id";
 
 pub async fn init_from_env() -> anyhow::Result<()> {
     init_from_env_with_shutdown(CancellationToken::new()).await
@@ -121,7 +124,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::context::AgentContext;
+    use crate::agents::context::AgentContext;
 
     use super::{
         AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,

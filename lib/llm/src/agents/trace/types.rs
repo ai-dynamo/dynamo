@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::AgentContext;
+use crate::agents::context::AgentContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTraceRecord {

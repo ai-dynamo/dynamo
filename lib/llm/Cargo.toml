@@ -52,7 +52,6 @@ required-features = ["kv-router-stress"]
 
 [dependencies]
 # repo
-dynamo-agents = { workspace = true }
 dynamo-config = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }

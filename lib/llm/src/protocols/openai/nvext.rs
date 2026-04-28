@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
+pub use crate::agents::context::AgentContext;
 pub use crate::protocols::common::timing::TimingInfo;
-pub use dynamo_agents::context::AgentContext;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";

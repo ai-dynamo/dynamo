@@ -5,9 +5,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::agents::trace::{AgentRequestMetrics, AgentTracePolicy, AgentTraceRecord, WorkerInfo};
 use crate::local_model::LocalModel;
 use crate::protocols::common::timing::RequestTracker;
-use dynamo_agents::trace::{AgentRequestMetrics, AgentTraceRecord, WorkerInfo};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -61,17 +61,16 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
     drt: DistributedRuntime,
     local_model: &LocalModel,
 ) -> anyhow::Result<()> {
-    let policy = dynamo_agents::trace::policy().clone();
+    let policy = super::policy().clone();
     if !policy.tool_events_enabled {
         return Ok(());
     }
+    if TOOL_EVENT_INGEST_STARTED.load(Ordering::Acquire) {
+        tracing::debug!("agent tool event ingest already started");
+        return Ok(());
+    }
 
-    let namespace_name = policy
-        .tool_events_namespace
-        .clone()
-        .or_else(|| local_model.namespace().map(str::to_string))
-        .unwrap_or_else(|| local_model.endpoint_id().namespace.clone());
-
+    let namespace_name = tool_events_namespace(&policy, local_model);
     let namespace = drt.namespace(namespace_name.clone())?;
     let mut subscriber =
         EventSubscriber::for_namespace(&namespace, policy.tool_events_topic.clone())
@@ -103,7 +102,7 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
                 next = subscriber.next() => {
                     match next {
                         Some(Ok((_envelope, record))) => {
-                            dynamo_agents::trace::publish_tool_record(record);
+                            super::publish_tool_record(record);
                         }
                         Some(Err(error)) => {
                             tracing::warn!(%error, "agent tool event ingest failed to decode event");
@@ -119,6 +118,14 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
     });
 
     Ok(())
+}
+
+fn tool_events_namespace(policy: &AgentTracePolicy, local_model: &LocalModel) -> String {
+    policy
+        .tool_events_namespace
+        .clone()
+        .or_else(|| local_model.namespace().map(str::to_string))
+        .unwrap_or_else(|| local_model.endpoint_id().namespace.clone())
 }
 
 #[cfg(test)]

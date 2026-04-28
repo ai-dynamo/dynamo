@@ -61,7 +61,8 @@ use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 use dynamo_runtime::logging::{
-    DEPRECATED_DYNAMO_REQUEST_ID_HEADER, REQUEST_ID_HEADER, get_distributed_tracing_context,
+    DEPRECATED_DYNAMO_REQUEST_ID_HEADER, REQUEST_ID_HEADER, X_REQUEST_ID_HEADER,
+    get_distributed_tracing_context,
 };
 use tracing::Instrument;
 
@@ -375,6 +376,18 @@ fn validated_request_id_header(headers: &HeaderMap, header_name: &str) -> Option
     }
 }
 
+fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
+    if let Some(x_request_id) = headers
+        .get(X_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        request.insert(
+            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.to_string(),
+        );
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -401,7 +414,8 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -881,7 +895,8 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles

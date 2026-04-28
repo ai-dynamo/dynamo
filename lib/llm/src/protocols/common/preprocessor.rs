@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
-use dynamo_agents::context::AgentContext;
 
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine

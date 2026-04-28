@@ -139,6 +139,22 @@ impl LLMMetricAnnotation {
     }
 }
 
+fn record_llm_metric_tokens(
+    tracker: Option<&RequestTracker>,
+    input_tokens: usize,
+    output_tokens: usize,
+    cached_tokens: Option<usize>,
+) {
+    let Some(tracker) = tracker else {
+        return;
+    };
+
+    if input_tokens > 0 || cached_tokens.is_some() {
+        tracker.record_isl(input_tokens, cached_tokens);
+    }
+    tracker.record_osl(output_tokens);
+}
+
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
@@ -971,6 +987,7 @@ impl OpenAIPreprocessor {
                         detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
+                    record_llm_metric_tokens(tracker.as_deref(), isl, current_osl, None);
 
                     // Flush per-request detokenize accumulators to global Prometheus counters
                     // (once per request instead of per-token).
@@ -1012,6 +1029,10 @@ impl OpenAIPreprocessor {
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
                         let tracker = inner.response_generator.tracker();
+                        let cached_tokens = usage
+                            .prompt_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.cached_tokens.map(|c| c as usize));
                         let prefill_worker_id =
                             tracker.as_ref().and_then(|t| t.prefill_worker_id());
                         let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
@@ -1029,10 +1050,7 @@ impl OpenAIPreprocessor {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
                             chunk_tokens: 0,
-                            cached_tokens: usage
-                                .prompt_tokens_details
-                                .as_ref()
-                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            cached_tokens,
                             prefill_worker_id,
                             prefill_dp_rank,
                             prefill_worker_type,
@@ -1045,6 +1063,12 @@ impl OpenAIPreprocessor {
                                 .and_then(|t| t.detokenize_total_latency()),
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
+                        record_llm_metric_tokens(
+                            tracker.as_deref(),
+                            usage.prompt_tokens as usize,
+                            usage.completion_tokens as usize,
+                            cached_tokens,
+                        );
 
                         // Flush per-request detokenize accumulators to global Prometheus counters
                         // (once per request instead of per-token).
@@ -1402,7 +1426,13 @@ impl
         let request_model = common_request.model.clone();
         let request_tracker = tracker.clone();
         let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-            .and_then(|context| context.x_request_id);
+            .and_then(|context| context.x_request_id)
+            .or_else(|| {
+                context
+                    .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
+                    .ok()
+                    .map(|value| value.as_ref().clone())
+            });
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1473,11 +1503,11 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = if dynamo_agents::trace::is_enabled()
+        let final_stream = if crate::agents::trace::is_enabled()
             && let Some(agent_context) = agent_context
         {
             let (stream, done_fut) =
-                dynamo_agents::trace::stream::notify_on_completion(final_stream);
+                crate::agents::trace::stream::notify_on_completion(final_stream);
             tokio::spawn(async move {
                 done_fut.await;
                 if request_tracker.is_none() {
@@ -1486,13 +1516,13 @@ impl
                         "agent_context present but request tracker is missing; emitting partial trace"
                     );
                 }
-                let metrics = crate::agent_trace::request_metrics(
+                let metrics = crate::agents::trace::request_metrics(
                     request_id,
                     x_request_id,
                     request_model,
                     request_tracker.as_deref(),
                 );
-                dynamo_agents::trace::emit_request_end(agent_context, metrics);
+                crate::agents::trace::emit_request_end(agent_context, metrics);
             });
             stream
         } else {

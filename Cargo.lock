@@ -2309,22 +2309,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynamo-agents"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "derive_builder",
- "futures",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "utoipa",
-]
-
-[[package]]
 name = "dynamo-bench"
 version = "1.2.0"
 dependencies = [
@@ -2428,7 +2412,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-agents",
  "dynamo-bench",
  "dynamo-config",
  "dynamo-kv-router",
