@@ -285,6 +285,44 @@ async def test_connector_set_replicas_success(connector):
 
 
 @pytest.mark.asyncio
+async def test_connector_set_replicas_rejected(connector):
+    """REJECTED is a budget-gate outcome — must not raise, must log a warning."""
+    target_replicas = [
+        TargetReplica(
+            sub_component_type=SubComponentType.PREFILL,
+            component_name="prefill-svc",
+            desired_replicas=2,
+        )
+    ]
+
+    with patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "ns"}
+    ):
+        mock_response = ScaleResponse(
+            status=ScaleStatus.REJECTED,
+            message="budget exceeded",
+            current_replicas={},
+        )
+        mock_client = AsyncMock()
+        mock_client.send_scale_request = AsyncMock(return_value=mock_response)
+        connector.remote_client = mock_client
+
+        with patch("dynamo.planner.connectors.global_planner.logger") as mock_logger:
+            # Must not raise — REJECTED is a legitimate business outcome.
+            await connector.set_component_replicas(target_replicas, blocking=False)
+
+            # Warning logged, not error.
+            mock_logger.warning.assert_called_once()
+            warning_msg = mock_logger.warning.call_args[0][0]
+            assert "rejected" in warning_msg.lower()
+            assert "budget exceeded" in warning_msg
+            mock_logger.error.assert_not_called()
+
+        # Client was still called — execution continued normally.
+        mock_client.send_scale_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_connector_error_handling(connector):
     """Test GlobalPlannerConnector error handling"""
     # Empty list
