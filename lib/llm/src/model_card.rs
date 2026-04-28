@@ -194,28 +194,19 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// Absolute upper bound on any single metadata file the frontend will
-/// accept. Defends against a compromised worker that publishes an MDC
-/// with a wildly inflated `CheckedFile.size` (or, on the legacy path,
-/// an HF repo with a huge file masquerading as a tokenizer). Realistic
-/// metadata files top out around 20 MiB; 1 GiB leaves comfortable
-/// headroom while keeping disk-exhaustion bounded.
+/// Trust-boundary clamp on a worker's declared `CheckedFile.size`.
+/// Realistic metadata files top out near 20 MiB; 1 GiB bounds
+/// disk exhaustion from a compromised worker advertising `u64::MAX`.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Exclusive lock for a blob path, mirroring the pattern `hf-hub`
-/// uses internally (`libc::flock(LOCK_EX)` on a sentinel file next to
-/// the blob). The lock is per-open-file-description, so the kernel
-/// serializes both within-process tasks and across processes
-/// uniformly. Held for the lifetime of `BlobLock`; released when its
-/// `_file` field drops.
+/// `flock(LOCK_EX)` on `<blob>.lock`. Per-open-file-description
+/// semantics serialize both intra- and inter-process callers, so a
+/// single layer covers both. Released when `_file` drops.
 struct BlobLock {
     _file: std::fs::File,
 }
 
 impl BlobLock {
-    /// Blocks the calling task until the OS-level exclusive lock is
-    /// acquired on `<blob>.lock`. Uses `tokio::task::spawn_blocking`
-    /// so the runtime stays responsive.
     async fn acquire(blob_path: &Path) -> anyhow::Result<Self> {
         use std::os::fd::AsRawFd;
         let lock_path = blob_path.with_extension("lock");
@@ -243,10 +234,10 @@ impl BlobLock {
     }
 }
 
-/// MDC files cache root: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`
-/// symlinks. The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/`,
-/// isolating different worker sets that share a model name but publish
-/// different file content.
+/// MDC cache: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`.
+/// The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/` and
+/// isolates worker sets that share a model name but publish different
+/// file content.
 fn mdc_cache_root() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -277,10 +268,9 @@ fn blake3_hex_of(checksum: &str) -> anyhow::Result<&str> {
         .with_context(|| format!("expected blake3 checksum, got: {checksum}"))
 }
 
-/// Stage `uri` to a temp file under `cap`, then verify by rebuilding a
-/// `CheckedFile` (using the worker's mmap-based hashing path) and
-/// comparing to `expected`. Atomically renames `tmp -> dest` on success.
-/// Schemes: `http(s)`, `file`, `hf`.
+/// Stage `uri` into `dest`, verifying staged bytes against `expected`
+/// before publishing. Schemes: `http(s)`, `file`, `hf`. Concurrent-safe
+/// via `BlobLock` + atomic rename.
 async fn resolve_uri(
     client: &reqwest::Client,
     uri: &str,
@@ -291,10 +281,8 @@ async fn resolve_uri(
         .size()
         .context("CheckedFile.size() must be populated for resolve_uri")?;
 
-    // Absolute pre-download ceiling — applied uniformly to every scheme
-    // (http, file, hf) so a compromised worker can't bypass the bound by
-    // choosing a particular transport. We reject before any bytes are
-    // fetched or copied.
+    // Pre-fetch ceiling on the worker's declared size — uniform across
+    // schemes so transport choice can't bypass the bound.
     if cap > ABSOLUTE_MAX_METADATA_BYTES {
         anyhow::bail!(
             "{uri}: declared size {cap} exceeds absolute metadata ceiling \
@@ -304,24 +292,14 @@ async fn resolve_uri(
 
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
 
-    // Exclusive flock on `<blob>.lock` — Linux's per-open-file-description
-    // lock semantics serialize both within-process tasks and across
-    // processes uniformly. Mirrors the pattern `hf-hub` uses internally.
     let _blob_guard = BlobLock::acquire(dest).await?;
 
-    // Re-check after acquiring the lock: another waiter (in this process
-    // or another) may have populated the blob while we were queued.
-    // Short-circuit to a cache hit rather than duplicate-fetching.
+    // Double-check: a peer that held the lock before us may have
+    // already populated `dest`.
     if dest.exists() {
         return Ok(());
     }
 
-    // Stage scheme-specific bytes into a per-call tmp, verify by
-    // rebuilding `CheckedFile::from_disk(tmp)` (same mmap-backed b3sum
-    // path the worker used at registration), then atomic-rename onto
-    // the content-addressed cache slot. The flock above gates the
-    // download itself; the per-call tmp + rename gives a uniform
-    // atomic-publish primitive (shared with `symlink_force`).
     stage_and_rename(dest, |tmp| async move {
         match parsed.scheme() {
             "http" | "https" => stream_to_tmp(client, uri, &tmp, cap).await?,
@@ -342,9 +320,8 @@ async fn resolve_uri(
             scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
         }
 
-        // Verify the staged bytes match the expected CheckedFile.
-        // `from_disk` runs the same hashing path the worker used at
-        // registration, so identity is bit-identical between sides.
+        // `from_disk` reuses the worker's hashing path so the
+        // checksum comparison is bit-identical across both sides.
         let actual = CheckedFile::from_disk(&tmp)?;
         if actual.checksum() != expected.checksum() {
             anyhow::bail!(
@@ -358,9 +335,9 @@ async fn resolve_uri(
     .await
 }
 
-/// Stream HTTP body to `tmp`, never buffering more than `cap` bytes
-/// in memory. Pre-rejects via `Content-Length` when the server provides
-/// it; otherwise relies on the chunked write loop catching overage.
+/// Stream HTTP body to `tmp`, capped at `cap` bytes. Pre-checks
+/// `Content-Length` if present; otherwise the post-write check
+/// catches overage.
 async fn stream_to_tmp(
     client: &reqwest::Client,
     uri: &str,
@@ -386,8 +363,8 @@ async fn stream_to_tmp(
     }
 
     let stream = response.bytes_stream().map_err(std::io::Error::other);
-    // `take(cap + 1)` so the post-write `written > cap` check fires
-    // when the body would have spilled past `cap`.
+    // `cap + 1` so a body of exactly `cap` passes but anything
+    // larger trips the `written > cap` check below.
     let mut reader = StreamReader::new(stream).take(cap.saturating_add(1));
     let mut file = tokio::fs::File::create(tmp)
         .await
@@ -402,9 +379,8 @@ async fn stream_to_tmp(
     Ok(())
 }
 
-/// Copy a local file into `tmp`, rejecting it before the read if its
-/// metadata size exceeds `cap`. Used for `file://` and `hf://` arms
-/// (the latter via the local snapshot dir produced by `hub::from_hf`).
+/// Copy a local file into `tmp`, rejecting before read if its
+/// metadata size exceeds `cap`.
 async fn copy_to_tmp(src: &Path, tmp: &Path, cap: u64) -> anyhow::Result<()> {
     let metadata = tokio::fs::metadata(src)
         .await
@@ -423,9 +399,7 @@ async fn copy_to_tmp(src: &Path, tmp: &Path, cap: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse an `hf://repo[@rev]/filename` URI into `(repo[@rev],
-/// filename)`. The repo portion is whatever HF Hub recognizes via
-/// [`crate::hub::from_hf`]; the filename is the last path segment.
+/// Parse `hf://repo[@rev]/filename` into `(repo[@rev], filename)`.
 fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     let body = uri
         .strip_prefix("hf://")
@@ -439,10 +413,9 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
-/// Per-call unique tmp path next to `dest`. The pid+uuid suffix
-/// guarantees disjoint tmp paths across concurrent callers (within and
-/// across processes), so the kernel `rename` is the synchronization
-/// point — never a `create(tmp)` collision.
+/// Per-call tmp path next to `dest`. pid + uuid suffix keeps tmps
+/// disjoint across concurrent callers so `rename(2)` is the only
+/// synchronization point — never `create(tmp)`.
 fn unique_tmp_path(dest: &Path) -> PathBuf {
     let suffix = format!(
         "tmp.{}.{}",
@@ -458,15 +431,10 @@ fn unique_tmp_path(dest: &Path) -> PathBuf {
     p
 }
 
-/// Stage some content via `f(&tmp)`, then atomically rename onto
-/// `dest`. The tmp is per-call, so concurrent callers (within or
-/// across processes) don't collide; the rename is atomic on the
-/// same filesystem and overwrites any existing target. On staging
-/// failure the tmp is cleaned up; on rename failure the same.
-///
-/// Async sibling of [`stage_and_rename_sync`] for I/O that needs the
-/// tokio runtime (network fetch, large copies). Both share the
-/// per-call tmp + atomic-rename pattern.
+/// Atomic publish: stage via `f(&tmp)` then `rename(tmp -> dest)`.
+/// Concurrent-safe because tmps are per-call (see [`unique_tmp_path`])
+/// and `rename(2)` is atomic + overwrites. Tmp is unlinked on any
+/// failure.
 async fn stage_and_rename<F, Fut>(dest: &Path, f: F) -> anyhow::Result<()>
 where
     F: FnOnce(PathBuf) -> Fut,
@@ -488,8 +456,8 @@ where
     Ok(())
 }
 
-/// Sync sibling of [`stage_and_rename`]. Use for cheap operations
-/// like creating a symlink that don't justify spawning blocking work.
+/// Sync sibling of [`stage_and_rename`] for cheap operations
+/// (e.g., creating a symlink).
 fn stage_and_rename_sync<F>(dest: &Path, f: F) -> anyhow::Result<()>
 where
     F: FnOnce(&Path) -> anyhow::Result<()>,
@@ -510,10 +478,8 @@ where
     Ok(())
 }
 
-/// Materialize a symlink at `link` pointing at `target`. Atomic and
-/// safe across concurrent callers (multiple processes / tokio tasks)
-/// — uses the per-call tmp + rename pattern, so the loser of any
-/// race ends up with an equivalent target.
+/// Symlink `link -> target`, overwriting any existing entry.
+/// Concurrent-safe via [`stage_and_rename_sync`].
 fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     stage_and_rename_sync(link, |tmp| {
         #[cfg(unix)]
@@ -528,12 +494,10 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// URI to feed `resolve_uri` for a `CheckedFile`. If the worker set
-/// a URL via `move_to_url`, that's what `resolve_uri` dispatches on.
-/// Otherwise — typical for shared-mount workers that never rewrote
-/// their local paths — we synthesize a `file://` URI from the
-/// canonicalized path so the file scheme exercises the same
-/// verify-and-cache pipeline as the http/hf schemes.
+/// URI to dispatch `resolve_uri` on. For CheckedFiles still pointing
+/// at a local path (shared-mount workers that never call `move_to_url`),
+/// synthesize `file://<canonicalized>` so every CheckedFile flows
+/// through the same verify-and-cache pipeline.
 fn checked_file_to_uri(cf: &CheckedFile) -> anyhow::Result<String> {
     if let Some(url) = cf.url() {
         return Ok(url.to_string());
@@ -548,8 +512,7 @@ fn checked_file_to_uri(cf: &CheckedFile) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
-/// Filename for a CheckedFile. Local paths take their final segment;
-/// URLs take the last non-empty path segment after `/`.
+/// Last path segment of a CheckedFile, whether it's a local path or URL.
 fn filename_from_checked_file(cf: &CheckedFile) -> Option<String> {
     if let Some(path) = cf.path() {
         return path.file_name().and_then(|f| f.to_str()).map(String::from);
@@ -919,21 +882,13 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
-        // New-format MDCs (every populated CheckedFile carries `size`) go
-        // through `resolve_metadata_files` uniformly — we recheck every
-        // metadata file's blake3 against the staged bytes, regardless of
-        // whether the source is `http://`, `hf://`, or a local file on a
-        // shared mount. No `has_local_files()` short-circuit for new
-        // format; the verify-and-cache property is identical across every
-        // scheme.
+        // New format always goes through `resolve_metadata_files`
+        // (every scheme rechecks blake3 against staged bytes); the
+        // `has_local_files()` short-circuit only applies to legacy.
         if self.is_new_format() {
             return self.resolve_metadata_files().await;
         }
 
-        // Legacy (size absent on at least one CheckedFile): preserve the
-        // origin/main behavior. If everything is locally readable on a
-        // shared mount, skip the download entirely; otherwise fall back
-        // to `hub::from_hf` for HF-resolvable models.
         if self.has_local_files() {
             tracing::trace!("All model config is local, not downloading");
             return Ok(());
@@ -946,26 +901,17 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
-    /// Walk every populated typed-enum metadata slot and resolve its
-    /// CheckedFile via `resolve_uri`. Caches each blob under the
-    /// content-addressed `blobs/<blake3>` and links into the
-    /// per-(slug, mdcsum) symlink directory. Hard-fail on any error —
-    /// no fallback to `hub::from_hf` once the new path is engaged.
+    /// Walk every populated metadata slot, resolve via `resolve_uri`,
+    /// and link the result into `by-slug/<slug>/<mdcsum>/`. No fallback
+    /// to `hub::from_hf` once this path is engaged — failures propagate.
     async fn resolve_metadata_files(&mut self) -> anyhow::Result<()> {
-        // Capture the mdcsum before taking `&mut self` borrows for symlink
-        // setup — the per-(slug, mdcsum) directory isolates worker sets that
-        // share a model name but publish different file content.
         let mdcsum = self.mdcsum().to_string();
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
         let client = reqwest::Client::new();
 
-        // Snapshot the (uri, expected, filename) triples up front so we can
-        // call `&mut self::update_dir` after the immutable iteration ends.
-        // For each CheckedFile we derive a URI: prefer the URL if the
-        // worker set one (via `move_to_url` / `move_to_self_host`), else
-        // synthesize a `file://` URI from the local path so the same
-        // verify-and-cache pipeline runs even on shared-mount setups.
+        // Snapshot up front so `&mut self::update_dir` is callable
+        // after the iteration ends.
         let entries: Vec<(String, CheckedFile, String)> = self
             .iter_metadata_files()
             .map(|cf| {
@@ -982,10 +928,6 @@ impl ModelDeploymentCard {
             let blake3_hex = blake3_hex_of(&expected.checksum().to_string())?.to_string();
             let blob = blobs.join(&blake3_hex);
 
-            // Per-file log so an operator (or test scraping with debug
-            // level enabled) can confirm which scheme each metadata
-            // file was resolved through and whether the cache
-            // short-circuited the fetch.
             let scheme = url::Url::parse(uri)
                 .map(|u| u.scheme().to_string())
                 .unwrap_or_else(|_| "?".to_string());
@@ -1074,11 +1016,11 @@ impl ModelDeploymentCard {
         out
     }
 
-    /// `true` iff the MDC is new-format: every populated metadata slot
-    /// carries `CheckedFile.size = Some(_)`. Mixed states (some slots
-    /// with size, some without) count as legacy and fall back to
-    /// `hub::from_hf` — they would indicate a worker bug we'd rather
-    /// surface conservatively than paper over.
+    /// `true` iff every populated metadata slot carries
+    /// `CheckedFile.size = Some(_)`. The `size` field is the
+    /// new/legacy discriminant since legacy workers never populate it.
+    /// Mixed states fall back to legacy — surfacing a likely worker
+    /// bug rather than papering over it.
     pub fn is_new_format(&self) -> bool {
         let mut any = false;
         for cf in self.iter_metadata_files() {
