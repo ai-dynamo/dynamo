@@ -1,16 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Multi-replica self-host metadata test using CPU-only mocker workers.
+"""Multi-replica metadata-fetch tests using CPU-only mocker workers.
 
-Spawns two mocker worker processes against a single frontend, both with
-``DYN_SELF_HOST_METADATA=true``. They register the same model
-concurrently, each advertising HTTP metadata URLs at its own system
-port. Verifies the frontend serializes concurrent fetches via its
-per-blake3 in-process mutex + cross-process flock, producing a
-consistent content-addressed cache without race-induced errors.
+Three scenarios, parametrized over the URI scheme the worker advertises:
 
-CPU-only (mocker) so this can run on gpu_0 / pre-merge.
+* ``self_host`` (``http://``): ``DYN_SELF_HOST_METADATA=true`` → worker
+  calls ``move_to_self_host`` and rewrites every CheckedFile to
+  ``http://<worker>/v1/metadata/<slug>/<filename>``.
+* ``hf`` (``hf://``): ``DYN_SELF_HOST_METADATA=false`` and the worker
+  is started with the HF repo ID as ``--model-path``. The repo-ID
+  string doesn't exist as a literal local path, so origin's
+  ``move_to_url("hf://...")`` branch fires and CheckedFiles end up
+  pointing at ``hf://<repo>/<filename>`` URIs.
+* ``file`` (``file://``): ``DYN_SELF_HOST_METADATA=false`` and the
+  worker is started with a **local snapshot directory** as
+  ``--model-path``. The path exists, so neither ``move_to_self_host``
+  nor ``move_to_url("hf://...")`` fires; the CheckedFile stays
+  ``Either::Left(PathBuf)`` and the frontend's
+  ``resolve_metadata_files`` synthesizes a ``file://`` URI from the
+  canonicalized local path.
+
+All three end up running the same downstream pipeline: ``resolve_uri``
+stages bytes to a tmp via the shared atomic-publish primitive,
+verifies via ``CheckedFile::from_disk(tmp)``, and atomic-renames into
+the content-addressed cache.
+
+A separate multi-frontend test exercises cross-process flock by
+sharing a single ``$HOME`` between two frontend processes.
+
+CPU-only (mocker) so these run on gpu_0 / post_merge.
 """
 
 from __future__ import annotations
@@ -39,17 +58,47 @@ pytestmark = [
 ]
 
 
+def _mocker_model_arg_for_scheme(scheme: str) -> str:
+    """Resolve the value to pass as `--model-path` for each scheme.
+
+    `self_host` and `hf` use the HF repo ID directly — the mocker
+    fetches it under the hood. `file` requires a local-disk path so
+    that origin's `move_to_url("hf://...")` branch doesn't fire and
+    CheckedFile stays `Either::Left(PathBuf)`.
+    """
+    if scheme in ("self_host", "hf"):
+        return TEST_MODEL
+    if scheme == "file":
+        from huggingface_hub import snapshot_download
+
+        # Limit to metadata files; weights aren't needed for the mocker.
+        return snapshot_download(
+            repo_id=TEST_MODEL,
+            allow_patterns=[
+                "config.json",
+                "tokenizer.json",
+                "tokenizer.model",
+                "tokenizer_config.json",
+                "chat_template.jinja",
+                "chat_template.json",
+                "generation_config.json",
+            ],
+        )
+    raise ValueError(f"unknown scheme: {scheme}")
+
+
 @pytest.fixture(scope="function")
-def multi_replica_self_host_services(
+def multi_replica_services(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports: ServicePorts,
     tmp_path,
-) -> Generator[Tuple[ServicePorts, Path], None, None]:
-    """Start a frontend with isolated $HOME plus two mocker worker
-    replicas, both with self-host metadata enabled. Yields the
-    `ServicePorts` (which carries two system ports) and the isolated
-    frontend home so the test can inspect the cache.
+):
+    """Factory: yields a callable `start(scheme)` that spawns a frontend
+    with isolated $HOME plus two mocker workers configured for the
+    requested URI scheme.
+
+    `scheme` is one of `"self_host"`, `"hf"`, `"file"`.
     """
     _ = runtime_services_dynamic_ports
     frontend_port = dynamo_dynamic_ports.frontend_port
@@ -58,44 +107,69 @@ def multi_replica_self_host_services(
     frontend_home = tmp_path / "frontend-home"
     frontend_home.mkdir(parents=True, exist_ok=True)
 
-    with DynamoFrontendProcess(
-        request,
-        frontend_port=frontend_port,
-        extra_env={"HOME": str(frontend_home)},
-        terminate_all_matching_process_names=False,
-    ):
-        # Two replicas, both publishing metadata via http://. They
-        # advertise URLs at distinct system ports, so the frontend
-        # sees two MDCs that share blake3 checksums but differ in
-        # URL host:port. The cache is keyed on blake3 → after the
-        # first replica's fetch, the second short-circuits via
-        # `dest.exists()` after acquiring the flock.
-        with MockerWorkerProcess(
+    contexts: list = []
+
+    def start(scheme: str):
+        worker_env = {
+            "DYN_SELF_HOST_METADATA": "true" if scheme == "self_host" else "false"
+        }
+        model_arg = _mocker_model_arg_for_scheme(scheme)
+
+        # For the `file` scheme we pass a local snapshot dir as
+        # `--model-path` (so the worker doesn't trigger the
+        # `move_to_url("hf://...")` branch). Without an explicit
+        # `--model-name`, the model's display_name would become the
+        # local path string and `/v1/models` would surface it as the
+        # model id. Override so the served name stays stable.
+        worker_extra_args = (
+            ["--model-name", TEST_MODEL] if scheme == "file" else None
+        )
+
+        frontend = DynamoFrontendProcess(
             request,
-            TEST_MODEL,
-            frontend_port,
-            sys_a,
-            worker_id="mocker-a",
-            extra_env={"DYN_SELF_HOST_METADATA": "true"},
-        ):
-            with MockerWorkerProcess(
+            frontend_port=frontend_port,
+            extra_env={"HOME": str(frontend_home)},
+            terminate_all_matching_process_names=False,
+        )
+        frontend.__enter__()
+        contexts.append(frontend)
+
+        for worker_id, sys_port in [("mocker-a", sys_a), ("mocker-b", sys_b)]:
+            worker = MockerWorkerProcess(
                 request,
-                TEST_MODEL,
+                model_arg,
                 frontend_port,
-                sys_b,
-                worker_id="mocker-b",
-                extra_env={"DYN_SELF_HOST_METADATA": "true"},
-            ):
-                yield dynamo_dynamic_ports, frontend_home
+                sys_port,
+                worker_id=worker_id,
+                extra_env=worker_env,
+                extra_args=worker_extra_args,
+            )
+            worker.__enter__()
+            contexts.append(worker)
+
+        return dynamo_dynamic_ports, frontend_home
+
+    try:
+        yield start
+    finally:
+        # Tear down in reverse order; swallow individual errors so all
+        # contexts get a chance to clean up.
+        for ctx in reversed(contexts):
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                logger.exception("error tearing down %r", ctx)
 
 
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("scheme", ["self_host", "hf", "file"])
 @pytest.mark.timeout(300)
-def test_two_mocker_replicas_register_via_self_host(
-    multi_replica_self_host_services: Tuple[ServicePorts, Path],
+def test_two_mocker_replicas_register(
+    multi_replica_services,
+    scheme: str,
     predownload_tokenizers,
 ) -> None:
-    ports, frontend_home = multi_replica_self_host_services
+    ports, frontend_home = multi_replica_services(scheme)
     base_url = f"http://localhost:{ports.frontend_port}"
 
     # Both replicas should have registered. /v1/models reflects merged
@@ -143,8 +217,9 @@ def test_two_mocker_replicas_register_via_self_host(
         f"{[p.name for p in blobs]}"
     )
     logger.info(
-        "multi-replica self-host verified: %d blob(s) under %s "
+        "multi-replica %s verified: %d blob(s) under %s "
         "from concurrent registrations on system_ports=%s",
+        scheme,
         len(blobs),
         blobs_dir,
         ports.system_ports,

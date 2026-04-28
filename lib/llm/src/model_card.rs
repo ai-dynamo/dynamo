@@ -528,6 +528,26 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     })
 }
 
+/// URI to feed `resolve_uri` for a `CheckedFile`. If the worker set
+/// a URL via `move_to_url`, that's what `resolve_uri` dispatches on.
+/// Otherwise — typical for shared-mount workers that never rewrote
+/// their local paths — we synthesize a `file://` URI from the
+/// canonicalized path so the file scheme exercises the same
+/// verify-and-cache pipeline as the http/hf schemes.
+fn checked_file_to_uri(cf: &CheckedFile) -> anyhow::Result<String> {
+    if let Some(url) = cf.url() {
+        return Ok(url.to_string());
+    }
+    let path = cf
+        .path()
+        .context("CheckedFile has neither path nor url")?;
+    let absolute = std::fs::canonicalize(path)
+        .with_context(|| format!("canonicalizing {}", path.display()))?;
+    let url = url::Url::from_file_path(&absolute)
+        .map_err(|()| anyhow::anyhow!("invalid file path for url: {}", absolute.display()))?;
+    Ok(url.to_string())
+}
+
 /// Filename for a CheckedFile. Local paths take their final segment;
 /// URLs take the last non-empty path segment after `/`.
 fn filename_from_checked_file(cf: &CheckedFile) -> Option<String> {
@@ -889,12 +909,8 @@ impl ModelDeploymentCard {
 
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.
     pub async fn download_config(&mut self) -> anyhow::Result<()> {
-        if self.has_local_files() {
-            tracing::trace!("All model config is local, not downloading");
-            return Ok(());
-        }
-
-        // For TensorBased models, config files are not used - they handle everything in the backend
+        // For TensorBased models, config files are not used — they handle
+        // everything in the backend.
         if self.model_type.supports_tensor() {
             tracing::debug!(
                 display_name = %self.display_name,
@@ -903,14 +919,24 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
-        // New-format MDCs carry `size` on every populated CheckedFile; resolve
-        // each file via its URL through `resolve_uri`, where the absolute
-        // ceiling is enforced. Old MDCs (no size) fall through to the legacy
-        // `hub::from_hf` path; we don't defend that path because the bytes
-        // are already on disk by the time we'd see them — bandwidth and HF
-        // cache are spent regardless.
+        // New-format MDCs (every populated CheckedFile carries `size`) go
+        // through `resolve_metadata_files` uniformly — we recheck every
+        // metadata file's blake3 against the staged bytes, regardless of
+        // whether the source is `http://`, `hf://`, or a local file on a
+        // shared mount. No `has_local_files()` short-circuit for new
+        // format; the verify-and-cache property is identical across every
+        // scheme.
         if self.is_new_format() {
             return self.resolve_metadata_files().await;
+        }
+
+        // Legacy (size absent on at least one CheckedFile): preserve the
+        // origin/main behavior. If everything is locally readable on a
+        // shared mount, skip the download entirely; otherwise fall back
+        // to `hub::from_hf` for HF-resolvable models.
+        if self.has_local_files() {
+            tracing::trace!("All model config is local, not downloading");
+            return Ok(());
         }
 
         let ignore_weights = true;
@@ -936,13 +962,14 @@ impl ModelDeploymentCard {
 
         // Snapshot the (uri, expected, filename) triples up front so we can
         // call `&mut self::update_dir` after the immutable iteration ends.
+        // For each CheckedFile we derive a URI: prefer the URL if the
+        // worker set one (via `move_to_url` / `move_to_self_host`), else
+        // synthesize a `file://` URI from the local path so the same
+        // verify-and-cache pipeline runs even on shared-mount setups.
         let entries: Vec<(String, CheckedFile, String)> = self
             .iter_metadata_files()
             .map(|cf| {
-                let url = cf
-                    .url()
-                    .context("CheckedFile must have a URL for resolve, got local path")?
-                    .to_string();
+                let url = checked_file_to_uri(cf)?;
                 let filename = filename_from_checked_file(cf).with_context(|| {
                     format!("could not derive filename from CheckedFile uri {url}")
                 })?;
@@ -954,6 +981,22 @@ impl ModelDeploymentCard {
         for (uri, expected, filename) in &entries {
             let blake3_hex = blake3_hex_of(&expected.checksum().to_string())?.to_string();
             let blob = blobs.join(&blake3_hex);
+
+            // Per-file log so an operator (or test scraping with debug
+            // level enabled) can confirm which scheme each metadata
+            // file was resolved through and whether the cache
+            // short-circuited the fetch.
+            let scheme = url::Url::parse(uri)
+                .map(|u| u.scheme().to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            tracing::debug!(
+                filename = %filename,
+                scheme = %scheme,
+                uri = %uri,
+                cache_hit = blob.exists(),
+                blake3 = %blake3_hex,
+                "resolving metadata file",
+            );
 
             if !blob.exists() {
                 resolve_uri(&client, uri, expected, &blob).await?;
