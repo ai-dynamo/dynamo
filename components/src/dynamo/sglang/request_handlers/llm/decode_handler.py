@@ -67,6 +67,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             shutdown_event,
         )
+        # Resolve the optional return_routed_experts kwarg once. We gate on the
+        # user opt-in flag and additionally drop the kwarg on sglang builds
+        # whose Engine.async_generate signature does not declare it (notably
+        # the older sglang pinned by DeepSeek-V4). Doing this at init keeps
+        # the per-request hot path free of signature inspection.
+        self._routed_experts_kwargs: Dict[str, Any] = {}
+        if getattr(self.config.server_args, "enable_return_routed_experts", False):
+            self._routed_experts_kwargs = filter_supported_async_generate_kwargs(
+                self.engine, {"return_routed_experts": True}
+            )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -278,12 +288,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        return_routed_experts = getattr(
-            self.config.server_args, "enable_return_routed_experts", False
-        )
-        routed_experts_kwargs = filter_supported_async_generate_kwargs(
-            self.engine, {"return_routed_experts": return_routed_experts}
-        )
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
@@ -317,7 +321,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
-                **routed_experts_kwargs,
+                **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -355,7 +359,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                **routed_experts_kwargs,
+                **self._routed_experts_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
