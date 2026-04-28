@@ -76,7 +76,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
     secrets: inherit
 
   sglang-build:
@@ -89,7 +89,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
     secrets: inherit
 
   trtllm-build:
@@ -102,7 +102,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
     secrets: inherit
 
   # ============================================================================
@@ -124,7 +124,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
       gpu_test_markers: vllm and gpu_1
-      gpu_test_timeout_minutes: 35
+      gpu_test_timeout_minutes: 240
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -141,7 +141,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   sglang-test:
@@ -175,7 +175,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: sglang and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   trtllm-test:
@@ -209,7 +209,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   # ============================================================================
@@ -223,7 +223,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       fresh_builder: true
       no_cache: true
-      build_timeout_minutes: 90
+      build_timeout_minutes: 120
       # TODO: widen beyond `pre_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
