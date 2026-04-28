@@ -4,7 +4,7 @@
 # Test-only dependencies — installed in test and dev containers, NOT in runtime.
 
 # For faster model downloads
-hf_transfer
+hf-xet
 # For deploy/utils async file IO used by deploy tests and profiler deployment helpers
 aiofiles<=25.1.0
 # For Allure test reporting in CI
