@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-sysprofile"
+version.workspace = true
+edition.workspace = true
+description = "System-level distributed profiler for Dynamo inference benchmarking"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["profiling", "tracing", "perfetto", "nvtx", "distributed"]
+
+[[bin]]
+name = "dynamo-sysprofile-merge"
+path = "src/bin/merge.rs"
+
+[features]
+default = []
+nvtx = ["dep:cudarc"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-nats = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+flate2 = "1"
+petgraph = "0.7"
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
+
+# NVTX support (requires CUDA toolkit at runtime)
+cudarc = { workspace = true, features = ["nvtx"], optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
