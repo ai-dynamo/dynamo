@@ -348,7 +348,7 @@ class SglangProcessor:
             raise
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
-            raise InvalidArgument(f"Preprocessing error: {exc}") from exc
+            raise Unknown(f"Preprocessing error: {exc}") from exc
 
         post = SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -392,7 +392,7 @@ class SglangProcessor:
             logger.exception(
                 "SGLang worker preprocessing failed for request %s", request_id
             )
-            raise InvalidArgument(f"Worker error: {exc}") from exc
+            raise Unknown(f"Worker error: {exc}") from exc
 
         # --- Phase 2: Recreate parsers in main process (not picklable) ---
         tool_call_parser, reasoning_parser = create_parsers(
