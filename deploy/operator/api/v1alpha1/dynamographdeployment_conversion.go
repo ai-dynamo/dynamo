@@ -75,6 +75,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	hubOrigin := restoredHubSpec || dst.ObjectMeta.Annotations[annDGDHubOrigin] == annotationTrue
 	delAnnFromObj(&dst.ObjectMeta, annDGDHubOrigin)
+	if hubOrigin {
+		scrubDGDInternalAnnotations(&dst.ObjectMeta)
+	}
 
 	var semanticSpec v1beta1.DynamoGraphDeploymentSpec
 	semanticSpec.Annotations = maps.Clone(src.Spec.Annotations)
@@ -124,6 +127,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 				continue
 			}
 			carrier := newDGDComponentCarrier(&dst.ObjectMeta, name)
+			if restoredHubSpec && dgdRestoredComponentHasPodTemplate(&dst.Spec, name) {
+				carrier.set(suffixPodTemplateOrig, annotationTrue)
+			}
 			var compDst v1beta1.DynamoComponentDeploymentSharedSpec
 			if err := convertSharedSpecTo(compSrc, &compDst, carrier); err != nil {
 				return fmt.Errorf("component %q: %w", name, err)
@@ -149,12 +155,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 
 	if restoredHubSpec {
-		overlayDGDHubSpec(&dst.Spec, &semanticSpec)
+		overlayDGDHubSpec(&dst.Spec, &semanticSpec, src.Spec.Services)
 	} else {
 		dst.Spec = semanticSpec
-	}
-	if hubOrigin {
-		scrubDGDInternalAnnotations(&dst.ObjectMeta)
 	}
 	convertDGDStatusTo(&src.Status, &dst.Status)
 	if preserveSpoke {
@@ -173,7 +176,7 @@ func preserveDGDSpoke(src *DynamoGraphDeployment, dst *v1beta1.DynamoGraphDeploy
 	}
 }
 
-func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta1.DynamoGraphDeploymentSpec) {
+func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta1.DynamoGraphDeploymentSpec, srcServices map[string]*DynamoComponentDeploymentSharedSpec) {
 	hubComponents := make(map[string]v1beta1.DynamoComponentDeploymentSharedSpec, len(base.Components))
 	for _, comp := range base.Components {
 		hubComponents[comp.ComponentName] = comp
@@ -185,13 +188,11 @@ func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta
 		if !ok {
 			continue
 		}
-		if hubComp.PodTemplate != nil {
-			base.Components[i].PodTemplate = hubComp.PodTemplate.DeepCopy()
-		}
+		base.Components[i].PodTemplate = overlayPreservedSharedPodTemplate(&hubComp, base.Components[i].PodTemplate, base.Components[i].CompilationCache, srcServices[base.Components[i].ComponentName])
 		if base.Components[i].FrontendSidecar == nil && hubComp.FrontendSidecar != nil {
 			base.Components[i].FrontendSidecar = ptr.To(*hubComp.FrontendSidecar)
 		}
-		if base.Components[i].Experimental == nil && hubComp.Experimental != nil {
+		if base.Components[i].Experimental == nil && experimentalIsHubOnlyShape(hubComp.Experimental) {
 			base.Components[i].Experimental = hubComp.Experimental.DeepCopy()
 		}
 	}
@@ -255,7 +256,14 @@ func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *Dy
 			if dstComp == nil || preservedSpec.Services == nil {
 				continue
 			}
-			fillSharedAlphaOnlyFromPreserved(dstComp, preservedSpec.Services[name])
+			preservedComp := preservedSpec.Services[name]
+			if preservedComp == nil {
+				continue
+			}
+			if dstComp.ServiceName == "" && preservedComp.ServiceName != "" && preservedComp.ServiceName != name {
+				dstComp.ServiceName = preservedComp.ServiceName
+			}
+			fillSharedAlphaOnlyFromPreserved(dstComp, preservedComp)
 		}
 	}
 	if preservedStatus != nil {
@@ -335,22 +343,6 @@ func decodeDGDSpokePreserved(obj metav1.Object) (*DynamoGraphDeploymentSpec, *Dy
 	return preservedSpokeSpec, preservedSpokeStatus
 }
 
-func restoreDGDSpokeFastPath(dst *DynamoGraphDeployment, src *v1beta1.DynamoGraphDeployment, preservedSpec *DynamoGraphDeploymentSpec, preservedStatus *DynamoGraphDeploymentStatus) bool {
-	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
-	// matching means no hub fields changed. Metadata was copied above and rides along.
-	if preservedSpec == nil || !dgdSpokeHubUnmodified(src) {
-		return false
-	}
-	dst.Spec = *preservedSpec.DeepCopy()
-	if preservedStatus != nil {
-		dst.Status = *preservedStatus.DeepCopy()
-	} else {
-		convertDGDStatusFrom(&src.Status, &dst.Status)
-	}
-	scrubDGDInternalAnnotations(&dst.ObjectMeta)
-	return true
-}
-
 // ConvertFrom converts from the hub (v1beta1) DynamoGraphDeployment into this
 // v1alpha1 instance.
 func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
@@ -362,9 +354,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	preservedSpokeSpec, preservedSpokeStatus := decodeDGDSpokePreserved(&dst.ObjectMeta)
-	if restoreDGDSpokeFastPath(dst, src, preservedSpokeSpec, preservedSpokeStatus) {
-		return nil
-	}
+	spokeHubUnmodified := dgdSpokeHubUnmodified(src)
 
 	dst.Spec.Annotations = maps.Clone(src.Spec.Annotations)
 	dst.Spec.Labels = maps.Clone(src.Spec.Labels)
@@ -447,7 +437,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus)
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeHub)
 	}
-	if dgdNeedsHubSpecPreservation(&src.Spec) {
+	if dgdNeedsHubSpecPreservation(src, spokeHubUnmodified) {
 		if data, err := marshalDGDHubSpec(&src.Spec); err == nil {
 			setAnnOnObj(&dst.ObjectMeta, annDGDHubSpec, string(data))
 		}
@@ -497,10 +487,46 @@ func restoreDGDSpokeSpec(raw string) (DynamoGraphDeploymentSpec, bool) {
 	})
 }
 
-func dgdNeedsHubSpecPreservation(src *v1beta1.DynamoGraphDeploymentSpec) bool {
-	for i := range src.Components {
-		if src.Components[i].PodTemplate != nil {
+func dgdNeedsHubSpecPreservation(src *v1beta1.DynamoGraphDeployment, sourceUnmodified bool) bool {
+	for i := range src.Spec.Components {
+		comp := &src.Spec.Components[i]
+		if dgdFrontendSidecarNeedsPreservation(src, comp) {
 			return true
+		}
+		if comp.PodTemplate != nil &&
+			!dgdGeneratedPodTemplateUnmodified(src, comp.ComponentName, sourceUnmodified) {
+			return true
+		}
+		if experimentalIsHubOnlyShape(comp.Experimental) {
+			return true
+		}
+	}
+	return false
+}
+
+func dgdFrontendSidecarNeedsPreservation(src *v1beta1.DynamoGraphDeployment, comp *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if comp.FrontendSidecar == nil {
+		return false
+	}
+	_, hasV1Alpha1Origin := newDGDComponentCarrier(&src.ObjectMeta, comp.ComponentName).get(suffixFrontendSidecar)
+	return !hasV1Alpha1Origin || *comp.FrontendSidecar != defaultFrontendSidecarContainerName
+}
+
+func dgdGeneratedPodTemplateUnmodified(src *v1beta1.DynamoGraphDeployment, componentName string, sourceUnmodified bool) bool {
+	if !sourceUnmodified {
+		return false
+	}
+	v, ok := newDGDComponentCarrier(&src.ObjectMeta, componentName).get(suffixPodTemplateOrig)
+	return ok && v == "generated"
+}
+
+func dgdRestoredComponentHasPodTemplate(spec *v1beta1.DynamoGraphDeploymentSpec, componentName string) bool {
+	if spec == nil {
+		return false
+	}
+	for i := range spec.Components {
+		if spec.Components[i].ComponentName == componentName {
+			return spec.Components[i].PodTemplate != nil
 		}
 	}
 	return false

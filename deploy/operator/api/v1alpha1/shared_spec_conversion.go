@@ -385,19 +385,20 @@ func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, 
 	if len(dst.Labels) == 0 {
 		dst.Labels = maps.Clone(preserved.Labels)
 	}
-	if dst.EnvFromSecret == nil && preserved.EnvFromSecret != nil {
-		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
-	}
 	if shouldRestorePreservedSharedMemory(dst.SharedMemory, preserved.SharedMemory) {
 		dst.SharedMemory = preserved.SharedMemory.DeepCopy()
 	}
-	if dst.ExtraPodMetadata == nil && preserved.ExtraPodMetadata != nil {
+	if dst.EnvFromSecret == nil && preserved.EnvFromSecret != nil && *preserved.EnvFromSecret == "" {
+		dst.EnvFromSecret = ptr.To("")
+	}
+	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && preserved.ExtraPodSpec != nil {
+	if dst.ExtraPodSpec == nil && extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) {
 		cp := *preserved.ExtraPodSpec.DeepCopy()
 		dst.ExtraPodSpec = &cp
 	}
+	restoreMainContainerFieldOrigins(dst, preserved)
 	if dst.ExtraPodSpec != nil && dst.ExtraPodSpec.MainContainer != nil &&
 		dst.ExtraPodSpec.MainContainer.Name == "" &&
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
@@ -419,8 +420,11 @@ func hasSharedAlphaOnlyFields(src *DynamoComponentDeploymentSharedSpec) bool {
 		len(src.Annotations) > 0 ||
 		len(src.Labels) > 0 ||
 		src.EnvFromSecret != nil ||
+		resourcesNeedPreservation(src.Resources) ||
+		(len(src.VolumeMounts) > 0 && !volumeMountsRoundTripThroughHub(src.VolumeMounts)) ||
 		sharedMemoryNeedsPreservation(src.SharedMemory) ||
 		extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) ||
+		extraPodSpecNeedsPreservation(src.ExtraPodSpec) ||
 		(src.ScalingAdapter != nil && !src.ScalingAdapter.Enabled) ||
 		(src.ExtraPodSpec != nil &&
 			src.ExtraPodSpec.MainContainer != nil &&
@@ -448,6 +452,10 @@ func shouldRestorePreservedSharedMemory(dst, preserved *SharedMemorySpec) bool {
 		return dst.Disabled && dst.Size.Sign() == 0
 	}
 	return false
+}
+
+func resourcesNeedPreservation(src *Resources) bool {
+	return src != nil && !reflect.DeepEqual(src, resourcesFromNative(resourcesToNative(src)))
 }
 
 func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
@@ -523,11 +531,6 @@ func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst
 		}
 		c.del(suffixLabels)
 	}
-	if v, ok := c.get(suffixEnvFromSecret); ok {
-		dst.EnvFromSecret = ptr.To(v)
-		c.del(suffixEnvFromSecret)
-	}
-
 	// sharedMemorySize -> SharedMemorySpec.
 	convertSharedMemoryFrom(src.SharedMemorySize, dst, c)
 
@@ -1121,8 +1124,13 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	// ExtraPodMetadata from podTemplate.metadata.
 	if v, ok := c.get(suffixPodMetadataOrig); ok {
 		var meta ExtraPodMetadata
-		if err := json.Unmarshal([]byte(v), &meta); err == nil {
+		if err := json.Unmarshal([]byte(v), &meta); err == nil && len(podTpl.Annotations) == 0 && len(podTpl.Labels) == 0 {
 			dst.ExtraPodMetadata = &meta
+		} else if len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0 {
+			dst.ExtraPodMetadata = &ExtraPodMetadata{
+				Annotations: maps.Clone(podTpl.Annotations),
+				Labels:      maps.Clone(podTpl.Labels),
+			}
 		}
 		c.del(suffixPodMetadataOrig)
 	} else if len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0 {
@@ -1182,6 +1190,7 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 		}
 	}
 
+	restoreEnvFromSecretFromMain(main, dst, c)
 	restoreDedicatedFieldsFromMain(main, dst, c)
 
 	// Put everything non-main into ExtraPodSpec. The main-container fields
@@ -1217,17 +1226,239 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	return nil
 }
 
+func overlayPreservedSharedPodTemplate(preserved *v1beta1.DynamoComponentDeploymentSharedSpec, semantic *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
+	if preserved == nil || preserved.PodTemplate == nil {
+		if semantic == nil {
+			return nil
+		}
+		return semantic.DeepCopy()
+	}
+	out := &corev1.PodTemplateSpec{}
+	if semantic != nil {
+		out = semantic.DeepCopy()
+	}
+	dropGeneratedCompilationCacheMount(out, preserved.PodTemplate, compilationCache, src)
+	dropGeneratedMainContainer(out, preserved.PodTemplate, compilationCache, src)
+	overlayHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
+	overlayHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, src)
+	return nilIfEmptyPodTemplate(out)
+}
+
+func dropGeneratedMainContainer(dst, preserved *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) {
+	if hasContainerNamed(preserved.Spec.Containers, mainContainerName) {
+		return
+	}
+	if src != nil && resourcesNeedPreservation(src.Resources) {
+		return
+	}
+	for i := range dst.Spec.Containers {
+		if dst.Spec.Containers[i].Name != mainContainerName {
+			continue
+		}
+		if mainContainerHasOnlyGeneratedFields(dst.Spec.Containers[i], compilationCache) {
+			dst.Spec.Containers = slices.Delete(dst.Spec.Containers, i, i+1)
+			return
+		}
+	}
+}
+
+func mainContainerHasOnlyGeneratedFields(container corev1.Container, compilationCache *v1beta1.CompilationCacheConfig) bool {
+	cp := container.DeepCopy()
+	cp.Name = ""
+	if compilationCache != nil {
+		cp.VolumeMounts = slices.DeleteFunc(cp.VolumeMounts, func(mount corev1.VolumeMount) bool {
+			return mount.Name == compilationCache.PVCName && mount.MountPath == compilationCache.MountPath
+		})
+	}
+	return containerIsEmpty(cp)
+}
+
+func dropGeneratedCompilationCacheMount(dst, preserved *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) {
+	if compilationCache == nil || preservedHasVolumeMount(preserved, compilationCache.PVCName, compilationCache.MountPath) ||
+		sourceExtraPodMainContainerVolumeMountMatches(srcExtraPodSpec(src), corev1.VolumeMount{Name: compilationCache.PVCName, MountPath: compilationCache.MountPath}) {
+		return
+	}
+	for i := range dst.Spec.Containers {
+		if dst.Spec.Containers[i].Name != mainContainerName {
+			continue
+		}
+		dst.Spec.Containers[i].VolumeMounts = slices.DeleteFunc(dst.Spec.Containers[i].VolumeMounts, func(mount corev1.VolumeMount) bool {
+			return mount.Name == compilationCache.PVCName && mount.MountPath == compilationCache.MountPath
+		})
+		return
+	}
+}
+
+func preservedHasVolumeMount(preserved *corev1.PodTemplateSpec, name, mountPath string) bool {
+	main, ok := findContainerByName(preserved.Spec.Containers, mainContainerName)
+	if !ok {
+		return false
+	}
+	for _, mount := range main.VolumeMounts {
+		if mount.Name == name && mount.MountPath == mountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func srcExtraPodSpec(src *DynamoComponentDeploymentSharedSpec) *ExtraPodSpec {
+	if src == nil {
+		return nil
+	}
+	return src.ExtraPodSpec
+}
+
+func overlayHubOnlyPodTemplateMetadata(dst *metav1.ObjectMeta, preserved metav1.ObjectMeta) {
+	labels := maps.Clone(dst.Labels)
+	annotations := maps.Clone(dst.Annotations)
+	*dst = *preserved.DeepCopy()
+	dst.Labels = labels
+	dst.Annotations = annotations
+}
+
+func overlayHubOnlyFlatVolumeMountFields(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) {
+	if src == nil || len(src.VolumeMounts) == 0 {
+		return
+	}
+	preservedMain, ok := findContainerByName(preserved.Spec.Containers, mainContainerName)
+	if !ok || len(preservedMain.VolumeMounts) == 0 {
+		return
+	}
+	for i := range dst.Spec.Containers {
+		if dst.Spec.Containers[i].Name != mainContainerName {
+			continue
+		}
+		for j := range dst.Spec.Containers[i].VolumeMounts {
+			mount := &dst.Spec.Containers[i].VolumeMounts[j]
+			if !sourceFlatVolumeMountMatches(src.VolumeMounts, *mount) ||
+				sourceExtraPodMainContainerVolumeMountMatches(src.ExtraPodSpec, *mount) {
+				continue
+			}
+			if preservedMount, ok := findPreservedVolumeMount(preservedMain.VolumeMounts, *mount); ok {
+				copyHubOnlyVolumeMountFields(mount, preservedMount)
+			}
+		}
+		return
+	}
+}
+
+func sourceFlatVolumeMountMatches(mounts []VolumeMount, mount corev1.VolumeMount) bool {
+	for _, candidate := range mounts {
+		if candidate.Name == mount.Name && candidate.MountPoint == mount.MountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func sourceExtraPodMainContainerVolumeMountMatches(extraPodSpec *ExtraPodSpec, mount corev1.VolumeMount) bool {
+	if extraPodSpec == nil || extraPodSpec.MainContainer == nil {
+		return false
+	}
+	for _, candidate := range extraPodSpec.MainContainer.VolumeMounts {
+		if candidate.Name == mount.Name && candidate.MountPath == mount.MountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func findPreservedVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMount) (corev1.VolumeMount, bool) {
+	for _, candidate := range mounts {
+		if candidate.Name == mount.Name && candidate.MountPath == mount.MountPath {
+			return *candidate.DeepCopy(), true
+		}
+	}
+	var match *corev1.VolumeMount
+	for i := range mounts {
+		if mounts[i].Name != mount.Name {
+			continue
+		}
+		if match != nil {
+			return corev1.VolumeMount{}, false
+		}
+		match = mounts[i].DeepCopy()
+	}
+	if match == nil {
+		return corev1.VolumeMount{}, false
+	}
+	return *match, true
+}
+
+func copyHubOnlyVolumeMountFields(dst *corev1.VolumeMount, preserved corev1.VolumeMount) {
+	name := dst.Name
+	mountPath := dst.MountPath
+	*dst = *preserved.DeepCopy()
+	dst.Name = name
+	dst.MountPath = mountPath
+}
+
+func hasContainerNamed(containers []corev1.Container, name string) bool {
+	for i := range containers {
+		if containers[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func experimentalIsHubOnlyShape(src *v1beta1.ExperimentalSpec) bool {
+	return src != nil &&
+		src.GPUMemoryService == nil &&
+		src.Failover == nil &&
+		src.Checkpoint == nil
+}
+
+func nilIfEmptyPodTemplate(podTemplate *corev1.PodTemplateSpec) *corev1.PodTemplateSpec {
+	if podTemplate == nil || apiequality.Semantic.DeepEqual(*podTemplate, corev1.PodTemplateSpec{}) {
+		return nil
+	}
+	return podTemplate
+}
+
+func resourceRequirementsEqual(a, b corev1.ResourceRequirements) bool {
+	return apiequality.Semantic.DeepEqual(a, b)
+}
+
+func volumeMountOriginsMatchNative(origin []VolumeMount, native []corev1.VolumeMount) bool {
+	if len(origin) != len(native) {
+		return false
+	}
+	for i := range origin {
+		if origin[i].Name != native[i].Name || origin[i].MountPoint != native[i].MountPath {
+			return false
+		}
+	}
+	return true
+}
+
+func restoreEnvFromSecretFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	if v, ok := c.get(suffixEnvFromSecret); ok {
+		if main != nil && envFromSecretMatches(main.EnvFrom, v) {
+			dst.EnvFromSecret = ptr.To(v)
+		}
+		c.del(suffixEnvFromSecret)
+	}
+}
+
 func restoreDedicatedFieldsFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
 	if main == nil {
-		restoreDedicatedOriginFields(dst, c)
+		c.del(suffixResourcesOrigin)
+		c.del(suffixVolumeMountsOrig)
 		return
 	}
 
 	if v, ok := c.get(suffixResourcesOrigin); ok {
 		var resources Resources
 		if err := json.Unmarshal([]byte(v), &resources); err == nil {
-			dst.Resources = &resources
-			main.Resources = corev1.ResourceRequirements{}
+			if resourceRequirementsEqual(main.Resources, resourcesToNative(&resources)) {
+				dst.Resources = &resources
+				main.Resources = corev1.ResourceRequirements{}
+			} else if native := resourcesFromNative(main.Resources); native != nil {
+				dst.Resources = native
+				main.Resources = corev1.ResourceRequirements{}
+			}
 		}
 		c.del(suffixResourcesOrigin)
 	} else if resources := resourcesFromNative(main.Resources); resources != nil {
@@ -1238,13 +1469,16 @@ func restoreDedicatedFieldsFromMain(main *corev1.Container, dst *DynamoComponent
 	if v, ok := c.get(suffixVolumeMountsOrig); ok {
 		var volumeMounts []VolumeMount
 		if err := json.Unmarshal([]byte(v), &volumeMounts); err == nil {
-			dst.VolumeMounts = volumeMounts
-			main.VolumeMounts = nil
+			if volumeMountOriginsMatchNative(volumeMounts, main.VolumeMounts) {
+				dst.VolumeMounts = volumeMounts
+				main.VolumeMounts = nil
+			} else {
+				restoreFlatVolumeMountsFromMain(main, dst)
+			}
 		}
 		c.del(suffixVolumeMountsOrig)
 	} else if len(main.VolumeMounts) > 0 {
-		dst.VolumeMounts = appendMissingVolumeMounts(dst.VolumeMounts, volumeMountsFromNative(main.VolumeMounts))
-		main.VolumeMounts = nil
+		restoreFlatVolumeMountsFromMain(main, dst)
 	}
 
 	if len(main.Env) > 0 {
@@ -1264,21 +1498,12 @@ func restoreDedicatedFieldsFromMain(main *corev1.Container, dst *DynamoComponent
 	}
 }
 
-func restoreDedicatedOriginFields(dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	if v, ok := c.get(suffixResourcesOrigin); ok {
-		var resources Resources
-		if err := json.Unmarshal([]byte(v), &resources); err == nil {
-			dst.Resources = &resources
-		}
-		c.del(suffixResourcesOrigin)
+func restoreFlatVolumeMountsFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec) {
+	if main == nil || len(main.VolumeMounts) == 0 {
+		return
 	}
-	if v, ok := c.get(suffixVolumeMountsOrig); ok {
-		var volumeMounts []VolumeMount
-		if err := json.Unmarshal([]byte(v), &volumeMounts); err == nil {
-			dst.VolumeMounts = volumeMounts
-		}
-		c.del(suffixVolumeMountsOrig)
-	}
+	dst.VolumeMounts = appendMissingVolumeMounts(dst.VolumeMounts, volumeMountsFromNative(main.VolumeMounts))
+	main.VolumeMounts = nil
 }
 
 // containerIsEmpty reports whether c has no user-visible fields set. Used by
@@ -1291,7 +1516,38 @@ func containerIsEmpty(c *corev1.Container) bool {
 	}
 	copy := *c
 	copy.Name = ""
+	normalizeContainerEmptySlices(&copy)
 	return apiequality.Semantic.DeepEqual(copy, corev1.Container{})
+}
+
+func normalizeContainerEmptySlices(c *corev1.Container) {
+	if len(c.Command) == 0 {
+		c.Command = nil
+	}
+	if len(c.Args) == 0 {
+		c.Args = nil
+	}
+	if len(c.Ports) == 0 {
+		c.Ports = nil
+	}
+	if len(c.EnvFrom) == 0 {
+		c.EnvFrom = nil
+	}
+	if len(c.Env) == 0 {
+		c.Env = nil
+	}
+	if len(c.VolumeMounts) == 0 {
+		c.VolumeMounts = nil
+	}
+	if len(c.VolumeDevices) == 0 {
+		c.VolumeDevices = nil
+	}
+	if len(c.ResizePolicy) == 0 {
+		c.ResizePolicy = nil
+	}
+	if len(c.RestartPolicyRules) == 0 {
+		c.RestartPolicyRules = nil
+	}
 }
 
 // appendFrontendSidecar ensures a container named
@@ -1340,6 +1596,8 @@ func frontendSidecarSpecFromContainer(ctr corev1.Container, origin *FrontendSide
 	out.Envs = slices.Clone(ctr.Env)
 	if secretName, ok := frontendSidecarEnvFromSecret(ctr.EnvFrom); ok {
 		out.EnvFromSecret = ptr.To(secretName)
+	} else if origin != nil && origin.EnvFromSecret != nil && *origin.EnvFromSecret == "" {
+		out.EnvFromSecret = ptr.To("")
 	} else {
 		out.EnvFromSecret = nil
 	}
@@ -1376,6 +1634,162 @@ func extraPodSpecIsZero(eps *ExtraPodSpec) bool {
 		return true
 	}
 	return podSpecIsZero(eps.PodSpec) && containerIsEmpty(eps.MainContainer)
+}
+
+func extraPodSpecNeedsPreservation(eps *ExtraPodSpec) bool {
+	return eps != nil && (extraPodSpecIsZero(eps) || extraPodSpecOnlyPreservesMainContainerName(eps))
+}
+
+func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {
+	if eps == nil || eps.MainContainer == nil || eps.MainContainer.Name == "" || !podSpecIsZero(eps.PodSpec) {
+		return false
+	}
+	main := eps.MainContainer.DeepCopy()
+	main.Name = ""
+	return containerIsEmpty(main)
+}
+
+func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil || preserved.ExtraPodSpec == nil || preserved.ExtraPodSpec.MainContainer == nil {
+		return
+	}
+	preservedMain := preserved.ExtraPodSpec.MainContainer
+	currentMain := semanticMainContainer(dst)
+	preservedSemanticMain := semanticMainContainer(preserved)
+
+	if apiequality.Semantic.DeepEqual(currentMain.Env, preservedSemanticMain.Env) &&
+		(len(preserved.Envs) > 0 || len(preservedMain.Env) > 0) {
+		dst.Envs = slices.Clone(preserved.Envs)
+		ensureExtraPodSpecMainContainer(dst).Env = slices.Clone(preservedMain.Env)
+	}
+	if apiequality.Semantic.DeepEqual(currentMain.EnvFrom, preservedSemanticMain.EnvFrom) && preserved.EnvFromSecret != nil {
+		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
+	}
+	if dst.Resources != nil &&
+		resourceRequirementsEqual(currentMain.Resources, preservedSemanticMain.Resources) &&
+		(preserved.Resources != nil || !resourceRequirementsEqual(preservedMain.Resources, corev1.ResourceRequirements{})) {
+		dst.Resources = preserved.Resources.DeepCopy()
+		ensureExtraPodSpecMainContainer(dst).Resources = *preservedMain.Resources.DeepCopy()
+	}
+	currentVolumeMounts := withoutCompilationCacheMounts(currentMain.VolumeMounts, dst.VolumeMounts)
+	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedSemanticMain.VolumeMounts), currentVolumeMounts) &&
+		(len(preserved.VolumeMounts) > 0 || len(preservedMain.VolumeMounts) > 0) {
+		dst.VolumeMounts = restorePreservedVolumeMountOrigins(preserved.VolumeMounts, dst.VolumeMounts, preservedMain.VolumeMounts)
+		ensureExtraPodSpecMainContainer(dst).VolumeMounts = cloneNativeVolumeMounts(preservedMain.VolumeMounts)
+	}
+	if apiequality.Semantic.DeepEqual(currentMain.LivenessProbe, preservedSemanticMain.LivenessProbe) &&
+		(preserved.LivenessProbe != nil || preservedMain.LivenessProbe != nil) {
+		dst.LivenessProbe = preserved.LivenessProbe.DeepCopy()
+		ensureExtraPodSpecMainContainer(dst).LivenessProbe = preservedMain.LivenessProbe.DeepCopy()
+	}
+	if apiequality.Semantic.DeepEqual(currentMain.ReadinessProbe, preservedSemanticMain.ReadinessProbe) &&
+		(preserved.ReadinessProbe != nil || preservedMain.ReadinessProbe != nil) {
+		dst.ReadinessProbe = preserved.ReadinessProbe.DeepCopy()
+		ensureExtraPodSpecMainContainer(dst).ReadinessProbe = preservedMain.ReadinessProbe.DeepCopy()
+	}
+}
+
+func semanticMainContainer(src *DynamoComponentDeploymentSharedSpec) corev1.Container {
+	if src == nil {
+		return corev1.Container{Name: mainContainerName}
+	}
+	main := buildMainContainerFromDedicated(src)
+	_ = mergeExtraPodSpecMainContainer(src, &main)
+	main.Name = mainContainerName
+	return main
+}
+
+func ensureExtraPodSpecMainContainer(dst *DynamoComponentDeploymentSharedSpec) *corev1.Container {
+	if dst.ExtraPodSpec == nil {
+		dst.ExtraPodSpec = &ExtraPodSpec{}
+	}
+	if dst.ExtraPodSpec.MainContainer == nil {
+		dst.ExtraPodSpec.MainContainer = &corev1.Container{}
+	}
+	return dst.ExtraPodSpec.MainContainer
+}
+
+func cloneNativeVolumeMounts(in []corev1.VolumeMount) []corev1.VolumeMount {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]corev1.VolumeMount, 0, len(in))
+	for i := range in {
+		out = append(out, *in[i].DeepCopy())
+	}
+	return out
+}
+
+func restorePreservedVolumeMountOrigins(preserved, current []VolumeMount, preservedMain []corev1.VolumeMount) []VolumeMount {
+	out := make([]VolumeMount, 0, len(preserved)+len(current))
+	for _, mount := range preserved {
+		if !mount.UseAsCompilationCache {
+			out = append(out, mount)
+		}
+	}
+	for _, mount := range current {
+		if !mount.UseAsCompilationCache {
+			if nativeVolumeMountHasNamePath(preservedMain, mount.Name, mount.MountPoint) ||
+				flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+				continue
+			}
+			out = append(out, mount)
+			continue
+		}
+		replaced := false
+		for i := range out {
+			if out[i].Name == mount.Name && out[i].MountPoint == mount.MountPoint {
+				out[i].UseAsCompilationCache = true
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, mount)
+		}
+	}
+	return out
+}
+
+func nativeVolumeMountHasNamePath(mounts []corev1.VolumeMount, name, mountPath string) bool {
+	for _, mount := range mounts {
+		if mount.Name == name && mount.MountPath == mountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func flatVolumeMountHasNamePath(mounts []VolumeMount, name, mountPath string) bool {
+	for _, mount := range mounts {
+		if mount.Name == name && mount.MountPoint == mountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutCompilationCacheMounts(mounts []corev1.VolumeMount, flat []VolumeMount) []corev1.VolumeMount {
+	if len(mounts) == 0 || len(flat) == 0 {
+		return mounts
+	}
+	out := make([]corev1.VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if flatVolumeMountHasCompilationCache(flat, mount.Name, mount.MountPath) {
+			continue
+		}
+		out = append(out, mount)
+	}
+	return out
+}
+
+func flatVolumeMountHasCompilationCache(mounts []VolumeMount, name, mountPath string) bool {
+	for _, mount := range mounts {
+		if mount.UseAsCompilationCache && mount.Name == name && mount.MountPoint == mountPath {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1967,9 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		}
 		seen[e.Name] = len(out)
 		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

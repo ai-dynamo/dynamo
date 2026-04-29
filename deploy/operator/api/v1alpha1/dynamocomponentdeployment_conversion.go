@@ -23,6 +23,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,10 +60,16 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	hubOrigin := restoredHubSpec || dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue
 	delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
+	if hubOrigin {
+		scrubDCDAnnotations(&dst.ObjectMeta)
+	}
 
 	var semantic v1beta1.DynamoComponentDeploymentSpec
 	semantic.BackendFramework = src.Spec.BackendFramework
 	carrier := newDCDCarrier(&dst.ObjectMeta)
+	if restoredHubSpec && dst.Spec.PodTemplate != nil {
+		carrier.set(suffixPodTemplateOrig, annotationTrue)
+	}
 	if err := convertSharedSpecTo(&src.Spec.DynamoComponentDeploymentSharedSpec,
 		&semantic.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
 		return err
@@ -78,7 +85,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		semantic.ComponentName = dst.ObjectMeta.Name
 	}
 	if restoredHubSpec {
-		overlayDCDHubSpec(&dst.Spec, &semantic)
+		overlayDCDHubSpec(&dst.Spec, &semantic, &src.Spec.DynamoComponentDeploymentSharedSpec)
 	} else {
 		dst.Spec = semantic
 	}
@@ -86,9 +93,6 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	preserveSpoke := !hubOrigin ||
 		hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec) ||
 		dcdStatusHasAlphaOnlyFields(&src.Status)
-	if hubOrigin {
-		scrubDCDAnnotations(&dst.ObjectMeta)
-	}
 	convertDCDStatusTo(&src.Status, &dst.Status)
 	if preserveSpoke {
 		preserveDCDSpoke(src, dst)
@@ -112,26 +116,30 @@ func preserveDCDSpoke(src *DynamoComponentDeployment, dst *v1beta1.DynamoCompone
 	}
 }
 
-func overlayDCDHubSpec(base *v1beta1.DynamoComponentDeploymentSpec, semantic *v1beta1.DynamoComponentDeploymentSpec) {
-	hubPodTemplate := base.PodTemplate
+func overlayDCDHubSpec(base *v1beta1.DynamoComponentDeploymentSpec, semantic *v1beta1.DynamoComponentDeploymentSpec, src *DynamoComponentDeploymentSharedSpec) {
+	hubSharedSpec := base.DynamoComponentDeploymentSharedSpec.DeepCopy()
 	hubFrontendSidecar := base.FrontendSidecar
 	hubExperimental := base.Experimental
 
 	*base = *semantic.DeepCopy()
-	if hubPodTemplate != nil {
-		base.PodTemplate = hubPodTemplate
-	}
+	base.PodTemplate = overlayPreservedSharedPodTemplate(hubSharedSpec, semantic.PodTemplate, semantic.CompilationCache, src)
 	if base.FrontendSidecar == nil {
 		base.FrontendSidecar = hubFrontendSidecar
 	}
-	if base.Experimental == nil {
+	if base.Experimental == nil && experimentalIsHubOnlyShape(hubExperimental) {
 		base.Experimental = hubExperimental
 	}
 }
 
-func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus *DynamoComponentDeploymentStatus, preservedSpec *DynamoComponentDeploymentSpec, preservedStatus *DynamoComponentDeploymentStatus) {
+func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus *DynamoComponentDeploymentStatus, preservedSpec *DynamoComponentDeploymentSpec, preservedStatus *DynamoComponentDeploymentStatus, objectName string) {
 	if preservedSpec != nil {
+		if preservedSpec.ServiceName == "" && dstSpec.ServiceName == objectName {
+			dstSpec.ServiceName = ""
+		}
 		fillSharedAlphaOnlyFromPreserved(&dstSpec.DynamoComponentDeploymentSharedSpec, &preservedSpec.DynamoComponentDeploymentSharedSpec)
+	}
+	if preservedStatus != nil && len(dstStatus.PodSelector) == 0 && len(preservedStatus.PodSelector) > 0 {
+		dstStatus.PodSelector = maps.Clone(preservedStatus.PodSelector)
 	}
 	if preservedStatus != nil && shouldRestorePreservedComponentName(dstStatus.Service, preservedStatus.Service) {
 		dstStatus.Service.ComponentName = preservedStatus.Service.ComponentName
@@ -140,8 +148,8 @@ func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus
 
 func dcdStatusHasAlphaOnlyFields(src *DynamoComponentDeploymentStatus) bool {
 	return src != nil &&
-		src.Service != nil &&
-		serviceStatusComponentNameNeedsPreservation(src.Service)
+		(len(src.PodSelector) > 0 ||
+			(src.Service != nil && serviceStatusComponentNameNeedsPreservation(src.Service)))
 }
 
 type preservedDCDHubSnapshot struct {
@@ -206,21 +214,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			preservedSpokeStatus = &status
 		}
 	}
-	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
-	// matching means no hub fields changed. Metadata was copied above and rides along.
 	spokeHubUnmodified := dcdSpokeHubUnmodified(src)
-	if preservedSpokeSpec != nil && spokeHubUnmodified {
-		dst.Spec = *preservedSpokeSpec.DeepCopy()
-		if preservedSpokeStatus != nil {
-			dst.Status = *preservedSpokeStatus.DeepCopy()
-		} else {
-			convertDCDStatusFrom(&src.Status, &dst.Status)
-		}
-		scrubDCDAnnotations(&dst.ObjectMeta)
-		delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
-		return nil
-	}
-
 	generatedPodTemplate := spokeHubUnmodified && src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
 	carrier := newDCDCarrier(&dst.ObjectMeta)
 	if err := convertSharedSpecFrom(&src.Spec.DynamoComponentDeploymentSharedSpec,
@@ -229,7 +223,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	convertDCDStatusFrom(&src.Status, &dst.Status)
-	fillDCDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus)
+	fillDCDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus, src.ObjectMeta.Name)
 	scrubDCDAnnotations(&dst.ObjectMeta)
 	if dcdNeedsHubSpecPreservation(&src.Spec, generatedPodTemplate) {
 		data, err := marshalDCDHubSpec(&src.Spec)

@@ -289,9 +289,28 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
 					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Name: "hub-only-template-name"},
+						ObjectMeta: metav1.ObjectMeta{
+							Name:        "hub-only-template-name",
+							Labels:      map[string]string{"old": "label"},
+							Annotations: map[string]string{"old": "annotation"},
+						},
 						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "main", Image: "worker:old"}},
+							Containers: []corev1.Container{{
+								Name:  "main",
+								Image: "worker:old",
+								Env:   []corev1.EnvVar{{Name: "OLD", Value: "old"}},
+								ReadinessProbe: &corev1.Probe{
+									ProbeHandler: corev1.ProbeHandler{
+										Exec: &corev1.ExecAction{Command: []string{"old"}},
+									},
+								},
+								VolumeMounts: []corev1.VolumeMount{{
+									Name:      "model-pvc",
+									MountPath: "/old-models",
+									ReadOnly:  true,
+									SubPath:   "weights",
+								}},
+							}},
 						},
 					},
 				},
@@ -305,6 +324,17 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	}
 	spoke.Spec.BackendFramework = backendFrameworkSGLang
 	spoke.Spec.Services["worker"].ComponentType = string(v1beta1.ComponentTypePlanner)
+	spoke.Spec.Services["worker"].Envs = []corev1.EnvVar{{Name: "NEW", Value: "new"}}
+	spoke.Spec.Services["worker"].ExtraPodMetadata = &ExtraPodMetadata{
+		Labels:      map[string]string{"new": "label"},
+		Annotations: map[string]string{"new": "annotation"},
+	}
+	spoke.Spec.Services["worker"].ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{"new"}},
+		},
+	}
+	spoke.Spec.Services["worker"].VolumeMounts = []VolumeMount{{Name: "model-pvc", MountPoint: "/new-models"}}
 
 	got := &v1beta1.DynamoGraphDeployment{}
 	if err := spoke.ConvertTo(got); err != nil {
@@ -319,6 +349,34 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	}
 	if got.Spec.Components[0].PodTemplate == nil || got.Spec.Components[0].PodTemplate.Name != "hub-only-template-name" {
 		t.Fatalf("expected hub-only podTemplate metadata to be preserved, got %#v", got.Spec.Components[0].PodTemplate)
+	}
+	if diff := cmp.Diff(map[string]string{"new": "label"}, got.Spec.Components[0].PodTemplate.Labels); diff != "" {
+		t.Fatalf("expected v1alpha1 podTemplate labels to win (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]string{"new": "annotation"}, got.Spec.Components[0].PodTemplate.Annotations); diff != "" {
+		t.Fatalf("expected v1alpha1 podTemplate annotations to win (-want +got):\n%s", diff)
+	}
+	main, ok := findContainerByName(got.Spec.Components[0].PodTemplate.Spec.Containers, "main")
+	if !ok {
+		t.Fatalf("expected converted podTemplate to include main container, got %#v", got.Spec.Components[0].PodTemplate.Spec.Containers)
+	}
+	if main.Image != "worker:old" {
+		t.Fatalf("expected hub main-container image to survive through v1alpha1 ExtraPodSpec, got %q", main.Image)
+	}
+	if diff := cmp.Diff([]corev1.EnvVar{{Name: "NEW", Value: "new"}}, main.Env); diff != "" {
+		t.Fatalf("expected v1alpha1 env edit to win (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(spoke.Spec.Services["worker"].ReadinessProbe, main.ReadinessProbe); diff != "" {
+		t.Fatalf("expected v1alpha1 readinessProbe edit to win (-want +got):\n%s", diff)
+	}
+	if len(main.VolumeMounts) != 1 {
+		t.Fatalf("expected one main volume mount, got %#v", main.VolumeMounts)
+	}
+	if main.VolumeMounts[0].Name != "model-pvc" || main.VolumeMounts[0].MountPath != "/new-models" {
+		t.Fatalf("expected v1alpha1 volume mount name/path to win, got %#v", main.VolumeMounts[0])
+	}
+	if !main.VolumeMounts[0].ReadOnly || main.VolumeMounts[0].SubPath != "weights" {
+		t.Fatalf("expected hub-only volume mount fields to be preserved, got %#v", main.VolumeMounts[0])
 	}
 }
 
@@ -764,6 +822,25 @@ func TestDGD_RoundTrip_FrontendSidecar(t *testing.T) {
 							},
 						},
 					}},
+			},
+		},
+	}
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_RoundTrip_FrontendSidecarWithoutPodTemplate(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "fs-ref-only", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName:   "epp",
+					ComponentType:   v1beta1.ComponentTypeEPP,
+					FrontendSidecar: ptr.To("sidecar-frontend"),
+				},
 			},
 		},
 	}

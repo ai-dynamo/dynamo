@@ -288,9 +288,28 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 				ComponentName: "pt-overlay",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Name: "hub-only-template-name"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "hub-only-template-name",
+						Labels:      map[string]string{"old": "label"},
+						Annotations: map[string]string{"old": "annotation"},
+					},
 					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "main", Image: "worker:old"}},
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "worker:old",
+							Env:   []corev1.EnvVar{{Name: "OLD", Value: "old"}},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{Command: []string{"old"}},
+								},
+							},
+							VolumeMounts: []corev1.VolumeMount{{
+								Name:      "model-pvc",
+								MountPath: "/old-models",
+								ReadOnly:  true,
+								SubPath:   "weights",
+							}},
+						}},
 					},
 				},
 			},
@@ -303,6 +322,17 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	}
 	spoke.Spec.BackendFramework = backendFrameworkSGLang
 	spoke.Spec.ComponentType = string(v1beta1.ComponentTypePlanner)
+	spoke.Spec.Envs = []corev1.EnvVar{{Name: "NEW", Value: "new"}}
+	spoke.Spec.ExtraPodMetadata = &ExtraPodMetadata{
+		Labels:      map[string]string{"new": "label"},
+		Annotations: map[string]string{"new": "annotation"},
+	}
+	spoke.Spec.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{"new"}},
+		},
+	}
+	spoke.Spec.VolumeMounts = []VolumeMount{{Name: "model-pvc", MountPoint: "/new-models"}}
 
 	got := &v1beta1.DynamoComponentDeployment{}
 	if err := spoke.ConvertTo(got); err != nil {
@@ -317,6 +347,34 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	}
 	if got.Spec.PodTemplate == nil || got.Spec.PodTemplate.Name != "hub-only-template-name" {
 		t.Fatalf("expected hub-only podTemplate metadata to be preserved, got %#v", got.Spec.PodTemplate)
+	}
+	if diff := cmp.Diff(map[string]string{"new": "label"}, got.Spec.PodTemplate.Labels); diff != "" {
+		t.Fatalf("expected v1alpha1 podTemplate labels to win (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]string{"new": "annotation"}, got.Spec.PodTemplate.Annotations); diff != "" {
+		t.Fatalf("expected v1alpha1 podTemplate annotations to win (-want +got):\n%s", diff)
+	}
+	main, ok := findContainerByName(got.Spec.PodTemplate.Spec.Containers, "main")
+	if !ok {
+		t.Fatalf("expected converted podTemplate to include main container, got %#v", got.Spec.PodTemplate.Spec.Containers)
+	}
+	if main.Image != "worker:old" {
+		t.Fatalf("expected hub main-container image to survive through v1alpha1 ExtraPodSpec, got %q", main.Image)
+	}
+	if diff := cmp.Diff([]corev1.EnvVar{{Name: "NEW", Value: "new"}}, main.Env); diff != "" {
+		t.Fatalf("expected v1alpha1 env edit to win (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(spoke.Spec.ReadinessProbe, main.ReadinessProbe); diff != "" {
+		t.Fatalf("expected v1alpha1 readinessProbe edit to win (-want +got):\n%s", diff)
+	}
+	if len(main.VolumeMounts) != 1 {
+		t.Fatalf("expected one main volume mount, got %#v", main.VolumeMounts)
+	}
+	if main.VolumeMounts[0].Name != "model-pvc" || main.VolumeMounts[0].MountPath != "/new-models" {
+		t.Fatalf("expected v1alpha1 volume mount name/path to win, got %#v", main.VolumeMounts[0])
+	}
+	if !main.VolumeMounts[0].ReadOnly || main.VolumeMounts[0].SubPath != "weights" {
+		t.Fatalf("expected hub-only volume mount fields to be preserved, got %#v", main.VolumeMounts[0])
 	}
 }
 
