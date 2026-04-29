@@ -13,18 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+
 import requests
 
 from .args import parse_args, parse_images
 from .local_media_server import run_server
 
+DOWNLOAD_TIMEOUT_S = 60
+
 
 def download(images: dict[str, str]) -> dict[str, bytes]:
     downloaded: dict[str, bytes] = {}
     for name, url in images.items():
-        response = requests.get(url)
-        response.raise_for_status()
-        downloaded[name] = response.content
+        try:
+            with requests.get(url, timeout=DOWNLOAD_TIMEOUT_S, stream=True) as response:
+                response.raise_for_status()
+                downloaded[name] = response.content
+        except requests.RequestException as exc:
+            print(f"Failed to download {name!r} from {url}: {exc}", file=sys.stderr)
+            sys.exit(1)
     return downloaded
 
 
