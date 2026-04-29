@@ -78,7 +78,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		includeOriginSplits: !hubOrigin,
 	}
 	var spokeSave DynamoComponentDeploymentSpec
-	if err := convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(&src.Spec, &dst.Spec, preservedHubSpec, &spokeSave, ctx); err != nil {
+	if err := convertDCDSpecToHub(&src.Spec, &dst.Spec, preservedHubSpec, &spokeSave, ctx); err != nil {
 		return err
 	}
 	var statusSave DynamoComponentDeploymentStatus
@@ -87,7 +87,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		!dcdAlphaSpecSaveIsZero(&spokeSave) ||
 		!dcdAlphaStatusSaveIsZero(&statusSave)
 
-	convertDCDStatusTo(&src.Status, &dst.Status)
+	convertDCDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
 	if preserveSpoke {
 		preserveDCDSpoke(&spokeSave, &statusSave, dst)
 		preserveDCDSpokeHub(dst)
@@ -95,7 +95,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	return nil
 }
 
-func convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(src *DynamoComponentDeploymentSpec, dst *v1beta1.DynamoComponentDeploymentSpec, restored *v1beta1.DynamoComponentDeploymentSpec, save *DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
+func convertDCDSpecToHub(src *DynamoComponentDeploymentSpec, dst *v1beta1.DynamoComponentDeploymentSpec, restored *v1beta1.DynamoComponentDeploymentSpec, save *DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
 	if src == nil || dst == nil {
 		return nil
 	}
@@ -118,7 +118,7 @@ func convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDe
 		carrier:             ctx.carrier,
 		includeOriginSplits: ctx.includeOriginSplits,
 	}
-	if err := convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
+	if err := convertSharedSpecToHub(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
 		return err
 	}
 
@@ -239,11 +239,11 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		sourceUnmodified: spokeHubUnmodified,
 	}
 	var hubSave v1beta1.DynamoComponentDeploymentSpec
-	if err := convert_v1beta1_DynamoComponentDeploymentSpec_To_v1alpha1_DynamoComponentDeploymentSpec(&src.Spec, &dst.Spec, preservedSpokeSpec, &hubSave, ctx); err != nil {
+	if err := convertDCDSpecFromHub(&src.Spec, &dst.Spec, preservedSpokeSpec, &hubSave, ctx); err != nil {
 		return err
 	}
 
-	convertDCDStatusFrom(&src.Status, &dst.Status)
+	convertDCDStatusFromHub(&src.Status, &dst.Status, nil, nil, ctx)
 	fillDCDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus, src.ObjectMeta.Name)
 	scrubDCDAnnotations(&dst.ObjectMeta)
 	if preservedSpokeSpec != nil || preservedSpokeStatus != nil || hadSpokeHubSnapshot {
@@ -263,7 +263,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	return nil
 }
 
-func convert_v1beta1_DynamoComponentDeploymentSpec_To_v1alpha1_DynamoComponentDeploymentSpec(src *v1beta1.DynamoComponentDeploymentSpec, dst *DynamoComponentDeploymentSpec, restored *DynamoComponentDeploymentSpec, save *v1beta1.DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
+func convertDCDSpecFromHub(src *v1beta1.DynamoComponentDeploymentSpec, dst *DynamoComponentDeploymentSpec, restored *DynamoComponentDeploymentSpec, save *v1beta1.DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
 	if src == nil || dst == nil {
 		return nil
 	}
@@ -284,7 +284,7 @@ func convert_v1beta1_DynamoComponentDeploymentSpec_To_v1alpha1_DynamoComponentDe
 		sourceCarrier:    ctx.sourceCarrier,
 		sourceUnmodified: ctx.sourceUnmodified,
 	}
-	if err := convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
+	if err := convertSharedSpecFromHub(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
 		return err
 	}
 	if v, ok := ctx.carrier.get(suffixServiceName); ok {
@@ -346,7 +346,10 @@ func hasDCDInternalAnnotations(annotations map[string]string) bool {
 	return false
 }
 
-func convertDCDStatusTo(src *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeploymentStatus) {
+//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
+func convertDCDStatusToHub(src *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeploymentStatus, restored *v1beta1.DynamoComponentDeploymentStatus, save *DynamoComponentDeploymentStatus, ctx dcdConversionContext) {
+	_, _, _ = restored, save, ctx
+
 	dst.ObservedGeneration = src.ObservedGeneration
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
@@ -355,14 +358,18 @@ func convertDCDStatusTo(src *DynamoComponentDeploymentStatus, dst *v1beta1.Dynam
 		}
 	}
 	if src.Service != nil {
-		dst.Component = convertReplicaStatusTo(src.Service)
+		dst.Component = &v1beta1.ComponentReplicaStatus{}
+		convertReplicaStatusToHub(src.Service, dst.Component, nil, nil, replicaStatusConversionContext{})
 	}
 	// PodSelector is dropped in v1beta1 (the field was never populated by the
 	// controller). No annotation is needed: the round-trip invariant is on
 	// v1beta1 inputs, which do not carry PodSelector.
 }
 
-func convertDCDStatusFrom(src *v1beta1.DynamoComponentDeploymentStatus, dst *DynamoComponentDeploymentStatus) {
+//nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
+func convertDCDStatusFromHub(src *v1beta1.DynamoComponentDeploymentStatus, dst *DynamoComponentDeploymentStatus, restored *DynamoComponentDeploymentStatus, save *v1beta1.DynamoComponentDeploymentStatus, ctx dcdConversionContext) {
+	_, _, _ = restored, save, ctx
+
 	dst.ObservedGeneration = src.ObservedGeneration
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
@@ -371,7 +378,8 @@ func convertDCDStatusFrom(src *v1beta1.DynamoComponentDeploymentStatus, dst *Dyn
 		}
 	}
 	if src.Component != nil {
-		dst.Service = convertReplicaStatusFrom(src.Component)
+		dst.Service = &ServiceReplicaStatus{}
+		convertReplicaStatusFromHub(src.Component, dst.Service, nil, nil, replicaStatusConversionContext{})
 	}
 }
 

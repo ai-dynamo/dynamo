@@ -32,6 +32,12 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+const (
+	dgdrHubSaveRepresentedFieldsMsg = "hub save included represented fields: %#v"
+	dgdrAliasLabelKey               = "source"
+	dgdrAliasBefore                 = "before"
+)
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
@@ -735,6 +741,101 @@ func TestDGDR_OptimizationTypeOnlyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDGDR_OptimizationTypeWinsOverPreservedNilSLA(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "optimization-stale-preserved"},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:     "llama",
+			Backend:   "vllm",
+			AutoApply: true,
+			ProfilingConfig: ProfilingConfigSpec{
+				Config: &apiextensionsv1.JSON{Raw: []byte(`{"sla":{"optimizationType":"throughput"}}`)},
+			},
+		},
+	}
+	setJSONAnnOnObj(src, annDGDRHubSpec, v1beta1.DynamoGraphDeploymentRequestSpec{
+		Model:   "llama",
+		Backend: v1beta1.BackendTypeVllm,
+	})
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.SLA == nil || restored.Spec.SLA.OptimizationType == nil {
+		t.Fatalf("SLA.OptimizationType = nil, want throughput")
+	}
+	if got := *restored.Spec.SLA.OptimizationType; got != v1beta1.OptimizationTypeThroughput {
+		t.Fatalf("SLA.OptimizationType = %q, want %q", got, v1beta1.OptimizationTypeThroughput)
+	}
+}
+
+func TestDGDR_ConversionDoesNotAliasSourceObjects(t *testing.T) {
+	rawDGD := []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment"}`)
+	expectedRawDGD := string(rawDGD)
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "alias-check",
+			Labels: map[string]string{dgdrAliasLabelKey: dgdrAliasBefore},
+		},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:     "llama",
+			Backend:   "vllm",
+			AutoApply: true,
+		},
+		Status: DynamoGraphDeploymentRequestStatus{
+			Conditions: []metav1.Condition{{
+				Type:    "Ready",
+				Status:  metav1.ConditionTrue,
+				Message: dgdrAliasBefore,
+			}},
+			GeneratedDeployment: &runtime.RawExtension{Raw: rawDGD},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	src.Labels[dgdrAliasLabelKey] = "after"
+	src.Spec.AutoApply = false
+	src.Status.Conditions[0].Message = "after"
+	src.Status.GeneratedDeployment.Raw[0] = '['
+	if hub.Labels[dgdrAliasLabelKey] != dgdrAliasBefore {
+		t.Fatalf("hub label aliases source label map: %q", hub.Labels[dgdrAliasLabelKey])
+	}
+	if hub.Spec.AutoApply == nil || !*hub.Spec.AutoApply {
+		t.Fatalf("hub AutoApply aliases source bool: %v", hub.Spec.AutoApply)
+	}
+	if hub.Status.Conditions[0].Message != dgdrAliasBefore {
+		t.Fatalf("hub condition aliases source condition: %q", hub.Status.Conditions[0].Message)
+	}
+	if string(hub.Status.ProfilingResults.SelectedConfig.Raw) != expectedRawDGD {
+		t.Fatalf("hub selectedConfig aliases source raw extension: %s", string(hub.Status.ProfilingResults.SelectedConfig.Raw))
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	hub.Labels[dgdrAliasLabelKey] = "hub-after"
+	*hub.Spec.AutoApply = false
+	hub.Status.Conditions[0].Message = "hub-after"
+	hub.Status.ProfilingResults.SelectedConfig.Raw[0] = '['
+	if spoke.Labels[dgdrAliasLabelKey] != dgdrAliasBefore {
+		t.Fatalf("spoke label aliases hub label map: %q", spoke.Labels[dgdrAliasLabelKey])
+	}
+	if !spoke.Spec.AutoApply {
+		t.Fatalf("spoke AutoApply aliases hub bool")
+	}
+	if spoke.Status.Conditions[0].Message != dgdrAliasBefore {
+		t.Fatalf("spoke condition aliases hub condition: %q", spoke.Status.Conditions[0].Message)
+	}
+	if string(spoke.Status.GeneratedDeployment.Raw) != expectedRawDGD {
+		t.Fatalf("spoke generatedDeployment aliases hub raw extension: %s", string(spoke.Status.GeneratedDeployment.Raw))
+	}
+}
+
 func TestDGDR_ProfilingResourcesClaimsOnlyRoundTrip(t *testing.T) {
 	original := &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "claims-only"},
@@ -993,10 +1094,91 @@ func TestDGDR_SparseHubSpecOmitsRepresentableFields(t *testing.T) {
 		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
 	}
 	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
-		t.Fatalf("hub save included represented fields: %#v", saved)
+		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved)
 	}
 	if saved.SearchStrategy != v1beta1.SearchStrategyThorough {
 		t.Fatalf("saved searchStrategy = %q, want %q", saved.SearchStrategy, v1beta1.SearchStrategyThorough)
+	}
+}
+
+func TestDGDR_SparseHubSpecNilAutoApplyOmitsRepresentableFields(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "hub-sparse-nil-autoapply"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:     "llama",
+			Backend:   v1beta1.BackendTypeVllm,
+			Image:     "profiler:v1",
+			AutoApply: nil,
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	raw := spoke.Annotations[annDGDRHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve nil AutoApply shape", annDGDRHubSpec)
+	}
+	var saved v1beta1.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	}
+	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
+		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.AutoApply != nil {
+		t.Fatalf("AutoApply = %v, want nil", *restored.Spec.AutoApply)
+	}
+}
+
+func TestDGDR_SparseHubSpecWorkloadWithoutSLAOmitsRepresentableFields(t *testing.T) {
+	isl := int32(2048)
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "hub-sparse-workload-no-sla"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			Image:   "profiler:v1",
+			Workload: &v1beta1.WorkloadSpec{
+				ISL: &isl,
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	raw := spoke.Annotations[annDGDRHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve workload-without-sla shape", annDGDRHubSpec)
+	}
+	var saved v1beta1.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	}
+	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
+		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved)
+	}
+	if saved.Workload == nil || saved.Workload.ISL != nil {
+		t.Fatalf("saved Workload = %#v, want sparse shape marker without represented ISL", saved.Workload)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.SLA != nil {
+		t.Fatalf("SLA = %#v, want nil", restored.Spec.SLA)
+	}
+	if restored.Spec.Workload == nil || restored.Spec.Workload.ISL == nil || *restored.Spec.Workload.ISL != isl {
+		t.Fatalf("Workload = %#v, want ISL %d", restored.Spec.Workload, isl)
 	}
 }
 

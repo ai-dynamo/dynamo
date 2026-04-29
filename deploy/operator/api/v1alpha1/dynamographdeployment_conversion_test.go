@@ -381,14 +381,13 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 }
 
 func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
-	// Services in alphabetical order match what ConvertTo emits from the map.
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "cc-planner", ComponentType: v1beta1.ComponentTypePlanner},
 				{ComponentName: "aa-frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				{ComponentName: "bb-worker", ComponentType: v1beta1.ComponentTypeWorker},
-				{ComponentName: "cc-planner", ComponentType: v1beta1.ComponentTypePlanner},
 			},
 		},
 	}

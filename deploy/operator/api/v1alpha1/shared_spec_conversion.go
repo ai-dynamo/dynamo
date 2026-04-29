@@ -311,10 +311,10 @@ func (ctx sharedSpecConversionContext) originalCarrier() *annCarrier {
 	return ctx.carrier
 }
 
-// convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec
-// converts fields represented by both versions from src, restores only
-// v1beta1-only fields from restored, and writes v1alpha1-only fields to save.
-func convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
+// convertSharedSpecToHub converts fields represented by both versions from src,
+// restores only v1beta1-only fields from restored, and writes v1alpha1-only
+// fields to save.
+func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
 	if src == nil || dst == nil {
 		return nil
 	}
@@ -632,10 +632,10 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 	return src != nil && len(src.Annotations) == 0 && len(src.Labels) == 0
 }
 
-// convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec
-// converts fields represented by both versions from src, restores only
-// v1alpha1-only fields from restored, and writes v1beta1-only fields to save.
-func convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
+// convertSharedSpecFromHub converts fields represented by both versions from
+// src, restores only v1alpha1-only fields from restored, and writes v1beta1-only
+// fields to save.
+func convertSharedSpecFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
 	if src == nil || dst == nil {
 		return nil
 	}
