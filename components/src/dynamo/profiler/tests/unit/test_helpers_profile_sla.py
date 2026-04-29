@@ -1148,8 +1148,8 @@ class TestValidateDgdServiceNameLengths:
         """Names summing to exactly 45 should not raise."""
         from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
 
-        # dgdr_name="a" * 10 → dgd_name="a"*10 + "-dgd" = 13 chars; svc = 32 chars → 45 total
-        monkeypatch.setenv("DGDR_NAME", "a" * 10)
+        # dgdr_name="a" * 9 → dgd_name="a"*9 + "-dgd" = 13 chars; svc = 32 chars → 45 total
+        monkeypatch.setenv("DGDR_NAME", "a" * 9)
         dgdr = self._make_dgdr()
         config = self._make_final_config(["s" * 32])
         _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
@@ -1158,8 +1158,8 @@ class TestValidateDgdServiceNameLengths:
         """Names summing to 46 should raise ValueError with detail."""
         from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
 
-        # dgdr_name="a"*10 → dgd_name=13; svc=33 → combined=46
-        monkeypatch.setenv("DGDR_NAME", "a" * 10)
+        # dgdr_name="a"*9 → dgd_name=13; svc=33 → combined=46
+        monkeypatch.setenv("DGDR_NAME", "a" * 9)
         dgdr = self._make_dgdr()
         config = self._make_final_config(["s" * 33])
         with pytest.raises(ValueError, match="pod-naming limit"):
@@ -1169,7 +1169,8 @@ class TestValidateDgdServiceNameLengths:
         """All offending service names should appear in the error message."""
         from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
 
-        monkeypatch.setenv("DGDR_NAME", "a" * 10)
+        # dgdr_name="a"*27 → dgd_name=31 chars; TRTLLM names (18-19) → combined 49-50 > 45
+        monkeypatch.setenv("DGDR_NAME", "a" * 27)
         dgdr = self._make_dgdr()
         config = self._make_final_config(
             ["TRTLLMPrefillWorker", "TRTLLMDecodeWorker", "ok"]
@@ -1225,9 +1226,9 @@ class TestValidateDgdServiceNameLengths:
         from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
         from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
 
-        monkeypatch.setenv("DGDR_NAME", "a" * 10)
-        # Override makes dgd_name very long, pushing combined over 45
-        long_override = "x" * 40
+        monkeypatch.setenv("DGDR_NAME", "a" * 9)
+        # Override makes dgd_name very long; "x"*43 + "svc"(3) = 46 > 45
+        long_override = "x" * 43
         dgdr = DynamoGraphDeploymentRequestSpec(
             backend="vllm",
             hardware=HardwareSpec(totalGpus=1),
