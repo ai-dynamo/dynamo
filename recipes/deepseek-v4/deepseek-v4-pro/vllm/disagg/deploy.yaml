@@ -7,25 +7,23 @@
 # Shape: 1 prefill replica + 1 decode replica, each spanning 2 GB200 nodes
 #        with 4 GPUs per node (DP=8, TP=1). Total: 4 nodes x 4 GPUs = 16 GPUs.
 #
-# Key differences from the aggregated recipe (vllm/agg/deploy.yaml):
-#   - Separate VllmPrefillWorker and VllmDecodeWorker services
-#   - DP=8 (TP=1) instead of TP=8 — each DP rank holds one FP4 model shard
-#   - NixlConnector for KV cache transfer between prefill and decode pods
-#   - UCX transport environment variables required by NixlConnector
-#   - Prefill uses expert weight offloading (offload-group-size/num-in-group/prefetch-step)
-#   - Sleep mode enabled on both workers for memory-efficient idle state
-#   - max-model-len 9280 (ISL 8k + OSL 1k headroom)
-#   - Multinode DP coordination flags are injected by the Dynamo operator:
-#     --data-parallel-hybrid-lb, --data-parallel-address,
-#     --data-parallel-size-local, --data-parallel-start-rank, and
-#     --data-parallel-rpc-port.
+# Cross-node fabric: NVLink72 (MNNVL) via ComputeDomain. UCX active-messages
+# control plane goes over TCP (eth0); bulk KV flows over MNNVL/cuda_ipc.
 #
-# Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
-#        includes the DeepSeek-V4 stack and NixlConnector support.
-#        See `../container/README.md` for the reference build.
-#
-# Weights: served from the `model-cache` PVC populated by
-#          `../../model-cache/model-download.yaml`.
+# Prerequisites: DRA / ComputeDomain controller installed cluster-wide.
+# Image: replace `:my-tag` with a Dynamo + vLLM image (see ../container/README.md).
+# Weights: served from the `model-cache` PVC (see ../../model-cache/model-download.yaml).
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv4-pro-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: dsv4-pro-compute-domain-channel
+---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -61,12 +59,13 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv4-pro-compute-domain-channel
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-          # DeepSeek-V4-Pro (1.6T params, FP4) with DP=8 + expert offloading.
-          # Allow ~90 min for first launch (weight sharding + FlashInfer autotune +
-          # cudagraph warmup). periodSeconds * failureThreshold = 10 * 540 = 5400s.
+          # ~90 min budget for first launch (weights + autotune + cudagraph): 10 * 540 = 5400s.
           startupProbe:
             httpGet:
               path: /health
@@ -81,10 +80,8 @@ spec:
               value: deepseek-ai/DeepSeek-V4-Pro
             - name: HF_HOME
               value: /opt/models
-            # Give the engine room to finish first-launch init.
             - name: VLLM_ENGINE_READY_TIMEOUT_S
               value: "5400"
-            # FP4 MoE and TileLang tuning for prefill
             - name: TILELANG_CLEANUP_TEMP_FILES
               value: "1"
             - name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
@@ -93,7 +90,6 @@ spec:
               value: "2048"
             - name: VLLM_SERVER_DEV_MODE
               value: "1"
-            # NCCL settings for Blackwell NVLink collectives
             - name: VLLM_USE_NCCL_SYMM_MEM
               value: "1"
             - name: NCCL_CUMEM_ENABLE
@@ -104,12 +100,17 @@ spec:
               value: "1"
             - name: NCCL_P2P_LEVEL
               value: NVL
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NVIDIA_GDRCOPY
+              value: "1"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
-            # UCX transport settings required by NixlConnector for cross-pod KV transfer
+            # UCX_TLS must include an AM-capable transport (tcp); cuda_ipc/cuda_copy
+            # are memory-type-only and cannot carry NIXL's UCX control plane.
             - name: UCX_MEMTYPE_CACHE
-              value: "n"
-            - name: UCX_MEMTYPE_REG_WHOLE
               value: "n"
             - name: UCX_TLS
               value: cuda_copy,cuda_ipc,tcp
@@ -120,7 +121,14 @@ spec:
             - -c
           args:
             - |
-              python3 -m dynamo.vllm \
+              # Park a TCP listener on :29500 so the operator's wait-for-leader-mp
+              # init container probe succeeds (vLLM hybrid-lb uses an OS-assigned port).
+              nohup python3 -u -c 'import socketserver
+              class H(socketserver.BaseRequestHandler):
+                  def handle(self): self.request.close()
+              socketserver.TCPServer.allow_reuse_address = True
+              socketserver.TCPServer(("0.0.0.0", 29500), H).serve_forever()' >/dev/null 2>&1 &
+              exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
                 --trust-remote-code \
@@ -157,6 +165,8 @@ spec:
           gpu: "4"
         requests:
           gpu: "4"
+        claims:
+          - name: compute-domain-channel
     VllmDecodeWorker:
       componentType: worker
       subComponentType: decode
@@ -167,11 +177,12 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv4-pro-compute-domain-channel
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-          # Allow ~90 min for first launch.
-          # periodSeconds * failureThreshold = 10 * 540 = 5400s.
           startupProbe:
             httpGet:
               path: /health
@@ -186,14 +197,12 @@ spec:
               value: deepseek-ai/DeepSeek-V4-Pro
             - name: HF_HOME
               value: /opt/models
-            # Give the engine room to finish first-launch init.
             - name: VLLM_ENGINE_READY_TIMEOUT_S
               value: "5400"
             - name: TILELANG_CLEANUP_TEMP_FILES
               value: "1"
             - name: VLLM_SERVER_DEV_MODE
               value: "1"
-            # NCCL settings for Blackwell NVLink collectives
             - name: VLLM_USE_NCCL_SYMM_MEM
               value: "1"
             - name: NCCL_CUMEM_ENABLE
@@ -204,12 +213,15 @@ spec:
               value: "1"
             - name: NCCL_P2P_LEVEL
               value: NVL
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NVIDIA_GDRCOPY
+              value: "1"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
-            # UCX transport settings required by NixlConnector for cross-pod KV transfer
             - name: UCX_MEMTYPE_CACHE
-              value: "n"
-            - name: UCX_MEMTYPE_REG_WHOLE
               value: "n"
             - name: UCX_TLS
               value: cuda_copy,cuda_ipc,tcp
@@ -220,7 +232,12 @@ spec:
             - -c
           args:
             - |
-              python3 -m dynamo.vllm \
+              nohup python3 -u -c 'import socketserver
+              class H(socketserver.BaseRequestHandler):
+                  def handle(self): self.request.close()
+              socketserver.TCPServer.allow_reuse_address = True
+              socketserver.TCPServer(("0.0.0.0", 29500), H).serve_forever()' >/dev/null 2>&1 &
+              exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
                 --trust-remote-code \
@@ -252,3 +269,5 @@ spec:
           gpu: "4"
         requests:
           gpu: "4"
+        claims:
+          - name: compute-domain-channel
