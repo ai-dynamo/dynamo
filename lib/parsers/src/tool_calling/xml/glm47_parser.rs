@@ -450,7 +450,7 @@ mod tests {
     // Pin current behavior when the outer `</tool_call>` is absent due to
     // max_tokens / EOS truncation. GLM 4.7's parser today returns zero calls
     // and surfaces the unmatched start as normal text — the "silent drop"
-    // failure mode flagged in TEST_CASES.md / DIS-1842 / DIS-1832. Kimi K2
+    // failure mode flagged in TEST_CASES.md. Kimi K2
     // recovers in this scenario (`kimi_k2_parser::test_parse_malformed_no_section_end`);
     // GLM 4.7 does not. Promoting to recovery is a parser change, not a
     // test change — these tests catch any drift in either direction.

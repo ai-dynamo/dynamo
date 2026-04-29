@@ -152,8 +152,8 @@ mod tests {
 
     // Pin current Nemotron behavior when </TOOLCALL> is absent due to
     // max_tokens / EOS truncation. The JSON-family parser today silently
-    // drops the in-flight call — the failure mode TEST_CASES.md / DIS-1842 /
-    // DIS-1832 flag. Promoting to recovery (matching Kimi K2's behavior)
+    // drops the in-flight call — the failure mode TEST_CASES.md flags.
+    // Promoting to recovery (matching Kimi K2's behavior)
     // would be a parser change.
     #[test] // CASE.5 — nemotron_deci
     fn test_parse_nemotron_deci_no_outer_close_silent_drop() {

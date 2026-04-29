@@ -905,7 +905,7 @@ rust programming
     // Pin current behavior when the OUTER </tool_call> fence is absent due
     // to max_tokens / EOS truncation. The qwen3_coder dialect (which uses
     // XmlParserConfig::default()) silently drops the in-flight call today
-    // — the failure mode TEST_CASES.md / DIS-1842 / DIS-1832 flag. Distinct
+    // — the failure mode TEST_CASES.md flags. Distinct
     // from `test_parse_missing_*_closing_tag` above, which exercises missing
     // INNER close tags (a separate, already-recovering path).
     #[test] // CASE.5 — qwen3_coder

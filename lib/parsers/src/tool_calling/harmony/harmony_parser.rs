@@ -275,7 +275,7 @@ mod tests {
     // envelope still gives the parser enough context to recover the call —
     // this test pins that recovery behavior. The bare-envelope variant
     // (no preceding analysis block) currently does NOT recover, but adding
-    // a test for that is a parser-change discussion (see DIS-1842 / DIS-1832).
+    // a test for that is a parser-change discussion.
     // Pin current behavior on two back-to-back commentary blocks. The
     // harmony parser today does NOT extract both calls — the second
     // `<|start|>assistant<|channel|>commentary` block is left in normal
