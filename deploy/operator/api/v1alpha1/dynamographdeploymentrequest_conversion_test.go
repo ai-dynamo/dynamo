@@ -885,6 +885,125 @@ func TestDGDR_ClearedSelectedConfigDoesNotRestorePreservedGeneratedDeployment(t 
 	}
 }
 
+func TestDGDR_SparseSpokeSpecOmitsRepresentableProfilingFields(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpha-profiling"},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: "vllm",
+			ProfilingConfig: ProfilingConfigSpec{
+				ProfilerImage: "profiler:v1",
+				Resources:     &corev1.ResourceRequirements{},
+				Tolerations: []corev1.Toleration{{
+					Key:      "gpu",
+					Operator: corev1.TolerationOpExists,
+				}},
+				NodeSelector: map[string]string{"kubernetes.io/arch": "arm64"},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if _, ok := hub.Annotations[annDGDRSpokeSpec]; ok {
+		t.Fatalf("%s should be omitted when only represented profiling fields need round-trip: %v", annDGDRSpokeSpec, hub.Annotations)
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if diff := cmp.Diff(src.Spec.ProfilingConfig.Resources, restored.Spec.ProfilingConfig.Resources); diff != "" {
+		t.Fatalf("resources mismatch after round-trip (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(src.Spec.ProfilingConfig.Tolerations, restored.Spec.ProfilingConfig.Tolerations); diff != "" {
+		t.Fatalf("tolerations mismatch after round-trip (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(src.Spec.ProfilingConfig.NodeSelector, restored.Spec.ProfilingConfig.NodeSelector); diff != "" {
+		t.Fatalf("nodeSelector mismatch after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDR_SparseHubSpecOmitsRepresentableFields(t *testing.T) {
+	autoApply := true
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "hub-sparse"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:          "llama",
+			Backend:        v1beta1.BackendTypeVllm,
+			Image:          "profiler:v1",
+			AutoApply:      &autoApply,
+			SearchStrategy: v1beta1.SearchStrategyThorough,
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	raw := spoke.Annotations[annDGDRHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve hub-only searchStrategy", annDGDRHubSpec)
+	}
+	var saved v1beta1.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	}
+	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
+		t.Fatalf("hub save included represented fields: %#v", saved)
+	}
+	if saved.SearchStrategy != v1beta1.SearchStrategyThorough {
+		t.Fatalf("saved searchStrategy = %q, want %q", saved.SearchStrategy, v1beta1.SearchStrategyThorough)
+	}
+}
+
+func TestDGDR_OldFullSpokeSpecDoesNotRestoreClearedProfilingFields(t *testing.T) {
+	oldSpokeSpec := DynamoGraphDeploymentRequestSpec{
+		Model:   "llama",
+		Backend: "vllm",
+		ProfilingConfig: ProfilingConfigSpec{
+			Resources: &corev1.ResourceRequirements{},
+			Tolerations: []corev1.Toleration{{
+				Key:      "old",
+				Operator: corev1.TolerationOpExists,
+			}},
+			NodeSelector: map[string]string{"old": "selector"},
+		},
+	}
+	envelope, err := json.Marshal(dgdrSpokeSpecPreservation{Spec: oldSpokeSpec})
+	if err != nil {
+		t.Fatalf("marshal old spoke spec: %v", err)
+	}
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cleared-profiling",
+			Annotations: map[string]string{
+				annDGDRSpokeSpec: string(envelope),
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Spec.ProfilingConfig.Resources != nil {
+		t.Fatalf("resources restored from stale full annotation: %#v", spoke.Spec.ProfilingConfig.Resources)
+	}
+	if len(spoke.Spec.ProfilingConfig.Tolerations) != 0 {
+		t.Fatalf("tolerations restored from stale full annotation: %#v", spoke.Spec.ProfilingConfig.Tolerations)
+	}
+	if len(spoke.Spec.ProfilingConfig.NodeSelector) != 0 {
+		t.Fatalf("nodeSelector restored from stale full annotation: %#v", spoke.Spec.ProfilingConfig.NodeSelector)
+	}
+}
+
 // TestConvertTo_InvalidProfilingConfigJSON verifies that malformed or arbitrary
 // RawExtension bytes in ProfilingConfig.Config are preserved rather than
 // rejected. The v1alpha1 field is an opaque extension point; typed v1beta1
