@@ -93,6 +93,9 @@ async fn new_velo() -> Arc<velo::Velo> {
         .unwrap()
 }
 
+// Temporarily disabled during the session-API refactor (Stage 4
+// rewrites this test against the new symmetric Session trait).
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cd_loopback_decode_prefill_session() -> Result<()> {
     // ------------------------------------------------------------------

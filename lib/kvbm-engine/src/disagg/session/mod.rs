@@ -234,9 +234,17 @@ pub trait SessionFactory: Send + Sync {
     /// Attach to a peer that opened a session. Returned
     /// session is already bound and ready for `commits()` /
     /// `availability()` / `pull(...)`.
+    ///
+    /// `peer_instance_id` is required up-front because the
+    /// puller side never receives the holder's identity over
+    /// the session wire (only the puller sends `Attach`). The
+    /// caller learns it out-of-band — typically from the
+    /// `initiator_instance_id` field of the request that
+    /// carried `peer_endpoint`.
     fn attach(
         &self,
         session_id: SessionId,
+        peer_instance_id: InstanceId,
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>>;
 }

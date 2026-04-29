@@ -798,6 +798,7 @@ impl SessionFactory for VeloSessionFactory {
     fn attach(
         &self,
         session_id: SessionId,
+        peer_instance_id: InstanceId,
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>> {
         let velo = Arc::clone(&self.velo);
@@ -822,6 +823,8 @@ impl SessionFactory for VeloSessionFactory {
                 leader,
                 Some(local_endpoint.clone()),
             );
+            // Puller knows peer's identity out-of-band.
+            *inner.peer_instance_id.lock() = Some(peer_instance_id);
             // Outbound is set immediately on the puller side.
             {
                 let mut slot = inner.outbound.lock().await;

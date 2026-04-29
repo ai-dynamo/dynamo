@@ -5,26 +5,28 @@
 //!
 //! The coordinator owns the async state machine for a single
 //! CD-bound request on the prefill participant: attach to D's
-//! session, request D's `sequence_hashes` block sets, RDMA-pull
-//! them, register them in P's G2, drive the G2→G1 onboard once
-//! USAA arrives with the G1 destinations, and tear down once
-//! D has acknowledged its `PullComplete`.
+//! session, drain D's commit + availability streams chunk-by-
+//! chunk, pull each chunk into P's G2 as availability lands,
+//! drive the G2→G1 onboard once USAA arrives with the G1
+//! destinations, and tear down once the request finishes.
+//!
+//! See `/home/ryan/.claude/plans/cd-session-refactor.md` for
+//! the symmetric `Session` API this is built against.
 //!
 //! The wrapper ([`super::prefill_leader::PrefillDisaggLeader`])
 //! interacts with the coordinator at the `ConnectorLeaderApi`
 //! boundary; the coordinator does not see vLLM directly.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
-use kvbm_common::LogicalLayoutHandle;
 use kvbm_disagg_protocol::RemotePrefillParams;
-use kvbm_engine::disagg::{
-    BlockSetRequest, HashSelection, PrefillSession, PullAck, PullComplete, RemoteBlockRef,
-    RemoteBlockSet, SessionEvent,
+use kvbm_engine::disagg::session::{
+    AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use parking_lot::Mutex;
@@ -33,7 +35,7 @@ use tokio::runtime::Handle;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::{BlockId, G2, SequenceHash};
 
-use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim, PrefillSessionAttacher};
+use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 
 /// Per-request prefill-side coordinator.
 ///
@@ -45,17 +47,16 @@ pub trait PrefillCoordinator: Send + Sync {
     /// Idempotent per-request init.
     ///
     /// First call for a `request_id` installs state and spawns
-    /// attach + diff + remote-pull asynchronously. Subsequent
-    /// calls are no-ops. Returns the number of external tokens
-    /// the wrapper should report — `params.sequence_hashes.len()
-    /// * block_size` — computed once and cached.
+    /// attach + commit/availability drain + chunked-pull
+    /// pipeline asynchronously. Subsequent calls return the
+    /// cached external-token count without side effects.
     fn ensure_started(
         &self,
         request_id: &str,
         params: &RemotePrefillParams,
     ) -> Result<usize>;
 
-    /// USAA-1 hand-off.
+    /// USAA hand-off.
     ///
     /// Wrapper calls inner USAA first, then hands the freshly
     /// allocated G1 ids and the external-token count to the
@@ -71,9 +72,11 @@ pub trait PrefillCoordinator: Send + Sync {
     /// Forward-pass-time hook.
     ///
     /// Wrapper's `build_connector_meta` calls this after the
-    /// inner build returns so the coordinator can install the
-    /// offload-completion observer that captures G1→G2 outputs
-    /// for this request and publishes them on the session.
+    /// inner build returns. Production wiring (Phase B) attaches
+    /// the offload pipeline's register-observer here so output
+    /// blocks flow into [`commit_output_blocks`] automatically.
+    /// For Phase A this is a no-op; tests call
+    /// [`commit_output_blocks`] directly.
     fn observe_forward(
         &self,
         request_id: &str,
@@ -83,10 +86,9 @@ pub trait PrefillCoordinator: Send + Sync {
     /// Detach the slot side.
     ///
     /// The wrapper calls this after `inner.request_finished`.
-    /// The session continues to live, holding output
-    /// `ImmutableBlock<G2>` pins, until D's `PullComplete`
-    /// arrives — at which point the coordinator sends `PullAck`
-    /// and drops state.
+    /// The coordinator finishes its commits/availability and
+    /// closes the session. Pins on output blocks are managed
+    /// internally by the session (drop on PullAck).
     fn on_request_finished(&self, request_id: &str);
 }
 
@@ -95,11 +97,6 @@ pub trait PrefillCoordinator: Send + Sync {
 // ============================================================================
 
 /// Per-request state machine state.
-///
-/// `Attaching` → `Pulling` → `Registered` → `OnboardingScheduled`
-/// → `OnboardingComplete` → `SlotDone` → `Released`.
-/// Error states are deferred (see plan §"Phase A error-path
-/// design (deferred)").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefillStatus {
     Attaching,
@@ -114,53 +111,34 @@ pub enum PrefillStatus {
 struct RequestState {
     num_external_tokens: usize,
     expected_hashes: Vec<SequenceHash>,
-    /// Attached session — populated once `attach` resolves.
-    session: Mutex<Option<Arc<dyn PrefillSession>>>,
-    /// Peer instance id, taken from
-    /// `RemotePrefillParams.initiator_instance_id`.
-    /// (P never receives a session-level Attached event from D
-    /// — D sends Attached on its own side after P's Attach
-    /// frame arrives.)
-    peer_instance_id: crate::InstanceId,
-    /// Mutables allocated for the remote pull. Drained into
-    /// `registered_g2` after pull + register.
-    pulled_mutables: Mutex<Option<Vec<MutableBlock<G2>>>>,
-    /// Registered G2 blocks pulled from D, held to keep them
-    /// pinned through the G2→G1 onboard.
-    registered_g2: Mutex<Vec<ImmutableBlock<G2>>>,
+    /// Attached session — populated once `factory.attach` resolves.
+    session: Mutex<Option<Arc<dyn Session>>>,
     /// G1 destinations from USAA, stashed until pull/register
-    /// completes so we can kick the G2→G1 onboard.
+    /// pipeline completes so we can kick the G2→G1 onboard.
     pending_g1: Mutex<Option<Vec<BlockId>>>,
-    /// Forward-pass output captures (held to keep pinned until
-    /// D's `PullComplete`).
-    output_pins: Mutex<Vec<ImmutableBlock<G2>>>,
-    /// Wrapper has called `on_request_finished` — the slot is
-    /// gone but the session keeps living until PullComplete.
+    /// All registered G2 blocks across chunks.
+    registered_g2: Mutex<Vec<ImmutableBlock<G2>>>,
+    /// Wrapper has called `on_request_finished`.
     request_finished_seen: AtomicBool,
-    /// D has sent `PullComplete` (and we acked it); output
-    /// pins are dropped. Final cleanup waits until
-    /// `request_finished_seen` is also true.
-    pull_complete_seen: AtomicBool,
+    /// All chunks pulled+registered (= we saw `Drained` or all
+    /// expected hashes were filled).
+    pulls_complete: AtomicBool,
+    /// Onboard kick was scheduled (idempotent).
+    onboarding_scheduled: AtomicBool,
     status: Mutex<PrefillStatus>,
 }
 
 impl RequestState {
-    fn new(
-        num_external_tokens: usize,
-        expected_hashes: Vec<SequenceHash>,
-        peer_instance_id: crate::InstanceId,
-    ) -> Self {
+    fn new(num_external_tokens: usize, expected_hashes: Vec<SequenceHash>) -> Self {
         Self {
             num_external_tokens,
             expected_hashes,
             session: Mutex::new(None),
-            peer_instance_id,
-            pulled_mutables: Mutex::new(None),
-            registered_g2: Mutex::new(Vec::new()),
             pending_g1: Mutex::new(None),
-            output_pins: Mutex::new(Vec::new()),
+            registered_g2: Mutex::new(Vec::new()),
             request_finished_seen: AtomicBool::new(false),
-            pull_complete_seen: AtomicBool::new(false),
+            pulls_complete: AtomicBool::new(false),
+            onboarding_scheduled: AtomicBool::new(false),
             status: Mutex::new(PrefillStatus::Attaching),
         }
     }
@@ -171,7 +149,7 @@ pub struct PrefillCoordinatorImpl {
     inner: Arc<dyn InnerLeaderShim>,
     transport: Arc<dyn CdBlockTransport>,
     worker_hook: Arc<dyn CdWorkerHook>,
-    attacher: Arc<dyn PrefillSessionAttacher>,
+    session_factory: Arc<dyn SessionFactory>,
     runtime: Handle,
     states: DashMap<String, Arc<RequestState>>,
     weak_self: std::sync::Weak<Self>,
@@ -182,14 +160,14 @@ impl PrefillCoordinatorImpl {
         inner: Arc<dyn InnerLeaderShim>,
         transport: Arc<dyn CdBlockTransport>,
         worker_hook: Arc<dyn CdWorkerHook>,
-        attacher: Arc<dyn PrefillSessionAttacher>,
+        session_factory: Arc<dyn SessionFactory>,
         runtime: Handle,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             inner,
             transport,
             worker_hook,
-            attacher,
+            session_factory,
             runtime,
             states: DashMap::new(),
             weak_self: weak_self.clone(),
@@ -214,53 +192,39 @@ impl PrefillCoordinatorImpl {
         self.weak_self.upgrade()
     }
 
-    /// Test hook: simulate G1→G2 outputs landing for a CD-bound
-    /// request. Production wires this through
-    /// `Pipeline::add_register_observer`; for A.4/A.5 the
-    /// wrapper test calls this directly.
-    pub fn simulate_offload_complete(
+    /// Test/production helper: commit + make_available for a
+    /// chunk of forward-pass output blocks. Wires output back
+    /// to the peer via the session's commit + availability
+    /// streams; pins are managed internally by the session.
+    pub fn commit_output_blocks(
         &self,
         request_id: &str,
         blocks: Vec<ImmutableBlock<G2>>,
     ) -> Result<()> {
-        let Some(state) = self.state_for(request_id) else {
-            anyhow::bail!("simulate_offload_complete: unknown request {}", request_id);
-        };
+        let state = self
+            .state_for(request_id)
+            .ok_or_else(|| anyhow!("commit_output_blocks: unknown request {}", request_id))?;
         let session = state
             .session
             .lock()
             .clone()
             .ok_or_else(|| {
                 anyhow!(
-                    "simulate_offload_complete: session not attached for {}",
+                    "commit_output_blocks: session not attached for {}",
                     request_id
                 )
             })?;
 
-        let block_sets = vec![RemoteBlockSet {
-            source_layout: LogicalLayoutHandle::G2,
-            blocks: blocks
-                .iter()
-                .map(|b| RemoteBlockRef {
-                    block_id: b.block_id(),
-                    sequence_hash: b.sequence_hash(),
-                })
-                .collect(),
-        }];
-
-        // Pin captured outputs until D acks PullComplete.
-        state.output_pins.lock().extend(blocks);
-
-        let publish = session.publish_output_block_sets(block_sets);
-        self.runtime.spawn(async move {
-            if let Err(err) = publish.await {
-                tracing::error!(error = %err, "publish_output_block_sets failed");
-            }
-        });
-
+        let hashes: Vec<SequenceHash> = blocks.iter().map(|b| b.sequence_hash()).collect();
+        session.commit(hashes)?;
+        session.make_available(blocks)?;
         Ok(())
     }
 
+    /// Drive the per-request setup pipeline: attach, drain
+    /// commits, drain availability (pull each chunk as it lands),
+    /// register pulled G2 blocks, kick onboard if USAA already
+    /// arrived.
     async fn run_setup(
         self: Arc<Self>,
         request_id: String,
@@ -275,78 +239,156 @@ impl PrefillCoordinatorImpl {
         })?;
 
         // 1. Attach.
-        let session = self.attacher.attach(params.session_id, endpoint).await?;
+        let session = self
+            .session_factory
+            .attach(params.session_id, params.initiator_instance_id, endpoint)
+            .await?;
         *state.session.lock() = Some(Arc::clone(&session));
 
-        // 2. Spawn the session monitor.
-        let monitor_self = Arc::clone(&self);
-        let monitor_request_id = request_id.clone();
-        let mut event_stream = session.subscribe();
-        self.runtime.spawn(async move {
-            while let Some(event) = event_stream.next().await {
-                match event {
-                    SessionEvent::PullComplete(complete) => {
-                        monitor_self
-                            .handle_pull_complete(&monitor_request_id, complete)
-                            .await;
+        // 2. Drain commit stream until Closed (or until we have
+        //    the expected set). Informational; the coordinator
+        //    trusts `params.sequence_hashes` for planning.
+        let mut commits = session.commits();
+        let mut commit_seen = HashSet::new();
+        let expected_count = state.expected_hashes.len();
+        while let Some(d) = commits.next().await {
+            match d {
+                CommitDelta::Added(hashes) => {
+                    for h in hashes {
+                        commit_seen.insert(h);
                     }
-                    SessionEvent::Detached { reason: _ } | SessionEvent::Failed { reason: _ } => {
-                        // Error-path teardown deferred; just stop the monitor.
+                    if commit_seen.len() >= expected_count {
+                        // Don't break — peer may still send Closed,
+                        // but we have what we need to plan against.
                         break;
                     }
-                    _ => {}
                 }
+                CommitDelta::Closed => break,
             }
-        });
+        }
 
-        // 3. Request D's blocks for all hashes.
+        // 3. Drain availability and pull chunks as they land.
         *state.status.lock() = PrefillStatus::Pulling;
-        let response = session
-            .request_block_sets(BlockSetRequest {
-                request_id: request_id.clone(),
-                hashes: HashSelection::All,
-            })
-            .await?;
+        let mut avail = session.availability();
+        let expected_set: HashSet<SequenceHash> =
+            state.expected_hashes.iter().copied().collect();
+        let mut remaining: HashSet<SequenceHash> = expected_set.clone();
+        let mut filled_index: usize = 0;
 
-        // D may advertise pending hashes for the remote slice
-        // (the blocks P will produce). P doesn't pull those —
-        // it computes them. Consume only `response.ready`.
-        let total_blocks: usize = response.ready.iter().map(|s| s.blocks.len()).sum();
-        if total_blocks != state.expected_hashes.len() {
+        while let Some(d) = avail.next().await {
+            match d {
+                AvailabilityDelta::Available(blocks) => {
+                    let chunk: Vec<CommittedBlock> = blocks
+                        .into_iter()
+                        .filter(|b| remaining.contains(&b.hash))
+                        .collect();
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    self.pull_and_register_chunk(&request_id, &state, chunk, &mut filled_index)
+                        .await?;
+                    for h in &state.expected_hashes[filled_index - 1..filled_index] {
+                        let _ = h;
+                    }
+                    // Recompute remaining from registered_g2.
+                    let registered = state.registered_g2.lock();
+                    remaining = expected_set.clone();
+                    for b in registered.iter() {
+                        remaining.remove(&b.sequence_hash());
+                    }
+                    if remaining.is_empty() {
+                        break;
+                    }
+                }
+                AvailabilityDelta::Drained => break,
+            }
+        }
+
+        if !remaining.is_empty() {
             anyhow::bail!(
-                "BlockSetResponse ready block count {} != expected {} (D advertised \
-                 {} pending hashes)",
-                total_blocks,
-                state.expected_hashes.len(),
-                response.pending_hashes.len()
+                "availability drained with {} hashes still missing for {}",
+                remaining.len(),
+                request_id
             );
         }
 
-        // 4. Allocate P-side G2 destinations and pull.
-        let mutables = self.inner.allocate_g2_blocks(total_blocks)?;
-        let dst_block_ids: Vec<BlockId> = mutables.iter().map(|m| m.block_id()).collect();
-        *state.pulled_mutables.lock() = Some(mutables);
+        *state.status.lock() = PrefillStatus::Registered;
+        state.pulls_complete.store(true, Ordering::Release);
 
-        self.transport
-            .pull_remote(
-                state.peer_instance_id,
-                response.ready.clone(),
-                dst_block_ids.clone(),
-            )
-            .await?;
+        // 4. If USAA already happened, kick onboard now.
+        let g1 = state.pending_g1.lock().take();
+        if let Some(g1_ids) = g1 {
+            self.kick_onboard(&request_id, &state, g1_ids).await?;
+        }
 
-        // 5. Register pulled blocks.
+        Ok(())
+    }
+
+    /// Pull a chunk of available blocks into P's G2,
+    /// register them, and append to `state.registered_g2`.
+    /// Maintains positional order matching `state.expected_hashes`
+    /// via the running `filled_index` cursor.
+    async fn pull_and_register_chunk(
+        self: &Arc<Self>,
+        request_id: &str,
+        state: &Arc<RequestState>,
+        chunk: Vec<CommittedBlock>,
+        filled_index: &mut usize,
+    ) -> Result<()> {
+        // The chunk's hashes may arrive in any order. Reorder
+        // the chunk to match `expected_hashes`'s positional
+        // order so the token-block sequence is correct on
+        // `MutableBlock::complete`.
+        let positions: std::collections::HashMap<SequenceHash, usize> = state
+            .expected_hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (*h, i))
+            .collect();
+        let mut indexed: Vec<(usize, CommittedBlock)> = chunk
+            .into_iter()
+            .map(|b| {
+                let idx = *positions.get(&b.hash).expect(
+                    "chunk hash not in expected_hashes — \
+                     filtered out before calling pull_and_register_chunk",
+                );
+                (idx, b)
+            })
+            .collect();
+        indexed.sort_by_key(|(idx, _)| *idx);
+
+        let hashes: Vec<SequenceHash> = indexed.iter().map(|(_, b)| b.hash).collect();
+        let chunk_size = hashes.len();
+        let dst = self.inner.allocate_g2_blocks(chunk_size)?;
+
+        let session = state
+            .session
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("pull: session missing for {}", request_id))?;
+        let filled = session.pull(hashes.clone(), dst).await?;
+
+        // Register pulled blocks.
+        let token_range_start = indexed.first().map(|(i, _)| *i).unwrap_or(0);
+        let token_range_end = indexed.last().map(|(i, _)| *i + 1).unwrap_or(0);
+        // For positional correctness we require the chunk to
+        // be a contiguous range of expected positions. If the
+        // peer sends out-of-order chunks, error.
+        for (i, (idx, _)) in indexed.iter().enumerate() {
+            if *idx != token_range_start + i {
+                anyhow::bail!(
+                    "non-contiguous chunk: expected idx {}, got {} (chunk: {:?})",
+                    token_range_start + i,
+                    idx,
+                    indexed.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+                );
+            }
+        }
         let token_blocks = self
             .inner
-            .token_blocks_for_range(&request_id, 0..total_blocks)?;
-
-        let mutables = state
-            .pulled_mutables
-            .lock()
-            .take()
-            .ok_or_else(|| anyhow!("pulled_mutables disappeared mid-register"))?;
-        let mut completes: Vec<CompleteBlock<G2>> = Vec::with_capacity(total_blocks);
-        for (mutable, token_block) in mutables.into_iter().zip(token_blocks.iter()) {
+            .token_blocks_for_range(request_id, token_range_start..token_range_end)?;
+        let mut completes: Vec<CompleteBlock<G2>> = Vec::with_capacity(chunk_size);
+        for (mutable, token_block) in filled.into_iter().zip(token_blocks.iter()) {
             completes.push(
                 mutable
                     .complete(token_block)
@@ -354,15 +396,8 @@ impl PrefillCoordinatorImpl {
             );
         }
         let registered = self.inner.register_g2_blocks(completes)?;
-        *state.registered_g2.lock() = registered;
-        *state.status.lock() = PrefillStatus::Registered;
-
-        // 6. If USAA already happened, kick onboard now.
-        let g1 = state.pending_g1.lock().take();
-        if let Some(g1_ids) = g1 {
-            self.kick_onboard(&request_id, &state, g1_ids).await?;
-        }
-
+        state.registered_g2.lock().extend(registered);
+        *filled_index += chunk_size;
         Ok(())
     }
 
@@ -372,6 +407,12 @@ impl PrefillCoordinatorImpl {
         state: &Arc<RequestState>,
         g1_dst_block_ids: Vec<BlockId>,
     ) -> Result<()> {
+        if state
+            .onboarding_scheduled
+            .swap(true, Ordering::AcqRel)
+        {
+            return Ok(()); // already scheduled
+        }
         *state.status.lock() = PrefillStatus::OnboardingScheduled;
 
         let g2_src_block_ids: Vec<BlockId> = state
@@ -401,36 +442,6 @@ impl PrefillCoordinatorImpl {
 
         Ok(())
     }
-
-    async fn handle_pull_complete(
-        self: &Arc<Self>,
-        request_id: &str,
-        complete: PullComplete,
-    ) {
-        let Some(state) = self.state_for(request_id) else {
-            return;
-        };
-        let session = match state.session.lock().clone() {
-            Some(s) => s,
-            None => return,
-        };
-
-        let pull_id = complete.pull_id;
-        if let Err(err) = session.ack_pull_from_prefill(PullAck { pull_id }).await {
-            tracing::error!(request_id, error = %err, "ack_pull_from_prefill failed");
-            return;
-        }
-
-        // Drop output pins — D has confirmed it's done with them.
-        state.output_pins.lock().clear();
-        state.pull_complete_seen.store(true, Ordering::Release);
-
-        if state.request_finished_seen.load(Ordering::Acquire) {
-            *state.status.lock() = PrefillStatus::Released;
-            self.states.remove(request_id);
-            session.close(Some("released".to_string()));
-        }
-    }
 }
 
 impl PrefillCoordinator for PrefillCoordinatorImpl {
@@ -448,7 +459,6 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         let state = Arc::new(RequestState::new(
             num_external_tokens,
             params.sequence_hashes.clone(),
-            params.initiator_instance_id,
         ));
         self.states
             .insert(request_id.to_string(), Arc::clone(&state));
@@ -493,9 +503,9 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         }
 
         let g1_ids = block_ids.to_vec();
-        let already_registered = matches!(*state.status.lock(), PrefillStatus::Registered);
+        let pulls_complete = state.pulls_complete.load(Ordering::Acquire);
 
-        if already_registered {
+        if pulls_complete {
             // Setup task already finished pull+register; spawn
             // the G2→G1 onboard so this call returns promptly.
             let coord = self
@@ -507,7 +517,7 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
                     tracing::error!(
                         request_id = request_id_owned,
                         error = %err,
-                        "prefill onboard failed (error path is Phase A deferred work)"
+                        "prefill onboard failed"
                     );
                 }
             });
@@ -526,7 +536,7 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
     ) -> Result<()> {
         // Production wiring of `Pipeline::add_register_observer`
         // is Phase B. For A.4/A.5 the test drives output capture
-        // via `simulate_offload_complete`. No-op for now.
+        // via `commit_output_blocks` directly. No-op for now.
         Ok(())
     }
 
@@ -536,23 +546,20 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         };
         state.request_finished_seen.store(true, Ordering::Release);
 
-        // If `PullComplete` already arrived, do final cleanup
-        // now (the PullComplete handler skipped removal because
-        // request_finished_seen wasn't true at the time).
-        if state.pull_complete_seen.load(Ordering::Acquire) {
-            let session = state.session.lock().clone();
-            *state.status.lock() = PrefillStatus::Released;
-            self.states.remove(request_id);
-            if let Some(session) = session {
-                session.close(Some("released".to_string()));
-            }
-            return;
+        // Finish our own commit/availability streams and close.
+        if let Some(session) = state.session.lock().clone() {
+            let _ = session.finish_commits();
+            let _ = session.finish_availability();
+            session.close(Some("request_finished".to_string()));
         }
 
         let mut status = state.status.lock();
-        if matches!(*status, PrefillStatus::Released) {
-            return;
-        }
-        *status = PrefillStatus::SlotDone;
+        *status = PrefillStatus::Released;
+        drop(status);
+        self.states.remove(request_id);
+
+        // Suppress unused warning on the unused field — it's
+        // checked in `on_usaa` via `pulls_complete` already.
+        let _ = AtomicUsize::new(0);
     }
 }

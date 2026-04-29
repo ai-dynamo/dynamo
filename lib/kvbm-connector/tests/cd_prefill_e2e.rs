@@ -1,24 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Prefill-side end-to-end test for the conditional-disagg wrapper.
+//! Prefill-side end-to-end test for the CD wrapper, against the new
+//! symmetric `Session` API (MockSession + MockSessionFactory).
 //!
-//! Mocks for the inner leader, the block transport, the worker hook, and
-//! the session attacher. No `KvbmRuntime`, no `nixl_agent`, no real RDMA,
-//! no real velo. The wrapper drives `PrefillCoordinatorImpl` through its
-//! `ConnectorLeaderApi` surface against scripted collaborators.
-//!
-//! Sequence layout (block_size = 16, total = 4 blocks):
-//!
-//! ```text
-//! block index   :  0   1   2   3
-//! [0, N)        : [r   r   r   r]    (everything pulled from D)
-//! ```
-//!
-//! GNMT-1 always returns `(Some(N * block_size), true)` for CD-bound
-//! requests; non-CD requests fall through to the inner.
-//!
-//! See `/home/ryan/.claude/plans/cd-usaa-pipeline.md` §"Test strategy".
+//! Mocks: `MockInnerLeaderShim`, `MockCdBlockTransport` (for the
+//! G2→G1 onboard only), `MockCdWorkerHook`, `MockSessionFactory`.
+//! No velo, no real RDMA.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,17 +18,15 @@ use kvbm_connector::connector::leader::disagg::prefill_coordinator::{
     PrefillCoordinatorImpl, PrefillStatus,
 };
 use kvbm_connector::connector::leader::disagg::testing::{
-    MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim, MockPrefillSessionAttacher,
-    MockSlot, TEST_BLOCK_SIZE, wait_until,
+    MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
+    wait_until,
 };
-use kvbm_connector::connector::leader::disagg::{
-    ConnectorLeaderApi, PrefillDisaggLeader, SessionEvent,
-};
+use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisaggLeader};
 use kvbm_disagg_protocol::{
     DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
 };
-use kvbm_engine::disagg::{
-    BlockSetResponse, HashSelection, PullComplete, RemoteBlockRef, RemoteBlockSet,
+use kvbm_engine::disagg::session::{
+    AvailabilityDelta, CommitDelta, CommittedBlock, MockSession, MockSessionFactory, Session,
 };
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
@@ -77,8 +63,6 @@ fn synthetic_decode_endpoint() -> SessionEndpoint {
     }
 }
 
-/// Build a `TransferParams` carrying a remote-prefill marker
-/// for `expected_hashes`.
 fn cd_transfer_params(
     session_id: SessionId,
     initiator_instance_id: kvbm_connector::InstanceId,
@@ -99,39 +83,22 @@ struct TestHarness {
     inner: Arc<MockInnerLeaderShim>,
     transport: Arc<MockCdBlockTransport>,
     workers: Arc<MockCdWorkerHook>,
-    attacher: Arc<MockPrefillSessionAttacher>,
-    /// Token-block hashes for the full sequence (length TOTAL_BLOCKS).
+    factory: Arc<MockSessionFactory>,
     all_hashes: Vec<kvbm_logical::SequenceHash>,
-    /// Synthetic G1 block_ids vLLM would give us.
     g1_block_ids: Vec<usize>,
-    /// Synthetic G2 source block_ids D would advertise in
-    /// `BlockSetResponse.ready`.
     decode_g2_block_ids: Vec<usize>,
-    /// Pre-built G2 source manager for synthesizing output blocks
-    /// in `simulate_offload_complete`.
     output_blocks: Vec<ImmutableBlock<G2>>,
-    /// `params.initiator_instance_id` — what the coordinator will
-    /// pass as `remote_instance` on `pull_remote`. Captured so
-    /// tests can assert on it.
     decode_instance_id: kvbm_connector::InstanceId,
 }
 
-/// Build the harness with a CD-bound slot. If `with_transfer_params`
-/// is false, the slot has no transfer_params and the wrapper falls
-/// through to inner.
 fn build_harness(with_transfer_params: bool) -> TestHarness {
-    // Generous capacity: TOTAL_BLOCKS pulled-G2 + a few output blocks.
     let g2_manager = build_g2_manager(64);
 
-    // Real token sequence so coordinator's `MutableBlock::complete`
-    // resolves against valid hashes.
     let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
     let all_hashes = generate_sequence_hashes(&token_sequence);
     let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
     assert_eq!(all_hashes.len(), TOTAL_BLOCKS);
 
-    // Pre-build a few output blocks to feed simulate_offload_complete.
-    // Use a different start_token so hashes don't collide with input.
     let output_seq = create_token_sequence(2, BLOCK_SIZE, 9000);
     let output_token_blocks: Vec<_> = output_seq.blocks().to_vec();
     let output_mutables = g2_manager
@@ -165,16 +132,12 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
     let slot = MockSlot {
         block_size: BLOCK_SIZE,
         total_blocks: TOTAL_BLOCKS,
-        // Prefill side doesn't use computed/local-match split, but
-        // the struct requires the fields. Set to no-match.
         computed_blocks: 0,
         local_match_blocks: 0,
         all_hashes: all_hashes.clone(),
         token_blocks,
         local_match_g2: parking_lot::Mutex::new(Some(Vec::new())),
         assigned_block_ids: parking_lot::Mutex::new(None),
-        // Used only on non-CD passthrough. Exercise it with a
-        // distinguishable value.
         gnmt_result: (Some(7 * BLOCK_SIZE), false),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
         transfer_params,
@@ -183,21 +146,18 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
 
     let transport = MockCdBlockTransport::new();
     let workers = MockCdWorkerHook::new();
-    let attacher = MockPrefillSessionAttacher::new();
+    let factory = MockSessionFactory::new();
 
     let coordinator = PrefillCoordinatorImpl::new(
         inner.clone(),
         transport.clone(),
         workers.clone(),
-        attacher.clone(),
+        factory.clone(),
         tokio::runtime::Handle::current(),
     );
 
-    let wrapper = PrefillDisaggLeader::from_parts(
-        inner.clone(),
-        coordinator.clone(),
-        workers.clone(),
-    );
+    let wrapper =
+        PrefillDisaggLeader::from_parts(inner.clone(), coordinator.clone(), workers.clone());
 
     TestHarness {
         wrapper,
@@ -205,7 +165,7 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
         inner,
         transport,
         workers,
-        attacher,
+        factory,
         all_hashes,
         g1_block_ids,
         decode_g2_block_ids,
@@ -214,28 +174,51 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
     }
 }
 
-/// Build a scripted `BlockSetResponse` advertising D's local G2
-/// block_ids for every expected hash.
-fn scripted_block_set_response(
-    request_id: &str,
+/// Build a `Vec<CommittedBlock>` carrying decode's local-match
+/// hashes mapped to scripted peer block_ids.
+fn committed_blocks(
     decode_g2_block_ids: &[usize],
     expected_hashes: &[kvbm_logical::SequenceHash],
-) -> BlockSetResponse {
-    BlockSetResponse {
-        request_id: request_id.to_string(),
-        ready: vec![RemoteBlockSet {
-            source_layout: kvbm_common::LogicalLayoutHandle::G2,
-            blocks: expected_hashes
-                .iter()
-                .zip(decode_g2_block_ids.iter())
-                .map(|(hash, block_id)| RemoteBlockRef {
-                    block_id: *block_id,
-                    sequence_hash: *hash,
-                })
-                .collect(),
-        }],
-        pending_hashes: Vec::new(),
-    }
+) -> Vec<CommittedBlock> {
+    expected_hashes
+        .iter()
+        .zip(decode_g2_block_ids.iter())
+        .map(|(hash, id)| CommittedBlock {
+            hash: *hash,
+            peer_block_id: *id,
+        })
+        .collect()
+}
+
+/// Drive the standard prefill setup: wait for attach, inject
+/// commits + availability, resolve pull. Returns the
+/// MockSession.
+async fn drive_setup(h: &TestHarness) -> Arc<MockSession> {
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    // Verify attach passed peer_instance_id correctly.
+    let calls = h.factory.attach_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, h.decode_instance_id);
+
+    // Inject the peer's commits, then the available blocks.
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(
+        &h.decode_g2_block_ids,
+        &h.all_hashes,
+    ));
+    session.inject_peer_drained();
+
+    // Coordinator calls session.pull(...) once it's drained the
+    // commit + availability streams. Resolve it.
+    session.wait_pull_count(1).await;
+    let pull = session.pull_calls()[0].clone();
+    assert_eq!(pull.0.len(), TOTAL_BLOCKS);
+    session.resolve_pull(0, Ok(()));
+
+    session
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -243,104 +226,59 @@ async fn cd_prefill_happy_path() -> Result<()> {
     let h = build_harness(true);
 
     h.wrapper.create_slot(make_request())?;
-
-    // 1. GNMT — wrapper detects CD-bound transfer_params, calls
-    //    ensure_started, returns (Some(N), true).
     let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
     assert_eq!(count, Some(NUM_EXTERNAL));
     assert!(async_flag);
     assert_eq!(h.coordinator.active_count(), 1);
 
-    // Coordinator spawned attach asynchronously; wait for it to land.
-    wait_until(|| h.attacher.last().is_some()).await;
-    let session = h.attacher.last().expect("session attached");
-    assert_eq!(h.attacher.attach_calls().len(), 1);
+    let session = drive_setup(&h).await;
 
-    // 2. Coordinator issues `request_block_sets` against the
-    //    session. The mock waits for a scripted response, so the
-    //    test can deliver the response any time.
-    wait_until(|| !session.requested_block_sets().is_empty()).await;
-    let requests = session.requested_block_sets();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].hashes, HashSelection::All);
-    session.enqueue_block_set_response(scripted_block_set_response(
-        "req-1",
-        &h.decode_g2_block_ids,
-        &h.all_hashes,
-    ));
-
-    // 3. Pull D→P fires with peer_instance_id sourced from
-    //    transfer_params.initiator_instance_id (NOT from a
-    //    SessionEvent::Attached — that's a decode-side event,
-    //    not prefill-side).
-    h.transport.wait_pull_count(1).await;
-    let pull = h.transport.pull_calls()[0].clone();
-    assert_eq!(pull.remote_instance, h.decode_instance_id);
-    assert_eq!(pull.local_dst_g2_block_ids.len(), TOTAL_BLOCKS);
-    h.transport.resolve_pull(0, Ok(()));
-
-    // 5. After register, status flips to Registered. Wait for it.
+    // Wait for register-then-Registered.
     wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
 
-    // 6. USAA arrives now (post-register). Wrapper calls inner USAA
-    //    first, then on_usaa hands deltas to the coordinator. Since
-    //    state is Registered, on_usaa spawns `kick_onboard`.
+    // USAA arrives (post-register). Wrapper calls inner USAA, then
+    // coordinator.on_usaa kicks the G2→G1 onboard via transport.
     h.wrapper
         .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
 
-    // Inner USAA passthrough recorded.
     let slot = h.inner.slot("req-1").unwrap();
     {
         let calls = slot.usaa_passthrough_calls.lock();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, h.g1_block_ids);
-        assert_eq!(calls[0].1, NUM_EXTERNAL);
     }
 
-    // 7. G2→G1 onboard fires. Resolve OK.
+    // G2→G1 onboard fires.
     h.transport.wait_onboard_count(1).await;
     let onboard = h.transport.onboard_calls()[0].clone();
     assert_eq!(onboard.dst_g1_block_ids, h.g1_block_ids);
     assert_eq!(onboard.src_g2_block_ids.len(), TOTAL_BLOCKS);
     h.transport.resolve_onboard(0, Ok(()));
 
-    // 8. mark_onboarding_complete fires.
     wait_until(|| h.workers.completed_contains("req-1")).await;
     wait_until(|| {
         h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete)
     })
     .await;
 
-    // 9. Forward-pass-time: simulate a single chunk of G2 outputs
-    //    landing via the offload pipeline observer.
+    // Forward-pass output: commit + make_available via the
+    // production-shaped helper.
     h.coordinator
-        .simulate_offload_complete("req-1", h.output_blocks.clone())?;
+        .commit_output_blocks("req-1", h.output_blocks.clone())?;
 
-    wait_until(|| !session.published_output_sets().is_empty()).await;
-    let published = session.published_output_sets();
-    assert_eq!(published.len(), 1);
-    assert_eq!(published[0].len(), 1);
-    assert_eq!(published[0][0].blocks.len(), 2);
+    // The MockSession records commit + make_available calls.
+    wait_until(|| !session.commit_calls().is_empty()).await;
+    let commits = session.commit_calls();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].len(), 2);
+    let avails = session.make_available_calls();
+    assert_eq!(avails.len(), 1);
+    assert_eq!(avails[0].len(), 2);
 
-    // 10. Slot is finished. Coordinator marks SlotDone but session
-    //     stays alive holding output pins.
-    let _status = h.wrapper.request_finished("req-1");
-    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::SlotDone)).await;
-
-    // 11. D's PullComplete arrives. Coordinator sends PullAck and
-    //     drops the request state.
-    let pull_id = 42_u64;
-    session
-        .push_event(SessionEvent::PullComplete(PullComplete {
-            pull_id,
-            hashes: h.all_hashes.clone(),
-        }))
-        .expect("push pull complete");
-
-    wait_until(|| !session.pull_acks().is_empty()).await;
-    assert_eq!(session.pull_acks()[0].pull_id, pull_id);
-
+    // request_finished: coordinator finishes streams + closes session.
+    let _ = h.wrapper.request_finished("req-1");
     wait_until(|| h.coordinator.active_count() == 0).await;
+    assert!(session.closed_reason().is_some());
 
     Ok(())
 }
@@ -350,23 +288,23 @@ async fn cd_prefill_usaa_before_pull_completes() -> Result<()> {
     let h = build_harness(true);
 
     h.wrapper.create_slot(make_request())?;
-
     let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
     assert_eq!(count, Some(NUM_EXTERNAL));
     assert!(async_flag);
 
-    wait_until(|| h.attacher.last().is_some()).await;
-    let session = h.attacher.last().expect("session attached");
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
 
-    wait_until(|| !session.requested_block_sets().is_empty()).await;
-    session.enqueue_block_set_response(scripted_block_set_response(
-        "req-1",
+    // Inject commits + availability — coordinator will call
+    // session.pull() but we DON'T resolve it yet.
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(
         &h.decode_g2_block_ids,
         &h.all_hashes,
     ));
 
-    // Wait for pull to be enqueued — but DO NOT resolve it yet.
-    h.transport.wait_pull_count(1).await;
+    session.wait_pull_count(1).await;
     assert!(matches!(
         h.coordinator.status_for("req-1"),
         Some(PrefillStatus::Pulling)
@@ -375,18 +313,16 @@ async fn cd_prefill_usaa_before_pull_completes() -> Result<()> {
     // USAA arrives early. Coordinator should stash G1 ids.
     h.wrapper
         .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
-    // No onboard call yet — pull hasn't resolved.
     assert_eq!(h.transport.onboard_calls().len(), 0);
 
-    // Now resolve the pull. Setup task picks up stashed G1 and kicks
-    // onboard.
-    h.transport.resolve_pull(0, Ok(()));
+    // Resolve the pull. Setup task picks up stashed G1 + kicks onboard.
+    session.resolve_pull(0, Ok(()));
 
     h.transport.wait_onboard_count(1).await;
     let onboard = h.transport.onboard_calls()[0].clone();
     assert_eq!(onboard.dst_g1_block_ids, h.g1_block_ids);
-
     h.transport.resolve_onboard(0, Ok(()));
+
     wait_until(|| h.workers.completed_contains("req-1")).await;
     wait_until(|| {
         h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete)
@@ -403,17 +339,8 @@ async fn cd_prefill_multi_chunk_publish() -> Result<()> {
     h.wrapper.create_slot(make_request())?;
     let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
 
-    wait_until(|| h.attacher.last().is_some()).await;
-    let session = h.attacher.last().expect("session attached");
-    wait_until(|| !session.requested_block_sets().is_empty()).await;
-    session.enqueue_block_set_response(scripted_block_set_response(
-        "req-1",
-        &h.decode_g2_block_ids,
-        &h.all_hashes,
-    ));
+    let session = drive_setup(&h).await;
 
-    h.transport.wait_pull_count(1).await;
-    h.transport.resolve_pull(0, Ok(()));
     wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
 
     h.wrapper
@@ -422,32 +349,21 @@ async fn cd_prefill_multi_chunk_publish() -> Result<()> {
     h.transport.resolve_onboard(0, Ok(()));
     wait_until(|| h.workers.completed_contains("req-1")).await;
 
-    // First chunk: 1 block.
+    // Two output chunks: each commit_output_blocks call commits +
+    // make_available.
     h.coordinator
-        .simulate_offload_complete("req-1", vec![h.output_blocks[0].clone()])?;
-    // Second chunk: 1 block.
+        .commit_output_blocks("req-1", vec![h.output_blocks[0].clone()])?;
     h.coordinator
-        .simulate_offload_complete("req-1", vec![h.output_blocks[1].clone()])?;
+        .commit_output_blocks("req-1", vec![h.output_blocks[1].clone()])?;
 
-    wait_until(|| session.published_output_sets().len() == 2).await;
-    let published = session.published_output_sets();
-    assert_eq!(published.len(), 2);
-    assert_eq!(published[0][0].blocks.len(), 1);
-    assert_eq!(published[1][0].blocks.len(), 1);
-    // Different hashes per chunk.
-    assert_ne!(published[0][0].blocks[0].sequence_hash, published[1][0].blocks[0].sequence_hash);
+    wait_until(|| session.commit_calls().len() == 2).await;
+    let commits = session.commit_calls();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0].len(), 1);
+    assert_eq!(commits[1].len(), 1);
+    assert_ne!(commits[0][0], commits[1][0]);
 
-    // Single PullComplete releases both chunks' pins.
     let _ = h.wrapper.request_finished("req-1");
-    session
-        .push_event(SessionEvent::PullComplete(PullComplete {
-            pull_id: 7,
-            hashes: vec![],
-        }))
-        .expect("push pull complete");
-
-    wait_until(|| !session.pull_acks().is_empty()).await;
-    assert_eq!(session.pull_acks().len(), 1);
     wait_until(|| h.coordinator.active_count() == 0).await;
 
     Ok(())
@@ -459,21 +375,14 @@ async fn cd_prefill_non_cd_request_passes_through() -> Result<()> {
 
     h.wrapper.create_slot(make_request())?;
 
-    // GNMT: no transfer_params on slot → wrapper falls through
-    // to inner.GNMT, which our mock returns as (Some(7*16), false).
     let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
     assert_eq!(count, Some(7 * BLOCK_SIZE));
     assert!(!async_flag);
 
-    // No coordinator state was created for this request.
     assert_eq!(h.coordinator.active_count(), 0);
     assert_eq!(h.coordinator.status_for("req-1"), None);
+    assert!(h.factory.last_attached().is_none());
 
-    // No session attach happened.
-    assert!(h.attacher.last().is_none());
-
-    // USAA passthrough: inner gets called, coordinator's on_usaa
-    // is a no-op for non-CD requests.
     h.wrapper
         .update_state_after_alloc("req-1", h.g1_block_ids.clone(), 0)?;
     let slot = h.inner.slot("req-1").unwrap();
@@ -483,22 +392,19 @@ async fn cd_prefill_non_cd_request_passes_through() -> Result<()> {
         assert_eq!(calls[0].1, 0);
     }
 
-    // request_finished: passes through; coordinator on_request_finished
-    // is a no-op for non-CD requests.
     let _ = h.wrapper.request_finished("req-1");
     assert_eq!(h.coordinator.active_count(), 0);
 
     Ok(())
 }
 
-// Suppress unused-warnings for fields not exercised in every test.
 #[allow(dead_code)]
 fn _ensure_used(h: &TestHarness) {
     let _ = (
         &h.inner,
         &h.transport,
         &h.workers,
-        &h.attacher,
+        &h.factory,
         &h.all_hashes,
         &h.g1_block_ids,
         &h.decode_g2_block_ids,

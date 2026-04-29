@@ -42,7 +42,7 @@ use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{BlockId, G2, SequenceHash};
+use crate::{BlockId, G2, InstanceId, SequenceHash};
 
 use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock,
@@ -76,6 +76,10 @@ impl<T: Send + 'static> futures::Stream for MpscStream<T> {
 enum StreamState<T: Clone> {
     /// No subscriber yet.  Buffer items here.
     Buffering(Vec<T>),
+    /// No subscriber yet, terminator already buffered. No more pushes accepted;
+    /// subscribe drains the buffer (containing the terminator) into the live
+    /// channel and transitions to Terminated.
+    BufferingClosed(Vec<T>),
     /// Subscriber attached.  Forward directly.
     Live(mpsc::UnboundedSender<T>),
     /// Terminal item already emitted.  Subsequent injects are no-ops.
@@ -90,6 +94,7 @@ impl<T: Clone> StreamState<T> {
     fn push(&mut self, item: T) {
         match self {
             Self::Buffering(buf) => buf.push(item),
+            Self::BufferingClosed(_) => {}
             Self::Live(tx) => {
                 let _ = tx.send(item);
             }
@@ -98,11 +103,20 @@ impl<T: Clone> StreamState<T> {
     }
 
     fn terminate(&mut self) {
-        *self = Self::Terminated;
+        match self {
+            Self::Buffering(buf) => {
+                let buf = std::mem::take(buf);
+                *self = Self::BufferingClosed(buf);
+            }
+            Self::BufferingClosed(_) => {}
+            Self::Live(_) | Self::Terminated => {
+                *self = Self::Terminated;
+            }
+        }
     }
 
     fn is_terminated(&self) -> bool {
-        matches!(self, Self::Terminated)
+        matches!(self, Self::BufferingClosed(_) | Self::Terminated)
     }
 }
 
@@ -183,18 +197,38 @@ impl MockSessionInner {
 pub struct MockSession {
     id: SessionId,
     endpoint: Option<SessionEndpoint>,
+    /// Peer's velo `InstanceId`, set on attach (puller side)
+    /// or when `Frame::Attach` arrives (holder side). Stored
+    /// for parity with `VeloSession` even though the mock's
+    /// `pull` doesn't drive RDMA.
+    peer_instance_id: Mutex<Option<InstanceId>>,
     inner: Mutex<MockSessionInner>,
     pull_index: AtomicU64,
 }
 
 impl MockSession {
     fn new(id: SessionId, endpoint: Option<SessionEndpoint>) -> Arc<Self> {
+        Self::new_with_peer(id, endpoint, None)
+    }
+
+    fn new_with_peer(
+        id: SessionId,
+        endpoint: Option<SessionEndpoint>,
+        peer_instance_id: Option<InstanceId>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id,
             endpoint,
+            peer_instance_id: Mutex::new(peer_instance_id),
             inner: Mutex::new(MockSessionInner::new()),
             pull_index: AtomicU64::new(0),
         })
+    }
+
+    /// Test accessor for `peer_instance_id` (set on attach or
+    /// via `inject_peer_attached`).
+    pub fn peer_instance_id(&self) -> Option<InstanceId> {
+        *self.peer_instance_id.lock()
     }
 
     // ---- subscribe helpers ----
@@ -208,6 +242,12 @@ impl MockSession {
                     let _ = tx.send(item);
                 }
                 inner.commits_state = StreamState::Live(tx);
+            }
+            StreamState::BufferingClosed(buf) => {
+                for item in drain_commit_buffer(std::mem::take(buf)) {
+                    let _ = tx.send(item);
+                }
+                inner.commits_state = StreamState::Terminated;
             }
             StreamState::Live(_) => {
                 panic!("MockSession::commits called twice");
@@ -229,6 +269,12 @@ impl MockSession {
                 }
                 inner.availability_state = StreamState::Live(tx);
             }
+            StreamState::BufferingClosed(buf) => {
+                for item in drain_availability_buffer(std::mem::take(buf)) {
+                    let _ = tx.send(item);
+                }
+                inner.availability_state = StreamState::Terminated;
+            }
             StreamState::Live(_) => {
                 panic!("MockSession::availability called twice");
             }
@@ -246,6 +292,12 @@ impl MockSession {
                     let _ = tx.send(item);
                 }
                 inner.lifecycle_state = StreamState::Live(tx);
+            }
+            StreamState::BufferingClosed(buf) => {
+                for item in std::mem::take(buf) {
+                    let _ = tx.send(item);
+                }
+                inner.lifecycle_state = StreamState::Terminated;
             }
             StreamState::Live(_) => {
                 panic!("MockSession::lifecycle called twice");
@@ -554,6 +606,7 @@ impl Session for MockSession {
 
 struct AttachRecord {
     session_id: SessionId,
+    peer_instance_id: InstanceId,
     peer_endpoint: SessionEndpoint,
 }
 
@@ -578,12 +631,13 @@ impl MockSessionFactory {
         self.last_attached.lock().clone()
     }
 
-    /// All `(session_id, peer_endpoint)` pairs passed to `attach`, in order.
-    pub fn attach_calls(&self) -> Vec<(SessionId, SessionEndpoint)> {
+    /// All `(session_id, peer_instance_id, peer_endpoint)` triples passed to
+    /// `attach`, in order.
+    pub fn attach_calls(&self) -> Vec<(SessionId, InstanceId, SessionEndpoint)> {
         self.attach_records
             .lock()
             .iter()
-            .map(|r| (r.session_id, r.peer_endpoint.clone()))
+            .map(|r| (r.session_id, r.peer_instance_id, r.peer_endpoint.clone()))
             .collect()
     }
 }
@@ -615,12 +669,14 @@ impl SessionFactory for MockSessionFactory {
     fn attach(
         &self,
         session_id: SessionId,
+        peer_instance_id: InstanceId,
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>> {
-        let session = MockSession::new(session_id, None);
+        let session = MockSession::new_with_peer(session_id, None, Some(peer_instance_id));
         *self.last_attached.lock() = Some(Arc::clone(&session));
         self.attach_records.lock().push(AttachRecord {
             session_id,
+            peer_instance_id,
             peer_endpoint,
         });
         async move { Ok(session as Arc<dyn Session>) }.boxed()
@@ -879,7 +935,24 @@ mod tests {
     async fn factory_attach_endpoint_is_none() {
         let factory = MockSessionFactory::new();
         let id = uuid::Uuid::new_v4();
-        let session = factory.attach(id, mock_endpoint()).await.unwrap();
+        let peer_id: InstanceId = uuid::Uuid::new_v4().into();
+        let session = factory.attach(id, peer_id, mock_endpoint()).await.unwrap();
         assert!(session.endpoint().is_none(), "attach session should have None endpoint");
+    }
+
+    #[tokio::test]
+    async fn factory_attach_records_peer_instance_id() {
+        let factory = MockSessionFactory::new();
+        let id = uuid::Uuid::new_v4();
+        let peer_id: InstanceId = uuid::Uuid::new_v4().into();
+        let _ = factory
+            .attach(id, peer_id, mock_endpoint())
+            .await
+            .unwrap();
+        let calls = factory.attach_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, peer_id);
+        let last = factory.last_attached().unwrap();
+        assert_eq!(last.peer_instance_id(), Some(peer_id));
     }
 }
