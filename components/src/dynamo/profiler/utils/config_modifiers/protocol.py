@@ -592,10 +592,13 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to a single worker service."""
         service.replicas = replicas
-        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
+        # Set CLI args *before* resource setup so that _get_per_instance_gpus
+        # can read the caller-provided TP/PP values (not the template defaults).
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
             service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
+
+        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
     @classmethod
     def _apply_disagg_workers(

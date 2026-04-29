@@ -94,6 +94,58 @@ def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     assert decode_service["multinode"] == {"nodeCount": 2}
 
 
+def test_build_dgd_config_fallback_when_no_parallelism_flags() -> None:
+    """When no TP/PP flags are present, per-instance defaults to 1 GPU (no multinode)."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-30B-A3B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--data-parallel-size", "8"],
+        decode_replicas=1,
+        decode_gpus=8,
+        num_gpus_per_node=8,
+    )
+
+    decode_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    # No TP/PP flags => per-instance count is 1 (defaults), fits on one node
+    assert decode_service["resources"]["limits"]["gpu"] == "8"
+    assert decode_service.get("multinode") is None
+
+
+def test_build_dgd_config_shell_joined_tp_arg() -> None:
+    """Shell-joined args (e.g. '--tp 16' as a single string) are parsed correctly."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="meta-llama/Llama-3-70B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp 16"],
+        decode_replicas=1,
+        decode_gpus=16,
+        num_gpus_per_node=8,
+    )
+
+    decode_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    # Shell-joined "--tp 16" should be split and parsed; tp=16, 16/8 = 2 nodes
+    assert decode_service["resources"]["limits"]["gpu"] == "8"
+    assert decode_service["multinode"] == {"nodeCount": 2}
+
+
 def test_apply_dgd_overrides_strips_envelope() -> None:
     """Envelope fields are stripped; nested payload keys are deep-merged."""
     dgd_config = {

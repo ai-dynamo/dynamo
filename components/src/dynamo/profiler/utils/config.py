@@ -229,42 +229,54 @@ def _get_per_instance_gpus(worker_service: Service) -> int | None:
 
     Returns ``None`` when TP/PP cannot be determined from the service args.
     """
-    args: list[str] | None = None
+    raw_args: list[str] | None = None
     if (
         worker_service.extraPodSpec
         and worker_service.extraPodSpec.mainContainer
         and worker_service.extraPodSpec.mainContainer.args
     ):
-        args = worker_service.extraPodSpec.mainContainer.args
+        raw_args = worker_service.extraPodSpec.mainContainer.args
 
-    if not args:
+    if not raw_args:
         return None
 
-    tp = 1
-    pp = 1
+    # Normalize: protocol.py may emit shell-joined items (e.g. "--tp 16")
+    # so split each entry with shlex to produce a flat token list.
+    args: list[str] = []
+    for item in raw_args:
+        args.extend(shlex.split(item))
+
+    tp: int | None = None
+    pp: int | None = None
     for i, arg in enumerate(args):
         if arg in ("--tensor-parallel-size", "--tp") and i + 1 < len(args):
             try:
                 tp = int(args[i + 1])
             except ValueError:
-                pass
+                logger.error("Invalid value for %s: %r", arg, args[i + 1])
+                raise
         elif arg.startswith("--tensor-parallel-size=") or arg.startswith("--tp="):
             try:
                 tp = int(arg.split("=", 1)[1])
             except ValueError:
-                pass
+                logger.error("Invalid value in %r", arg)
+                raise
         elif arg in ("--pipeline-parallel-size", "--pp") and i + 1 < len(args):
             try:
                 pp = int(args[i + 1])
             except ValueError:
-                pass
+                logger.error("Invalid value for %s: %r", arg, args[i + 1])
+                raise
         elif arg.startswith("--pipeline-parallel-size=") or arg.startswith("--pp="):
             try:
                 pp = int(arg.split("=", 1)[1])
             except ValueError:
-                pass
+                logger.error("Invalid value in %r", arg)
+                raise
 
-    return tp * pp
+    # Default to 1 when a flag is absent — workers without explicit TP/PP
+    # use single-GPU instances (e.g. data-parallel-only deployments).
+    return (tp or 1) * (pp or 1)
 
 
 def set_multinode_config(
@@ -273,10 +285,10 @@ def set_multinode_config(
     """Set multinode configuration based on GPU count and GPUs per node.
 
     ``gpu_count`` may represent the *total* GPUs across all data-parallel
-    shards (e.g. dp=8 × 8 GPUs = 64), but multinode should only be set
+    shards (e.g. dp=8 x 8 GPUs = 64), but multinode should only be set
     when a *single engine instance* needs more GPUs than one node provides.
     We therefore derive the per-instance GPU count from the worker's
-    TP × PP CLI args when available and use that for the multinode decision.
+    TP x PP CLI args when available and use that for the multinode decision.
     """
     # Determine per-instance GPUs from CLI args when possible.
     per_instance = _get_per_instance_gpus(worker_service)
