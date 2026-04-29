@@ -197,7 +197,7 @@ runs:
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
-        HF_HOME: /runner/_work/_temp
+        HF_HOME: /models
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         # Run pytest with detailed output and JUnit XML
@@ -271,7 +271,7 @@ runs:
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-          -v "/models:${HF_HOME}/hub" \
+          -v "/models:${HF_HOME}" \
           ${{ inputs.image_tag }} \
           sh -c "umask 0022 && ${PYTEST_CMD}"
 
