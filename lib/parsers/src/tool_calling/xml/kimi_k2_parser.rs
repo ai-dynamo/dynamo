@@ -307,7 +307,7 @@ mod tests {
         KimiK2ParserConfig::default()
     }
 
-    #[test]
+    #[test] // CASE.20 — detection helper
     fn test_detect_tool_call_start() {
         let config = default_config();
         assert!(detect_tool_call_start_kimi_k2(
@@ -329,7 +329,7 @@ mod tests {
         assert!(!detect_tool_call_start_kimi_k2("toolcall", &config));
     }
 
-    #[test]
+    #[test] // CASE.20 — detection helper
     fn test_find_tool_call_end_position() {
         let config = default_config();
         let text = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>more text";
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(pos, None, "should return None when section_end is missing");
     }
 
-    #[test]
+    #[test] // CASE.1
     fn test_parse_simple_tool_call() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
-    #[test]
+    #[test] // CASE.1, CASE.7
     fn test_parse_multiple_args() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"San Francisco, CA","unit":"fahrenheit"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test]
+    #[test] // CASE.2
     fn test_parse_multiple_tool_calls() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(args1["timezone"], "EST");
     }
 
-    #[test]
+    #[test] // CASE.13
     fn test_parse_with_normal_text() {
         let config = default_config();
         let input = r#"I'll help you with that. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
@@ -401,7 +401,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.6
     fn test_parse_no_arg_call() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_time:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -414,7 +414,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test]
+    #[test] // CASE.3
     fn test_parse_no_tool_calls() {
         let config = default_config();
         let input = "This is just normal text without any tool calls.";
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test]
+    #[test] // CASE.21 — function-name conventions (`functions.X` vs bare `X`)
     fn test_parse_without_functions_prefix() {
         let config = default_config();
         // Some models may emit without the "functions." prefix
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    #[test] // CASE.1 (with declared `ToolDefinition` tools provided)
     fn test_parse_with_tool_validation() {
         let config = default_config();
         let tools = vec![ToolDefinition {
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    #[test] // CASE.5, CASE.16 (PR #8208)
     fn test_parse_malformed_no_section_end() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    #[test] // CASE.4, CASE.5
     fn test_parse_truncated_mid_argument_no_section_end() {
         let config = default_config();
         // Model hit max_tokens mid-argument — no call_end, no section_end.
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    #[test] // CASE.2, CASE.5
     fn test_parse_multiple_calls_no_section_end() {
         let config = default_config();
         // Two complete individual tool calls, but model stopped before section_end.
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test]
+    #[test] // CASE.2, CASE.4, CASE.5
     fn test_parse_complete_plus_truncated_no_section_end() {
         let config = default_config();
         // First call is complete, second is truncated mid-argument.
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    #[test] // CASE.22 — whitespace tolerance
     fn test_parse_with_whitespace() {
         let config = default_config();
         let input = "<|tool_calls_section_begin|>\n<|tool_call_begin|> functions.search:0 <|tool_call_argument_begin|> {\"query\":\"rust programming\"} <|tool_call_end|>\n<|tool_calls_section_end|>";
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(args["query"], "rust programming");
     }
 
-    #[test]
+    #[test] // CASE.7
     fn test_parse_complex_json_arguments() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{"items":[1,2,3],"config":{"nested":true}}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(args["config"]["nested"], true);
     }
 
-    #[test]
+    #[test] // CASE.2, CASE.7
     fn test_parse_deeply_nested_json_multiple_calls() {
         let config = default_config();
         // Multiple tool calls with deeply nested JSON - stress test for regex backtracking
@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.23 — detection helper, singular section-token variant
     fn test_detect_singular_section_start() {
         let config = default_config();
         // Singular variant: <|tool_call_section_begin|> (without 's')
@@ -591,7 +591,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[test] // CASE.23 — singular section-token variant
     fn test_parse_with_singular_section_tokens() {
         let config = default_config();
         // Use singular form: tool_call_section_begin/end (without 's')
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    #[test] // CASE.20, CASE.23 — detection helper, singular section-token variant
     fn test_find_end_position_singular_variant() {
         let config = default_config();
         // Singular variant end token
@@ -614,7 +614,7 @@ mod tests {
 
     // --- Tests inspired by vllm/sglang coverage gaps ---
 
-    #[test]
+    #[test] // CASE.4
     fn test_parse_invalid_json_falls_back_to_raw_string() {
         // vllm: test_extract_tool_calls_invalid_json
         // Invalid JSON in arguments should fall back to raw string, not panic
@@ -628,7 +628,7 @@ mod tests {
         assert_eq!(calls[0].function.arguments, "{invalid json here}");
     }
 
-    #[test]
+    #[test] // CASE.21 — function-name conventions (ID regex validation)
     fn test_parse_invalid_function_id_rejected_by_regex() {
         // vllm: test_extract_tool_calls_invalid_funcall
         // sglang: test_invalid_tool_call
@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "valid");
     }
 
-    #[test]
+    #[test] // CASE.7 — special characters in arg values
     fn test_parse_angle_brackets_in_json_arguments() {
         // vllm: angle_brackets_in_json
         // JSON values containing <tag> constructs should not confuse the parser,
@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(args["format"], "html");
     }
 
-    #[test]
+    #[test] // CASE.2 — parallel calls, zero-spacing edge case
     fn test_parse_three_concatenated_calls_no_spacing() {
         // vllm: concatenated_tool_calls_bug_fix, three_concatenated_tool_calls
         // Three tool calls concatenated with zero whitespace between them
@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    #[test] // CASE.7 — newlines in arg values
     fn test_parse_newlines_in_json_arguments() {
         // vllm: newlines_in_json
         // Multi-line formatted JSON arguments (model may emit pretty-printed JSON)
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(args["tags"], serde_json::json!(["admin", "active"]));
     }
 
-    #[test]
+    #[test] // CASE.24 — empty wrapper (start+end with no calls between)
     fn test_parse_empty_tool_section() {
         // vllm: test_empty_tool_section
         // Section begin immediately followed by section end, no tool calls inside
@@ -737,7 +737,7 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[rstest] // CASE.21 — function-name conventions (hyphens, double-underscores)
     #[case(
         r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.list-tasklists:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#,
         "list-tasklists",

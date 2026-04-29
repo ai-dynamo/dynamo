@@ -140,6 +140,12 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
+	// Snapshot restore plus GMS is temporarily disabled while the underlying
+	// GPU driver restore path is being fixed.
+	if err := v.validateCheckpointWithGPUMemoryService(); err != nil {
+		return nil, err
+	}
+
 	return warnings, nil
 }
 
@@ -406,6 +412,20 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 	}
 
 	return nil
+}
+
+func (v *SharedSpecValidator) validateCheckpointWithGPUMemoryService() error {
+	if v.spec.Checkpoint == nil || !v.spec.Checkpoint.Enabled {
+		return nil
+	}
+	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%s.checkpoint: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues; "+
+			"disable either checkpointing or gpuMemoryService for this service",
+		v.fieldPath)
 }
 
 // validateServiceAnnotations validates known annotations on the service-level spec.

@@ -33,6 +33,7 @@ inputs:
   enable_coverage:
     description: 'Enable coverage collection (true/false)'
     required: false
+    type: string
     default: 'false'
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
@@ -258,6 +259,7 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "HF_XET_HIGH_PERFORMANCE=1")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")

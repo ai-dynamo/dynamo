@@ -4,6 +4,7 @@
 import logging
 import re
 from typing import Tuple
+from uuid import uuid4
 
 import yaml
 
@@ -91,7 +92,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "trtllm-agg"
+        cfg.metadata.name = f"trtllm-agg-{uuid4().hex[:8]}"
 
         # disable planner
         if "Planner" in cfg.spec.services:

@@ -113,7 +113,7 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: GenerateChunk = {"token_ids": []}
+            out: GenerateChunk = {"token_ids": [], "index": 0}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 
@@ -124,6 +124,7 @@ class SglangLLMEngine(LLMEngine):
                     completion_tokens = meta_info.get("completion_tokens", 0)
                     yield {
                         "token_ids": [],
+                        "index": 0,
                         "finish_reason": "cancelled",
                         "completion_usage": {
                             "prompt_tokens": prompt_tokens,
@@ -151,6 +152,7 @@ class SglangLLMEngine(LLMEngine):
                 completion_tokens = meta_info.get("completion_tokens", 0)
                 yield {
                     "token_ids": output_ids,
+                    "index": 0,
                     "finish_reason": "cancelled",
                     "completion_usage": {
                         "prompt_tokens": prompt_tokens,

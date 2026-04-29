@@ -51,6 +51,14 @@ inputs:
     description: 'Additional Docker build args (newline-separated list of KEY=VALUE pairs)'
     required: false
     default: ''
+  build_target:
+    description: 'Docker build target stage (passed as --target); empty = build to last stage'
+    required: false
+    default: ''
+  tag_suffix:
+    description: 'Suffix appended to image tags, cache tags, artifact names, and log filenames (e.g. "test"). When set, the primary cache slot becomes "{framework}-cuda{N}-{arch}-{suffix}-cache" and the unsuffixed base-image cache is also read so shared layers are reused.'
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -91,9 +99,15 @@ runs:
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
+        # Compute an optional tag suffix so test-image artifacts don't collide with
+        # the normal-image artifacts when both run in the same job.
+        TAG_SUFFIX="${{ inputs.tag_suffix }}"
+        TAG_SUFFIX="${TAG_SUFFIX:+-${TAG_SUFFIX}}"   # "-test" when set, "" otherwise
+        echo "TAG_SUFFIX=${TAG_SUFFIX}" >> $GITHUB_ENV
+
         # Create build logs directory
         mkdir -p build-logs
-        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-${PLATFORM_SAFE}.log"
+        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}${TAG_SUFFIX}-${PLATFORM_SAFE}.log"
         echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
@@ -101,14 +115,27 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
-          if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            # Release branches also use release cache
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "
-          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
+          BASE_CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
+          if [ -n "${{ inputs.tag_suffix }}" ]; then
+            PRIMARY_CACHE_TAG="${BASE_CACHE_TAG%-cache}-${{ inputs.tag_suffix }}-cache"
+            # Read the suffixed (e.g. test-specific) cache first, then fall back to
+            # the base image cache so layers shared with the normal build are reused.
+            CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PRIMARY_CACHE_TAG} "
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${BASE_CACHE_TAG} "
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${BASE_CACHE_TAG} "
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PRIMARY_CACHE_TAG},mode=max "
+            fi
+          else
+            CACHE_TAG="$BASE_CACHE_TAG"
+            CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
+            if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+              # Release branches also use release cache
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "
+            elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
+            fi
           fi
         else
           CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
@@ -169,12 +196,17 @@ runs:
           fi
         fi
 
+        TARGET_ARG=""
+        if [ -n "${{ inputs.build_target }}" ]; then
+          TARGET_ARG="--target ${{ inputs.build_target }}"
+        fi
+
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $TARGET_ARG $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -250,7 +282,8 @@ runs:
 
         # Create job-specific metrics file
         mkdir -p build-metrics
-        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
+        TAG_SUFFIX="${{ env.TAG_SUFFIX }}"
+        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}${TAG_SUFFIX}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
         # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
@@ -293,11 +326,13 @@ runs:
         # Use the BUILD_LOG_FILE set during the build step
         BUILD_LOG="${{ env.BUILD_LOG_FILE }}"
 
+        TAG_SUFFIX="${{ env.TAG_SUFFIX }}"
+
         # Path to container metadata created in previous step
-        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}${TAG_SUFFIX}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         # Output single comprehensive JSON with all build stages
-        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}${TAG_SUFFIX}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         echo "🚀 Parsing BuildKit outputs and merging with container metrics..."
 
@@ -349,7 +384,7 @@ runs:
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
+        name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}${{ env.TAG_SUFFIX }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-metrics/build-${{ inputs.framework }}${{ env.TAG_SUFFIX }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
 
