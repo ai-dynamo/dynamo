@@ -33,7 +33,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -95,11 +94,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	// DGD.spec.pvcs has no v1beta1 equivalent -- users now declare PVC volumes
 	// directly on podTemplate. Stash as an annotation.
 	if len(src.Spec.PVCs) > 0 {
-		data, err := json.Marshal(src.Spec.PVCs)
-		if err != nil {
-			return fmt.Errorf("marshal pvcs: %w", err)
-		}
-		setAnnOnObj(&dst.ObjectMeta, annDGDPVCs, string(data))
+		setJSONAnnOnObj(&dst.ObjectMeta, annDGDPVCs, src.Spec.PVCs)
 	}
 	ctx := dgdConversionContext{
 		includeOriginSplits: !hubOrigin,
@@ -223,10 +218,7 @@ func preserveDGDSpoke(specSave *DynamoGraphDeploymentSpec, statusSave *DynamoGra
 		}
 	}
 	if !dgdAlphaStatusSaveIsZero(statusSave) {
-		data, err := json.Marshal(statusSave)
-		if err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, string(data))
-		}
+		setJSONAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, statusSave)
 	}
 }
 
@@ -241,42 +233,20 @@ func preservedDGDHubComponentsByName(preserved *v1beta1.DynamoGraphDeploymentSpe
 	return out
 }
 
-type preservedDGDHubSnapshot struct {
-	Spec   string                              `json:"spec"`
-	Status v1beta1.DynamoGraphDeploymentStatus `json:"status"`
-}
-
 func preserveDGDSpokeHub(dst *v1beta1.DynamoGraphDeployment) {
 	spec, err := marshalDGDHubSpec(&dst.Spec)
 	if err != nil {
 		return
 	}
-	data, err := json.Marshal(preservedDGDHubSnapshot{
-		Spec:   string(spec),
-		Status: dst.Status,
-	})
-	if err == nil {
-		setAnnOnObj(&dst.ObjectMeta, annDGDSpokeHub, string(data))
-	}
+	setHubSnapshotAnn(&dst.ObjectMeta, annDGDSpokeHub, spec, dst.Status)
 }
 
 func dgdSpokeHubUnmodified(src *v1beta1.DynamoGraphDeployment) bool {
-	raw, ok := getAnnFromObj(&src.ObjectMeta, annDGDSpokeHub)
-	if !ok || raw == "" {
-		return false
-	}
 	spec, err := marshalDGDHubSpec(&src.Spec)
 	if err != nil {
 		return false
 	}
-	current, err := json.Marshal(preservedDGDHubSnapshot{
-		Spec:   string(spec),
-		Status: src.Status,
-	})
-	if err != nil {
-		return false
-	}
-	return string(current) == raw
+	return hubSnapshotAnnMatches(&src.ObjectMeta, annDGDSpokeHub, spec, src.Status)
 }
 
 func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *DynamoGraphDeploymentStatus, preservedSpec *DynamoGraphDeploymentSpec, preservedStatus *DynamoGraphDeploymentStatus) {
@@ -382,11 +352,8 @@ func decodeDGDSpokePreserved(obj metav1.Object) (*DynamoGraphDeploymentSpec, *Dy
 			preservedSpokeSpec = &spec
 		}
 	}
-	if rawStatus, ok := getAnnFromObj(obj, annDGDSpokeStatus); ok && rawStatus != "" {
-		var status DynamoGraphDeploymentStatus
-		if err := json.Unmarshal([]byte(rawStatus), &status); err == nil {
-			preservedSpokeStatus = &status
-		}
+	if status, ok := getJSONAnnFromObj[DynamoGraphDeploymentStatus](obj, annDGDSpokeStatus); ok {
+		preservedSpokeStatus = &status
 	}
 	return preservedSpokeSpec, preservedSpokeStatus
 }
@@ -405,9 +372,8 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	_, hadSpokeHubSnapshot := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeHub)
 	spokeHubUnmodified := dgdSpokeHubUnmodified(src)
 
-	if v, ok := getAnnFromObj(&dst.ObjectMeta, annDGDPVCs); ok {
-		var pvcs []PVC
-		if err := json.Unmarshal([]byte(v), &pvcs); err == nil {
+	if _, ok := getAnnFromObj(&dst.ObjectMeta, annDGDPVCs); ok {
+		if pvcs, ok := getJSONAnnFromObj[[]PVC](&dst.ObjectMeta, annDGDPVCs); ok {
 			dst.Spec.PVCs = pvcs
 		}
 		delAnnFromObj(&dst.ObjectMeta, annDGDPVCs)
@@ -426,9 +392,8 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	if err := convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, preservedSpokeSpec, &hubSave, ctx); err != nil {
 		return err
 	}
-	if v, ok := getAnnFromObj(&dst.ObjectMeta, annDGDNilServices); ok {
-		var nilServices []string
-		if err := json.Unmarshal([]byte(v), &nilServices); err == nil {
+	if _, ok := getAnnFromObj(&dst.ObjectMeta, annDGDNilServices); ok {
+		if nilServices, ok := getJSONAnnFromObj[[]string](&dst.ObjectMeta, annDGDNilServices); ok {
 			if dst.Spec.Services == nil {
 				dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(nilServices))
 			}

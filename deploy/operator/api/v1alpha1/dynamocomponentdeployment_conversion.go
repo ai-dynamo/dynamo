@@ -21,7 +21,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -142,10 +141,7 @@ func preserveDCDSpoke(specSave *DynamoComponentDeploymentSpec, statusSave *Dynam
 		}
 	}
 	if !dcdAlphaStatusSaveIsZero(statusSave) {
-		data, err := json.Marshal(statusSave)
-		if err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDCDSpokeStatus, string(data))
-		}
+		setJSONAnnOnObj(&dst.ObjectMeta, annDCDSpokeStatus, statusSave)
 	}
 }
 
@@ -197,42 +193,20 @@ func dcdAlphaStatusSaveIsZero(save *DynamoComponentDeploymentStatus) bool {
 			save.Service == nil
 }
 
-type preservedDCDHubSnapshot struct {
-	Spec   string                                  `json:"spec"`
-	Status v1beta1.DynamoComponentDeploymentStatus `json:"status"`
-}
-
 func preserveDCDSpokeHub(dst *v1beta1.DynamoComponentDeployment) {
 	spec, err := marshalDCDHubSpec(&dst.Spec)
 	if err != nil {
 		return
 	}
-	data, err := json.Marshal(preservedDCDHubSnapshot{
-		Spec:   string(spec),
-		Status: dst.Status,
-	})
-	if err == nil {
-		setAnnOnObj(&dst.ObjectMeta, annDCDSpokeHub, string(data))
-	}
+	setHubSnapshotAnn(&dst.ObjectMeta, annDCDSpokeHub, spec, dst.Status)
 }
 
 func dcdSpokeHubUnmodified(src *v1beta1.DynamoComponentDeployment) bool {
-	raw, ok := src.ObjectMeta.Annotations[annDCDSpokeHub]
-	if !ok || raw == "" {
-		return false
-	}
 	spec, err := marshalDCDHubSpec(&src.Spec)
 	if err != nil {
 		return false
 	}
-	current, err := json.Marshal(preservedDCDHubSnapshot{
-		Spec:   string(spec),
-		Status: src.Status,
-	})
-	if err != nil {
-		return false
-	}
-	return string(current) == raw
+	return hubSnapshotAnnMatches(&src.ObjectMeta, annDCDSpokeHub, spec, src.Status)
 }
 
 // ConvertFrom converts from the hub (v1beta1) DynamoComponentDeployment into
@@ -252,11 +226,8 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			preservedSpokeSpec = &spec
 		}
 	}
-	if rawStatus, ok := getAnnFromObj(&dst.ObjectMeta, annDCDSpokeStatus); ok && rawStatus != "" {
-		var status DynamoComponentDeploymentStatus
-		if err := json.Unmarshal([]byte(rawStatus), &status); err == nil {
-			preservedSpokeStatus = &status
-		}
+	if status, ok := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDSpokeStatus); ok {
+		preservedSpokeStatus = &status
 	}
 	_, hadSpokeHubSnapshot := getAnnFromObj(&dst.ObjectMeta, annDCDSpokeHub)
 	spokeHubUnmodified := dcdSpokeHubUnmodified(src)

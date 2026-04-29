@@ -168,6 +168,30 @@ func (c *annCarrier) del(suffix string) {
 	}
 }
 
+func setJSONAnn(c *annCarrier, suffix string, value any) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	c.set(suffix, string(data))
+}
+
+func popJSONAnn[T any](c *annCarrier, suffix string) (T, bool) {
+	var out T
+	raw, ok := c.get(suffix)
+	if !ok {
+		return out, false
+	}
+	c.del(suffix)
+	if raw == "" {
+		return out, false
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return out, false
+	}
+	return out, true
+}
+
 // setAnnOnObj is a convenience for annotations that do not belong to a single
 // carrier (e.g. DGD spec-level PVCs).
 func setAnnOnObj(obj metav1.Object, key, value string) {
@@ -179,6 +203,15 @@ func setAnnOnObj(obj metav1.Object, key, value string) {
 	obj.SetAnnotations(anns)
 }
 
+func setJSONAnnOnObj(obj metav1.Object, key string, value any) bool {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	setAnnOnObj(obj, key, string(data))
+	return true
+}
+
 func getAnnFromObj(obj metav1.Object, key string) (string, bool) {
 	anns := obj.GetAnnotations()
 	if anns == nil {
@@ -186,6 +219,46 @@ func getAnnFromObj(obj metav1.Object, key string) (string, bool) {
 	}
 	v, ok := anns[key]
 	return v, ok
+}
+
+func getJSONAnnFromObj[T any](obj metav1.Object, key string) (T, bool) {
+	var out T
+	raw, ok := getAnnFromObj(obj, key)
+	if !ok || raw == "" {
+		return out, false
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return out, false
+	}
+	return out, true
+}
+
+func jsonAnnMatches(obj metav1.Object, key string, value any) bool {
+	current, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	raw, ok := getAnnFromObj(obj, key)
+	return ok && raw == string(current)
+}
+
+type preservedHubSnapshot[T any] struct {
+	Spec   string `json:"spec"`
+	Status T      `json:"status"`
+}
+
+func setHubSnapshotAnn[T any](obj metav1.Object, key string, spec []byte, status T) {
+	setJSONAnnOnObj(obj, key, preservedHubSnapshot[T]{
+		Spec:   string(spec),
+		Status: status,
+	})
+}
+
+func hubSnapshotAnnMatches[T any](obj metav1.Object, key string, spec []byte, status T) bool {
+	return jsonAnnMatches(obj, key, preservedHubSnapshot[T]{
+		Spec:   string(spec),
+		Status: status,
+	})
 }
 
 func delAnnFromObj(obj metav1.Object, key string) {
@@ -340,15 +413,11 @@ func convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoCompo
 func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
 	// Autoscaling -> annotation (deprecated, removed in v1beta1).
 	if src.Autoscaling != nil {
-		if data, err := json.Marshal(src.Autoscaling); err == nil {
-			c.set(suffixAutoscaling, string(data))
-		}
+		setJSONAnn(c, suffixAutoscaling, src.Autoscaling)
 	}
 	// Ingress -> annotation (removed in v1beta1).
 	if src.Ingress != nil {
-		if data, err := json.Marshal(src.Ingress); err == nil {
-			c.set(suffixIngress, string(data))
-		}
+		setJSONAnn(c, suffixIngress, src.Ingress)
 	}
 	// EnvFromSecret -> podTemplate.containers[main].envFrom; preserve the
 	// pointer string so ConvertFrom can distinguish it from native envFrom.
@@ -357,29 +426,19 @@ func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, 
 	}
 	// Per-service Annotations / Labels apply beyond podTemplate.metadata.
 	if len(src.Annotations) > 0 {
-		if data, err := json.Marshal(src.Annotations); err == nil {
-			c.set(suffixAnnotations, string(data))
-		}
+		setJSONAnn(c, suffixAnnotations, src.Annotations)
 	}
 	if len(src.Labels) > 0 {
-		if data, err := json.Marshal(src.Labels); err == nil {
-			c.set(suffixLabels, string(data))
-		}
+		setJSONAnn(c, suffixLabels, src.Labels)
 	}
 	if extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) {
-		if data, err := json.Marshal(src.ExtraPodMetadata); err == nil {
-			c.set(suffixPodMetadataOrig, string(data))
-		}
+		setJSONAnn(c, suffixPodMetadataOrig, src.ExtraPodMetadata)
 	}
 	if src.Resources != nil && !reflect.DeepEqual(src.Resources, resourcesFromNative(resourcesToNative(src.Resources))) {
-		if data, err := json.Marshal(src.Resources); err == nil {
-			c.set(suffixResourcesOrigin, string(data))
-		}
+		setJSONAnn(c, suffixResourcesOrigin, src.Resources)
 	}
 	if len(src.VolumeMounts) > 0 && !volumeMountsRoundTripThroughHub(src.VolumeMounts) {
-		if data, err := json.Marshal(src.VolumeMounts); err == nil {
-			c.set(suffixVolumeMountsOrig, string(data))
-		}
+		setJSONAnn(c, suffixVolumeMountsOrig, src.VolumeMounts)
 	}
 }
 
@@ -616,33 +675,17 @@ func convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoCompo
 		dst.DynamoNamespace = ptr.To(v)
 		ctx.carrier.del(suffixDynamoNamespace)
 	}
-	if v, ok := ctx.carrier.get(suffixAutoscaling); ok {
-		var as Autoscaling
-		if err := json.Unmarshal([]byte(v), &as); err == nil {
-			dst.Autoscaling = &as
-		}
-		ctx.carrier.del(suffixAutoscaling)
+	if as, ok := popJSONAnn[Autoscaling](ctx.carrier, suffixAutoscaling); ok {
+		dst.Autoscaling = &as
 	}
-	if v, ok := ctx.carrier.get(suffixIngress); ok {
-		var ing IngressSpec
-		if err := json.Unmarshal([]byte(v), &ing); err == nil {
-			dst.Ingress = &ing
-		}
-		ctx.carrier.del(suffixIngress)
+	if ing, ok := popJSONAnn[IngressSpec](ctx.carrier, suffixIngress); ok {
+		dst.Ingress = &ing
 	}
-	if v, ok := ctx.carrier.get(suffixAnnotations); ok {
-		var m map[string]string
-		if err := json.Unmarshal([]byte(v), &m); err == nil {
-			dst.Annotations = m
-		}
-		ctx.carrier.del(suffixAnnotations)
+	if m, ok := popJSONAnn[map[string]string](ctx.carrier, suffixAnnotations); ok {
+		dst.Annotations = m
 	}
-	if v, ok := ctx.carrier.get(suffixLabels); ok {
-		var m map[string]string
-		if err := json.Unmarshal([]byte(v), &m); err == nil {
-			dst.Labels = m
-		}
-		ctx.carrier.del(suffixLabels)
+	if m, ok := popJSONAnn[map[string]string](ctx.carrier, suffixLabels); ok {
+		dst.Labels = m
 	}
 	// sharedMemorySize -> SharedMemorySpec.
 	convertSharedMemoryFrom(src.SharedMemorySize, dst, ctx.carrier)
@@ -732,9 +775,7 @@ func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDe
 	if src.Disabled {
 		dst.SharedMemorySize = ptr.To(resource.MustParse("0"))
 		if !src.Size.IsZero() {
-			if data, err := json.Marshal(src); err == nil {
-				c.set(suffixSharedMemOrigin, string(data))
-			}
+			setJSONAnn(c, suffixSharedMemOrigin, src)
 		}
 		return nil
 	}
@@ -931,9 +972,7 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 				DeviceClassName: src.GPUMemoryService.DeviceClassName,
 			}
 		} else if !gmsIsZeroPayload(src.GPUMemoryService) {
-			if data, err := json.Marshal(src.GPUMemoryService); err == nil {
-				c.set(suffixGMSDisabled, string(data))
-			}
+			setJSONAnn(c, suffixGMSDisabled, src.GPUMemoryService)
 		} else {
 			// Enabled=false with an otherwise-empty payload is semantically
 			// indistinguishable from absence; still preserve the explicit
@@ -949,9 +988,7 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 				NumShadows: src.Failover.NumShadows,
 			}
 		} else if !failoverIsZeroPayload(src.Failover) {
-			if data, err := json.Marshal(src.Failover); err == nil {
-				c.set(suffixFailoverDisabled, string(data))
-			}
+			setJSONAnn(c, suffixFailoverDisabled, src.Failover)
 		} else {
 			c.set(suffixFailoverDisabled, `{}`)
 		}
@@ -961,9 +998,7 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 		if src.Checkpoint.Enabled {
 			ensureExp().Checkpoint = checkpointToV1beta1(src.Checkpoint)
 		} else if !checkpointIsZeroPayload(src.Checkpoint) {
-			if data, err := json.Marshal(src.Checkpoint); err == nil {
-				c.set(suffixCheckpointDisabled, string(data))
-			}
+			setJSONAnn(c, suffixCheckpointDisabled, src.Checkpoint)
 		} else {
 			c.set(suffixCheckpointDisabled, `{}`)
 		}
@@ -990,13 +1025,9 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 			DeviceClassName: src.Experimental.GPUMemoryService.DeviceClassName,
 		}
 		c.del(suffixGMSDisabled)
-	} else if v, ok := c.get(suffixGMSDisabled); ok {
-		var g GPUMemoryServiceSpec
-		if err := json.Unmarshal([]byte(v), &g); err == nil {
-			g.Enabled = false
-			dst.GPUMemoryService = &g
-		}
-		c.del(suffixGMSDisabled)
+	} else if g, ok := popJSONAnn[GPUMemoryServiceSpec](c, suffixGMSDisabled); ok {
+		g.Enabled = false
+		dst.GPUMemoryService = &g
 	}
 
 	if src.Experimental != nil && src.Experimental.Failover != nil {
@@ -1006,25 +1037,17 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 			NumShadows: src.Experimental.Failover.NumShadows,
 		}
 		c.del(suffixFailoverDisabled)
-	} else if v, ok := c.get(suffixFailoverDisabled); ok {
-		var f FailoverSpec
-		if err := json.Unmarshal([]byte(v), &f); err == nil {
-			f.Enabled = false
-			dst.Failover = &f
-		}
-		c.del(suffixFailoverDisabled)
+	} else if f, ok := popJSONAnn[FailoverSpec](c, suffixFailoverDisabled); ok {
+		f.Enabled = false
+		dst.Failover = &f
 	}
 
 	if src.Experimental != nil && src.Experimental.Checkpoint != nil {
 		dst.Checkpoint = checkpointFromV1beta1(src.Experimental.Checkpoint, true)
 		c.del(suffixCheckpointDisabled)
-	} else if v, ok := c.get(suffixCheckpointDisabled); ok {
-		var cp ServiceCheckpointConfig
-		if err := json.Unmarshal([]byte(v), &cp); err == nil {
-			cp.Enabled = false
-			dst.Checkpoint = &cp
-		}
-		c.del(suffixCheckpointDisabled)
+	} else if cp, ok := popJSONAnn[ServiceCheckpointConfig](c, suffixCheckpointDisabled); ok {
+		cp.Enabled = false
+		dst.Checkpoint = &cp
 	}
 }
 
@@ -1202,9 +1225,7 @@ func applyFrontendSidecarToPodTemplate(src *DynamoComponentDeploymentSharedSpec,
 		appendFrontendSidecar(podTpl, src.FrontendSidecar)
 		// Stash origin so ConvertFrom can reproduce the full spec on the
 		// v1alpha1 side without depending on the podTemplate sidecar.
-		if data, err := json.Marshal(src.FrontendSidecar); err == nil {
-			c.set(suffixFrontendSidecar, string(data))
-		}
+		setJSONAnn(c, suffixFrontendSidecar, src.FrontendSidecar)
 		dst.FrontendSidecar = ptr.To(defaultFrontendSidecarContainerName)
 		// Drop any stale v1beta1-first ref annotation; the origin annotation
 		// is authoritative in this direction.
@@ -1330,21 +1351,13 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 }
 
 func decomposeMissingPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	if v, ok := c.get(suffixPodMetadataOrig); ok {
-		var meta ExtraPodMetadata
-		if err := json.Unmarshal([]byte(v), &meta); err == nil {
-			dst.ExtraPodMetadata = &meta
-		}
-		c.del(suffixPodMetadataOrig)
+	if meta, ok := popJSONAnn[ExtraPodMetadata](c, suffixPodMetadataOrig); ok {
+		dst.ExtraPodMetadata = &meta
 	}
 	// Restore FrontendSidecar from origin annotation even if there is no
 	// podTemplate (uncommon but possible for manual edits).
-	if v, ok := c.get(suffixFrontendSidecar); ok {
-		var fs FrontendSidecarSpec
-		if err := json.Unmarshal([]byte(v), &fs); err == nil {
-			dst.FrontendSidecar = &fs
-		}
-		c.del(suffixFrontendSidecar)
+	if fs, ok := popJSONAnn[FrontendSidecarSpec](c, suffixFrontendSidecar); ok {
+		dst.FrontendSidecar = &fs
 	}
 	if src.FrontendSidecar != nil {
 		c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
