@@ -18,8 +18,8 @@ Release history in this document begins at v0.6.0.
 
 **Pre-Releases**
 
-- **DeepSeek-V4:** [v1.2.0-sglang-deepseek-v4-dev.1](#v120-sglang-deepseek-v4-dev1) — SGLang container for DeepSeek-V4-Flash and V4-Pro on Blackwell (B200), based on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview. SGLang container only; no vLLM or TRT-LLM containers, no wheels, no Helm charts.
 - **Nightlies:** daily `ai-dynamo` and `ai-dynamo-runtime` wheels only (no containers, no Helm charts) published from `main` to [pypi.nvidia.com](https://pypi.nvidia.com/), versioned `X.Y.Z.dev${YYYYMMDD}`. No QA validation. See [Nightly Wheels](#nightly-wheels).
+- **DeepSeek-V4:** [v1.2.0-sglang-deepseek-v4-dev.1](#v120-sglang-deepseek-v4-dev1) — SGLang container for DeepSeek-V4-Flash and V4-Pro on Blackwell (B200), based on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview. SGLang container only; no vLLM or TRT-LLM containers, no wheels, no Helm charts.
 - **Experimental v1.1.0 previews:** [v1.1.0-dev.3](#v110-dev3) is the latest (partial: TRT-LLM container plus `ai-dynamo` and `ai-dynamo-runtime` wheels). Older: [v1.1.0-dev.2](#v110-dev2), [v1.1.0-dev.1](#v110-dev1). See [Pre-Release Artifacts](#pre-release-artifacts) for the full inventory per version.
 
 ### Container Images
@@ -170,8 +170,8 @@ For a complete list of known issues, refer to the release notes for each version
 
 ## Release History
 
-- **v1.2.0-sglang-deepseek-v4-dev.1** *(experimental, SGLang only)*: DeepSeek-V4 preview release on `release/1.2.0-sglang-deepseek-v4-dev.1`. Ships only `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` (built from `lmsysorg/sglang:deepseek-v4-blackwell`). No vLLM or TRT-LLM containers, no wheels, no Helm charts. Backend pins follow upstream DSv4 preview images, not standard Dynamo pins.
 - **Nightly Wheels** *(rolling, from `main`)*: Daily `ai-dynamo` and `ai-dynamo-runtime` wheels published to [pypi.nvidia.com](https://pypi.nvidia.com/) under `X.Y.Z.dev${YYYYMMDD}` versioning. The `X.Y.Z` is the next in-flight train, not yet shipped. No QA validation; intended for early integration testing only. See [Nightly Wheels](#nightly-wheels).
+- **v1.2.0-sglang-deepseek-v4-dev.1** *(experimental, SGLang only)*: DeepSeek-V4 preview release on `release/1.2.0-sglang-deepseek-v4-dev.1`. Ships only `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` (built from `lmsysorg/sglang:deepseek-v4-blackwell`). No vLLM or TRT-LLM containers, no wheels, no Helm charts. Backend pins follow upstream DSv4 preview images, not standard Dynamo pins.
 - **v1.1.0-dev.3** *(experimental, partial)*: Preview release on `release/1.1.0-dev.3`. Ships only `tensorrtllm-runtime:1.1.0-dev.3` (TRT-LLM `v1.3.0rc11`) plus `ai-dynamo` and `ai-dynamo-runtime` wheels. No vLLM/SGLang containers, no other component containers, no Helm charts published. Not recommended for production use.
 - **v1.1.0-dev.2** *(experimental, partial)*: Preview release. Ships `sglang-runtime:1.1.0-dev.2` (SGLang `v0.5.9`) and `tensorrtllm-runtime:1.1.0-dev.2` (TRT-LLM `v1.3.0rc9`) plus `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels. No vLLM container, no other component containers, no Helm charts published. Not recommended for production use.
 - **v1.1.0-dev.1** *(experimental)*: Preview release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1`, vLLM `v0.17.1`, NIXL `v0.10.1`. Not recommended for production use.
