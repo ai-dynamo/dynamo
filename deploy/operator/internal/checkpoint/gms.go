@@ -19,12 +19,15 @@ const (
 	GMSLoaderContainer = "gms-loader"
 	GMSSaverContainer  = "gms-saver"
 
-	gmsCheckpointLoaderModule = "gpu_memory_service.cli.snapshot.loader"
-	gmsCheckpointSaverModule  = "gpu_memory_service.cli.snapshot.saver"
+	GMSCheckpointLoaderModule = "gpu_memory_service.cli.snapshot.loader"
+	GMSCheckpointSaverModule  = "gpu_memory_service.cli.snapshot.saver"
 
-	// envCheckpointDir is the environment variable name for the GMS
+	// EnvCheckpointDir is the environment variable name for the GMS
 	// checkpoint artifact directory on the snapshot PVC.
-	envCheckpointDir = "GMS_CHECKPOINT_DIR"
+	EnvCheckpointDir = "GMS_CHECKPOINT_DIR"
+	// EnvPodUID exposes metadata.uid to GMS saver/loader sidecars so their
+	// completion files are unique per pod attempt.
+	EnvPodUID = "GMS_POD_UID"
 )
 
 // EnsureGMSRestoreSidecars appends restartable init sidecars for GMS restore.
@@ -54,9 +57,12 @@ func EnsureGMSRestoreSidecars(
 	server := gms.Container(gms.ServerContainerName, gms.ServerModule, mainContainer.Image)
 	server.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 
-	loader := gms.Container(GMSLoaderContainer, gmsCheckpointLoaderModule, mainContainer.Image)
+	loader := gms.Container(GMSLoaderContainer, GMSCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	loader.Env = append(loader.Env, corev1.EnvVar{Name: envCheckpointDir, Value: resolveGMSArtifactDir(storage)})
+	loader.Env = append(loader.Env,
+		corev1.EnvVar{Name: EnvCheckpointDir, Value: ResolveGMSArtifactDir(storage)},
+		PodUIDEnvVar(),
+	)
 	loader.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 
 	podSpec.InitContainers = append(podSpec.InitContainers, server, loader)
@@ -79,14 +85,17 @@ func EnsureGMSCheckpointJobSidecars(
 		return fmt.Errorf("gms checkpoint jobs require resolved checkpoint storage")
 	}
 
-	gmsArtifactDir := resolveGMSArtifactDir(storage)
+	gmsArtifactDir := ResolveGMSArtifactDir(storage)
 
 	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
 
-	saver := gms.Container(GMSSaverContainer, gmsCheckpointSaverModule, mainContainer.Image)
+	saver := gms.Container(GMSSaverContainer, GMSCheckpointSaverModule, mainContainer.Image)
 	saver.VolumeMounts = append(saver.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	saver.Env = append(saver.Env, corev1.EnvVar{Name: envCheckpointDir, Value: gmsArtifactDir})
+	saver.Env = append(saver.Env,
+		corev1.EnvVar{Name: EnvCheckpointDir, Value: gmsArtifactDir},
+		PodUIDEnvVar(),
+	)
 	// The saver is an init sidecar (restartPolicy=Always) so it doesn't
 	// affect pod Ready (only the worker's probe matters) and doesn't block
 	// Job completion. It saves, then sleeps until the pod terminates.
@@ -95,7 +104,18 @@ func EnsureGMSCheckpointJobSidecars(
 	return nil
 }
 
-func resolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
+func PodUIDEnvVar() corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: EnvPodUID,
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.uid",
+			},
+		},
+	}
+}
+
+func ResolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
 	// GMS data lives under /checkpoints/gms/<hash>/versions/<version>
 	// separate from the CRIU tree (/checkpoints/<hash>/versions/<version>)
 	// so the non-root saver can create directories at the PVC root.

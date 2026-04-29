@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
@@ -71,6 +72,8 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
+		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
+		delete(annotations, snapshotprotocol.GMSCompletionFileModeAnnotation)
 	}
 	if !enabled {
 		return nil
@@ -83,6 +86,17 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 	if ok {
 		snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, storage)
+	}
+	if checkpointInfo.GPUMemoryService != nil && checkpointInfo.GPUMemoryService.Enabled && checkpointInfo.GMSArtifactDir != "" {
+		annotations[snapshotprotocol.GMSCheckpointDirAnnotation] = checkpointInfo.GMSArtifactDir
+		if checkpointInfo.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+			annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModeShared
+		} else {
+			annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModePodUID
+		}
+	} else {
+		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
+		delete(annotations, snapshotprotocol.GMSCompletionFileModeAnnotation)
 	}
 	return nil
 }
@@ -209,6 +223,13 @@ func injectCheckpointIntoPodSpec(
 		EnsurePodInfoMount(container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+		if len(info.RestoreTargetContainers) > 0 {
+			return fmt.Errorf("gpuMemoryService checkpoint restore is not supported with multiple restore targets")
+		}
+		info.GMSArtifactDir = ResolveGMSArtifactDir(storage)
+		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+			return nil
+		}
 		mainContainer, err := RequireMainContainer(podSpec)
 		if err != nil {
 			return fmt.Errorf("gpuMemoryService enabled: %w", err)

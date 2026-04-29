@@ -384,6 +384,8 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 		mainMounts[m.Name] = m.MountPath
 	}
 	assert.Equal(t, gms.SharedMountPath, mainMounts[gms.SharedVolumeName])
+	assert.Contains(t, main.Args, "--load-format")
+	assert.Contains(t, main.Args, "gms")
 
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
@@ -401,6 +403,8 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 		saverEnv[env.Name] = env.Value
 	}
 	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
+	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", job.Spec.Template.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation])
+	assert.Equal(t, snapshotprotocol.GMSCompletionFileModePodUID, job.Spec.Template.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation])
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {

@@ -36,7 +36,14 @@ type CheckpointInfo struct {
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
-	// Empty means the restore pod targets the default main container.
+	GMSArtifactDir   string
+	// RestoreTargetContainers is the list of container names in the
+	// restore pod that the snapshot agent should restore the checkpoint
+	// into. Empty means "use the default target" (the container named
+	// commonconsts.MainContainerName). The intra-pod-failover path
+	// populates this with engine-0/engine-1 so the agent restores the
+	// same checkpoint into both the primary and the shadow engine; see
+	// ApplyFailoverTargets.
 	RestoreTargetContainers []string
 }
 
