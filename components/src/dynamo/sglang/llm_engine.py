@@ -202,7 +202,7 @@ class SglangLLMEngine(LLMEngine):
         return {k: v for k, v in param_mapping.items() if v is not None}
 
     @staticmethod
-    def _get_guided_decoding_params(guided_decoding: dict | None) -> dict:
+    def _get_guided_decoding_params(guided_decoding: object) -> dict:
         if isinstance(guided_decoding, dict):
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
