@@ -6,6 +6,7 @@
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -21,6 +22,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -110,6 +112,69 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+def test_routed_experts_kwarg_omitted_when_flag_off():
+    """Default config (no enable_return_routed_experts) → empty dict."""
+
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    server_args = SimpleNamespace()  # flag absent → treated as False
+
+    assert (
+        DecodeWorkerHandler._resolve_routed_experts_kwargs(NewEngine(), server_args)
+        == {}
+    )
+
+
+def test_routed_experts_kwarg_dropped_on_deepseek_v4_engine():
+    """Opt-in + sglang deepseek_v4-shaped engine (no kwarg, no **kwargs) → empty dict.
+
+    Mirrors the deepseek_v4 branch of sglang/srt/entrypoints/engine.py:
+    async_generate has explicit named params and no return_routed_experts.
+    The compat layer must drop the kwarg even when the user opted in.
+    """
+
+    class DeepSeekV4Engine:
+        async def async_generate(
+            self,
+            prompt=None,
+            sampling_params=None,
+            input_ids=None,
+            stream=False,
+            bootstrap_host=None,
+            bootstrap_port=None,
+            bootstrap_room=None,
+            data_parallel_rank=None,
+            external_trace_header=None,
+            rid=None,
+        ):
+            return None
+
+    server_args = SimpleNamespace(enable_return_routed_experts=True)
+
+    assert (
+        DecodeWorkerHandler._resolve_routed_experts_kwargs(
+            DeepSeekV4Engine(), server_args
+        )
+        == {}
+    )
+
+
+def test_routed_experts_kwarg_forwarded_when_flag_on_and_supported():
+    """Opt-in + engine with kwarg in signature → kwarg forwarded as True."""
+
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    server_args = SimpleNamespace(enable_return_routed_experts=True)
+
+    assert DecodeWorkerHandler._resolve_routed_experts_kwargs(
+        NewEngine(), server_args
+    ) == {"return_routed_experts": True}
 
 
 def test_compat_caches_async_generate_signature_inspection(monkeypatch):
