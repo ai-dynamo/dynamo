@@ -40,6 +40,8 @@ class MockSamplingParams:
     top_p: float = 1.0
     top_k: int = 50
     repetition_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
     seed: int | None = None
     ignore_eos: bool = False
     guided_decoding: object | None = None
