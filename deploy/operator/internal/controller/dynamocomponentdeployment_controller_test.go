@@ -1670,7 +1670,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-0",
+						Name:      "test-component",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -1692,12 +1692,12 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
 				status:   metav1.ConditionTrue,
-				reason:   "AllLeaderWorkerSetsReady",
-				message:  "All LeaderWorkerSets are ready",
+				reason:   "LeaderWorkerSetReady",
+				message:  "LeaderWorkerSet is ready",
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-					ComponentName:   "test-component-0",
-					ComponentNames:  []string{"test-component-0"},
+					ComponentName:   "test-component",
+					ComponentNames:  []string{"test-component"},
 					ReadyReplicas:   ptr.To(int32(1)),
 					UpdatedReplicas: 1,
 					Replicas:        1,
@@ -1710,36 +1710,16 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-0",
+						Name:      "test-component",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
+						Replicas: ptr.To(int32(3)),
 					},
 					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-1",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   0, // Not ready
-						Replicas:        1,
-						UpdatedReplicas: 0,
+						ReadyReplicas:   2, // one replica not ready
+						Replicas:        3,
+						UpdatedReplicas: 2,
 						Conditions: []metav1.Condition{
 							{
 								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
@@ -1748,36 +1728,16 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 						},
 					},
 				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-2",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
 			},
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
 				status:   metav1.ConditionFalse,
-				reason:   "SomeLeaderWorkerSetsNotReady",
-				message:  "Some LeaderWorkerSets are not ready",
+				reason:   "LeaderWorkerSetNotReady",
+				message:  "LeaderWorkerSet is not ready",
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-					ComponentName:   "test-component-0",
-					ComponentNames:  []string{"test-component-0", "test-component-1", "test-component-2"},
+					ComponentName:   "test-component",
+					ComponentNames:  []string{"test-component"},
 					ReadyReplicas:   ptr.To(int32(2)),
 					UpdatedReplicas: 2,
 					Replicas:        3,
@@ -1790,56 +1750,16 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-0",
+						Name:      "test-component",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
+						Replicas: ptr.To(int32(3)),
 					},
 					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-1",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-2",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
+						ReadyReplicas:   3,
+						Replicas:        3,
+						UpdatedReplicas: 3,
 						Conditions: []metav1.Condition{
 							{
 								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
@@ -1852,12 +1772,12 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
 				status:   metav1.ConditionTrue,
-				reason:   "AllLeaderWorkerSetsReady",
-				message:  "All LeaderWorkerSets are ready",
+				reason:   "LeaderWorkerSetReady",
+				message:  "LeaderWorkerSet is ready",
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-					ComponentName:   "test-component-0",
-					ComponentNames:  []string{"test-component-0", "test-component-1", "test-component-2"},
+					ComponentName:   "test-component",
+					ComponentNames:  []string{"test-component"},
 					ReadyReplicas:   ptr.To(int32(3)),
 					UpdatedReplicas: 3,
 					Replicas:        3,
