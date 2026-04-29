@@ -48,19 +48,21 @@ the trace record as `request.x_request_id`.
 | `program_id` | Yes | One schedulable reasoning/tool trajectory. |
 | `parent_program_id` | No | Parent program for subagents. |
 
-## Enabling JSONL Output
+## Enabling Trace Output
 
-Set `DYN_AGENT_TRACE_JSONL` before starting Dynamo:
+Set `DYN_AGENT_TRACE_SINKS` before starting Dynamo. Use `jsonl` for local
+trace files, `stderr` for development logging, or both:
 
 ```bash
-export DYN_AGENT_TRACE_JSONL=/tmp/dynamo-agent-trace.jsonl
+export DYN_AGENT_TRACE_SINKS=jsonl,stderr
+export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
 export DYN_AGENT_TRACE_CAPACITY=1024
 ```
 
 Dynamo writes one recorder JSON object per line:
 `{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The sink is
-best-effort local telemetry for debugging and offline profiling. It is not a
-durable audit log.
+best-effort telemetry for debugging and offline profiling. It is not a durable
+audit log.
 
 ## Operator Notes
 

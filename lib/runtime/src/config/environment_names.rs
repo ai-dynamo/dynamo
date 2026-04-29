@@ -315,8 +315,11 @@ pub mod llm {
 
     /// Agent trace configuration
     pub mod agent_trace {
+        /// Agent trace sink selection. Comma-separated values: stderr,jsonl.
+        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
+
         /// Local JSONL sink path for normalized agent trace records.
-        pub const DYN_AGENT_TRACE_JSONL: &str = "DYN_AGENT_TRACE_JSONL";
+        pub const DYN_AGENT_TRACE_JSONL_PATH: &str = "DYN_AGENT_TRACE_JSONL_PATH";
 
         /// In-process trace bus capacity.
         pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
@@ -538,7 +541,8 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL,
+            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,

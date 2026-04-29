@@ -12,6 +12,7 @@ const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
 #[derive(Clone, Debug)]
 pub struct AgentTracePolicy {
     pub enabled: bool,
+    pub sinks: Vec<String>,
     pub jsonl_path: Option<String>,
     pub capacity: usize,
     pub jsonl_buffer_bytes: usize,
@@ -20,8 +21,26 @@ pub struct AgentTracePolicy {
 
 static POLICY: OnceLock<AgentTracePolicy> = OnceLock::new();
 
+pub(crate) fn parse_sink_names(value: &str) -> Vec<String> {
+    let sinks: Vec<String> = value
+        .split(',')
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+
+    if sinks.is_empty() {
+        vec!["stderr".to_string()]
+    } else {
+        sinks
+    }
+}
+
 fn load_from_env() -> AgentTracePolicy {
-    let jsonl_path = std::env::var(env_agent_trace::DYN_AGENT_TRACE_JSONL)
+    let sinks = std::env::var(env_agent_trace::DYN_AGENT_TRACE_SINKS)
+        .ok()
+        .map(|value| parse_sink_names(&value))
+        .unwrap_or_default();
+    let jsonl_path = std::env::var(env_agent_trace::DYN_AGENT_TRACE_JSONL_PATH)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -40,7 +59,8 @@ fn load_from_env() -> AgentTracePolicy {
             .unwrap_or(DEFAULT_JSONL_FLUSH_INTERVAL_MS);
 
     AgentTracePolicy {
-        enabled: jsonl_path.is_some(),
+        enabled: !sinks.is_empty(),
+        sinks,
         jsonl_path,
         capacity,
         jsonl_buffer_bytes,
@@ -54,4 +74,22 @@ pub fn policy() -> &'static AgentTracePolicy {
 
 pub fn is_enabled() -> bool {
     policy().enabled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_sink_names;
+
+    #[test]
+    fn parse_sink_names_trims_and_normalizes() {
+        assert_eq!(
+            parse_sink_names(" jsonl, STDERR "),
+            vec!["jsonl".to_string(), "stderr".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_sink_names_defaults_empty_value_to_stderr() {
+        assert_eq!(parse_sink_names(" , "), vec!["stderr".to_string()]);
+    }
 }
