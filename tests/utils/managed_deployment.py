@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
@@ -104,7 +105,7 @@ class ServiceSpec:
             container["args"] = []
         args = container["args"]
         if isinstance(args, str):
-            args = args.split()
+            args = shlex.split(args)
             container["args"] = args
         return args
 
@@ -177,6 +178,112 @@ class ServiceSpec:
         args.extend(["--tensor-parallel-size", str(value)])
         self.gpus = value
 
+    # ----- Spec helpers (DGH-703) -----
+    def _ensure_path(self, *keys):
+        """Ensure a nested dict path exists, returning the innermost dict."""
+        d = self._spec
+        for key in keys:
+            if key not in d:
+                d[key] = {}
+            d = d[key]
+        return d
+
+    @property
+    def component_type(self) -> Optional[str]:
+        """Service component type (e.g. ``frontend`` for the frontend service)."""
+        return self._spec.get("componentType")
+
+    # ----- Args -----
+    def set_arg(self, arg_name: str, arg_value: str):
+        """Set or override a command-line argument for this service.
+
+        If the argument already exists, its value is updated. Otherwise it is appended.
+
+        Args:
+            arg_name: Argument name (e.g. ``"--max-model-len"``)
+            arg_value: Argument value (e.g. ``"4096"``)
+        """
+        container = self._ensure_path("extraPodSpec", "mainContainer")
+        if "args" not in container:
+            container["args"] = []
+        args = container["args"]
+        if isinstance(args, str):
+            args = shlex.split(args)
+            container["args"] = args
+        for i, arg in enumerate(args):
+            if arg == arg_name:
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    args[i + 1] = arg_value
+                else:
+                    args.insert(i + 1, arg_value)
+                return
+        args.extend([arg_name, arg_value])
+
+    # ----- Volume mounts and env vars -----
+    def _add_volume_mount(self, name: str, mount_point: str):
+        """Add a volume mount if not already present."""
+        if "volumeMounts" not in self._spec:
+            self._spec["volumeMounts"] = []
+        if not any(m.get("name") == name for m in self._spec["volumeMounts"]):
+            self._spec["volumeMounts"].append({"name": name, "mountPoint": mount_point})
+
+    def _add_env_var(self, name: str, value=None, value_from=None):
+        """Add an env var if not already present."""
+        if "envs" not in self._spec:
+            self._spec["envs"] = []
+        if not any(e.get("name") == name for e in self._spec["envs"]):
+            env: dict[str, Any] = {"name": name}
+            if value_from:
+                env["valueFrom"] = value_from
+            elif value is not None:
+                env["value"] = value
+            self._spec["envs"].append(env)
+
+    # ----- Log collection -----
+    def enable_log_collection(self, log_dir: str, pvc_name: str):
+        """Wrap this service's command to tee output into a PVC-mounted log dir."""
+        main_container = self._spec.get("extraPodSpec", {}).get("mainContainer", {})
+        existing_command = main_container.get("command", [])
+        if (
+            len(existing_command) >= 3
+            and existing_command[:2] == ["/bin/bash", "-c"]
+            and "tee -a" in existing_command[2]
+        ):
+            return  # already wrapped
+
+        main_container = self._ensure_path("extraPodSpec", "mainContainer")
+        original_command = main_container.get("command", [])
+        original_args = main_container.get("args", [])
+        if not original_command and not original_args:
+            original_command = ["python3"]
+            original_args = (
+                ["-m", "dynamo.frontend"] if self.component_type == "frontend" else []
+            )
+
+        full_command = " ".join(original_command + original_args)
+        service_log_dir = f"{log_dir}/service_logs/{self._name.lower()}"
+
+        template_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "templates", "log_wrapper.sh"
+        )
+        with open(template_path) as f:
+            wrapper_script = f.read()
+        wrapper_script = wrapper_script.replace("{{SERVICE_LOG_DIR}}", service_log_dir)
+        wrapper_script = wrapper_script.replace("{{FULL_COMMAND}}", full_command)
+
+        main_container["command"] = ["/bin/bash", "-c", wrapper_script]
+        if "args" in main_container:
+            del main_container["args"]
+
+        self._add_volume_mount(pvc_name, log_dir)
+        self._add_env_var(
+            "POD_NAME", value_from={"fieldRef": {"fieldPath": "metadata.name"}}
+        )
+        self._add_env_var(
+            "POD_NAMESPACE",
+            value_from={"fieldRef": {"fieldPath": "metadata.namespace"}},
+        )
+
 
 class DeploymentSpec:
     def __init__(
@@ -185,6 +292,7 @@ class DeploymentSpec:
         """Load the deployment YAML file"""
         with open(base, "r") as f:
             self._deployment_spec = yaml.safe_load(f)
+        self._base_path = base
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
@@ -430,6 +538,111 @@ class DeploymentSpec:
         """Save updated deployment to file"""
         with open(out_file, "w") as f:
             yaml.safe_dump(self._deployment_spec, f, default_flow_style=False)
+
+    # ----- DGH-703 unified-framework APIs -----
+    @classmethod
+    def from_backend(
+        cls,
+        backend: str,
+        deployment_type: str = "agg",
+        workspace_dir: str = "/workspace",
+        **kwargs,
+    ) -> "DeploymentSpec":
+        """Create a DeploymentSpec from a backend name and deployment type.
+
+        Args:
+            backend: Backend name (``"vllm"``, ``"trtllm"``, ``"sglang"``, ``"mocker"``)
+            deployment_type: Deployment shape (``"agg"``, ``"disagg"``, ...)
+            workspace_dir: Workspace root containing ``examples/backends/<backend>/deploy/``
+            **kwargs: Forwarded to :class:`DeploymentSpec` (``endpoint``, ``port``, ...)
+
+        Example::
+
+            spec = DeploymentSpec.from_backend("vllm", "disagg")
+            spec.set_worker_replicas(2)
+        """
+        yaml_path = (
+            f"{workspace_dir}/examples/backends/{backend}/deploy/{deployment_type}.yaml"
+        )
+        return cls(yaml_path, **kwargs)
+
+    @property
+    def backend(self) -> str:
+        """Auto-detect backend from the YAML path or service names.
+
+        Returns one of ``"vllm"``, ``"trtllm"``, ``"sglang"``, ``"mocker"``,
+        or ``"unknown"`` if neither path nor service names match.
+        """
+        if hasattr(self, "_base_path") and self._base_path:
+            path = self._base_path.lower()
+            for name in ("vllm", "trtllm", "sglang", "mocker"):
+                if f"/backends/{name}/" in path or f"/{name}/" in path:
+                    return name
+        service_names = " ".join(s.name.lower() for s in self.services)
+        for name in ("vllm", "trtllm", "sglang", "mocker"):
+            if name in service_names:
+                return name
+        return "unknown"
+
+    def worker_services(self) -> list[str]:
+        """Return worker service names — services whose ``componentType`` is not ``frontend``."""
+        return [s.name for s in self.services if s.component_type != "frontend"]
+
+    def set_worker_replicas(self, replicas: int) -> None:
+        """Set ``replicas`` for every worker service."""
+        for name in self.worker_services():
+            self[name].replicas = replicas
+
+    def enable_log_collection(
+        self,
+        pvc_name: Optional[str] = None,
+        pvc_size: str = "1Gi",
+        storage_class: Optional[str] = None,
+        container_log_dir: str = "/tmp/service_logs",
+        enable_all_services: bool = True,
+        service_names: Optional[list[str]] = None,
+    ) -> None:
+        """Enable PVC-backed log collection for this deployment.
+
+        Creates an RWX PVC declaration in the deployment spec and wraps every
+        target service's command to tee output into ``container_log_dir``. The
+        PVC itself is materialized later by :class:`ManagedDeployment`.
+
+        Requires a storage class that supports ReadWriteMany; if absent, the
+        deployment will fail at PVC binding time.
+        """
+        if enable_all_services:
+            target_services = self.services
+        else:
+            target_services = [self[name] for name in (service_names or [])]
+
+        if pvc_name is None:
+            timestamp = int(time.time())
+            rand_suffix = secrets.randbelow(9000) + 1000
+            pvc_name = f"{self.name}-logs-{timestamp}-{rand_suffix}"
+
+        self._log_collection_pvc_name = pvc_name
+        self._log_collection_pvc_size = pvc_size
+        self._log_collection_storage_class = storage_class
+        self._log_collection_container_dir = container_log_dir
+
+        if "pvcs" not in self._deployment_spec["spec"]:
+            self._deployment_spec["spec"]["pvcs"] = []
+
+        # Drop any prior log PVCs so reruns don't accumulate stale entries.
+        self._deployment_spec["spec"]["pvcs"] = [
+            pvc
+            for pvc in self._deployment_spec["spec"]["pvcs"]
+            if not pvc.get("name", "").endswith("-logs-pvc")
+            and pvc.get("name") != pvc_name
+        ]
+        # ``create: False`` — ManagedDeployment provisions the PVC explicitly.
+        self._deployment_spec["spec"]["pvcs"].append(
+            {"name": pvc_name, "create": False}
+        )
+
+        for service in target_services:
+            service.enable_log_collection(container_log_dir, pvc_name)
 
 
 class PodProcess:
