@@ -77,30 +77,32 @@ def _generate_dgd_from_pick(
         return None
 
     original_total_gpus = tc.total_gpus
-    if "total_gpus_needed" in row.index:
-        clamped_total_gpus, was_clamped = clamp_total_gpus_to_budget(
-            row["total_gpus_needed"],
-            original_total_gpus,
-        )
-        # Enforce DGDR hardware budget as a hard cap in rapid mode.
-        # Some AIC pickers expose total_gpus_needed as a ranking signal rather
-        # than a strict feasibility constraint.
-        if was_clamped:
-            logger.warning(
-                "Picked config requests %d GPUs but DGDR budget is %d; "
-                "clamping generated deployment to budget.",
-                int(row["total_gpus_needed"]),
+    try:
+        if "total_gpus_needed" in row.index:
+            clamped_total_gpus, was_clamped = clamp_total_gpus_to_budget(
+                row["total_gpus_needed"],
                 original_total_gpus,
             )
-        tc.total_gpus = clamped_total_gpus
+            # Enforce DGDR hardware budget as a hard cap in rapid mode.
+            # Some AIC pickers expose total_gpus_needed as a ranking signal rather
+            # than a strict feasibility constraint.
+            if was_clamped:
+                logger.warning(
+                    "Picked config requests %d GPUs but DGDR budget is %d; "
+                    "clamping generated deployment to budget.",
+                    int(row["total_gpus_needed"]),
+                    original_total_gpus,
+                )
+            tc.total_gpus = clamped_total_gpus
 
-    k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
-    cfg = task_config_to_generator_config(
-        task_config=tc,
-        result_df=row,
-        generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
-    )
-    tc.total_gpus = original_total_gpus
+        k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
+        cfg = task_config_to_generator_config(
+            task_config=tc,
+            result_df=row,
+            generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
+        )
+    finally:
+        tc.total_gpus = original_total_gpus
 
     artifacts = generate_backend_artifacts(
         params=cfg,
