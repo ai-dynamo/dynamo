@@ -49,6 +49,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apitestingfuzzer "k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metafuzzer "k8s.io/apimachinery/pkg/apis/meta/fuzzer"
@@ -58,6 +59,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 	"sigs.k8s.io/randfill"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -130,6 +132,28 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 			r.Object = nil
 			apitestingfuzzer.NormalizeJSONRawExtension(r)
 		},
+		// json.RawMessage: generate valid JSON so marshal-based snapshots can
+		// detect in-memory mutations instead of tripping over random bytes.
+		func(raw *json.RawMessage, c randfill.Continue) {
+			if c.Bool() {
+				*raw = nil
+				return
+			}
+			data, err := json.Marshal(fuzzJSONValue(c, 0))
+			if err != nil {
+				panic(err)
+			}
+			*raw = append((*raw)[:0], data...)
+		},
+		// apiextensionsv1.JSON wraps raw JSON bytes with custom marshal logic.
+		// These fields are admitted as JSON objects, not arbitrary JSON values.
+		func(v *apiextensionsv1.JSON, c randfill.Continue) {
+			data, err := json.Marshal(fuzzJSONObject(c, 0))
+			if err != nil {
+				panic(err)
+			}
+			v.Raw = append(v.Raw[:0], data...)
+		},
 		// resource.Quantity: parseable suffix; randfill's default produces
 		// inconsistent Format/Value combinations.
 		func(q *resource.Quantity, c randfill.Continue) {
@@ -165,10 +189,71 @@ func newRoundTripFiller(seed int64) *randfill.Filler {
 	return apitestingfuzzer.FuzzerFor(funcs, rand.NewSource(seed), runtimeserializer.NewCodecFactory(runtime.NewScheme()))
 }
 
+func fuzzJSONValue(c randfill.Continue, depth int) any {
+	if depth >= 2 {
+		switch c.Uint32() % 5 {
+		case 0:
+			return nil
+		case 1:
+			return c.Bool()
+		case 2:
+			return int64(c.Int63() % 1024)
+		case 3:
+			return fmt.Sprintf("s%d", c.Uint32()%1024)
+		default:
+			return float64(c.Uint32()%1000) / 10
+		}
+	}
+
+	switch c.Uint32() % 7 {
+	case 0:
+		return nil
+	case 1:
+		return c.Bool()
+	case 2:
+		return int64(c.Int63() % 1024)
+	case 3:
+		return fmt.Sprintf("s%d", c.Uint32()%1024)
+	case 4:
+		out := make([]any, int(c.Uint32()%3))
+		for i := range out {
+			out[i] = fuzzJSONValue(c, depth+1)
+		}
+		return out
+	case 5:
+		n := int(c.Uint32() % 3)
+		out := make(map[string]any, n)
+		for i := 0; i < n; i++ {
+			out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
+		}
+		return out
+	default:
+		return float64(c.Uint32()%1000) / 10
+	}
+}
+
+func fuzzJSONObject(c randfill.Continue, depth int) map[string]any {
+	n := int(c.Uint32() % 3)
+	out := make(map[string]any, n)
+	for i := 0; i < n; i++ {
+		out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
+	}
+	return out
+}
+
 func mustJSON(v any) string {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("(marshal err: %v)", err)
+	}
+	return string(b)
+}
+
+func toYAML(t *testing.T, v any) string {
+	t.Helper()
+	b, err := yaml.Marshal(v)
+	if err != nil {
+		t.Fatalf("toYAML: %v", err)
 	}
 	return string(b)
 }
@@ -193,9 +278,13 @@ func fuzzHubSpokeHub[
 	for i := 0; i < *fuzzIters; i++ {
 		in := newHub()
 		f.Fill(in)
+		inBeforeYAML := toYAML(t, in)
 		spoke := PS(new(S))
 		if err := spoke.ConvertFrom(in); err != nil {
 			t.Fatalf("%s iter %d ConvertFrom: %v\ninput=%s", name, i, err, mustJSON(in))
+		}
+		if diff := cmp.Diff(inBeforeYAML, toYAML(t, in)); diff != "" {
+			t.Fatalf("%s iter %d ConvertFrom mutated input (-before +after):\n%s\ninput=%s", name, i, diff, mustJSON(in))
 		}
 		out := newHub()
 		if err := spoke.ConvertTo(out); err != nil {
@@ -223,9 +312,13 @@ func fuzzSpokeHubSpoke[
 	for i := 0; i < *fuzzIters; i++ {
 		in := PS(new(S))
 		f.Fill(in)
+		inBeforeYAML := toYAML(t, in)
 		hub := newHub()
 		if err := in.ConvertTo(hub); err != nil {
 			t.Fatalf("%s iter %d ConvertTo: %v\ninput=%s", name, i, err, mustJSON(in))
+		}
+		if diff := cmp.Diff(inBeforeYAML, toYAML(t, in)); diff != "" {
+			t.Fatalf("%s iter %d ConvertTo mutated input (-before +after):\n%s\ninput=%s", name, i, diff, mustJSON(in))
 		}
 		out := PS(new(S))
 		if err := out.ConvertFrom(hub); err != nil {
