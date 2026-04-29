@@ -93,12 +93,10 @@ def run_dynamo_headless(config: Config) -> None:
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             configure_gms_lock_mode(config.engine_args)
-            validate_cudagraph_mode(config.engine_args)
 
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
@@ -472,17 +470,15 @@ def setup_vllm_engine(
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             logger.info(
-                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
             )
             # ENGINE_ID=0 writes weights, all others import (RO).
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
-            validate_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
