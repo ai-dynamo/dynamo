@@ -43,6 +43,7 @@ def test_cleanup_once_calls_engine_cleanup_exactly_once():
     assert engine.cleanup.await_count == 1
 
 
+@pytest.mark.timeout(5)
 def test_cleanup_once_concurrent_invocations_only_run_once():
     """Concurrent _cleanup_once invocations must coalesce AND serialize.
 

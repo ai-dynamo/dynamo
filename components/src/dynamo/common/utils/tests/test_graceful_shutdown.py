@@ -280,6 +280,7 @@ def test_cleanup_callback_exception_does_not_block_shutdown():
     mock_runtime.shutdown.assert_called_once()
 
 
+@pytest.mark.timeout(1)
 def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
     """A hanging cleanup callback must time out and let shutdown proceed.
 
