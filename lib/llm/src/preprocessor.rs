@@ -44,6 +44,7 @@ use crate::protocols::common::preprocessor::{
     MmRoutingInfo, MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
+use crate::protocols::TokenIdType;
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -157,6 +158,12 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// Image-placeholder token ID for approx MM routing. Resolved at
+    /// startup by trying a list of known special-token strings against
+    /// the tokenizer; the first one present in the vocab wins. `None`
+    /// means we couldn't identify the image placeholder and approx MM
+    /// routing falls back to the spread-evenly heuristic.
+    image_token_id: Option<TokenIdType>,
 }
 
 impl OpenAIPreprocessor {
@@ -198,6 +205,39 @@ impl OpenAIPreprocessor {
 
         let context_length = mdc.context_length;
 
+        // Resolve the model's image-placeholder token ID for approx MM
+        // routing. We try a small list of well-known placeholder strings
+        // covering the common VLM families; the first one present in the
+        // vocab wins. If none match, approx MM routing falls back to the
+        // spread-evenly heuristic.
+        const KNOWN_IMAGE_PLACEHOLDERS: &[&str] = &[
+            "<|image_pad|>",     // Qwen2-VL / Qwen3-VL
+            "<image>",           // LLaVA / LLaVA-NeXT / Idefics2/3 / Mllama
+            "[IMG]",             // Pixtral
+            "<IMG_CONTEXT>",     // InternVL
+            "<|image|>",         // Some custom VLMs
+        ];
+        let image_token_id = KNOWN_IMAGE_PLACEHOLDERS
+            .iter()
+            .find_map(|tok| tokenizer.token_to_id(tok).map(|id| (tok, id)));
+        let image_token_id = match image_token_id {
+            Some((tok, id)) => {
+                tracing::info!(
+                    image_token = tok,
+                    image_token_id = id,
+                    "[mm-approx] resolved image-placeholder token for approx MM routing"
+                );
+                Some(id)
+            }
+            None => {
+                tracing::debug!(
+                    "[mm-approx] no known image-placeholder token found in tokenizer; \
+                     approx MM routing will fall back to spread-evenly heuristic"
+                );
+                None
+            }
+        };
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -208,6 +248,7 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            image_token_id,
         }))
     }
     /// Encode a string to it's tokens
@@ -628,14 +669,49 @@ impl OpenAIPreprocessor {
         // when images are present.
         let num_full_blocks = (routing_token_ids.len() / block_size).max(1);
 
-        // Spread images across the *full* blocks. We pin image i to block
-        // `(i * num_full_blocks) / n_images` so two images can't collide
-        // on the same block unless there are more images than blocks (in
-        // which case extras pile onto the last block).
+        // Pin each image hash to the block where its placeholder token
+        // actually lives in the tokenized prompt. This makes approx MM
+        // routing match exact routing's natural placement: shared text
+        // produces identical leading-block hashes (text-prefix overlap
+        // wins), and different images only differ in the block(s) that
+        // contain their placeholder.
+        //
+        // We discover image placeholder positions by scanning
+        // `routing_token_ids` for the model's image-placeholder token ID
+        // (resolved at startup). If we can't find the token (no known
+        // placeholder, or it was somehow stripped from routing_token_ids),
+        // fall back to the previous "spread evenly" heuristic.
         let n_images = mm_hashes.len();
         let mut mm_objects = Vec::with_capacity(n_images);
+
+        let image_positions: Vec<usize> = if let Some(token_id) = self.image_token_id {
+            routing_token_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &t)| (t == token_id).then_some(i))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let use_actual_positions = image_positions.len() == n_images;
+        if !use_actual_positions {
+            tracing::debug!(
+                n_images,
+                detected_positions = image_positions.len(),
+                "[mm-approx] image placeholder count mismatch; falling back to spread-evenly"
+            );
+        }
+
         for (i, mm_hash) in mm_hashes.iter().copied().enumerate() {
-            let block_idx = (i * num_full_blocks / n_images).min(num_full_blocks - 1);
+            let block_idx = if use_actual_positions {
+                // Path 2: use the placeholder's actual position in the
+                // tokenized prompt. Clamp to valid full-block range.
+                (image_positions[i] / block_size).min(num_full_blocks - 1)
+            } else {
+                // Fallback: legacy spread-evenly across full blocks.
+                (i * num_full_blocks / n_images).min(num_full_blocks - 1)
+            };
             // Represent each image as a single-token offset so
             // RequestExtraInfo::to_block_level maps it to exactly one block.
             let token_offset = block_idx * block_size;

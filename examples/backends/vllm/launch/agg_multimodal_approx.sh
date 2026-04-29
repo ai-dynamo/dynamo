@@ -76,6 +76,59 @@ python -m dynamo.frontend \
     --kv-cache-block-size "${BLOCK_SIZE}" \
     --no-router-kv-events &
 
-sleep 5
-echo "=== Native MM approx ready ==="
+# Wait until the frontend can serve a real request (preprocessor + tokenizer loaded).
+echo "Waiting for frontend processor to initialize (this may take a while for custom models)..."
+DEADLINE=$((SECONDS + 300))
+while (( SECONDS < DEADLINE )); do
+    HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+        -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
+        2>/dev/null || echo "000")
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        echo "Frontend processor is ready"
+        break
+    fi
+    sleep 2
+done
+if (( SECONDS >= DEADLINE )); then
+    echo "Warning: Frontend processor may not be fully ready (timed out)" >&2
+fi
+
+echo
+echo "=== All services are ready ==="
+echo "Frontend: http://127.0.0.1:${HTTP_PORT}"
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+done
+echo
+echo "Architecture: Rust Frontend (mm_routing_info + KvRouter, approx mode) -> ${NUM_WORKERS}x vLLM backend"
+echo "  - No separate MM Router Worker, no Python preprocessor"
+echo "  - Frontend hashes the image URL/bytes directly via DYN_ROUTER_MM_APPROX"
+echo
+echo "Test routing: send the same image request 3 times."
+echo "  - Request 1: routed to any worker (no cache yet)"
+echo "  - Request 2: routed to SAME worker (KV cache overlap from request 1)"
+echo "  - Request 3 with different image: may route to the OTHER worker"
+echo
+echo "Watch for 'Selected worker' in logs to see routing decisions change."
+echo
+echo "Example (same image twice, then different image; needs DYN_MM_ALLOW_INTERNAL=1 for http URLs):"
+echo "  # Request 1 - image A"
+echo "  curl http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this image\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://images.cocodataset.org/test2017/000000000001.jpg\"}}]}],\"max_tokens\":32}'"
+echo
+echo "  # Request 2 - same image A (should route to same worker)"
+echo "  curl http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this image\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://images.cocodataset.org/test2017/000000000001.jpg\"}}]}],\"max_tokens\":32}'"
+echo
+echo "  # Request 3 - different image B (may route to other worker)"
+echo "  curl http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this image\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://images.cocodataset.org/test2017/000000000016.jpg\"}}]}],\"max_tokens\":32}'"
+echo
+echo "Press Ctrl+C to stop all services"
+
 wait

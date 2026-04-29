@@ -63,7 +63,11 @@ impl Decoder for HuggingFaceTokenizer {
     }
 }
 
-impl Tokenizer for HuggingFaceTokenizer {}
+impl Tokenizer for HuggingFaceTokenizer {
+    fn token_to_id(&self, token: &str) -> Option<TokenIdType> {
+        self.tokenizer.token_to_id(token)
+    }
+}
 
 impl From<HfTokenizer> for HuggingFaceTokenizer {
     fn from(tokenizer: HfTokenizer) -> Self {

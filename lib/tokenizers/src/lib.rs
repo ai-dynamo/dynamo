@@ -130,6 +130,20 @@ pub mod traits {
     pub trait Tokenizer: Encoder + Decoder {
         // fn get_vocab_size(&self) -> usize;
         // fn make_unique_clone(&self) -> Box<dyn Tokenizer>;
+
+        /// Resolve a special-token string to its token ID, if registered
+        /// in the tokenizer's vocab. Returns `None` if the token isn't
+        /// present.
+        ///
+        /// Used by approximate MM routing to discover model-specific
+        /// image-placeholder token IDs (e.g. `<|image_pad|>` for Qwen-VL,
+        /// `<image>` for LLaVA, `[IMG]` for Pixtral) at startup so we can
+        /// later locate image positions in tokenized prompts and place
+        /// `mm_hash` at the corresponding block — matching exact routing's
+        /// natural placement.
+        fn token_to_id(&self, _token: &str) -> Option<TokenIdType> {
+            None
+        }
     }
 }
 
