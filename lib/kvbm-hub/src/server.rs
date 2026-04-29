@@ -49,6 +49,13 @@ pub const DEFAULT_REGISTRATION_TTL: Duration = Duration::from_secs(30);
 /// Default reaper tick interval used by the in-memory registry.
 pub const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Default interval between hub-driven heartbeat probes.
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Default consecutive probe failures before a registered instance is
+/// unregistered by the heartbeat task.
+pub const DEFAULT_HEARTBEAT_MAX_FAILURES: u32 = 3;
+
 /// Shared hub server state (cheap to clone, all state is inside `Arc`s).
 #[derive(Clone)]
 pub struct HubServerState {
@@ -117,6 +124,8 @@ pub struct HubServerBuilder {
     transports: Vec<Arc<dyn velo::Transport>>,
     registration_ttl: Duration,
     prune_interval: Duration,
+    heartbeat_interval: Duration,
+    heartbeat_max_failures: u32,
     feature_managers: Vec<Arc<dyn FeatureManager>>,
 }
 
@@ -145,6 +154,8 @@ impl Default for HubServerBuilder {
             transports: Vec::new(),
             registration_ttl: DEFAULT_REGISTRATION_TTL,
             prune_interval: DEFAULT_PRUNE_INTERVAL,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            heartbeat_max_failures: DEFAULT_HEARTBEAT_MAX_FAILURES,
             feature_managers: Vec::new(),
         }
     }
@@ -203,6 +214,20 @@ impl HubServerBuilder {
     /// registry. Ignored when a custom registry is injected.
     pub fn prune_interval(mut self, d: Duration) -> Self {
         self.prune_interval = d;
+        self
+    }
+
+    /// Override the hub-driven heartbeat probe interval. Ignored when no
+    /// velo transport is configured.
+    pub fn heartbeat_interval(mut self, d: Duration) -> Self {
+        self.heartbeat_interval = d;
+        self
+    }
+
+    /// Override the consecutive-failure threshold before the heartbeat
+    /// task unregisters an instance.
+    pub fn heartbeat_max_failures(mut self, n: u32) -> Self {
+        self.heartbeat_max_failures = n;
         self
     }
 
@@ -294,12 +319,6 @@ impl HubServerBuilder {
             }));
         }
 
-        let state = HubServerState {
-            registry: registry.clone(),
-            velo,
-            managers: Arc::clone(&managers),
-        };
-
         let discovery_addr = SocketAddr::new(self.bind_addr, self.discovery_port);
         let control_addr = SocketAddr::new(self.bind_addr, self.control_port);
 
@@ -321,6 +340,37 @@ impl HubServerBuilder {
 
         let reaper_task = registry.clone().spawn_liveness_task(cancel.child_token());
 
+        // Spawn the hub-driven heartbeat task only when velo is configured.
+        // Done before `velo` is moved into `HubServerState` below.
+        let heartbeat_task = velo.as_ref().map(|v| {
+            spawn_heartbeat_task(
+                Arc::clone(v),
+                registry.clone(),
+                v.instance_id(),
+                self.heartbeat_interval,
+                self.heartbeat_max_failures,
+                cancel.child_token(),
+            )
+        });
+
+        let state = HubServerState {
+            registry: registry.clone(),
+            velo,
+            managers: Arc::clone(&managers),
+        };
+        if heartbeat_task.is_none() {
+            tracing::info!(
+                "hub heartbeat task disabled (no velo transport configured); \
+                 instances rely on TTL-based reaping only"
+            );
+        } else {
+            tracing::info!(
+                interval_secs = self.heartbeat_interval.as_secs(),
+                max_failures = self.heartbeat_max_failures,
+                "hub heartbeat task started"
+            );
+        }
+
         let mut discovery_router = discovery_router(state.clone());
         let mut control_router = control_router(state.clone());
         for mgr in managers.values() {
@@ -339,6 +389,7 @@ impl HubServerBuilder {
             discovery_task: Some(discovery_task),
             control_task: Some(control_task),
             reaper_task,
+            heartbeat_task,
         })
     }
 }
@@ -355,6 +406,7 @@ pub struct HubServer {
     discovery_task: Option<JoinHandle<()>>,
     control_task: Option<JoinHandle<()>>,
     reaper_task: Option<JoinHandle<()>>,
+    heartbeat_task: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for HubServer {
@@ -399,6 +451,9 @@ impl HubServer {
         if let Some(t) = self.reaper_task.take() {
             let _ = t.await;
         }
+        if let Some(t) = self.heartbeat_task.take() {
+            let _ = t.await;
+        }
         Ok(())
     }
 }
@@ -406,6 +461,181 @@ impl HubServer {
 impl Drop for HubServer {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+/// Outcome of a single hub→peer heartbeat probe, sent from the
+/// per-probe task back to the heartbeat manager.
+#[derive(Debug)]
+enum ProbeOutcome {
+    /// Probe acked. Manager refreshes the registry's `last_heartbeat_at`.
+    Ok { id: InstanceId, ack_seq: u64 },
+    /// Probe failed (timeout, transport error, deserialize error).
+    /// Manager increments the per-instance failure counter and
+    /// unregisters after `max_failures` consecutive failures.
+    Failed { id: InstanceId, reason: String },
+}
+
+/// Spawn the hub-driven heartbeat task.
+///
+/// **Architecture:** the heartbeat is split into a *manager* task and
+/// per-tick fan-out *probe* tasks. The manager:
+/// 1. Wakes every `interval`, snapshots `registry.list()`.
+/// 2. For each peer (skipping the hub's own `self_id`) it spawns a
+///    detached probe task that bounds itself by `tokio::time::timeout`
+///    and reports its outcome back over a `mpsc` channel. **The
+///    manager never awaits a probe directly** — a single hung peer
+///    cannot wedge the loop.
+/// 3. Drains outcomes from the channel between ticks. On `Ok` it
+///    `registry.touch(id)`s the entry; on `Failed` it increments a
+///    per-instance failure counter and `registry.unregister(id)`s
+///    after `max_failures` consecutive failures.
+///
+/// Probe tasks own no state beyond the channel sender; failure
+/// counting lives only in the manager. A peer that recovers (`Ok`
+/// after a `Failed`) has its counter cleared.
+fn spawn_heartbeat_task(
+    velo: Arc<velo::Velo>,
+    registry: Arc<dyn PeerRegistry>,
+    self_id: InstanceId,
+    interval: Duration,
+    max_failures: u32,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    // Channel capacity is generous — at most one `tick`-worth of
+    // outcomes is in flight at any moment, but bursts (slow drain
+    // followed by a fast tick) are fine.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProbeOutcome>();
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        // Wait one interval before the first probe so freshly
+        // registered instances have time to install their handler.
+        tick.tick().await;
+        let mut failures: HashMap<InstanceId, u32> = HashMap::new();
+        let mut seq: u64 = 0;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tracing::debug!("heartbeat task: shutdown requested");
+                    return;
+                }
+                _ = tick.tick() => {
+                    seq = seq.wrapping_add(1);
+                    fan_out_probes(
+                        &velo,
+                        &registry,
+                        self_id,
+                        seq,
+                        interval,
+                        tx.clone(),
+                    );
+                }
+                Some(outcome) = rx.recv() => {
+                    handle_outcome(
+                        outcome,
+                        &registry,
+                        &mut failures,
+                        max_failures,
+                    ).await;
+                }
+            }
+        }
+    })
+}
+
+/// For every peer in the registry except `self_id`, spawn a detached
+/// probe task that times itself out at `interval` and posts one
+/// [`ProbeOutcome`] to `tx`.
+fn fan_out_probes(
+    velo: &Arc<velo::Velo>,
+    registry: &Arc<dyn PeerRegistry>,
+    self_id: InstanceId,
+    seq: u64,
+    interval: Duration,
+    tx: tokio::sync::mpsc::UnboundedSender<ProbeOutcome>,
+) {
+    let peers = registry.list();
+    for peer in peers {
+        let id = peer.instance_id();
+        if id == self_id {
+            continue;
+        }
+        let velo = Arc::clone(velo);
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let req = HeartbeatRequest { seq };
+            let probe = async {
+                let unary = velo.typed_unary(HEARTBEAT_HANDLER)?;
+                let ack: HeartbeatAck = unary.payload(&req)?.instance(id).send().await?;
+                Ok::<HeartbeatAck, anyhow::Error>(ack)
+            };
+            let outcome = match tokio::time::timeout(interval, probe).await {
+                Ok(Ok(ack)) => ProbeOutcome::Ok {
+                    id,
+                    ack_seq: ack.seq,
+                },
+                Ok(Err(e)) => ProbeOutcome::Failed {
+                    id,
+                    reason: format!("{e:#}"),
+                },
+                Err(_) => ProbeOutcome::Failed {
+                    id,
+                    reason: format!("heartbeat probe timed out after {:?}", interval),
+                },
+            };
+            // Receiver dropped only on shutdown — drop the outcome
+            // silently in that case.
+            let _ = tx.send(outcome);
+        });
+    }
+}
+
+/// Drain a single [`ProbeOutcome`] from the channel and apply its
+/// effect to the registry / failure map.
+async fn handle_outcome(
+    outcome: ProbeOutcome,
+    registry: &Arc<dyn PeerRegistry>,
+    failures: &mut HashMap<InstanceId, u32>,
+    max_failures: u32,
+) {
+    match outcome {
+        ProbeOutcome::Ok { id, ack_seq } => {
+            failures.remove(&id);
+            if let Err(e) = registry.touch(id).await {
+                tracing::trace!(
+                    instance = %id, error = %e,
+                    "heartbeat: touch returned non-fatal error"
+                );
+            } else {
+                tracing::trace!(
+                    instance = %id, ack_seq,
+                    "heartbeat: refreshed TTL"
+                );
+            }
+        }
+        ProbeOutcome::Failed { id, reason } => {
+            let n = failures.entry(id).and_modify(|c| *c += 1).or_insert(1);
+            tracing::warn!(
+                instance = %id, failures = *n, error = %reason,
+                "heartbeat: probe failed"
+            );
+            if *n >= max_failures {
+                tracing::warn!(
+                    instance = %id, failures = *n,
+                    "heartbeat: unregistering after consecutive failures"
+                );
+                failures.remove(&id);
+                if let Err(e) = registry.unregister(id).await {
+                    tracing::warn!(
+                        instance = %id, error = %e,
+                        "heartbeat: unregister failed"
+                    );
+                }
+            }
+        }
     }
 }
 

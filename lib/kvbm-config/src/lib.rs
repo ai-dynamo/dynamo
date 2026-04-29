@@ -7,7 +7,9 @@
 //! Supports role-specific configuration for leader and worker components.
 
 mod cache;
+mod control;
 mod debug;
+mod disagg;
 mod discovery;
 mod events;
 mod messenger;
@@ -21,7 +23,9 @@ mod tokio;
 mod v1_compat;
 
 pub use cache::{CacheConfig, DiskCacheConfig, HostCacheConfig, ParallelismMode};
+pub use control::ControlConfig;
 pub use debug::DebugConfig;
+pub use disagg::{DisaggConfig, DisaggregationRole};
 pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
@@ -115,6 +119,18 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub debug: DebugConfig,
+
+    /// Disaggregation configuration (P/D role + hub coordination).
+    /// None = aggregated (non-disagg) mode.
+    #[validate(nested)]
+    #[serde(default)]
+    pub disagg: Option<DisaggConfig>,
+
+    /// Local axum control-plane configuration. Default is `enabled = false`
+    /// — the connector relies on velo handlers + the hub's HTTP proxy.
+    #[validate(nested)]
+    #[serde(default)]
+    pub control: ControlConfig,
 }
 
 impl KvbmConfig {
@@ -212,6 +228,11 @@ impl KvbmConfig {
             )
             // Onboard config: KVBM_ONBOARD_MODE
             .merge(Env::prefixed("KVBM_ONBOARD_MODE").map(|_| "onboard.mode".into()))
+            // Control config: KVBM_CONTROL_ENABLED, KVBM_CONTROL_BIND_ADDR, KVBM_CONTROL_PORT
+            .merge(
+                Env::prefixed("KVBM_CONTROL_")
+                    .map(|k| format!("control.{}", k.as_str().to_lowercase()).into()),
+            )
     }
 
     /// Load configuration from default figment (env and files).
@@ -592,6 +613,115 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn test_disagg_json_deserializes_via_leader_profile() {
+        // User prompt example: disagg block nested in leader profile.
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
+            let json = r#"{
+                "leader": {
+                    "disagg": { "hub_url": "http://127.0.0.1:1337", "role": "prefill" }
+                },
+                "worker": {}
+            }"#;
+
+            let leader_cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+            let disagg = leader_cfg.disagg.expect("leader should have disagg config");
+            assert_eq!(disagg.hub_url, "http://127.0.0.1:1337");
+            assert_eq!(disagg.role, DisaggregationRole::Prefill);
+
+            // Worker profile should not pick up the leader-only disagg block.
+            let worker_cfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+            assert!(
+                worker_cfg.disagg.is_none(),
+                "worker should not inherit leader's disagg block"
+            );
+        });
+    }
+
+    #[test]
+    fn test_disagg_role_decode_via_leader_profile() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
+            let json = r#"{
+                "leader": {
+                    "disagg": { "role": "decode" }
+                }
+            }"#;
+            let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+            let disagg = cfg.disagg.expect("disagg present");
+            assert_eq!(disagg.role, DisaggregationRole::Decode);
+            // hub_url default applied
+            assert_eq!(disagg.hub_url, "http://127.0.0.1:1337");
+        });
+    }
+
+    #[test]
+    fn test_control_default_is_disabled() {
+        temp_env::with_vars_unset(
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_CONTROL_ENABLED",
+                "KVBM_CONTROL_BIND_ADDR",
+                "KVBM_CONTROL_PORT",
+            ],
+            || {
+                let cfg = KvbmConfig::from_env().unwrap();
+                assert!(!cfg.control.enabled);
+                assert_eq!(cfg.control.bind_addr, "0.0.0.0");
+                assert_eq!(cfg.control.port, 9999);
+            },
+        );
+    }
+
+    #[test]
+    fn test_control_env_vars_apply() {
+        temp_env::with_vars(
+            vec![
+                ("KVBM_CONTROL_ENABLED", Some("true")),
+                ("KVBM_CONTROL_BIND_ADDR", Some("127.0.0.1")),
+                ("KVBM_CONTROL_PORT", Some("19999")),
+            ],
+            || {
+                let cfg = KvbmConfig::from_env().unwrap();
+                assert!(cfg.control.enabled);
+                assert_eq!(cfg.control.bind_addr, "127.0.0.1");
+                assert_eq!(cfg.control.port, 19999);
+            },
+        );
+    }
+
+    #[test]
+    fn test_control_via_json_leader_profile() {
+        temp_env::with_vars_unset(
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_CONTROL_ENABLED",
+                "KVBM_CONTROL_PORT",
+            ],
+            || {
+                let json = r#"{
+                    "leader": {
+                        "control": { "enabled": true, "port": 12345 }
+                    }
+                }"#;
+                let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert!(cfg.control.enabled);
+                assert_eq!(cfg.control.port, 12345);
+                // Worker profile gets the default (disabled) since `control` was
+                // declared only under `leader`.
+                let wcfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert!(!wcfg.control.enabled);
+            },
+        );
+    }
+
+    #[test]
+    fn test_disagg_absent_means_none() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
+            let cfg = KvbmConfig::from_figment_with_json_for_leader("{}").unwrap();
+            assert!(cfg.disagg.is_none());
+        });
     }
 
     #[test]

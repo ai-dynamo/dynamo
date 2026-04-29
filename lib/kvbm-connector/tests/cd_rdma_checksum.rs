@@ -147,7 +147,6 @@ async fn connector_remote_prefill_pulls_decode_block_sets_by_checksum() {
             hashes.clone(),
             vec![1, 2, 3, 4],
         )
-        .await
         .expect("begin remote prefill");
 
     let request = queue

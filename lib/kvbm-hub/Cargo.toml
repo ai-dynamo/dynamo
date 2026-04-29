@@ -23,7 +23,8 @@ velo        = { workspace = true, features = ["queue-messenger"] }
 velo-common = { workspace = true }
 
 # KVBM
-kvbm-disagg-protocol = { workspace = true }
+kvbm-control-protocol = { workspace = true }
+kvbm-disagg-protocol  = { workspace = true }
 
 # Async / core
 anyhow       = { workspace = true }
@@ -49,6 +50,7 @@ tower-http = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+kvbm-common        = { workspace = true }
 tokio              = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true }
 velo-transports    = { version = "0.1.0" }

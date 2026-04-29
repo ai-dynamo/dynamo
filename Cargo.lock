@@ -4500,6 +4500,7 @@ dependencies = [
  "insta",
  "kvbm-common",
  "kvbm-config",
+ "kvbm-control-protocol",
  "kvbm-disagg-protocol",
  "kvbm-engine",
  "kvbm-hub",
@@ -4516,8 +4517,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "velo",
+]
+
+[[package]]
+name = "kvbm-control-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "velo-common",
 ]
 
 [[package]]
@@ -4587,6 +4600,8 @@ dependencies = [
  "dashmap",
  "figment",
  "futures",
+ "kvbm-common",
+ "kvbm-control-protocol",
  "kvbm-disagg-protocol",
  "parking_lot",
  "reqwest 0.12.28",

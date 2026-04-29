@@ -193,6 +193,39 @@ Omit entire `[object]` section to disable object storage.
 |---|---|---|---|---|
 | `debug.recording` | `bool` | `false` | `KVBM_DEBUG_RECORDING` | Enable KVBM recording for replay/debugging |
 
+### Control Plane
+
+Local axum HTTP control server. Default is **disabled** — connectors are
+typically reached through `kvbm-hub`'s HTTP→velo proxy instead, which
+collapses operator-visible ports to a single hub. Flip `enabled = true`
+when you need a direct local backdoor.
+
+| Config Path | Type | Default | Env Var | Description |
+|---|---|---|---|---|
+| `control.enabled` | `bool` | `false` | `KVBM_CONTROL_ENABLED` | Spawn the local axum control server |
+| `control.bind_addr` | `String` | `"0.0.0.0"` | `KVBM_CONTROL_BIND_ADDR` | Bind address |
+| `control.port` | `u16` | `9999` | `KVBM_CONTROL_PORT` | TCP port |
+
+### Disaggregation
+
+Omit entire `[disagg]` section to run in aggregated (non-disagg) mode.
+
+| Config Path | Type | Default | Description |
+|---|---|---|---|
+| `disagg` | `Option<DisaggConfig>` | None | None = aggregated mode (no hub coordination) |
+| `disagg.hub_url` | `String` | `"http://127.0.0.1:1337"` | kvbm-hub control-plane URL |
+| `disagg.role` | `DisaggregationRole` | required | `prefill` or `decode` |
+
+Typical leader-only JSON (worker ignores `disagg`):
+
+```json
+{
+  "leader": {
+    "disagg": { "hub_url": "http://127.0.0.1:1337", "role": "prefill" }
+  }
+}
+```
+
 ## TOML Example
 
 ```toml

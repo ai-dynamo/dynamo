@@ -628,19 +628,52 @@ impl ConnectorLeader {
         let workers = self.init.lock().clone();
         let _ = self.workers.set(Arc::new(workers));
 
-        // Start the control server
-        tracing::debug!("Starting control server");
-        match super::control::start_control_server(self.clone(), self.runtime.tokio()).await {
-            Ok(shutdown_tx) => {
-                let _ = self.control_server_shutdown.set(shutdown_tx);
-                tracing::info!("Control server started successfully");
+        // Register velo control-plane handlers on the leader's messenger.
+        // These are the canonical transport for connector control; the
+        // hub's HTTP→velo proxy and any direct-velo callers reach the
+        // leader through these handlers regardless of whether the local
+        // axum is enabled.
+        super::velo_control::register_handlers(self.runtime.messenger(), self.clone())
+            .context("registering connector-leader velo control handlers")?;
+        tracing::info!("Registered connector-leader velo control handlers");
+
+        // Start the local axum control server only when explicitly enabled.
+        // Default: disabled — control operations reach the connector via
+        // velo handlers + the hub's HTTP→velo proxy.
+        let control_cfg = self.runtime.config().control.clone();
+        if control_cfg.enabled {
+            tracing::debug!(
+                bind_addr = %control_cfg.bind_addr,
+                port = control_cfg.port,
+                "Starting local axum control server"
+            );
+            match super::control::start_control_server(
+                self.clone(),
+                self.runtime.tokio(),
+                &control_cfg,
+            )
+            .await
+            {
+                Ok(shutdown_tx) => {
+                    let _ = self.control_server_shutdown.set(shutdown_tx);
+                    tracing::info!(
+                        bind_addr = %control_cfg.bind_addr,
+                        port = control_cfg.port,
+                        "Local axum control server listening"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to start local axum control server: {}. Continuing without it.",
+                        e
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to start control server: {}. Continuing without it.",
-                    e
-                );
-            }
+        } else {
+            tracing::debug!(
+                "Local axum control server disabled (control.enabled=false); \
+                 control operations available via velo handlers and hub proxy"
+            );
         }
 
         // Log the instance_id for distributed discovery
@@ -649,6 +682,22 @@ impl ConnectorLeader {
             instance_id = %self.runtime.messenger().instance_id(),
             "KVBM leader instance started - use this ID for register_leader on remote instances"
         );
+
+        // Register with kvbm-hub for conditional disaggregation, if configured.
+        if let Some(disagg_cfg) = self.runtime.config().disagg.clone() {
+            tracing::info!(
+                role = ?disagg_cfg.role,
+                hub_url = %disagg_cfg.hub_url,
+                "Registering leader with kvbm-hub for conditional disaggregation"
+            );
+            let (_hub, client, _hub_velo_id) = super::disagg::register_with_hub(
+                &disagg_cfg,
+                self.runtime.messenger().clone(),
+            )
+            .await
+            .context("conditional-disagg hub registration failed")?;
+            let _ = self.disagg_client.set(client);
+        }
 
         Ok(())
     }

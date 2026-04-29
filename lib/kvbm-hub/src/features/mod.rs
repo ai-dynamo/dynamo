@@ -18,6 +18,7 @@ use crate::protocol::{Feature, FeatureKey};
 use crate::registry::PeerRegistry;
 
 pub mod conditional_disagg;
+pub mod connector_control;
 
 /// Context handed to a [`FeatureManager`] at hub startup so it can stash any
 /// references it needs (e.g. the hub's Velo handle for active messaging).

@@ -1085,7 +1085,10 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
         session_id: uuid::Uuid::new_v4(),
         initiator_instance_id: d_id,
         decode_endpoint: None,
-        sequence_hashes: vec!["100".to_string(), "101".to_string()],
+        sequence_hashes: vec![
+            kvbm_common::SequenceHash::new(100, None, 0),
+            kvbm_common::SequenceHash::new(101, Some(100), 1),
+        ],
         token_ids: vec![1, 2, 3],
         num_computed_tokens: 16,
     };

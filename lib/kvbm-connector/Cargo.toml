@@ -16,6 +16,7 @@ keywords.workspace = true
 # Internal workspace crates
 kvbm-common   = { workspace = true }
 kvbm-config   = { workspace = true }
+kvbm-control-protocol = { workspace = true }
 kvbm-disagg-protocol = { workspace = true }
 kvbm-engine   = { workspace = true }
 kvbm-hub      = { workspace = true }
@@ -48,6 +49,7 @@ tracing        = { workspace = true }
 uuid           = { workspace = true }
 oneshot        = { workspace = true }
 serde_json     = { workspace = true }
+url            = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

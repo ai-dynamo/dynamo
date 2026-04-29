@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::Either;
+use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -245,6 +246,23 @@ pub struct ChainOutput<T: BlockMetadata> {
 /// Receiver for chain output from a pipeline.
 pub type ChainOutputRx<T> = mpsc::Receiver<ChainOutput<T>>;
 
+/// Observer invoked synchronously after the pipeline registers a
+/// batch of destination-tier blocks.
+///
+/// The slice contains the freshly-registered `ImmutableBlock<Dst>`s
+/// from a single batch's transfer, in the same order as the
+/// underlying source blocks. Observers may inspect or `clone`
+/// individual `ImmutableBlock`s to retain pins; do not block in
+/// the callback as it runs on the executor's transfer task.
+pub type RegisterObserver<Dst> =
+    Arc<dyn Fn(&[ImmutableBlock<Dst>]) + Send + Sync + 'static>;
+
+/// Shared registration-observer list. Held both by `Pipeline`
+/// (so callers can `add_register_observer` after the executor
+/// has spawned) and by the executor's shared state (so it can
+/// fan out to observers in the register loop).
+type RegisterObservers<Dst> = ParkingMutex<Vec<RegisterObserver<Dst>>>;
+
 /// A running pipeline instance.
 pub struct Pipeline<Src: BlockMetadata, Dst: BlockMetadata> {
     config: PipelineConfig<Src, Dst>,
@@ -258,6 +276,9 @@ pub struct Pipeline<Src: BlockMetadata, Dst: BlockMetadata> {
     cancel_tx: watch::Sender<HashSet<TransferId>>,
     /// Tracker for pending (in-flight) transfers to prevent duplicates
     pending_tracker: Arc<PendingTracker>,
+    /// Observers fanned out after each batch's destination-tier
+    /// register step. Shared with the executor's shared state.
+    register_observers: Arc<RegisterObservers<Dst>>,
     /// Task handles for pipeline stages
     _task_handles: Vec<JoinHandle<()>>,
     /// Marker
@@ -354,6 +375,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             awaiter.run().await;
         });
 
+        let register_observers: Arc<RegisterObservers<Dst>> =
+            Arc::new(ParkingMutex::new(Vec::new()));
+
         // Spawn block transfer executor (reads from precond_rx)
         let executor = BlockTransferExecutor {
             input_rx: precond_rx,
@@ -364,6 +388,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             skip_transfers: config.skip_transfers,
             max_concurrent_transfers: config.max_concurrent_transfers,
             chain_tx,
+            register_observers: Arc::clone(&register_observers),
             _src_marker: PhantomData::<Src>,
         };
         let transfer_handle = runtime.spawn(async move {
@@ -392,6 +417,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             chain_rx,
             cancel_tx,
             pending_tracker,
+            register_observers,
             _task_handles: vec![
                 eval_handle,
                 batch_handle,
@@ -462,6 +488,21 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
     /// for blocks currently in-flight through this pipeline.
     pub fn pending_tracker(&self) -> &Arc<PendingTracker> {
         &self.pending_tracker
+    }
+
+    /// Register an observer invoked synchronously after each batch's
+    /// destination-tier register step.
+    ///
+    /// Observers are fanned out in registration order. The slice
+    /// passed to each observer contains the freshly-registered
+    /// `ImmutableBlock<Dst>`s for that batch. Observers must not
+    /// block — they run on the executor's transfer task and any
+    /// stall delays subsequent batches.
+    ///
+    /// Multiple observers are supported; observers may be added at
+    /// any time after `Pipeline::new` returns.
+    pub fn add_register_observer(&self, observer: RegisterObserver<Dst>) {
+        self.register_observers.lock().push(observer);
     }
 }
 
@@ -1314,6 +1355,8 @@ struct BlockTransferExecutor<Src: BlockMetadata, Dst: BlockMetadata> {
     max_concurrent_transfers: usize,
     /// Channel to send registered blocks for chaining to downstream pipeline
     chain_tx: Option<mpsc::Sender<ChainOutput<Dst>>>,
+    /// Multicast observers invoked after each batch's register step.
+    register_observers: Arc<RegisterObservers<Dst>>,
     _src_marker: PhantomData<Src>,
 }
 
@@ -1325,6 +1368,7 @@ struct SharedBlockExecutorState<Dst: BlockMetadata> {
     dst_layout: LogicalLayoutHandle,
     skip_transfers: bool,
     chain_tx: Option<mpsc::Sender<ChainOutput<Dst>>>,
+    register_observers: Arc<RegisterObservers<Dst>>,
 }
 
 impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
@@ -1342,6 +1386,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             dst_layout: self.dst_layout,
             skip_transfers: self.skip_transfers,
             chain_tx: self.chain_tx.take(),
+            register_observers: Arc::clone(&self.register_observers),
         });
 
         while let Some(batch) = self.input_rx.recv().await {
@@ -1460,6 +1505,17 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                     shared.dst_manager.register_block(complete)
                 })
                 .collect();
+
+            // Fan out to register observers (e.g. CD prefill capture).
+            // Snapshot the observer list under the lock, then invoke
+            // outside the lock so observers can't block the pipeline.
+            let observers: Vec<RegisterObserver<Dst>> = {
+                let guard = shared.register_observers.lock();
+                guard.iter().cloned().collect()
+            };
+            for observer in &observers {
+                observer(&registered_blocks);
+            }
 
             let registration_timepoint = Instant::now();
 

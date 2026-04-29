@@ -15,6 +15,22 @@ use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest, Sessio
 use kvbm_engine::disagg::{
     BlockSetRequest, BlockSetResponse, HashSelection, RemoteBlockRef, RemoteBlockSet, UnpinAck,
 };
+
+/// Decode-side hook the wrapper installs on the coordinator so it can react
+/// to session events that need cross-component coordination (output pull,
+/// failures). Kept narrow on purpose — the coordinator should not know about
+/// `ConnectorLeader` directly.
+pub trait CdOutputSink: Send + Sync {
+    /// `BlockSetsAdded` arrived on the session: prefill has output blocks
+    /// available. The wrapper is expected to drive the D-side pull, the
+    /// G2 → G1 onboarding, and the `PullComplete` ack.
+    fn on_block_sets_added(&self, request_id: &str, block_sets: Vec<RemoteBlockSet>);
+
+    /// Coordinator transitioned the request to a terminal failure state.
+    /// The wrapper should release any per-request resources (inflight token
+    /// budget, slot tracking).
+    fn on_request_failed(&self, request_id: &str, reason: String);
+}
 use kvbm_logical::blocks::ImmutableBlock;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
@@ -44,6 +60,9 @@ pub enum RemotePrefillStatus {
 pub struct RemotePrefillState {
     pub session: Arc<dyn PrefillSession>,
     pub initiator_instance_id: InstanceId,
+    /// Set when `SessionEvent::Attached` arrives — the prefill peer's
+    /// velo `InstanceId`, needed for RDMA pulls of P's published output.
+    pub peer_instance_id: Option<InstanceId>,
     pub ready_g2_blocks: Vec<ImmutableBlock<G2>>,
     pub pending_hashes: Vec<SequenceHash>,
     pub initial_ready_hashes: HashSet<SequenceHash>,
@@ -63,6 +82,7 @@ pub struct RemotePrefillCoordinator {
     tokio_handle: Handle,
     attach_timeout: Duration,
     metadata_cache: Arc<dyn PeerMetadataCache>,
+    output_sink: Mutex<Option<Arc<dyn CdOutputSink>>>,
 }
 
 impl RemotePrefillCoordinator {
@@ -114,14 +134,39 @@ impl RemotePrefillCoordinator {
             tokio_handle,
             attach_timeout,
             metadata_cache: CoalescingPeerMetadataCache::new(metadata_cache),
+            output_sink: Mutex::new(None),
         })
+    }
+
+    /// Install the [`CdOutputSink`] hook used for output-pull and failure
+    /// callbacks. Replaces any previously-installed sink; pass `None` to
+    /// detach.
+    ///
+    /// The sink is held as a weakly-coupled trait object so the coordinator
+    /// never needs to know about the wrapper type.
+    pub fn set_output_sink(&self, sink: Option<Arc<dyn CdOutputSink>>) {
+        *self.output_sink.lock() = sink;
+    }
+
+    fn output_sink(&self) -> Option<Arc<dyn CdOutputSink>> {
+        self.output_sink.lock().clone()
     }
 
     pub fn evaluate(&self, inputs: &PolicyInputs) -> PrefillSelection {
         self.policy.evaluate(inputs)
     }
 
-    pub async fn begin_remote_prefill(
+    /// Synchronous entry point for the conditional-disagg wrapper.
+    ///
+    /// Performs the synchronous setup (session creation, state install,
+    /// monitor spawn) immediately and spawns a background task to drive
+    /// the queue enqueue. Caller can therefore invoke this from a sync
+    /// context (e.g. vLLM's GNMT hook) without needing a `block_on`.
+    ///
+    /// On enqueue failure, the spawned task removes the coordinator
+    /// state, closes the session, and dispatches `on_request_failed`
+    /// through the installed [`CdOutputSink`].
+    pub fn begin_remote_prefill(
         self: &Arc<Self>,
         request_id: &str,
         inputs: &PolicyInputs,
@@ -148,6 +193,7 @@ impl RemotePrefillCoordinator {
         let state = RemotePrefillState {
             session: session.clone(),
             initiator_instance_id,
+            peer_instance_id: None,
             ready_g2_blocks: session_blocks.ready_g2,
             pending_hashes: session_blocks.pending_hashes,
             initial_ready_hashes,
@@ -173,20 +219,25 @@ impl RemotePrefillCoordinator {
             num_computed_tokens: inputs.num_computed_tokens,
         };
 
-        if let Err(err) = self.queue.enqueue(request).await {
-            if let Some((_, state)) = self.states.remove(request_id) {
-                state
-                    .lock()
-                    .session
-                    .close(Some(format!("remote prefill enqueue failed: {err}")));
-            }
-            return Err(err);
-        }
-
+        // Spawn the monitor immediately — it'll drain Attached and
+        // BlockSetsAdded events as they arrive.
         let coord = Arc::clone(self);
-        let request_id = request_id.to_string();
+        let request_id_owned = request_id.to_string();
         self.tokio_handle.spawn(async move {
-            monitor_loop(coord, request_id, event_stream).await;
+            monitor_loop(coord, request_id_owned, event_stream).await;
+        });
+
+        // Spawn the enqueue separately so a slow queue doesn't block the
+        // sync caller. On failure, mark the coordinator state failed.
+        let coord = Arc::clone(self);
+        let request_id_owned = request_id.to_string();
+        let queue = Arc::clone(&self.queue);
+        self.tokio_handle.spawn(async move {
+            if let Err(err) = queue.enqueue(request).await {
+                let reason = format!("remote prefill enqueue failed: {err}");
+                tracing::error!(request_id = request_id_owned, error = %err, "enqueue failed");
+                coord.mark_failed(&request_id_owned, reason);
+            }
         });
 
         Ok(BeginOutcome::Started { session_id })
@@ -224,16 +275,20 @@ impl RemotePrefillCoordinator {
                 state.failure_reason = Some(reason.clone());
                 state.session.clone()
             };
-            session.close(Some(reason));
+            session.close(Some(reason.clone()));
+            if let Some(sink) = self.output_sink() {
+                sink.on_request_failed(request_id, reason);
+            }
         }
     }
 
-    fn handle_attached(&self, request_id: &str) {
+    fn handle_attached(&self, request_id: &str, peer_instance_id: InstanceId) {
         if let Some(state) = self.state_for(request_id) {
             let mut state = state.lock();
             if state.status == RemotePrefillStatus::AwaitingAttach {
                 state.status = RemotePrefillStatus::Attached;
             }
+            state.peer_instance_id = Some(peer_instance_id);
         }
     }
 
@@ -408,7 +463,7 @@ async fn monitor_loop(
                             coord.mark_failed(&request_id, format!("peer metadata import failed: {err}"));
                             break;
                         }
-                        coord.handle_attached(&request_id);
+                        coord.handle_attached(&request_id, peer_instance_id);
                     }
                     Some(SessionEvent::BlockSetRequest(request)) => {
                         coord.handle_block_set_request(&request_id, request);
@@ -425,8 +480,15 @@ async fn monitor_loop(
                     Some(SessionEvent::PullComplete(_)) | Some(SessionEvent::PullAcked(_)) => {
                         // Future decode-output path consumes pull completion acks.
                     }
-                    Some(SessionEvent::BlockSetsAdded { .. }) => {
-                        // Prefill output path lands in a later phase.
+                    Some(SessionEvent::BlockSetsAdded { block_sets }) => {
+                        if let Some(sink) = coord.output_sink() {
+                            sink.on_block_sets_added(&request_id, block_sets);
+                        } else {
+                            tracing::warn!(
+                                request_id,
+                                "BlockSetsAdded received but no CdOutputSink installed"
+                            );
+                        }
                     }
                     Some(SessionEvent::Detached { reason }) => {
                         coord.handle_detached(&request_id, reason);
@@ -506,7 +568,6 @@ mod tests {
                 hashes.clone(),
                 vec![1, 2, 3],
             )
-            .await
             .expect("begin remote prefill");
 
         let BeginOutcome::Started { session_id } = outcome;
@@ -516,6 +577,8 @@ mod tests {
             Some(RemotePrefillStatus::AwaitingAttach)
         );
 
+        // queue.enqueue runs on a spawned task; wait for it.
+        wait_until(|| !queue.snapshot().is_empty()).await;
         let queued = queue.snapshot();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].request_id, "req-1");
@@ -539,7 +602,7 @@ mod tests {
                 hashes,
                 vec![9],
             )
-            .await
+
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");
@@ -567,7 +630,7 @@ mod tests {
                 hashes,
                 vec![10],
             )
-            .await
+
             .expect("begin remote prefill");
 
         wait_until(|| coord.status_for("req-timeout") == Some(RemotePrefillStatus::Failed)).await;
@@ -599,7 +662,7 @@ mod tests {
                     .collect(),
                 vec![11],
             )
-            .await
+
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");
@@ -644,7 +707,7 @@ mod tests {
                 blocks.hashes(),
                 vec![12],
             )
-            .await
+
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");
@@ -692,7 +755,7 @@ mod tests {
                 hashes,
                 vec![13],
             )
-            .await
+
             .expect("begin remote prefill");
 
         let session = factory.last().expect("session created");

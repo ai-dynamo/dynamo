@@ -33,6 +33,19 @@ pub struct HubConfig {
     /// discovery-only.
     #[serde(default)]
     pub velo_port: Option<u16>,
+    /// Period (seconds) of the hub-driven heartbeat probe loop. Each
+    /// tick, the hub velo-pushes a `HeartbeatRequest` to every
+    /// registered instance and refreshes the registry on ack. Ignored
+    /// when `velo_port` is `None` (no velo, no probes). Default `10`.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    /// Number of consecutive probe failures before the hub unregisters
+    /// an instance. Default `3`. With the default 10s interval this
+    /// removes a hung instance after ~30s — well under the 30s
+    /// registry TTL so the reaper rarely sees stale entries when velo
+    /// is in use.
+    #[serde(default = "default_heartbeat_max_failures")]
+    pub heartbeat_max_failures: u32,
 }
 
 fn default_registration_ttl_secs() -> u64 {
@@ -40,6 +53,12 @@ fn default_registration_ttl_secs() -> u64 {
 }
 fn default_prune_interval_secs() -> u64 {
     10
+}
+fn default_heartbeat_interval_secs() -> u64 {
+    10
+}
+fn default_heartbeat_max_failures() -> u32 {
+    3
 }
 
 impl Default for HubConfig {
@@ -51,6 +70,8 @@ impl Default for HubConfig {
             registration_ttl_secs: default_registration_ttl_secs(),
             prune_interval_secs: default_prune_interval_secs(),
             velo_port: None,
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            heartbeat_max_failures: default_heartbeat_max_failures(),
         }
     }
 }

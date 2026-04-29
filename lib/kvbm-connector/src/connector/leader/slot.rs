@@ -679,6 +679,14 @@ impl RequestSlot {
         self.request.kv_transfer_params()
     }
 
+    /// Parse this slot's `kv_transfer_params` as conditional-disagg
+    /// transfer params. `Ok(None)` when no metadata / no params present.
+    pub fn transfer_params(
+        &self,
+    ) -> Result<Option<kvbm_disagg_protocol::TransferParams>, serde_json::Error> {
+        self.request.disagg_transfer_params()
+    }
+
     /// Get the current transaction state (read-only).
     pub fn txn_state(&self) -> &TransactionState {
         self.state.txn_state()

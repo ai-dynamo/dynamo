@@ -58,6 +58,7 @@ pub mod server;
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
 pub use config::HubConfig;
 pub use features::conditional_disagg::{ConditionalDisaggClient, ConditionalDisaggManager};
+pub use features::connector_control::ConnectorControlManager;
 pub use features::{FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 pub use protocol::{

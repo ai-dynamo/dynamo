@@ -6,11 +6,62 @@
 //! This module is deliberately narrow. It describes the pieces of a connector
 //! leader that conditional-disaggregation code needs, without putting the
 //! decode/prefill state machines into the base [`ConnectorLeader`].
+//!
+//! # Decode-side golden path
+//!
+//! 1. `get_num_new_matched_tokens` — wrapper calls inner local match. If the
+//!    inner result is `(None, _)` or `(Some(0), _)`, pass through unchanged.
+//! 2. Build [`PolicyInputs`] (`total`, `num_computed_tokens`,
+//!    `num_connector_tokens = inner_match`) and evaluate the
+//!    [`ConditionalDisaggPolicy`].
+//! 3. On `Remote`: compute `((total - num_computed) / block_size) * block_size`
+//!    full-block external tokens, try to reserve that many tokens from the
+//!    inflight budget, and return `(None, false)` if the budget is
+//!    exhausted (vLLM retries next forward pass). Otherwise insert per-
+//!    request state and return `(Some(N), true)`.
+//! 4. `update_state_after_alloc` — for CD-bound requests, capture the G1
+//!    destination block IDs and `num_external_tokens`; do **not** call the
+//!    inner USAA. The bytes will land via the `BlockSetsAdded` path.
+//! 5. The prefill peer attaches, requests D's matched G2 block sets, RDMA-
+//!    pulls them, runs prefill, publishes output block sets on the session.
+//! 6. On `SessionEvent::BlockSetsAdded` the wrapper pulls P's output back
+//!    into D's local memory (currently to G1 via the engine's
+//!    `pull_remote_block_sets`), then sends `PullComplete` to P, awaits
+//!    the `PullAck`, calls `mark_onboarding_complete` on the inner leader,
+//!    and releases the inflight budget reservation.
+//!
+//! # No partial transfers
+//!
+//! GNMT returns `(Some(N), true)` only when **all** N tokens (full blocks
+//! only — partial trailing tokens are excluded) will arrive via the CD
+//! path. Failure of any kind is total: the wrapper releases the budget,
+//! drops the per-request state, and surfaces the failure through
+//! [`CdOutputSink::on_request_failed`].
+//!
+//! # Inflight budget
+//!
+//! Per-decode-leader, counted in *tokens* (not blocks, not requests).
+//! Default is `usize::MAX` (unlimited) — operators opt in to admission
+//! throttling via `DisaggConfig::max_inflight_remote_prefill_tokens`. The
+//! unlimited path skips the atomic CAS entirely so it costs nothing when
+//! disabled.
+//!
+//! # Role dispatch
+//!
+//! The wrapper reads the manager role per call (no caching) so a future
+//! hub-controlled role-swap can change behavior on the next call without
+//! restructuring this API. The Prefill arm is currently `todo!()` until
+//! that side is wired in a follow-up.
 
+pub mod conditional_leader;
 pub mod decode;
+pub mod decode_leader;
 pub mod metadata;
+pub mod prefill_coordinator;
+pub mod prefill_leader;
 pub mod queue;
 pub mod session;
+pub mod transport;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -26,7 +77,13 @@ use crate::common::RequestMetadata;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
-pub use decode::{BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus};
+pub use conditional_leader::{ConditionalDisaggLeader, register_with_hub};
+pub use decode::{
+    BeginOutcome, CdOutputSink, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus,
+};
+pub use decode_leader::DecodeDisaggLeader;
+pub use prefill_coordinator::PrefillCoordinator;
+pub use prefill_leader::PrefillDisaggLeader;
 pub use metadata::{
     CoalescingPeerMetadataCache, EnginePeerMetadataCache, NoopPeerMetadataCache, PeerMetadataCache,
 };
@@ -34,6 +91,10 @@ pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
 pub use session::{
     CONDITIONAL_DISAGG_STREAM_SCHEMA, DisaggSession, PrefillSession, PrefillSessionFactory,
     SessionBlocks, SessionEvent, SessionEventStream, VeloPrefillSessionFactory,
+};
+pub use transport::{
+    CdBlockTransport, CdWorkerHook, ConnectorLeaderShim, EngineCdBlockTransport, InnerLeaderShim,
+    InnerLeaderWorkerHook,
 };
 
 /// Scheduler-facing connector leader API used by wrappers/compositions.

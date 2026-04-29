@@ -31,7 +31,6 @@ pub const CONDITIONAL_DISAGG_STREAM_SCHEMA: &str = "kvbm_conditional_disagg_v1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteBlockRef {
     pub block_id: BlockId,
-    #[serde(with = "serde_hash::single")]
     pub sequence_hash: SequenceHash,
 }
 
@@ -63,7 +62,7 @@ enum HashSelectionKind {
 struct HashSelectionWire {
     #[serde(rename = "type")]
     kind: HashSelectionKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_hash::vec")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hashes: Vec<SequenceHash>,
 }
 
@@ -111,7 +110,6 @@ pub struct BlockSetRequest {
 pub struct BlockSetResponse {
     pub request_id: String,
     pub ready: Vec<RemoteBlockSet>,
-    #[serde(with = "serde_hash::vec")]
     pub pending_hashes: Vec<SequenceHash>,
 }
 
@@ -141,7 +139,6 @@ pub struct UnpinAck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullComplete {
     pub pull_id: u64,
-    #[serde(with = "serde_hash::vec")]
     pub hashes: Vec<SequenceHash>,
 }
 
@@ -169,7 +166,6 @@ pub enum DecodeToPrefillFrame {
         blocks: Vec<RemoteBlockRef>,
     },
     OutputBlocksPulled {
-        #[serde(with = "serde_hash::vec")]
         hashes: Vec<SequenceHash>,
     },
     Detach,
@@ -196,7 +192,6 @@ pub enum PrefillToDecodeFrame {
     PullComplete(PullComplete),
     PullAck(PullAck),
     InitialBlocksPulled {
-        #[serde(with = "serde_hash::vec")]
         hashes: Vec<SequenceHash>,
     },
     OutputBlockSetsReady {
@@ -232,65 +227,6 @@ mod serde_instance_id_string {
         Uuid::parse_str(&value)
             .map(InstanceId::from)
             .map_err(D::Error::custom)
-    }
-}
-
-/// Serde helpers for [`SequenceHash`] in velo wire frames.
-///
-/// rmp-serde (MessagePack) has no u128 type. We serialize each hash as a
-/// `[u64; 2]` pair (hi word, lo word), which every serializer handles natively.
-///
-/// SAFETY for `from_u128`: `SequenceHash = PositionalLineageHash(u128)` is a
-/// single-field tuple struct. Rust guarantees this has the same size and
-/// alignment as u128, making the transmute sound for any bit pattern.
-mod serde_hash {
-    use super::SequenceHash;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
-
-    #[inline]
-    fn to_pair(hash: SequenceHash) -> [u64; 2] {
-        let v = hash.as_u128();
-        [(v >> 64) as u64, v as u64]
-    }
-
-    #[inline]
-    fn from_pair([hi, lo]: [u64; 2]) -> SequenceHash {
-        let v: u128 = ((hi as u128) << 64) | lo as u128;
-        // SAFETY: see module-level comment.
-        unsafe { std::mem::transmute::<u128, SequenceHash>(v) }
-    }
-
-    pub mod single {
-        use super::*;
-
-        pub fn serialize<S: Serializer>(hash: &SequenceHash, s: S) -> Result<S::Ok, S::Error> {
-            to_pair(*hash).serialize(s)
-        }
-
-        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SequenceHash, D::Error> {
-            let pair = <[u64; 2]>::deserialize(d)?;
-            Ok(from_pair(pair))
-        }
-    }
-
-    pub mod vec {
-        use super::*;
-
-        pub fn serialize<S: Serializer>(
-            hashes: &Vec<SequenceHash>,
-            s: S,
-        ) -> Result<S::Ok, S::Error> {
-            let pairs: Vec<[u64; 2]> = hashes.iter().map(|h| to_pair(*h)).collect();
-            pairs.serialize(s)
-        }
-
-        pub fn deserialize<'de, D: Deserializer<'de>>(
-            d: D,
-        ) -> Result<Vec<SequenceHash>, D::Error> {
-            let pairs = Vec::<[u64; 2]>::deserialize(d)
-                .map_err(|e| D::Error::custom(format!("serde_hash::vec: {e}")))?;
-            Ok(pairs.into_iter().map(from_pair).collect())
-        }
     }
 }
 
@@ -382,6 +318,41 @@ pub trait PrefillSession: Send + Sync {
     /// Local-initiated unpin protocol. Included now so future decode output
     /// pull paths can require a peer ack before releasing session pins.
     fn request_unpin(&self, request: UnpinRequest) -> BoxFuture<'static, Result<UnpinAck>>;
+
+    /// Decode-side notifies the prefill peer that an output block-set RDMA
+    /// pull has completed. Resolves with the peer's `PullAck` once received.
+    ///
+    /// Used by the conditional-disagg output-pull path: after D pulls a
+    /// `BlockSetsAdded` payload from P's G2 into D's local memory, D sends
+    /// `PullComplete` so P can release its session-held output pins.
+    fn pull_complete_from_decode(
+        &self,
+        complete: PullComplete,
+    ) -> BoxFuture<'static, Result<PullAck>>;
+
+    // ------------------------------------------------------------------
+    // Prefill-side methods
+    // ------------------------------------------------------------------
+
+    /// Prefill-side: ask the decode peer for its ready/pending block sets.
+    /// Resolves with the response correlated by `request.request_id`.
+    fn request_block_sets(
+        &self,
+        request: BlockSetRequest,
+    ) -> BoxFuture<'static, Result<BlockSetResponse>>;
+
+    /// Prefill-side: publish a chunk of output block sets to the decode peer.
+    /// One call per chunk; decode reacts via `SessionEvent::BlockSetsAdded`.
+    fn publish_output_block_sets(
+        &self,
+        block_sets: Vec<RemoteBlockSet>,
+    ) -> BoxFuture<'static, Result<()>>;
+
+    /// Prefill-side: acknowledge a `PullComplete` previously sent by decode.
+    fn ack_pull_from_prefill(
+        &self,
+        ack: PullAck,
+    ) -> BoxFuture<'static, Result<()>>;
 
     fn close(&self, reason: Option<String>);
 }
@@ -620,14 +591,30 @@ impl DisaggSession {
     }
 
     async fn send_decode(&self, frame: DecodeToPrefillFrame) -> Result<()> {
-        let sender = self.inner.decode_tx.lock().await;
-        let Some(sender) = sender.as_ref() else {
-            anyhow::bail!("decode->prefill stream is not attached");
-        };
-        sender
-            .send(frame)
-            .await
-            .map_err(|err| anyhow!("send decode->prefill frame: {err}"))
+        // The decode->prefill sender is set asynchronously by
+        // `attach_decode_sender` after the prefill peer's
+        // `Attach` frame is processed. P may send subsequent
+        // frames (e.g. `BlockSetRequest`) immediately after
+        // Attach; D's response to those needs to wait for the
+        // sender to be installed rather than failing eagerly.
+        // Poll briefly with a generous overall deadline so
+        // genuine non-attach failures still surface.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            {
+                let sender = self.inner.decode_tx.lock().await;
+                if let Some(sender) = sender.as_ref() {
+                    return sender
+                        .send(frame)
+                        .await
+                        .map_err(|err| anyhow!("send decode->prefill frame: {err}"));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("decode->prefill stream not attached after 30s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
     }
 
     async fn send_prefill(&self, frame: PrefillToDecodeFrame) -> Result<()> {
@@ -735,6 +722,38 @@ impl PrefillSession for DisaggSession {
             rx.await.context("unpin ack channel closed before ack")?
         }
         .boxed()
+    }
+
+    fn pull_complete_from_decode(
+        &self,
+        complete: PullComplete,
+    ) -> BoxFuture<'static, Result<PullAck>> {
+        let session = self.clone();
+        async move { session.pull_complete_from_decode(complete).await }.boxed()
+    }
+
+    fn request_block_sets(
+        &self,
+        request: BlockSetRequest,
+    ) -> BoxFuture<'static, Result<BlockSetResponse>> {
+        let session = self.clone();
+        async move { session.request_block_sets(request).await }.boxed()
+    }
+
+    fn publish_output_block_sets(
+        &self,
+        block_sets: Vec<RemoteBlockSet>,
+    ) -> BoxFuture<'static, Result<()>> {
+        let session = self.clone();
+        async move { session.publish_output_block_sets(block_sets).await }.boxed()
+    }
+
+    fn ack_pull_from_prefill(
+        &self,
+        ack: PullAck,
+    ) -> BoxFuture<'static, Result<()>> {
+        let session = self.clone();
+        async move { session.ack_pull_from_prefill(ack).await }.boxed()
     }
 
     fn close(&self, reason: Option<String>) {

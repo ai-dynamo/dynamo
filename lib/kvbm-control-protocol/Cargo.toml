@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-control-protocol"
+version = "0.1.0"
+edition.workspace = true
+description = "Shared connector-leader control-plane request/response types and ControlReply envelope used by kvbm-connector (HTTP + velo handlers) and kvbm-hub (HTTP→velo proxy)."
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+velo-common = { workspace = true }
+
+[dev-dependencies]

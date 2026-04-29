@@ -183,7 +183,20 @@ impl HubClient {
     /// Currently registers:
     /// - [`handlers::HEARTBEAT_HANDLER`] — velo-level liveness probe.
     pub fn register_handlers(self: &Arc<Self>, velo: &velo::Velo) -> Result<()> {
-        velo.register_handler(handlers::create_heartbeat_handler(Arc::clone(self)))?;
+        self.register_handlers_messenger(velo.messenger())
+    }
+
+    /// Register the velo control-plane handlers directly on a [`velo::Messenger`].
+    ///
+    /// Equivalent to [`register_handlers`](Self::register_handlers); prefer
+    /// this when the caller holds only an [`Arc<velo::Messenger>`] (e.g. from
+    /// `kvbm_engine::runtime::KvbmRuntime::messenger`) rather than a full
+    /// [`velo::Velo`].
+    pub fn register_handlers_messenger(
+        self: &Arc<Self>,
+        messenger: &Arc<velo::Messenger>,
+    ) -> Result<()> {
+        messenger.register_handler(handlers::create_heartbeat_handler(Arc::clone(self)))?;
         Ok(())
     }
 

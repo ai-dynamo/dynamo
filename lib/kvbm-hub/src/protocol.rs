@@ -67,6 +67,17 @@ pub mod paths {
     /// `GET /v1/features/conditional-disagg/instances`
     /// → [`super::ConditionalDisaggInstancesResponse`]
     pub const CD_INSTANCES: &str = "/v1/features/conditional-disagg/instances";
+
+    /// `PUT` connector-leader reset (proxied to the connector via velo).
+    /// Body: `kvbm_connector::connector::leader::control_api::ResetRequest`.
+    pub const CONNECTOR_RESET: &str = "/v1/instances/{instance_id}/reset";
+
+    /// `PUT` connector-leader register-leader (proxied via velo). Body:
+    /// `kvbm_connector::connector::leader::control_api::RegisterLeaderRequest`.
+    pub const CONNECTOR_REGISTER_LEADER: &str = "/v1/instances/{instance_id}/register_leader";
+
+    /// `GET` connector health (one-shot velo probe + last-heartbeat info).
+    pub const CONNECTOR_HEALTH: &str = "/v1/instances/{instance_id}/health";
 }
 
 /// Velo-queue name used by the ConditionalDisagg feature to move prefill
@@ -108,6 +119,10 @@ pub enum Feature {
 pub enum FeatureKey {
     /// Matches [`Feature::ConditionalDisagg`].
     ConditionalDisagg,
+    /// Connector-control HTTP→velo proxy. No client-side `Feature`
+    /// payload — the manager only contributes axum routes, so this key
+    /// never matches an incoming registration.
+    ConnectorControl,
 }
 
 impl Feature {
@@ -240,6 +255,7 @@ pub fn instance_probe(id: InstanceId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kvbm_common::SequenceHash;
     use velo_common::WorkerAddress;
 
     fn make_peer_info() -> PeerInfo {
@@ -340,7 +356,10 @@ mod tests {
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: vec!["11".to_string(), "12".to_string()],
+            sequence_hashes: vec![
+                SequenceHash::new(11, None, 11),
+                SequenceHash::new(12, None, 12),
+            ],
             token_ids: vec![1, 2, 3],
             num_computed_tokens: 16,
         };

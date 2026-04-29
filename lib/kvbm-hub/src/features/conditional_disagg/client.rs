@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::OnceCell;
+use velo::Messenger;
 use velo::discovery::PeerDiscovery;
 use velo::queue::NextOptions;
 use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
@@ -22,12 +23,15 @@ use crate::protocol::{
 /// Thin wrapper that registers an instance under the ConditionalDisagg
 /// feature and exposes helpers for peer discovery and prefill-queue IO.
 ///
-/// Construction requires both the [`HubClient`] (HTTP discovery surface) and
-/// the participant's [`velo::Velo`] instance (used to open a
-/// [`MessengerQueueBackend`] targeting the hub for prefill enqueue / dequeue).
+/// Construction requires the [`HubClient`] (HTTP discovery surface) and an
+/// [`Arc<Messenger>`] (used to open a [`MessengerQueueBackend`] targeting the
+/// hub for prefill enqueue / dequeue). Use [`ConditionalDisaggClient::new`]
+/// when you have a full [`velo::Velo`], or
+/// [`ConditionalDisaggClient::with_messenger`] when only a bare [`Messenger`]
+/// is available (e.g. from [`kvbm_engine::runtime::KvbmRuntime`]).
 pub struct ConditionalDisaggClient {
     hub: Arc<HubClient>,
-    velo: Arc<velo::Velo>,
+    messenger: Arc<Messenger>,
     role: ConditionalDisaggRole,
     /// Hub's velo `InstanceId`, learned on `register()`. Queue RPCs need
     /// this to address the hub-side queue service.
@@ -53,9 +57,23 @@ impl ConditionalDisaggClient {
         velo: Arc<velo::Velo>,
         role: ConditionalDisaggRole,
     ) -> Arc<Self> {
+        Self::with_messenger(hub, velo.messenger().clone(), role)
+    }
+
+    /// Wrap a [`HubClient`] + [`Arc<Messenger>`] and declare a role.
+    ///
+    /// Prefer this constructor when only a bare [`Messenger`] is available.
+    /// The [`Messenger`] is the only piece of [`velo::Velo`] this client
+    /// actually uses (for the hub-targeted prefill queue backend), so a full
+    /// [`velo::Velo`] instance is not required.
+    pub fn with_messenger(
+        hub: Arc<HubClient>,
+        messenger: Arc<Messenger>,
+        role: ConditionalDisaggRole,
+    ) -> Arc<Self> {
         Arc::new(Self {
             hub,
-            velo,
+            messenger,
             role,
             hub_velo_id: OnceLock::new(),
             queue_backend: OnceCell::new(),
@@ -157,7 +175,7 @@ impl ConditionalDisaggClient {
             .get_or_try_init(|| async {
                 let hub_id = self.hub_velo_id()?;
                 Ok::<_, anyhow::Error>(Arc::new(MessengerQueueBackend::new(
-                    self.velo.messenger().clone(),
+                    self.messenger.clone(),
                     hub_id,
                     MessengerQueueConfig::default(),
                 )))

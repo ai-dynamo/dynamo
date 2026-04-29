@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod control;
+pub mod control_api;
 pub mod disagg;
+pub mod velo_control;
 mod request;
 mod slot;
 
 use super::worker::ConnectorWorkerClient;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
 use kvbm_config::OnboardMode;
+use kvbm_hub::ConditionalDisaggClient;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::leader::{
     FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
@@ -33,6 +36,9 @@ use slot::{MatchCheckOutcome, RequestSlot, TransactionState};
 pub use request::Request;
 pub use scheduler::{CachedRequestData, NewRequestData, SchedulerOutput};
 pub use slot::FinishedStatus;
+// SlotMatchSplit is defined further down in this file; re-exported here so
+// downstream code (e.g., the conditional-disagg `InnerLeaderShim` trait)
+// can name it.
 
 pub trait ConnectorLeaderInterface: Send + Sync {}
 
@@ -60,10 +66,14 @@ pub struct ConnectorLeader {
 
     forward_pass_samples: Mutex<Option<ForwardPassSample>>,
     cache_stats: CacheStatsTracker,
+    /// Conditional-disagg hub client. Populated in `initialize_async` when
+    /// `config.disagg` is present. Holds the hub registration alive for the
+    /// life of this leader.
+    disagg_client: OnceLock<Arc<ConditionalDisaggClient>>,
 }
 
 #[derive(Default, Clone)]
-struct WorkerClients {
+pub(crate) struct WorkerClients {
     worker_instance_ids: Vec<InstanceId>,
     worker_connector_clients: Vec<ConnectorWorkerClient>,
     worker_transfer_clients: Vec<VeloWorkerClient>,
@@ -117,7 +127,14 @@ impl ConnectorLeader {
             control_server_shutdown: OnceLock::new(),
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
             forward_pass_samples: Mutex::new(None),
+            disagg_client: OnceLock::new(),
         }
+    }
+
+    /// Conditional-disagg hub client, if this leader was configured with
+    /// `disagg` and `initialize_async` has completed.
+    pub fn disagg_client(&self) -> Option<&Arc<ConditionalDisaggClient>> {
+        self.disagg_client.get()
     }
 
     /// Get the current onboard mode.
@@ -133,6 +150,24 @@ impl ConnectorLeader {
     /// Access the InstanceLeader (available after initialize_workers()).
     pub(crate) fn instance_leader(&self) -> Option<&InstanceLeader> {
         self.instance_leader.get()
+    }
+
+    /// Access the worker clients, if `initialize_async` has completed.
+    ///
+    /// Used by the conditional-disagg wrapper to drive
+    /// `mark_onboarding_complete` after a remote-prefill request finishes its
+    /// G2 → G1 onboarding. Currently dead in this crate; the call site
+    /// lands with the `on_block_sets_added` output-pull wiring.
+    #[allow(dead_code)]
+    pub(crate) fn worker_clients(&self) -> Option<&Arc<WorkerClients>> {
+        self.workers.get()
+    }
+
+    /// Tokio runtime handle for spawning async work. See `worker_clients`
+    /// — the call site lands with the CD output-pull integration.
+    #[allow(dead_code)]
+    pub(crate) fn tokio_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.tokio().clone()
     }
 
     /// Set the InstanceLeader (called by test infrastructure after worker initialization).
@@ -215,6 +250,218 @@ impl ConnectorLeader {
         let slot = self.get_slot(request_id)?;
         Ok(slot.lock().total_tokens())
     }
+
+    /// Apply G1 block_id assignments to a slot's token sequence without
+    /// triggering the inner USAA's G2→G1 transfer.
+    ///
+    /// Conditional-disagg uses this on USAA-1 to align the vLLM-allocated
+    /// G1 block_ids with the slot's sequence hashes; the wrapper then
+    /// drives transfers for the local-match and remote-prefill slices
+    /// separately via `CdBlockTransport` (step 2 onward).
+    #[allow(dead_code)]
+    pub(crate) fn apply_block_assignments(
+        &self,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+    ) -> Result<()> {
+        let slot = self.get_slot(request_id)?;
+        let mut slot = slot.lock();
+        slot.set_match_requires_reset(true);
+        slot.apply_new_blocks(block_ids);
+        Ok(())
+    }
+
+    /// Read the local-match split for a slot mid-onboard.
+    ///
+    /// Non-destructive — does not consume G2 blocks. The wrapper uses this
+    /// to decide how many of the vLLM-allocated G1 blocks point at
+    /// already-resident local data versus remote-prefill output.
+    #[allow(dead_code)]
+    pub(crate) fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        let block_size = slot.block_size();
+        let total_blocks = slot.sequence.blocks().len();
+        let all_sequence_hashes = slot.all_sequence_hashes();
+
+        let onboarding = slot
+            .onboarding_state()
+            .ok_or_else(|| anyhow!("slot {} has no active onboarding state", request_id))?;
+        let breakdown = onboarding.find_session.match_breakdown();
+        let local_match_blocks =
+            breakdown.host_blocks + breakdown.disk_blocks + breakdown.object_blocks;
+        let computed_blocks = onboarding.num_computed_tokens / block_size;
+
+        Ok(SlotMatchSplit {
+            block_size,
+            computed_blocks,
+            local_match_blocks,
+            total_blocks,
+            all_sequence_hashes,
+        })
+    }
+
+    /// Take ownership of the local-match G2 blocks staged by the slot's
+    /// find session.
+    ///
+    /// Destructive: after this returns the slot's onboarding state has no
+    /// G2 blocks left to give. The wrapper hands these to
+    /// [`CdBlockTransport::local_g2_to_g1`] for the matched portion of the
+    /// G1 destination slice.
+    #[allow(dead_code)]
+    pub(crate) fn take_local_match_g2_blocks(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<ImmutableBlock<G2>>> {
+        let slot = self.get_slot(request_id)?;
+        let mut slot = slot.lock();
+        let onboarding = slot.onboarding_state_mut().ok_or_else(|| {
+            anyhow!(
+                "slot {} has no active onboarding state for take_local_match_g2_blocks",
+                request_id
+            )
+        })?;
+        onboarding
+            .find_session
+            .take_g2_blocks()
+            .ok_or_else(|| anyhow!("slot {} G2 blocks not yet ready to take", request_id))
+    }
+
+    /// Clone a contiguous slice of the slot's `TokenBlock`s.
+    ///
+    /// Used by the wrapper to feed `MutableBlock<G2>::complete(token_block)`
+    /// once an RDMA pull lands and we need to register the new G2 blocks.
+    #[allow(dead_code)]
+    pub(crate) fn token_blocks_for_range(
+        &self,
+        request_id: &str,
+        range: std::ops::Range<usize>,
+    ) -> Result<Vec<dynamo_tokens::TokenBlock>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        let blocks = slot.sequence.blocks();
+        if range.end > blocks.len() {
+            bail!(
+                "token_blocks_for_range out of bounds: range {:?}, len {}",
+                range,
+                blocks.len()
+            );
+        }
+        Ok(blocks[range].to_vec())
+    }
+
+    /// Drive `mark_onboarding_complete` across all worker clients for
+    /// CD-bound requests once the wrapper has finished the G2→G1 transfer.
+    #[allow(dead_code)]
+    pub(crate) fn mark_workers_onboarding_complete(
+        &self,
+        request_id: String,
+    ) -> futures::future::BoxFuture<'static, Result<()>> {
+        use futures::FutureExt;
+        let workers = self.workers.get().cloned();
+        async move {
+            let workers = workers
+                .ok_or_else(|| anyhow!("WorkerClients not initialized for mark_workers_onboarding_complete"))?;
+            workers.mark_onboarding_complete(request_id).await
+        }
+        .boxed()
+    }
+
+    /// Read the full token sequence for a slot.
+    ///
+    /// Used by the conditional-disagg wrapper to populate
+    /// `RemotePrefillRequest.token_ids` so the prefill peer knows which
+    /// tokens to compute.
+    #[allow(dead_code)]
+    pub(crate) fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        let total = slot.sequence.total_tokens();
+        let tokens = slot.sequence.tokens_at(0..total);
+        Ok(Vec::<u32>::from(tokens))
+    }
+
+    /// Local velo instance_id — used as the `initiator_instance_id` on
+    /// CD remote-prefill requests so the prefill peer can attach back.
+    #[allow(dead_code)]
+    pub(crate) fn local_instance_id(&self) -> InstanceId {
+        self.runtime.messenger().instance_id()
+    }
+
+    /// Read the slot's parsed CD transfer params, if any. Returns `None`
+    /// when the slot has no metadata or no `kv_transfer_params`.
+    ///
+    /// Used by the prefill-side conditional-disagg wrapper to detect
+    /// CD-bound requests at GNMT time.
+    #[allow(dead_code)]
+    pub(crate) fn slot_transfer_params(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<kvbm_disagg_protocol::TransferParams>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        slot.transfer_params()
+            .map_err(|err| anyhow!("decode kv_transfer_params for {}: {}", request_id, err))
+    }
+
+    /// Drive `mark_failed_onboarding` across all worker clients for the
+    /// listed G1 block_ids when a CD pipeline cannot complete.
+    #[allow(dead_code)]
+    pub(crate) fn mark_workers_failed_onboarding(
+        &self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+    ) -> futures::future::BoxFuture<'static, Result<()>> {
+        use futures::FutureExt;
+        let workers = self.workers.get().cloned();
+        async move {
+            let workers = workers
+                .ok_or_else(|| anyhow!("WorkerClients not initialized for mark_workers_failed_onboarding"))?;
+            workers.mark_failed_onboarding(request_id, block_ids).await
+        }
+        .boxed()
+    }
+}
+
+/// Snapshot of a slot's match-side state taken mid-onboard, used by the
+/// conditional-disagg wrapper to split USAA's G1 block_ids into
+/// `[computed | local_match | remote_prefill]` ranges.
+///
+/// Methods/fields are `#[allow(dead_code)]` until `decode_usaa` rewrite
+/// (step 6) wires them in.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SlotMatchSplit {
+    pub block_size: usize,
+    pub computed_blocks: usize,
+    pub local_match_blocks: usize,
+    pub total_blocks: usize,
+    pub all_sequence_hashes: Vec<crate::SequenceHash>,
+}
+
+#[allow(dead_code)]
+impl SlotMatchSplit {
+    pub fn remote_blocks(&self) -> usize {
+        self.total_blocks
+            .saturating_sub(self.computed_blocks)
+            .saturating_sub(self.local_match_blocks)
+    }
+
+    pub fn local_match_range(&self) -> std::ops::Range<usize> {
+        self.computed_blocks..self.computed_blocks + self.local_match_blocks
+    }
+
+    pub fn remote_range(&self) -> std::ops::Range<usize> {
+        let start = self.computed_blocks + self.local_match_blocks;
+        start..self.total_blocks
+    }
+
+    pub fn expected_remote_hashes(&self) -> Vec<crate::SequenceHash> {
+        self.all_sequence_hashes[self.remote_range()].to_vec()
+    }
+}
+
+impl ConnectorLeader {
 
     /// Extend a slot's token sequence with new tokens.
     ///

@@ -44,6 +44,16 @@ struct Cli {
     /// (overrides KVBM_HUB_PRUNE_INTERVAL_SECS).
     #[arg(long)]
     prune_interval_secs: Option<u64>,
+
+    /// Hub-driven heartbeat probe interval (seconds).
+    /// (overrides KVBM_HUB_HEARTBEAT_INTERVAL_SECS).
+    #[arg(long)]
+    heartbeat_interval_secs: Option<u64>,
+
+    /// Consecutive probe failures before unregister.
+    /// (overrides KVBM_HUB_HEARTBEAT_MAX_FAILURES).
+    #[arg(long)]
+    heartbeat_max_failures: Option<u32>,
 }
 
 fn build_config(cli: &Cli) -> anyhow::Result<HubConfig> {
@@ -65,6 +75,12 @@ fn build_config(cli: &Cli) -> anyhow::Result<HubConfig> {
     }
     if let Some(secs) = cli.prune_interval_secs {
         f = f.merge(("prune_interval_secs", secs));
+    }
+    if let Some(secs) = cli.heartbeat_interval_secs {
+        f = f.merge(("heartbeat_interval_secs", secs));
+    }
+    if let Some(n) = cli.heartbeat_max_failures {
+        f = f.merge(("heartbeat_max_failures", n));
     }
     Ok(f.extract()?)
 }
@@ -91,7 +107,11 @@ async fn main() -> anyhow::Result<()> {
         .discovery_port(config.discovery_port)
         .control_port(config.control_port)
         .registration_ttl(Duration::from_secs(config.registration_ttl_secs))
-        .prune_interval(Duration::from_secs(config.prune_interval_secs));
+        .prune_interval(Duration::from_secs(config.prune_interval_secs))
+        .heartbeat_interval(Duration::from_secs(config.heartbeat_interval_secs))
+        .heartbeat_max_failures(config.heartbeat_max_failures)
+        .add_feature_manager(Arc::new(kvbm_hub::ConditionalDisaggManager::new()))
+        .add_feature_manager(Arc::new(kvbm_hub::ConnectorControlManager::new()));
 
     if let Some(velo_port) = config.velo_port {
         let bind = SocketAddr::new(config.bind_addr, velo_port);
