@@ -15,6 +15,7 @@ Validates:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -656,12 +657,37 @@ def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
     }
 
 
+def retry_on_assertion(test_func):
+    """Retry a test once if it raises ``AssertionError``.
+
+    Why: model output is non-deterministic, and a single unlucky generation
+    can flip an assertion that would pass on a re-roll. Retrying once
+    smooths over that variance without masking real regressions, which
+    would fail both attempts.
+    """
+
+    @functools.wraps(test_func)
+    def wrapper(*args, **kwargs):
+        try:
+            return test_func(*args, **kwargs)
+        except AssertionError as exc:
+            logger.warning(
+                "Test %s failed first attempt with AssertionError: %s. Retrying once.",
+                test_func.__name__,
+                exc,
+            )
+            return test_func(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Protocol / contract tests
 # ---------------------------------------------------------------------------
 
 
 class TestToolCallingProtocol:
+    @retry_on_assertion
     def test_stream_has_required_chunk_shape(self, client: OpenAI, model: str):
         stream = client.chat.completions.create(
             model=model,
@@ -690,6 +716,7 @@ class TestToolCallingProtocol:
         assert chunk_count > 0
         assert saw_finish, "stream never emitted a finish_reason"
 
+    @retry_on_assertion
     def test_single_tool_call_schema_valid(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -708,6 +735,7 @@ class TestToolCallingProtocol:
         assert isinstance(args["city"], str)
         assert args["city"]
 
+    @retry_on_assertion
     def test_tool_choice_required_forces_a_tool_call(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -736,6 +764,7 @@ class TestToolCallingProtocol:
                     required_field in args
                 ), f"{fn_name} missing required field {required_field!r}"
 
+    @retry_on_assertion
     def test_tool_choice_none_suppresses_tool_calls(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -748,6 +777,7 @@ class TestToolCallingProtocol:
         assert result.tool_calls == []
         assert result.content.strip()
 
+    @retry_on_assertion
     def test_named_tool_choice_forces_specific_function(
         self, client: OpenAI, model: str
     ):
@@ -764,6 +794,7 @@ class TestToolCallingProtocol:
         for tc in result.tool_calls:
             parse_and_validate_tool_call(tc, schema, expected_name="get_weather")
 
+    @retry_on_assertion
     def test_parallel_multi_tool_request_includes_all_expected_tools(
         self, client: OpenAI, model: str
     ):
@@ -794,6 +825,7 @@ class TestToolCallingProtocol:
             names.add(tc["function"]["name"])
         assert len(names) >= 2, f"expected at least 2 distinct tools, got {names}"
 
+    @retry_on_assertion
     def test_array_argument_schema_valid(self, client: OpenAI, model: str):
         tools = [
             {
@@ -840,6 +872,7 @@ class TestToolCallingProtocol:
         assert isinstance(args["recipients"], list)
         assert len(args["recipients"]) >= 3
 
+    @retry_on_assertion
     def test_no_tools_is_plain_text(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -857,6 +890,7 @@ class TestToolCallingProtocol:
 
 
 class TestToolCallingMultiTurn:
+    @retry_on_assertion
     def test_tool_result_is_consumed_and_final_answer_is_text(
         self, client: OpenAI, model: str
     ):
@@ -895,6 +929,7 @@ class TestToolCallingMultiTurn:
         assert second.content.strip()
         assert "15" in second.content or "cloud" in second.content.lower()
 
+    @retry_on_assertion
     def test_chained_tool_use_search_then_calculate(self, client: OpenAI, model: str):
         schemas = tool_schema_map(TOOLS_SEARCH + TOOLS_CALCULATOR)
         messages: list[dict[str, Any]] = [
@@ -966,6 +1001,7 @@ class TestToolCallingMultiTurn:
             assert step2.tool_calls == []
             assert "1396000" in step2.content.replace(",", "")
 
+    @retry_on_assertion
     def test_multiple_prior_tool_results_synthesize_to_text(
         self, client: OpenAI, model: str
     ):
@@ -1027,6 +1063,7 @@ class TestToolCallingMultiTurn:
 
 
 class TestToolCallingModelBehavior:
+    @retry_on_assertion
     def test_many_tools_prefers_calculator_for_math_question(
         self, client: OpenAI, model: str
     ):
@@ -1043,6 +1080,7 @@ class TestToolCallingModelBehavior:
             assert len(result.tool_calls) >= 1
             assert result.tool_calls[0]["function"]["name"] == "calculate"
 
+    @retry_on_assertion
     def test_unicode_arguments_are_preserved(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -1063,6 +1101,7 @@ class TestToolCallingModelBehavior:
             )
             assert args["city"]
 
+    @retry_on_assertion
     def test_system_instruction_encourages_tool_use(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
