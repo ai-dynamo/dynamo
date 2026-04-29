@@ -246,9 +246,11 @@ def test_cleanup_callback_runs_after_drain():
 
     asyncio.run(_run())
 
-    assert call_order == ["drain", "cleanup", "shutdown"], (
-        f"expected drain -> cleanup -> shutdown, got {call_order}"
-    )
+    assert call_order == [
+        "drain",
+        "cleanup",
+        "shutdown",
+    ], f"expected drain -> cleanup -> shutdown, got {call_order}"
 
 
 def test_cleanup_callback_exception_does_not_block_shutdown():

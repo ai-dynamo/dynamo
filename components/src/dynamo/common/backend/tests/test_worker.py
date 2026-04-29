@@ -130,18 +130,42 @@ def test_cleanup_once_calls_engine_cleanup_exactly_once():
 
 
 def test_cleanup_once_concurrent_invocations_only_run_once():
-    """Concurrent _cleanup_once invocations must coalesce.
+    """Concurrent _cleanup_once invocations must coalesce AND serialize.
 
-    Mirrors the real race: signal handler creates a task that awaits
-    _cleanup_once at the same time that run()'s finally block awaits it.
+    Mirrors the real race: the signal-handler task awaits _cleanup_once while
+    run()'s finally block awaits it. The second caller must wait for the
+    first's engine.cleanup() to finish before returning — otherwise the
+    signal handler can call runtime.shutdown() while the finally-block's
+    cleanup is still mid-flight, collapsing the loop under it.
     """
     worker, engine = _make_worker()
 
     async def _run():
-        await asyncio.gather(
-            worker._cleanup_once(),
-            worker._cleanup_once(),
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_cleanup():
+            started.set()
+            await release.wait()
+
+        engine.cleanup.side_effect = slow_cleanup
+
+        first = asyncio.create_task(worker._cleanup_once())
+        await started.wait()
+        # First caller is now suspended inside engine.cleanup(). A second
+        # caller arriving here must NOT return until the first finishes.
+        second = asyncio.create_task(worker._cleanup_once())
+        # Yield enough times that a flag-only short-circuit would let `second`
+        # complete while `first` is still inside engine.cleanup().
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not second.done(), (
+            "second _cleanup_once returned while the first was still inside "
+            "engine.cleanup() — late callers must wait for the in-flight cleanup"
         )
+
+        release.set()
+        await asyncio.gather(first, second)
 
     asyncio.run(_run())
     assert engine.cleanup.await_count == 1

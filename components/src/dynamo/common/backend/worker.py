@@ -83,19 +83,29 @@ class Worker:
         self.config = config
         self.engine = engine
         self._cleanup_done = False
+        self._cleanup_lock = asyncio.Lock()
 
     async def _cleanup_once(self) -> None:
-        # Idempotent. Called from two paths: the graceful-shutdown signal
-        # handler (before runtime.shutdown() tears down the Rust async runtime)
-        # and run()'s finally block (covers clean returns from serve_endpoint
-        # and failures during model registration). Whichever runs first wins;
-        # the other is a no-op. Required because runtime.shutdown() collapses
-        # the loop's native backing before a finally-only cleanup can finish.
+        # Idempotent and serialized. Called from two paths: the graceful-shutdown
+        # signal handler (before runtime.shutdown() tears down the Rust async
+        # runtime) and run()'s finally block (covers clean returns from
+        # serve_endpoint and failures during model registration). The lock makes
+        # late callers wait for an in-flight cleanup to finish before returning,
+        # so the signal handler will not call runtime.shutdown() while the
+        # finally-block's engine.cleanup() is still mid-flight.
         if self._cleanup_done:
             return
-        self._cleanup_done = True
-        await self.engine.cleanup()
-        logger.info("Engine cleanup complete")
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
+            try:
+                await self.engine.cleanup()
+                logger.info("Engine cleanup complete")
+            finally:
+                # Mark done even on failure so the other path does not retry
+                # cleanup (engines like vLLM/TRT-LLM tear down NCCL groups in
+                # cleanup(); a second attempt can hang or raise).
+                self._cleanup_done = True
 
     async def generate(
         self, request: GenerateRequest, context: Context
