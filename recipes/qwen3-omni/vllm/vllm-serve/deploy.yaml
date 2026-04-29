@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Upstream `vllm-omni serve` baseline for DYN-2581 agg-vs-disagg benchmarking.
+# Plain k8s Deployment + Service — no Dynamo frontend / router. Used as the
+# reference point that the dynamo agg + disagg topologies are compared against.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-serve-qwen3-omni
+spec:
+  selector:
+    app: vllm-serve-qwen3-omni
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-serve-qwen3-omni
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-serve-qwen3-omni
+  template:
+    metadata:
+      labels:
+        app: vllm-serve-qwen3-omni
+    spec:
+      containers:
+        - name: vllm-omni
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          command: ["bash", "-lc"]
+          # vllm-omni ships in the same runtime image dynamo uses, so we just
+          # invoke its CLI directly. If the image ever drops vllm-omni, add a
+          # `pip install vllm-omni` here.
+          args:
+            - >-
+              vllm-omni serve
+              Qwen/Qwen3-Omni-30B-A3B-Instruct
+              --port 8000
+              --output-modalities text,audio
+              --trust-remote-code
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+            - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+              value: "1"
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+              memory: "200Gi"
+            requests:
+              nvidia.com/gpu: "2"
+              memory: "150Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
