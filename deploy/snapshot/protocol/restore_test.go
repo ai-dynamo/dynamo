@@ -30,13 +30,14 @@ func TestNewRestorePod(t *testing.T) {
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
-				Name:           "main",
-				Image:          "test:latest",
-				Command:        []string{"python3", "-m", "dynamo.vllm"},
-				Args:           []string{"--model", "Qwen"},
-				ReadinessProbe: readinessProbe.DeepCopy(),
-				LivenessProbe:  livenessProbe.DeepCopy(),
-				StartupProbe:   startupProbe.DeepCopy(),
+				Name:            "main",
+				Image:           "test:latest",
+				ImagePullPolicy: corev1.PullAlways,
+				Command:         []string{"python3", "-m", "dynamo.vllm"},
+				Args:            []string{"--model", "Qwen"},
+				ReadinessProbe:  readinessProbe.DeepCopy(),
+				LivenessProbe:   livenessProbe.DeepCopy(),
+				StartupProbe:    startupProbe.DeepCopy(),
 			}},
 		},
 	}, PodOptions{
@@ -78,6 +79,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if main.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", main.Args)
+	}
+	if main.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("expected restore image pull policy %q, got %q", corev1.PullIfNotPresent, main.ImagePullPolicy)
 	}
 	if main.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -137,9 +141,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "engine-0", Image: "test:latest", Command: []string{"python3"}, Args: []string{"--serve"}},
-				{Name: "engine-1", Image: "test:latest", Command: []string{"python3"}, Args: []string{"--serve"}},
-				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
+				{Name: "engine-0", Image: "test:latest", ImagePullPolicy: corev1.PullAlways, Command: []string{"python3"}, Args: []string{"--serve"}},
+				{Name: "engine-1", Image: "test:latest", ImagePullPolicy: corev1.PullAlways, Command: []string{"python3"}, Args: []string{"--serve"}},
+				{Name: "sidecar", Image: "sidecar:latest", ImagePullPolicy: corev1.PullAlways, Command: []string{"sidecar"}, Args: []string{"run"}},
 			},
 		},
 	}, PodOptions{
@@ -165,6 +169,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		if c.Args != nil {
 			t.Fatalf("expected args cleared on %s, got %#v", name, c.Args)
 		}
+		if c.ImagePullPolicy != corev1.PullIfNotPresent {
+			t.Fatalf("expected restore image pull policy %q on %s, got %q", corev1.PullIfNotPresent, name, c.ImagePullPolicy)
+		}
 		assertRestoreStartupGate(t, c.StartupProbe)
 		found := false
 		for _, m := range c.VolumeMounts {
@@ -183,6 +190,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 	sidecar := findRestoreContainer(t, restorePod.Spec.Containers, "sidecar")
 	if len(sidecar.Command) != 1 || sidecar.Command[0] != "sidecar" {
 		t.Fatalf("sidecar command must not be rewritten, got %#v", sidecar.Command)
+	}
+	if sidecar.ImagePullPolicy != corev1.PullAlways {
+		t.Fatalf("sidecar image pull policy must not be rewritten, got %q", sidecar.ImagePullPolicy)
 	}
 	for _, m := range sidecar.VolumeMounts {
 		if m.Name == SnapshotControlVolumeName {
@@ -241,12 +251,13 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	livenessProbe := &corev1.Probe{TimeoutSeconds: 5}
 	startupProbe := &corev1.Probe{FailureThreshold: 60}
 	podSpec.Containers = []corev1.Container{{
-		Name:           "main",
-		Command:        []string{"python3", "-m", "dynamo.vllm"},
-		Args:           []string{"--model", "Qwen"},
-		ReadinessProbe: readinessProbe.DeepCopy(),
-		LivenessProbe:  livenessProbe.DeepCopy(),
-		StartupProbe:   startupProbe.DeepCopy(),
+		Name:            "main",
+		ImagePullPolicy: corev1.PullAlways,
+		Command:         []string{"python3", "-m", "dynamo.vllm"},
+		Args:            []string{"--model", "Qwen"},
+		ReadinessProbe:  readinessProbe.DeepCopy(),
+		LivenessProbe:   livenessProbe.DeepCopy(),
+		StartupProbe:    startupProbe.DeepCopy(),
 	}}
 
 	storage := Storage{
@@ -304,6 +315,9 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	}
 	if container.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
+	}
+	if container.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("expected restore image pull policy %q, got %q", corev1.PullIfNotPresent, container.ImagePullPolicy)
 	}
 	if container.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
