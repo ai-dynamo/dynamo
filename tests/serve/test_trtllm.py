@@ -611,3 +611,52 @@ def test_chat_only_aggregated_with_test_logits_processor(
         }
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.trtllm
+@pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(3.9)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("num_system_ports", [1], indirect=True)
+def test_aggregated_health_check_priority(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """
+    Validate the canary health check with priority=1.0 on an aggregated
+    TRT-LLM deployment.
+
+    Starts the engine with DYN_HEALTH_CHECK_ENABLED=true and
+    health_check_workers=True (1 system port). The test passes only if:
+    1. The worker /health endpoint reports ready (canary with priority=1.0
+       was accepted by generate_async and returned a valid response)
+    2. A normal chat request succeeds alongside the canary
+    """
+    base = trtllm_configs["aggregated"]
+    config = TRTLLMConfig(
+        name="aggregated_health_check",
+        directory=base.directory,
+        script_name=base.script_name,
+        marks=[],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        delayed_start=base.delayed_start,
+        timeout=base.timeout,
+        health_check_workers=True,
+        env={
+            "DYN_HEALTH_CHECK_ENABLED": "true",
+            "DYN_CANARY_WAIT_TIME": "2",
+            "MODEL_PATH": "Qwen/Qwen3-0.6B",
+            "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
+        },
+        request_payloads=[
+            chat_payload_default(),
+        ],
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
