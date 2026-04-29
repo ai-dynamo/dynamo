@@ -82,6 +82,20 @@ class Worker:
     def __init__(self, engine: LLMEngine, config: WorkerConfig):
         self.config = config
         self.engine = engine
+        self._cleanup_done = False
+
+    async def _cleanup_once(self) -> None:
+        # Idempotent. Called from two paths: the graceful-shutdown signal
+        # handler (before runtime.shutdown() tears down the Rust async runtime)
+        # and run()'s finally block (covers clean returns from serve_endpoint
+        # and failures during model registration). Whichever runs first wins;
+        # the other is a no-op. Required because runtime.shutdown() collapses
+        # the loop's native backing before a finally-only cleanup can finish.
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+        await self.engine.cleanup()
+        logger.info("Engine cleanup complete")
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -133,7 +147,13 @@ class Worker:
         endpoint = runtime.endpoint(f"{cfg.namespace}.{cfg.component}.{cfg.endpoint}")
         shutdown_endpoints = [endpoint]
 
-        install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+        install_signal_handlers(
+            loop,
+            runtime,
+            shutdown_endpoints,
+            shutdown_event,
+            cleanup_callback=self._cleanup_once,
+        )
 
         try:
             engine_config = await self.engine.start()
@@ -183,5 +203,4 @@ class Worker:
                 metrics_labels=cfg.metrics_labels,
             )
         finally:
-            await self.engine.cleanup()
-            logger.info("Engine cleanup complete")
+            await self._cleanup_once()
