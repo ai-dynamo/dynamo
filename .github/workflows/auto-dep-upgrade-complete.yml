@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# HACKY E2E TEST - DO NOT MERGE
+# Slack failure step disabled. workflow_run requires this file on the default
+# branch to fire, so this listener will not run during the hacky test anyway;
+# the slack guard is precautionary.
 
 name: Auto Dependency Upgrade - Complete
 
@@ -60,7 +65,7 @@ jobs:
             --body "$BODY"
 
       - name: Slack on failure
-        if: github.event.workflow_run.conclusion != 'success'
+        if: false  # HACKY E2E TEST - slack disabled
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2.1.1
         with:
           webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}

@@ -1,9 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# HACKY E2E TEST - DO NOT MERGE
+# Push trigger on phase 2 branch + checkout phase 2 (instead of main) so the
+# dep branch inherits the modified post-merge-ci.yml (with the deps/upgrade-*
+# push trigger). The final dispatch step is removed; user re-pushes the dep
+# branch from local to fire post-merge-ci (GITHUB_TOKEN pushes don't fire
+# downstream workflows).
 
 name: Auto Dependency Upgrade - Trigger
 
 on:
+  push:
+    branches: [anants/auto-dep-upgrade-trtllm]
   schedule:
     - cron: '0 10 * * *'
   workflow_dispatch:
@@ -27,10 +36,10 @@ jobs:
       matrix:
         framework: [trtllm]
     steps:
-      - name: Checkout main
+      - name: Checkout phase 2 branch (HACK)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: main
+          ref: anants/auto-dep-upgrade-trtllm
           fetch-depth: 0
 
       - name: Set up Python
@@ -87,11 +96,8 @@ jobs:
           git commit -s -m "chore: bump ${{ matrix.framework }} to v${{ steps.detect.outputs.latest }}"
           git push origin "${{ steps.branch.outputs.name }}"
 
-      - name: Dispatch post-merge-ci on upgrade branch
-        if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run post-merge-ci.yml \
-            --ref "${{ steps.branch.outputs.name }}" \
-            -f framework=${{ matrix.framework }}
+      # HACKY E2E TEST: dispatch step removed.
+      # Instead, push an empty commit from local to fire post-merge-ci's push
+      # trigger on deps/upgrade-* (GITHUB_TOKEN pushes won't fire it):
+      #   git fetch origin "${BRANCH}" && git checkout "${BRANCH}" \
+      #     && git commit --allow-empty -s -m "fire CI" && git push origin "${BRANCH}"
