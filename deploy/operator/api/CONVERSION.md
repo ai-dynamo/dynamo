@@ -305,6 +305,66 @@ The mutation step must update nested existing objects, including elements inside
 arrays and slices. This is what exposes stale annotation overlays on deep
 fields.
 
+## Adding v1beta1 Fields
+
+In Kubernetes conversion, `v1beta1` is the hub version and `v1alpha1` is the
+spoke version. Objects may be converted in either direction:
+
+```text
+v1beta1 hub -> v1alpha1 spoke
+v1alpha1 spoke -> v1beta1 hub
+```
+
+The conversion helpers use these names:
+
+- `src`: the live object we are converting from now. It is the source of truth.
+- `dst`: the object we are building.
+- `restored`: older `dst`-version data decoded from preservation annotations.
+- `save`: `src`-version data that `dst` cannot represent directly and that
+  will be written into `dst.metadata.annotations` for a future conversion.
+- `ctx`: extra typed context passed to nested helpers.
+
+`TestV1Beta1ConversionFieldSetIsAcknowledged` is a schema-change tripwire. It
+reflects over the v1beta1 spec/status structs that participate in conversion
+and compares their JSON field paths to a checked-in field-set snapshot.
+
+When a v1beta1 field is added, this test should fail before the field can be
+silently dropped by conversion. Treat that failure as a prompt to make an
+explicit conversion decision:
+
+- Native mapping: add the field to the relevant `convert*ToHub` /
+  `convert*FromHub` helper, sourced from the live `src` value.
+- Source-only preservation: if the target version cannot represent the field,
+  add it to the sparse `save` payload. The payload is serialized into an
+  annotation on `dst`. On a later conversion back, restore that field from
+  `restored` only if the then-current `src` version still cannot represent it.
+- Derived or lossy mapping: document the semantic mapping and add a targeted
+  regression test for the lossy shape.
+- Intentional drop: document why the field is not part of the conversion
+  contract and add a targeted test if the omission is observable.
+
+For example, if a new v1beta1 field has no v1alpha1 field, then on
+`v1beta1 -> v1alpha1` the converter should copy it into `save` and encode that
+save payload into a v1alpha1 annotation. On `v1alpha1 -> v1beta1`, the
+converter may restore that field from `restored`. If v1alpha1 later grows a
+native field for the same concept, the live `src` field must win over any stale
+annotation.
+
+Then add or update a focused conversion test for the new field. Fuzz is a broad
+backstop; the field-set test tells reviewers that the schema changed, while the
+focused test proves the chosen conversion policy.
+
+After the conversion code and tests are updated, refresh the
+`knownV1Beta1ConversionFieldSet` snapshot in
+`conversion_field_coverage_test.go` by applying the diff from the failing test
+output. Do not update the snapshot before the conversion decision is
+implemented.
+
+The field-set snapshot walks v1beta1 API structs and v1beta1-owned nested
+types. Kubernetes/library structs such as `corev1.PodTemplateSpec` are treated
+as leaves; additions inside those upstream types are covered by the existing
+pod-template/job conversion tests rather than by this schema tripwire.
+
 ## Verification
 
 Each conversion change should run:
