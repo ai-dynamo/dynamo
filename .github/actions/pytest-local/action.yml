@@ -147,15 +147,14 @@ runs:
         mkdir -p "${XDG_CACHE_HOME}"
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
-        NVME_CACHE_ARGS=""
         if [[ "${{ inputs.gpu_tests }}" == "true" ]]; then
           NVME_HUB="${NVME_ROOT}/.cache/huggingface/hub"
           # This directory exists when the models have been seeded to NVMe.
           if [[ -d "${NVME_HUB}" ]]; then
-            NVME_CACHE_ARGS+="HF_HUB_CACHE=${NVME_HUB}"
-            NVME_CACHE_ARGS+="HF_HUB_OFFLINE=1"
-            NVME_CACHE_ARGS+="TRANSFORMERS_OFFLINE=1"
-            NVME_CACHE_ARGS+="DYNAMO_MODELS_DIR=${NVME_HUB}"
+            export HF_HUB_CACHE="${NVME_HUB}"
+            export HF_HUB_OFFLINE=1
+            export TRANSFORMERS_OFFLINE=1
+            export DYNAMO_MODELS_DIR="${NVME_HUB}"
           fi
         fi
 
@@ -168,7 +167,7 @@ runs:
 
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
-          PYTEST_CMD="pytest -v --collect-only ${NVME_CACHE_ARGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           case "${{ inputs.parallel_mode }}" in
@@ -186,8 +185,8 @@ runs:
               ;;
           esac
 
-          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO ${NVME_CACHE_ARGS} -m \"${{ inputs.pytest_marks }}\""
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py ${NVME_CACHE_ARGS} -m \"${{ inputs.pytest_marks }}\""
+          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py -m \"${{ inputs.pytest_marks }}\""
         fi
 
         umask 0022
