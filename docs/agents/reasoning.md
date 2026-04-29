@@ -44,6 +44,7 @@ require the opening tag to be present in the model output.
 |---|---|---|---|---|
 | `basic` | Generic CoT models | Dynamo-only | No | Plain `<think>...</think>` |
 | `deepseek_r1` | DeepSeek R1, DeepSeek V3.1, DeepSeek V3.2 | | Yes | Pass explicitly for V3.1/V3.2 (no alias) |
+| `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
 | `glm45` | GLM-4.5, GLM-4.7 | Dynamo-only | No | Alias for `nemotron_deci`. `<think>...</think>` |
 | `gpt_oss` | gpt-oss-20b / -120b | Dynamo-only | No | Harmony channel reasoning format |
 | `granite` | Granite 3.x | | No | `Here's my thought process:` / `Here's my response:` |
@@ -54,7 +55,7 @@ require the opening tag to be present in the model output.
 | `nemotron3` | Nemotron-3 / Mini | Dynamo-only | Yes | Alias for `deepseek_r1` |
 | `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron | Dynamo-only | No | `<think>...</think>` |
 | `nemotron_nano` | Nemotron-Nano | Dynamo-only | Yes | Alias for `deepseek_r1` |
-| `qwen3` | QwQ-32B, Qwen3-Think, Qwen3-Coder | | No | `<think>...</think>` |
+| `qwen3` | QwQ-32B, Qwen3-Think, Qwen3-Coder, Qwen3.5 | | No | `<think>...</think>` |
 | `step3` | Step-3 / Step-3-Reasoning | Dynamo-only | Yes | `<think>...</think>` |
 
 ## Common Parser Pairings
@@ -62,8 +63,10 @@ require the opening tag to be present in the model output.
 Some models need both parsers configured together. Common pairings include:
 
 - `openai/gpt-oss-*`: `--dyn-tool-call-parser harmony --dyn-reasoning-parser gpt_oss`
+- `deepseek-ai/DeepSeek-V4-*`: `--dyn-tool-call-parser deepseek_v4 --dyn-reasoning-parser deepseek_v4`
 - `zai-org/GLM-4.7`: `--dyn-tool-call-parser glm47 --dyn-reasoning-parser glm45`
 - `moonshotai/Kimi-K2.5*`: `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25`
+- `Qwen/Qwen3.5*`: `--dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3`
 - MiniMax M2.1 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_append_think`
 
 ## Tool Calling Interplay

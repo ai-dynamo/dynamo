@@ -1417,4 +1417,75 @@ mod tests {
         );
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
+
+    /// `CASE.5` + `CASE.8` + `CASE.16` — kimi-k2 truncated mid-argument
+    /// (no `<|tool_call_end|>`), streaming, customer regression. Also
+    /// validates `CASE.12` finish_reason=stop passthrough.
+    ///
+    /// Repro for the production leak observed against kimi-k2-6: the
+    /// model stops mid-argument with
+    /// `finish_reason: stop` (not max_tokens), having emitted
+    /// `<|tool_calls_section_begin|>`, `<|tool_call_begin|>`, the function id,
+    /// `<|tool_call_argument_begin|>`, and the JSON value — but **never**
+    /// emitting `<|tool_call_end|>` or `<|tool_calls_section_end|>`. This is
+    /// the most common failure mode under heavy concurrent load (multi-worker
+    /// batching causes occasional EOS-token confusion at the close-of-arg
+    /// boundary).
+    ///
+    /// The parser correctly returns 0 tool calls (no complete call found,
+    /// since `<|tool_call_end|>` is required by the kimi_k2 regex) and an
+    /// empty `normal_text` (the section body is consumed). Before the fix,
+    /// the jail's `create_tool_call_choice` ignored `normal_text` and emitted
+    /// the raw `accumulated_content` (with all special-token markers) as
+    /// plain user-visible content — leaking internal protocol tokens to the
+    /// client and breaking downstream agents that expect either a clean
+    /// `tool_calls` array or clean text.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_truncated_mid_argument_no_call_end() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.Write:42", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(
+                r#"{"file_path":"/app/main.rs","content":"fn main() {}"}"#,
+                None,
+            ),
+            // Stream ends here — model self-terminated without emitting
+            // <|tool_call_end|> or <|tool_calls_section_end|>.
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // The parser cannot recover a structured tool call without
+        // <|tool_call_end|>, so tool_calls is expected to be empty.
+        assert!(
+            !aggregated.has_tool_calls,
+            "Truly truncated call (no call_end) should not produce structured tool_calls"
+        );
+
+        // The parser consumes the section body, so normal_text is expected
+        // to be empty. Asserting equality (not just marker-absence) locks the
+        // contract: any future regression that produced *other* garbage in
+        // normal_text would still fail this assertion.
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Truncated tool-call section should produce empty normal_content. \
+             Got: {:?}",
+            aggregated.normal_content
+        );
+
+        // finish_reason should pass through unchanged from the source chunk
+        // (Stop in this case). Locks the contract that the no-tool-calls
+        // branch doesn't remap the reason.
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason should pass through as Stop when no tool calls are emitted"
+        );
+    }
 }

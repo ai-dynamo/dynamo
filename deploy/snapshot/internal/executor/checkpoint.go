@@ -11,7 +11,6 @@ import (
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
-	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -49,7 +48,7 @@ type checkpointPhaseTimings struct {
 // The checkpoint directory is staged under tmp/<uuid> during the operation.
 // On success, the previous checkpoint is removed and the staged directory is
 // renamed into place at the base path root.
-func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
+func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	phaseTimings := checkpointPhaseTimings{}
 	prepareStart := time.Now()
@@ -74,7 +73,7 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	defer os.RemoveAll(tmpDir)
 
 	// Phase 1: Inspect container state
-	state, err := inspectContainer(ctx, ctrd, log, req)
+	state, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
 		return err
 	}
@@ -128,9 +127,9 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	return nil
 }
 
-func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
+func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
 	containerID := req.ContainerID
-	pid, ociSpec, err := snapshotruntime.ResolveContainer(ctx, ctrd, containerID)
+	pid, ociSpec, err := rt.ResolveContainer(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve container: %w", err)
 	}
