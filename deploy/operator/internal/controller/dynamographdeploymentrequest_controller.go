@@ -896,6 +896,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 		}
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed, err.Error())
+		// Admission webhook denials and other permanent API rejections (400/403/422)
+		// will never succeed on retry — surface them as a terminal failure instead of
+		// looping forever.
+		if apierrors.IsBadRequest(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) {
+			logger.Error(err, "DGD creation permanently rejected, transitioning to Failed")
+			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
+				nvidiacomv1beta1.ConditionTypeDeploymentReady, metav1.ConditionFalse,
+				"DeploymentRejected", err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 

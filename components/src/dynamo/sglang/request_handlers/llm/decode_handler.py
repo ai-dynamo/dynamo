@@ -67,12 +67,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             shutdown_event,
         )
+        # Resolve the optional return_routed_experts kwarg once. Gating on the
+        # opt-in flag avoids sending the kwarg on sglang builds whose
+        # Engine.async_generate does not declare it (notably the deepseek_v4
+        # branch). Doing this at init keeps the per-request hot path free of
+        # signature inspection.
+        self._routed_experts_kwargs: Dict[
+            str, Any
+        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
             )
         else:
             logging.info("Decode worker handler initialized (aggregated mode)")
+
+    @staticmethod
+    def _resolve_routed_experts_kwargs(engine: Any, server_args: Any) -> Dict[str, Any]:
+        """Resolve the return_routed_experts kwarg for this engine.
+
+        Returns ``{"return_routed_experts": True}`` only when the user opted in
+        via ``enable_return_routed_experts=True`` AND the engine's
+        ``async_generate`` signature declares the kwarg. Returns ``{}`` for the
+        default-off path and for sglang builds that do not declare the kwarg
+        (e.g. the ``deepseek_v4`` branch).
+        """
+        if not getattr(server_args, "enable_return_routed_experts", False):
+            return {}
+        return filter_supported_async_generate_kwargs(
+            engine, {"return_routed_experts": True}
+        )
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
@@ -278,12 +302,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        return_routed_experts = getattr(
-            self.config.server_args, "enable_return_routed_experts", False
-        )
-        routed_experts_kwargs = filter_supported_async_generate_kwargs(
-            self.engine, {"return_routed_experts": return_routed_experts}
-        )
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
@@ -317,7 +335,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
-                **routed_experts_kwargs,
+                **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -355,7 +373,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                **routed_experts_kwargs,
+                **self._routed_experts_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,

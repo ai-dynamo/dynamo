@@ -14,6 +14,8 @@ coverage[toml]==7.13.1
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
 filelock==3.25.1
+# For faster model downloads
+hf-xet
 # For Kubernetes operations in deploy tests
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0
