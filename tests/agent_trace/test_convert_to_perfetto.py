@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from benchmarks.agent_trace.convert_to_perfetto import convert_records
+
+
+def test_convert_records_emits_request_stages_and_metadata():
+    trace, converted = convert_records(
+        [
+            {
+                "timestamp": 10,
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 2000,
+                    "event_source": "dynamo",
+                    "agent_context": {
+                        "workflow_type_id": "ms_agent",
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:researcher",
+                    },
+                    "request": {
+                        "request_id": "req-1",
+                        "x_request_id": "caller-1",
+                        "model": "test-model",
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                        "cached_tokens": 80,
+                        "request_received_ms": 1000,
+                        "prefill_wait_time_ms": 5,
+                        "prefill_time_ms": 7,
+                        "ttft_ms": 12,
+                        "total_time_ms": 50,
+                        "avg_itl_ms": 4.2,
+                        "kv_hit_rate": 0.8,
+                        "queue_depth": 2,
+                        "worker": {
+                            "prefill_worker_id": 1,
+                            "prefill_dp_rank": 0,
+                            "decode_worker_id": 2,
+                            "decode_dp_rank": 0,
+                        },
+                    },
+                },
+            }
+        ],
+        include_stages=True,
+    )
+
+    assert converted == 1
+    events = trace["traceEvents"]
+    assert [event for event in events if event["ph"] == "M"]
+
+    request_events = [
+        event for event in events if event.get("cat") == "dynamo.llm"
+    ]
+    assert len(request_events) == 1
+    request = request_events[0]
+    assert request["name"] == "LLM request: test-model"
+    assert request["ts"] == 1_000_000
+    assert request["dur"] == 50_000
+    assert request["args"]["x_request_id"] == "caller-1"
+    assert request["args"]["worker.decode_worker_id"] == 2
+
+    stage_names = {
+        event["name"]
+        for event in events
+        if event.get("cat") == "dynamo.llm.stage"
+    }
+    assert stage_names == {"prefill wait", "prefill", "decode"}
+
+    markers = [
+        event for event in events if event.get("cat") == "dynamo.llm.marker"
+    ]
+    assert len(markers) == 1
+    assert markers[0]["name"] == "first token"
+    assert markers[0]["ts"] == 1_012_000
+

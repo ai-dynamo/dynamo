@@ -130,6 +130,24 @@ Expected records should contain `event.event_type = "request_end"`,
 caller `x_request_id`, token counts, TTFT, average ITL, cache metrics, queue
 depth, and worker IDs when available.
 
+## Perfetto Timeline Conversion
+
+Convert Dynamo agent trace shards to Chrome Trace JSON for Perfetto UI:
+
+```bash
+python3 benchmarks/agent_trace/convert_to_perfetto.py \
+  "/tmp/dynamo-agent-trace.*.jsonl.gz" \
+  --output /tmp/dynamo-agent-trace.perfetto.json \
+  --include-stages
+```
+
+Open `/tmp/dynamo-agent-trace.perfetto.json` in
+[Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
+slice grouped by workflow and program. The slice args include request IDs,
+model, token counts, cache metrics, TTFT, average ITL, queue depth, and worker
+IDs. With `--include-stages`, the converter also emits prefill wait, prefill,
+and decode slices when those timings are present.
+
 ## Operator Notes
 
 - Agent request trace emission is currently wired for `/v1/chat/completions`.
