@@ -992,15 +992,27 @@ impl JailedStream {
                         )
                     }
                     Ok((_, normal_text)) => {
-                        // Parser succeeded but extracted no structured tool calls — typically
-                        // a malformed/truncated tool-call section (missing tool_call_end,
-                        // corrupted function id, etc.). Emit the parser's stripped
-                        // normal_text rather than accumulated_content, which still contains
-                        // the raw special-token markers and would leak them to the user.
+                        // Parser succeeded but extracted no structured tool calls. The parser
+                        // signals which sub-case via normal_text:
+                        //   - Some(""):  parser detected markers but couldn't form a complete
+                        //                call (e.g. kimi truncated mid-arg, or start token with
+                        //                no valid JSON). Drop the buffer — accumulated_content
+                        //                still has the raw markers and would leak.
+                        //   - otherwise: parser saw no markers (false positive entry, e.g.
+                        //                mistral on a stray `{` in prose, or default `<tool_call>`
+                        //                token when manual sequences are configured). Pass
+                        //                accumulated_content through verbatim — it's regular text
+                        //                and may carry leading/trailing whitespace the parser
+                        //                would have trimmed.
+                        let content = if normal_text.as_deref() == Some("") {
+                            ""
+                        } else {
+                            accumulated_content
+                        };
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            normal_text.as_deref().unwrap_or(""),
+                            content,
                             None,
                             base_choice.finish_reason,
                             base_choice.stop_reason.clone(),
