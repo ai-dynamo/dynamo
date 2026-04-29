@@ -6,6 +6,29 @@
 use crate::agents::trace::{AgentRequestMetrics, WorkerInfo};
 use crate::protocols::common::timing::RequestTracker;
 
+/// Record token counts needed by agent trace request-end records.
+///
+/// Callers should gate this once per request so the response path only pays a
+/// cheap boolean branch for untraced requests.
+pub(crate) fn record_llm_metric_tokens(
+    tracker: Option<&RequestTracker>,
+    input_tokens: Option<usize>,
+    output_tokens: usize,
+    cached_tokens: Option<usize>,
+) {
+    let Some(tracker) = tracker else {
+        return;
+    };
+
+    // Usage-derived token counts arrive late in the response path. Earlier
+    // router-side observations still win because RequestTracker stores them
+    // with OnceLock.
+    if input_tokens.is_some() || cached_tokens.is_some() {
+        tracker.record_isl(input_tokens.unwrap_or(0), cached_tokens);
+    }
+    tracker.record_osl(output_tokens);
+}
+
 pub(crate) fn request_metrics(
     request_id: String,
     x_request_id: Option<String>,

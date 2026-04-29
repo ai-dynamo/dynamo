@@ -139,25 +139,6 @@ impl LLMMetricAnnotation {
     }
 }
 
-fn record_llm_metric_tokens(
-    tracker: Option<&RequestTracker>,
-    input_tokens: Option<usize>,
-    output_tokens: usize,
-    cached_tokens: Option<usize>,
-) {
-    let Some(tracker) = tracker else {
-        return;
-    };
-
-    // Usage-derived token counts arrive late in the response path. Earlier
-    // router-side observations still win because RequestTracker stores them
-    // with OnceLock.
-    if input_tokens.is_some() || cached_tokens.is_some() {
-        tracker.record_isl(input_tokens.unwrap_or(0), cached_tokens);
-    }
-    tracker.record_osl(output_tokens);
-}
-
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
@@ -869,6 +850,7 @@ impl OpenAIPreprocessor {
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
+        trace_tokens_enabled: bool,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -886,6 +868,7 @@ impl OpenAIPreprocessor {
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
             finished: bool,
+            trace_tokens_enabled: bool,
         }
 
         let state = State {
@@ -897,6 +880,7 @@ impl OpenAIPreprocessor {
             finish_reason_sent: false,
             usage_chunk_sent: false,
             finished: false,
+            trace_tokens_enabled,
         };
 
         // transform the common response stream into a chat response stream
@@ -990,7 +974,14 @@ impl OpenAIPreprocessor {
                         detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
-                    record_llm_metric_tokens(tracker.as_deref(), isl, current_osl, None);
+                    if inner.trace_tokens_enabled {
+                        crate::agents::trace::record_llm_metric_tokens(
+                            tracker.as_deref(),
+                            isl,
+                            current_osl,
+                            None,
+                        );
+                    }
 
                     // Flush per-request detokenize accumulators to global Prometheus counters
                     // (once per request instead of per-token).
@@ -1066,12 +1057,14 @@ impl OpenAIPreprocessor {
                                 .and_then(|t| t.detokenize_total_latency()),
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
-                        record_llm_metric_tokens(
-                            tracker.as_deref(),
-                            Some(usage.prompt_tokens as usize),
-                            usage.completion_tokens as usize,
-                            cached_tokens,
-                        );
+                        if inner.trace_tokens_enabled {
+                            crate::agents::trace::record_llm_metric_tokens(
+                                tracker.as_deref(),
+                                Some(usage.prompt_tokens as usize),
+                                usage.completion_tokens as usize,
+                                cached_tokens,
+                            );
+                        }
 
                         // Flush per-request detokenize accumulators to global Prometheus counters
                         // (once per request instead of per-token).
@@ -1442,6 +1435,7 @@ impl
         } else {
             None
         };
+        let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1474,6 +1468,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            trace_tokens_enabled,
         );
 
         let transformed_stream =
@@ -1638,6 +1633,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            false,
         );
 
         // prepend the annotations to the response stream

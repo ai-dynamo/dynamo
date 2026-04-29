@@ -14,7 +14,7 @@ use crate::agents::context::AgentContext;
 use crate::telemetry::bus::TelemetryBus;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
-pub(crate) use integration::request_metrics;
+pub(crate) use integration::{record_llm_metric_tokens, request_metrics};
 pub use types::{
     AgentRequestMetrics, AgentTraceRecord, TraceEventSource, TraceEventType, TraceSchema,
     WorkerInfo,
