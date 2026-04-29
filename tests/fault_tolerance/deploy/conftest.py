@@ -35,6 +35,20 @@ def pytest_addoption(parser):
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
     )
+    parser.addoption(
+        "--storage-class",
+        type=str,
+        default=None,
+        help="Storage class for PVC log collection (must support RWX). "
+        "If not specified, uses cluster default.",
+    )
+    parser.addoption(
+        "--restart-services",
+        action="store_true",
+        default=False,
+        help="Restart NATS and etcd before each test. "
+        "Default is to skip restart (faster iteration).",
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -117,12 +131,19 @@ def client_type(request):
 def skip_service_restart(request):
     """Whether to skip restarting NATS and etcd services.
 
-    Fault tolerance tests default to RESTARTING services (for clean state).
-    The --skip-service-restart flag can override this behavior.
-
-    Returns:
-        If --skip-service-restart is passed: True (skip restart)
-        If flag not passed: False (FT tests restart by default)
+    Default: True (skip restart — services are assumed to be running).
+    Pass --restart-services to opt in to a clean-state restart.
+    The legacy --skip-service-restart flag is still honored if explicitly set.
     """
-    value = request.config.getoption("--skip-service-restart")
-    return value if value is not None else False  # Default: restart for FT tests
+    if request.config.getoption("--restart-services", default=False):
+        return False  # don't skip = do restart
+    skip = request.config.getoption("--skip-service-restart", default=None)
+    if skip is not None:
+        return skip
+    return True  # default: skip restart
+
+
+@pytest.fixture
+def storage_class(request):
+    """Storage class for PVC log collection (must support RWX)."""
+    return request.config.getoption("--storage-class")
