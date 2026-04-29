@@ -157,8 +157,6 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-        # TEMP DIAGNOSTIC (revert before merge): force live stdout, dump trace on fatal signals.
-        DOCKER_ENV_FLAGS+=(--env "PYTHONUNBUFFERED=1" --env "PYTHONFAULTHANDLER=1")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
@@ -248,10 +246,7 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          # TEMP DIAGNOSTIC (revert before merge): -vv -s, thread-timeout, live log streaming.
-          # Bounds each test (incl. setup) at 120s so a hanging fixture dumps its stack instead
-          # of silently consuming the whole step timeout. Tracking sglang gpu_1 cuda13 hang.
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -vv -s --tb=long --showlocals --timeout=120 --timeout-method=thread --log-cli-level=INFO --log-cli-format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s' --log-cli-date-format='%H:%M:%S' --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -264,8 +259,6 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-        # TEMP DIAGNOSTIC (revert before merge): force live stdout, dump trace on fatal signals.
-        DOCKER_ENV_FLAGS+=(--env "PYTHONUNBUFFERED=1" --env "PYTHONFAULTHANDLER=1")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
