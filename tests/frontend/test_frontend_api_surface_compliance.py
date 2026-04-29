@@ -376,7 +376,7 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 # masking real hangs.
 @pytest.mark.timeout(750)
 @pytest.mark.frontend_api_surface_compliance
-@pytest.mark.pre_merge
+@pytest.mark.post_merge
 def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
