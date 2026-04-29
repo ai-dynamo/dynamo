@@ -41,6 +41,7 @@
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	sla.ttft                                   Spec.SLA.TTFT             (*float64)
 //	sla.itl                                    Spec.SLA.ITL              (*float64)
+//	sla.optimizationType                       Spec.SLA.OptimizationType (*OptimizationType)
 //	sla.isl                                    Spec.Workload.ISL           (*int32)
 //	sla.osl                                    Spec.Workload.OSL           (*int32)
 //	deployment.modelCache.pvcName              Spec.ModelCache.PVCName       (string)
@@ -180,6 +181,13 @@ const (
 	annDGDRSpokeStatus      = "nvidia.com/dgdr-spoke-status"
 	annDGDRSpokeHubStatus   = "nvidia.com/dgdr-spoke-hub-status"
 	annDGDRProfilingEmpty   = "nvidia.com/dgdr-profiling-config-empty"
+
+	dgdrProfilingBlobSLAKey              = "sla"
+	dgdrProfilingBlobTTFTKey             = "ttft"
+	dgdrProfilingBlobITLKey              = "itl"
+	dgdrProfilingBlobOptimizationTypeKey = "optimizationType"
+	dgdrProfilingBlobISLKey              = "isl"
+	dgdrProfilingBlobOSLKey              = "osl"
 )
 
 type dgdrConversionContext struct {
@@ -427,12 +435,18 @@ func profilingConfigNeedsAlphaSave(config *apiextensionsv1.JSON) bool {
 }
 
 func pruneDGDRKnownAlphaBlobFields(blob map[string]interface{}) {
-	if slaMap, ok := blob["sla"].(map[string]interface{}); ok {
-		for _, key := range []string{"ttft", "itl", "isl", "osl"} {
+	if slaMap, ok := blob[dgdrProfilingBlobSLAKey].(map[string]interface{}); ok {
+		for _, key := range []string{
+			dgdrProfilingBlobTTFTKey,
+			dgdrProfilingBlobITLKey,
+			dgdrProfilingBlobOptimizationTypeKey,
+			dgdrProfilingBlobISLKey,
+			dgdrProfilingBlobOSLKey,
+		} {
 			delete(slaMap, key)
 		}
 		if len(slaMap) == 0 {
-			delete(blob, "sla")
+			delete(blob, dgdrProfilingBlobSLAKey)
 		}
 	}
 	if deployMap, ok := blob["deployment"].(map[string]interface{}); ok {
@@ -894,7 +908,7 @@ func convert_v1alpha1_DynamoGraphDeploymentRequestSpec_To_v1beta1_DynamoGraphDep
 // applySLAAndWorkloadFromBlob extracts SLA and Workload fields from the v1alpha1 JSON blob.
 // Both are nested under blob["sla"] in the v1alpha1 schema.
 func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	slaRaw, ok := blob["sla"]
+	slaRaw, ok := blob[dgdrProfilingBlobSLAKey]
 	if !ok {
 		return
 	}
@@ -906,27 +920,27 @@ func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.Dynam
 	if dst.SLA == nil {
 		dst.SLA = &v1beta1.SLASpec{}
 	}
-	if v, ok := slaMap["ttft"].(float64); ok {
+	if v, ok := slaMap[dgdrProfilingBlobTTFTKey].(float64); ok {
 		dst.SLA.TTFT = &v
 	}
-	if v, ok := slaMap["itl"].(float64); ok {
+	if v, ok := slaMap[dgdrProfilingBlobITLKey].(float64); ok {
 		dst.SLA.ITL = &v
 	}
-	if v, ok := slaMap["optimizationType"].(string); ok {
+	if v, ok := slaMap[dgdrProfilingBlobOptimizationTypeKey].(string); ok {
 		ot := v1beta1.OptimizationType(v)
 		if ot == v1beta1.OptimizationTypeLatency || ot == v1beta1.OptimizationTypeThroughput {
 			dst.SLA.OptimizationType = &ot
 		}
 	}
 
-	if v, ok := slaMap["isl"].(float64); ok {
+	if v, ok := slaMap[dgdrProfilingBlobISLKey].(float64); ok {
 		if dst.Workload == nil {
 			dst.Workload = &v1beta1.WorkloadSpec{}
 		}
 		isl := int32(v)
 		dst.Workload.ISL = &isl
 	}
-	if v, ok := slaMap["osl"].(float64); ok {
+	if v, ok := slaMap[dgdrProfilingBlobOSLKey].(float64); ok {
 		if dst.Workload == nil {
 			dst.Workload = &v1beta1.WorkloadSpec{}
 		}
@@ -1353,37 +1367,38 @@ func pruneKnownProfilingBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec
 }
 
 func pruneSLAWorkloadBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
-	slaMap, ok := blob["sla"].(map[string]interface{})
+	slaMap, ok := blob[dgdrProfilingBlobSLAKey].(map[string]interface{})
 	if !ok {
 		return
 	}
 	deleted := false
 	if src.SLA == nil || src.SLA.TTFT == nil {
-		if _, ok := slaMap["ttft"]; ok {
-			delete(slaMap, "ttft")
-			deleted = true
-		}
+		_, had := slaMap[dgdrProfilingBlobTTFTKey]
+		delete(slaMap, dgdrProfilingBlobTTFTKey)
+		deleted = deleted || had
 	}
 	if src.SLA == nil || src.SLA.ITL == nil {
-		if _, ok := slaMap["itl"]; ok {
-			delete(slaMap, "itl")
-			deleted = true
-		}
+		_, had := slaMap[dgdrProfilingBlobITLKey]
+		delete(slaMap, dgdrProfilingBlobITLKey)
+		deleted = deleted || had
+	}
+	if src.SLA == nil || src.SLA.OptimizationType == nil {
+		_, had := slaMap[dgdrProfilingBlobOptimizationTypeKey]
+		delete(slaMap, dgdrProfilingBlobOptimizationTypeKey)
+		deleted = deleted || had
 	}
 	if src.Workload == nil || src.Workload.ISL == nil {
-		if _, ok := slaMap["isl"]; ok {
-			delete(slaMap, "isl")
-			deleted = true
-		}
+		_, had := slaMap[dgdrProfilingBlobISLKey]
+		delete(slaMap, dgdrProfilingBlobISLKey)
+		deleted = deleted || had
 	}
 	if src.Workload == nil || src.Workload.OSL == nil {
-		if _, ok := slaMap["osl"]; ok {
-			delete(slaMap, "osl")
-			deleted = true
-		}
+		_, had := slaMap[dgdrProfilingBlobOSLKey]
+		delete(slaMap, dgdrProfilingBlobOSLKey)
+		deleted = deleted || had
 	}
 	if deleted && len(slaMap) == 0 {
-		delete(blob, "sla")
+		delete(blob, dgdrProfilingBlobSLAKey)
 	}
 }
 
@@ -1410,37 +1425,42 @@ func pruneModelCacheBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, bl
 // mergeSLAWorkloadIntoBlob writes SLA and Workload structured fields back into the JSON blob,
 // overwriting any existing values for those keys.
 func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}, preserveEmpty bool) {
-	slaMap, hadSLA := blob["sla"].(map[string]interface{})
+	slaMap, hadSLA := blob[dgdrProfilingBlobSLAKey].(map[string]interface{})
 	if slaMap == nil {
 		slaMap = make(map[string]interface{})
 	}
 	wrote := false
 	if src.SLA != nil {
 		if src.SLA.TTFT != nil {
-			slaMap["ttft"] = *src.SLA.TTFT
+			slaMap[dgdrProfilingBlobTTFTKey] = *src.SLA.TTFT
 			wrote = true
 		}
 		if src.SLA.ITL != nil {
-			slaMap["itl"] = *src.SLA.ITL
+			slaMap[dgdrProfilingBlobITLKey] = *src.SLA.ITL
 			wrote = true
 		}
 		if src.SLA.OptimizationType != nil {
-			slaMap["optimizationType"] = string(*src.SLA.OptimizationType)
+			slaMap[dgdrProfilingBlobOptimizationTypeKey] = string(*src.SLA.OptimizationType)
+			wrote = true
 		}
 	}
 	if src.Workload != nil {
 		if src.Workload.ISL != nil {
-			slaMap["isl"] = float64(*src.Workload.ISL)
+			slaMap[dgdrProfilingBlobISLKey] = float64(*src.Workload.ISL)
 			wrote = true
 		}
 		if src.Workload.OSL != nil {
-			slaMap["osl"] = float64(*src.Workload.OSL)
+			slaMap[dgdrProfilingBlobOSLKey] = float64(*src.Workload.OSL)
 			wrote = true
 		}
 	}
-	emptySLA := src.SLA != nil && src.SLA.TTFT == nil && src.SLA.ITL == nil && src.SLA.E2ELatency == nil
+	emptySLA := src.SLA != nil &&
+		src.SLA.TTFT == nil &&
+		src.SLA.ITL == nil &&
+		src.SLA.E2ELatency == nil &&
+		src.SLA.OptimizationType == nil
 	if wrote || hadSLA || preserveEmpty || emptySLA {
-		blob["sla"] = slaMap
+		blob[dgdrProfilingBlobSLAKey] = slaMap
 	}
 }
 

@@ -169,6 +169,16 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 				*v = intstr.FromString(fmt.Sprintf("p%d", c.Uint32()%65535))
 			}
 		},
+		// v1beta1 OptimizationType is an enum. randfill's default arbitrary
+		// string output is not admitted by the CRD schema and would be dropped
+		// when projecting through v1alpha1's profiling JSON blob.
+		func(v *v1beta1.OptimizationType, c randfill.Continue) {
+			if c.Bool() {
+				*v = v1beta1.OptimizationTypeLatency
+			} else {
+				*v = v1beta1.OptimizationTypeThroughput
+			}
+		},
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.

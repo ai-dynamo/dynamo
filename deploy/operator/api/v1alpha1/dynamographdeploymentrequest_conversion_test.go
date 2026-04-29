@@ -642,7 +642,7 @@ func TestDGDR_StaleProfilingConfigAnnotationDoesNotRestoreClearedHubFields(t *te
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "stale-blob",
 			Annotations: map[string]string{
-				annDGDRProfilingConfig: `{"sla":{"ttft":500,"isl":2048},"planner":{"enabled":true},"deployment":{"modelCache":{"pvcName":"old-pvc"}},"extra":"preserved"}`,
+				annDGDRProfilingConfig: `{"sla":{"ttft":500,"isl":2048,"optimizationType":"throughput"},"planner":{"enabled":true},"deployment":{"modelCache":{"pvcName":"old-pvc"}},"extra":"preserved"}`,
 			},
 		},
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
@@ -691,6 +691,47 @@ func TestDGDR_StaleProfilingConfigAnnotationDoesNotRestoreClearedHubFields(t *te
 	}
 	if restored.Spec.Features != nil && restored.Spec.Features.Planner != nil {
 		t.Fatalf("Planner = %#v, want nil", restored.Spec.Features.Planner)
+	}
+}
+
+func TestDGDR_OptimizationTypeOnlyRoundTrip(t *testing.T) {
+	opt := v1beta1.OptimizationTypeThroughput
+	original := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "optimization-only"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			SLA: &v1beta1.SLASpec{
+				OptimizationType: &opt,
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Spec.ProfilingConfig.Config == nil {
+		t.Fatalf("ProfilingConfig.Config is nil, want optimizationType in profiling blob")
+	}
+	var blob map[string]interface{}
+	if err := json.Unmarshal(spoke.Spec.ProfilingConfig.Config.Raw, &blob); err != nil {
+		t.Fatalf("unmarshal profiling config: %v", err)
+	}
+	slaMap, _ := blob[dgdrProfilingBlobSLAKey].(map[string]interface{})
+	if slaMap == nil {
+		t.Fatalf("sla key missing in profiling config: %v", blob)
+	}
+	if got := slaMap[dgdrProfilingBlobOptimizationTypeKey]; got != string(v1beta1.OptimizationTypeThroughput) {
+		t.Fatalf("sla.optimizationType = %v, want %q", got, v1beta1.OptimizationTypeThroughput)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after round-trip (-want +got):\n%s", diff)
 	}
 }
 
