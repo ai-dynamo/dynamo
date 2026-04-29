@@ -56,13 +56,15 @@ done
 if (( QUICK )); then
     CONCURRENCIES=(4)
     PROMPT_LENS=("short")
-    REQUEST_COUNT=8
+    BENCHMARK_DURATION=15
     WARMUP=2
 else
-    CONCURRENCIES=(1 4 8 16 32)
+    # Sweep through the throughput knee. At c=256 a 30B-A3B MoE on one
+    # H200 should be queue-bound; the curve flattens before that.
+    CONCURRENCIES=(1 4 8 16 32 64 128 256)
     PROMPT_LENS=("short" "long")
-    REQUEST_COUNT=64
-    WARMUP=4
+    BENCHMARK_DURATION=60
+    WARMUP=8
 fi
 
 PROMPT_TOKENS_SHORT=64
@@ -96,7 +98,7 @@ run_chat() {
         --synthetic-input-tokens-stddev "$PROMPT_STDDEV" \
         --output-tokens-mean 128 \
         --concurrency "$concurrency" \
-        --request-count "$REQUEST_COUNT" \
+        --benchmark-duration "$BENCHMARK_DURATION" \
         --warmup-request-count "$WARMUP" \
         --ui none \
         --no-server-metrics \
@@ -123,7 +125,7 @@ run_audio() {
         --extra-inputs "modalities:audio" \
         --extra-inputs "voice:ethan" \
         --concurrency "$concurrency" \
-        --request-count "$REQUEST_COUNT" \
+        --benchmark-duration "$BENCHMARK_DURATION" \
         --warmup-request-count "$WARMUP" \
         --ui none \
         --no-server-metrics \
