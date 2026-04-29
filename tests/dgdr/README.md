@@ -1,33 +1,58 @@
-# DGDR v1beta1 Tests (PR2 Scope)
+# DGDR v1beta1 Tests
 
-This directory contains the DGDR v1beta1 tests currently in scope for PR2.
+This folder contains end-to-end tests for the DGDR v1beta1 API.
 
-## Test files in this branch
+## What We Are Testing So Far
+
+1. Validation and conversion baseline
+- Webhook validation for accepted/rejected DGDR specs
+- v1alpha1 -> v1beta1 conversion behavior
+- Basic CRD UX checks (e.g., shortname/columns)
+
+2. Lifecycle behavior
+- Rapid + `autoApply=false` reaches `Ready`
+- Rapid + `autoApply=true` reaches `Deployed` in non-mocker mode
+
+3. Profiling behavior
+- Profiling output ConfigMap exists and `final_config.yaml` is parseable
+- Planner feature appears in generated DGD when enabled
+- Known rapid total GPU budget regression is tracked as `xfail`
+
+## Test Files
 
 - `tests/dgdr/test_dgdr_validation.py`
-  - Webhook validation and version conversion checks (no profiling lifecycle assertions)
 - `tests/dgdr/test_dgdr_lifecycle.py`
-  - Focused lifecycle checks for rapid mode
-  - `autoApply=false` reaches `Ready`
-  - `autoApply=true` reaches `Deployed` in non-mocker mode
 - `tests/dgdr/test_dgdr_profiling.py`
-  - Profiling-focused checks for rapid mode
-  - Output ConfigMap generation and `final_config.yaml` parseability
-  - Planner feature emitted in generated DGD
-  - Known budget guard as `xfail` (tracked issue)
 
 ## Prerequisites
 
-1. Kubernetes cluster with Dynamo operator + DGDR CRD/webhook installed
+1. Kubernetes cluster with Dynamo operator and DGDR CRD/webhook installed
 2. `kubectl` configured for that cluster
-3. Python + pytest dependencies available
-4. Required test args:
-   - `--dgdr-namespace`
-   - `--dgdr-image`
+3. Python environment with `pytest`
+4. Required args for all DGDR runs:
+- `--dgdr-namespace`
+- `--dgdr-image`
 
-## How to run
+## How To Run
 
-### 1) Validation/conversion only (fastest)
+### Mocker Mode (default, no real GPU deployment)
+
+```bash
+PYTHONPATH=components/src python3 -m pytest tests/dgdr/ -v \
+  --dgdr-namespace=dynamo-system \
+  --dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2
+```
+
+### GPU Cluster Mode (real deployment path)
+
+```bash
+PYTHONPATH=components/src python3 -m pytest tests/dgdr/ -v \
+  --dgdr-namespace=dynamo-system \
+  --dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2 \
+  --dgdr-no-mocker
+```
+
+### Optional: Validation/Conversion Only (fastest subset)
 
 ```bash
 PYTHONPATH=components/src python3 -m pytest tests/dgdr/test_dgdr_validation.py -v \
@@ -35,27 +60,8 @@ PYTHONPATH=components/src python3 -m pytest tests/dgdr/test_dgdr_validation.py -
   --dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2
 ```
 
-### 2) PR2 lifecycle + profiling tests (mocker/default)
+## Scope Note
 
-```bash
-PYTHONPATH=components/src python3 -m pytest \
-  tests/dgdr/test_dgdr_lifecycle.py \
-  tests/dgdr/test_dgdr_profiling.py -v \
-  --dgdr-namespace=dynamo-system \
-  --dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2
-```
-
-### 3) Real-GPU lifecycle deployment path (non-mocker)
-
-```bash
-PYTHONPATH=components/src python3 -m pytest tests/dgdr/test_dgdr_lifecycle.py -v \
-  --dgdr-namespace=dynamo-system \
-  --dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2 \
-  --dgdr-no-mocker
-```
-
-## Notes
-
-- PR2 intentionally focuses on lifecycle + profiling coverage.
-- Broader operator semantics (hardware/overrides/status/immutability/cleanup) are planned for PR3.
-- If required args are omitted, DGDR tests are skipped by fixture logic.
+This suite currently focuses on validation, conversion, lifecycle, and profiling behavior.
+Broader DGDR operator semantics (hardware overrides, immutability, cleanup, and deeper
+status assertions) are planned as follow-up test expansion.
