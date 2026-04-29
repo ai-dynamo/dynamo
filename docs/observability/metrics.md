@@ -127,15 +127,26 @@ curl http://localhost:8081/metrics
 
 Backend `dynamo_component_*` series carry two groups of labels: the ones the Dynamo runtime emits, and the ones Prometheus/Kubernetes attach during scraping.
 
-**Emitted by Dynamo (present in the metric itself):**
+**Auto-injected by the Dynamo runtime** (added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric registered through the namespace/component/endpoint hierarchy):
 
 | Label | Description | Example |
 |-------|-------------|---------|
-| `dynamo_namespace` | The Dynamo runtime namespace — the logical scope shared by every component (frontend / router / prefill / decode) in one deployment. **Not** the K8s namespace. | `dynamo_cloud_vllm_v1_disagg_router_071de157` |
+| `dynamo_namespace` | The Dynamo runtime namespace — the logical scope shared by every component (router / prefill / decode / encode) in one deployment. **Not** the K8s namespace. | `dynamo_cloud_vllm_v1_disagg_router_071de157` |
 | `dynamo_component` | Service role: see [Component Names](#component-names) below. | `backend`, `prefill`, `router` |
 | `dynamo_endpoint` | The RPC within that component: see [Endpoint Names](#endpoint-names) below. | `generate`, `clear_kv_blocks`, `worker_kv_indexer_query_dp0` |
-| `model` | The model being served (OpenAI-style label). Present on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. | `Qwen/Qwen3-0.6B` |
-| `model_name` | Same model identifier under a second label name, kept for engine-native and dashboard back-compat. | `Qwen/Qwen3-0.6B` |
+| `worker_id` | Hex-encoded discovery instance ID of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. | `1a2b3c4d` |
+
+**Added at registration time by backend code** (passed via `metrics_labels=` when the worker calls `serve_endpoint()` — not auto-injected, so presence depends on the backend):
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `model` | The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. | `Qwen/Qwen3-0.6B` |
+| `model_name` | Same model identifier under a second label name, retained for engine-native and dashboard back-compat. Added by vLLM and TRT-LLM workers; **not** added by SGLang. | `Qwen/Qwen3-0.6B` |
+
+**Added by the metric itself**:
+
+| Label | Description | Example |
+|-------|-------------|---------|
 | `error_type` | Only on `dynamo_component_errors_total` — the failure category. See [Component Error Types](#component-error-types). | `generate`, `publish_response` |
 
 **Injected by Prometheus / Kubernetes (added by the scraper, not in the metric itself):**
@@ -155,19 +166,22 @@ Backend `dynamo_component_*` series carry two groups of labels: the ones the Dyn
 
 #### Component Names
 
-Values you will see in the `dynamo_component` label:
+Values you will see in the `dynamo_component` label on `dynamo_component_*` series. The HTTP frontend (`python -m dynamo.frontend`) is **not** in this list — it exposes its own `dynamo_frontend_*` metric family, not `dynamo_component_*`.
 
 | Value | Meaning |
 |-------|---------|
-| `frontend` | The HTTP frontend (`python -m dynamo.frontend`). |
-| `router` | The KV router. |
-| `planner` | The planner component. |
-| `prefill` | The prefill worker in disaggregated serving. |
-| `backend` | The decode worker in disaggregated serving (vLLM, SGLang, mocker), **or** the combined worker in aggregated mode. |
+| `router` | The standalone KV router (`python -m dynamo.router`). |
+| `Planner` | The planner component (`python -m dynamo.planner`). Note the capital `P`. |
+| `prefill` | The prefill worker in disaggregated serving (all backends). |
+| `backend` | The decode worker in disaggregated serving for vLLM, SGLang, and the mocker, **and** the combined worker for vLLM in aggregated mode. |
 | `tensorrt_llm` | The decode worker in disaggregated serving for TRT-LLM. |
-| `encode` | Multimodal encoder worker. |
+| `tensorrt_llm_encode` | The encode worker for TRT-LLM. |
+| `encode` | The encode worker for vLLM. |
+| `diffusion` | The diffusion worker for TRT-LLM. |
 
-> The name `backend` for the decode worker is historical and will likely be renamed to `decode` in a future release.
+Internal subsystems (e.g. `kvbm` from the block manager, `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
+
+> The name `backend` for the decode worker is historical. The runtime has a TODO to introduce a `decode` constant and migrate to it (see `lib/runtime/src/metrics/prometheus_names.rs::component_names`).
 
 #### Endpoint Names
 
