@@ -464,18 +464,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # Internal transport field consumed by frontend nvext mapping.
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
-                    input_tokens = res["meta_info"]["prompt_tokens"]
-                    completion_tokens = res["meta_info"]["completion_tokens"]
-                    cached_tokens = res["meta_info"]["cached_tokens"]
+                    meta_info = res.get("meta_info", {})
+                    input_tokens = meta_info.get("prompt_tokens")
+                    completion_tokens = meta_info.get("completion_tokens")
+                    cached_tokens = meta_info.get("cached_tokens")
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
+                    if input_tokens is not None and completion_tokens is not None:
+                        out["completion_usage"] = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": input_tokens + completion_tokens,
+                            "prompt_tokens_details": prefill_prompt_tokens_details,
+                        }
                 if not context.is_stopped():
                     yield out
 
