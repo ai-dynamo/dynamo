@@ -217,8 +217,10 @@ pub async fn spawn_system_status_server(
     }
 
     // Self-hosted MDC files. Always mounted; empty registry → 404.
+    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
+    // so detaching one registration doesn't wipe another's entries.
     app = app.route(
-        "/v1/metadata/{model_slug}/{*filename}",
+        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
         get({
             let state = Arc::clone(&server_state);
             move |path| metadata_file_handler(State(state), path)
@@ -485,17 +487,22 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
     }
 }
 
-/// `GET /v1/metadata/{model_slug}/{filename}` — 404 on miss,
+/// `GET /v1/metadata/{slug}/{suffix}/{filename}` — 404 on miss,
 /// 500 on read error, raw bytes on hit. Consumer blake3-verifies.
 async fn metadata_file_handler(
     State(state): State<Arc<SystemStatusState>>,
-    Path((model_slug, filename)): Path<(String, String)>,
+    Path((model_slug, model_suffix, filename)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
-    let path = match state.drt().metadata_artifacts().get(&model_slug, &filename) {
+    let path = match state
+        .drt()
+        .metadata_artifacts()
+        .get(&model_slug, &model_suffix, &filename)
+    {
         Some(p) => p,
         None => {
             tracing::debug!(
                 model_slug,
+                model_suffix,
                 filename,
                 "metadata artifact not registered for self-host"
             );
@@ -508,6 +515,7 @@ async fn metadata_file_handler(
         Err(err) => {
             tracing::error!(
                 model_slug,
+                model_suffix,
                 filename,
                 path = %path.display(),
                 %err,

@@ -292,6 +292,7 @@ impl LocalModelBuilder {
                 migration_limit: self.migration_limit,
                 migration_max_seq_len: self.migration_max_seq_len,
                 self_host_metadata: self.self_host_metadata,
+                attached_self_host_suffix: None,
             });
         }
 
@@ -348,6 +349,7 @@ impl LocalModelBuilder {
             migration_limit: self.migration_limit,
             migration_max_seq_len: self.migration_max_seq_len,
             self_host_metadata: self.self_host_metadata,
+            attached_self_host_suffix: None,
         })
     }
 }
@@ -370,6 +372,9 @@ pub struct LocalModel {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     self_host_metadata: bool,
+    /// Set by `move_to_self_host` so `clear_self_hosted_artifacts`
+    /// scopes its unregister to this model's `(slug, suffix)` only.
+    attached_self_host_suffix: Option<String>,
 }
 
 impl LocalModel {
@@ -495,7 +500,7 @@ impl LocalModel {
         );
 
         if self.self_host_metadata {
-            self.move_to_self_host(endpoint.drt())
+            self.move_to_self_host(endpoint.drt(), model_suffix.as_deref())
                 .context("move_to_self_host")?;
         }
 
@@ -532,11 +537,14 @@ impl LocalModel {
     }
 
     /// Local-path slots register in the registry and get rewritten to
-    /// `http://<worker>/v1/metadata/<slug>/<filename>`. URL slots
+    /// `http://<worker>/v1/metadata/<slug>/<suffix>/<filename>`. URL slots
     /// (`hf://`, etc.) are left alone so existing transports keep working.
+    /// `model_suffix` is the LoRA slug, or `None` for the base model
+    /// (recorded as `BASE_SUFFIX` in the registry).
     fn move_to_self_host(
         &mut self,
         drt: &dynamo_runtime::DistributedRuntime,
+        model_suffix: Option<&str>,
     ) -> anyhow::Result<()> {
         let Some(base_url) = self_host_base_url(drt)? else {
             tracing::warn!(
@@ -548,6 +556,7 @@ impl LocalModel {
             return Ok(());
         };
         let model_slug = self.card.slug().to_string();
+        let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
         let registry = drt.metadata_artifacts();
 
         let mut rewritten = 0usize;
@@ -578,14 +587,18 @@ impl LocalModel {
                 }
             };
 
-            let url = url::Url::parse(&format!("{base_url}/v1/metadata/{model_slug}/{filename}"))?;
-            registry.register(&model_slug, &filename, absolute);
+            let url = url::Url::parse(&format!(
+                "{base_url}/v1/metadata/{model_slug}/{suffix}/{filename}"
+            ))?;
+            registry.register(&model_slug, suffix, &filename, absolute);
             cf.move_to_url(url);
             rewritten += 1;
         }
 
+        self.attached_self_host_suffix = Some(suffix.to_string());
         tracing::debug!(
             model_slug,
+            suffix,
             rewritten,
             base_url,
             "self-hosting model metadata artifacts"
@@ -596,8 +609,10 @@ impl LocalModel {
     /// Idempotent. Call before detach/hot-reload; otherwise the
     /// runtime drops the registry entries with the worker process.
     pub fn clear_self_hosted_artifacts(&self, drt: &dynamo_runtime::DistributedRuntime) {
-        drt.metadata_artifacts()
-            .unregister_model(self.card.slug().as_ref());
+        if let Some(suffix) = self.attached_self_host_suffix.as_deref() {
+            drt.metadata_artifacts()
+                .unregister(self.card.slug().as_ref(), suffix);
+        }
     }
 
     /// Helper associated function to detach a model from an endpoint
