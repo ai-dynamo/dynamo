@@ -86,6 +86,9 @@ func PrepareRestorePodSpec(
 		if isCheckpointReady {
 			container.Command = []string{"sleep", "infinity"}
 			container.Args = nil
+			// Restore needs the placeholder container running before nsrestore can
+			// enter its namespaces; avoid registry checks on the critical path.
+			container.ImagePullPolicy = corev1.PullIfNotPresent
 			ensureRestoreStartupProbe(container)
 		}
 	}
