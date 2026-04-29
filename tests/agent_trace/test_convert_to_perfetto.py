@@ -63,10 +63,14 @@ def test_convert_records_emits_request_stages_and_metadata():
     assert request["args"]["x_request_id"] == "caller-1"
     assert request["args"]["worker.decode_worker_id"] == 2
 
+    stage_events = [
+        event for event in events if event.get("cat") == "dynamo.llm.stage"
+    ]
+    assert {event["tid"] for event in stage_events} != {request["tid"]}
+
     stage_names = {
         event["name"]
-        for event in events
-        if event.get("cat") == "dynamo.llm.stage"
+        for event in stage_events
     }
     assert stage_names == {"prefill wait", "prefill", "decode"}
 

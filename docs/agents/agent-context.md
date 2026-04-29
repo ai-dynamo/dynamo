@@ -143,11 +143,11 @@ python3 benchmarks/agent_trace/convert_to_perfetto.py \
 
 Open `/tmp/dynamo-agent-trace.perfetto.json` in
 [Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
-slice grouped by workflow and program. The slice args include request IDs,
+slice grouped by workflow and program lane. The slice args include request IDs,
 model, token counts, cache metrics, TTFT, average ITL, queue depth, and worker
-IDs. With `--include-stages`, the converter also emits prefill wait, prefill,
-and decode slices when those timings are present. Add `--include-markers` to
-emit first-token instant markers.
+IDs. With `--include-stages`, the converter emits prefill wait, prefill, and
+decode slices on separate stage tracks when those timings are present. Add
+`--include-markers` to emit first-token instant markers.
 
 ## Operator Notes
 

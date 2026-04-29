@@ -18,7 +18,8 @@ Inputs may be `.jsonl`, `.jsonl.gz`, a directory containing trace shards, or a
 glob pattern. The converter emits Chrome Trace Event JSON:
 
 - one workflow per Perfetto process
-- one program per Perfetto thread
+- one program lane per Perfetto request thread
 - one LLM request slice per Dynamo `request_end`
-- optional prefill wait, prefill, and decode stage slices
+- optional prefill wait, prefill, and decode stage slices on separate stage
+  threads
 - optional first-token markers with `--include-markers`

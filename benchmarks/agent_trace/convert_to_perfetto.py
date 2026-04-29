@@ -150,22 +150,21 @@ def _flatten_args(
 class TrackTable:
     def __init__(self) -> None:
         self._workflow_pids: dict[str, int] = {}
-        self._track_tids: dict[tuple[str, str, int], int] = {}
+        self._track_tids: dict[tuple[str, str, int, str], int] = {}
         self._active_lanes: dict[tuple[str, str], list[tuple[int, int]]] = {}
         self._next_lane: dict[tuple[str, str], int] = {}
         self._max_lanes: dict[tuple[str, str], int] = {}
 
-    def track_for(
+    def lane_for(
         self,
         workflow_id: str,
         program_id: str,
         *,
         start_us: int,
         end_us: int,
-    ) -> tuple[int, int]:
+    ) -> int:
         if workflow_id not in self._workflow_pids:
             self._workflow_pids[workflow_id] = len(self._workflow_pids) + 1
-        pid = self._workflow_pids[workflow_id]
 
         program_key = (workflow_id, program_id)
         active = self._active_lanes.setdefault(program_key, [])
@@ -182,8 +181,20 @@ class TrackTable:
             self._max_lanes.get(program_key, 0), lane + 1
         )
         heapq.heappush(active, (end_us, lane))
+        return lane
 
-        track_key = (workflow_id, program_id, lane)
+    def track_for(
+        self,
+        workflow_id: str,
+        program_id: str,
+        lane: int,
+        track_kind: str,
+    ) -> tuple[int, int]:
+        if workflow_id not in self._workflow_pids:
+            self._workflow_pids[workflow_id] = len(self._workflow_pids) + 1
+        pid = self._workflow_pids[workflow_id]
+
+        track_key = (workflow_id, program_id, lane, track_kind)
         if track_key not in self._track_tids:
             self._track_tids[track_key] = len(
                 [1 for existing in self._track_tids if existing[0] == workflow_id]
@@ -203,7 +214,7 @@ class TrackTable:
                     "args": {"name": f"workflow: {workflow_id}"},
                 }
             )
-        for (workflow_id, program_id, lane), tid in sorted(
+        for (workflow_id, program_id, lane, track_kind), tid in sorted(
             self._track_tids.items(),
             key=lambda item: (self._workflow_pids[item[0][0]], item[1]),
         ):
@@ -212,6 +223,8 @@ class TrackTable:
             track_name = program_id
             if lane_count > 1:
                 track_name = f"{program_id} [lane {lane + 1}]"
+            if track_kind != "request":
+                track_name = f"{track_name} {track_kind}"
             events.append(
                 {
                     "name": "thread_name",
@@ -318,11 +331,22 @@ def convert_records(
         args = item["args"]
         ts_us = item["ts_us"]
         dur_us = item["dur_us"]
-        pid, tid = tracks.track_for(
+        lane = tracks.lane_for(
             item["workflow_id"],
             item["program_id"],
             start_us=ts_us,
             end_us=ts_us + dur_us,
+        )
+        request_pid, request_tid = tracks.track_for(
+            item["workflow_id"],
+            item["program_id"],
+            lane,
+            "request",
+        )
+        stage_pid, stage_tid = (
+            tracks.track_for(item["workflow_id"], item["program_id"], lane, "stages")
+            if include_stages
+            else (request_pid, request_tid)
         )
 
         trace_events.append(
@@ -332,8 +356,8 @@ def convert_records(
                     f"{_safe_label(request.get('model'), 'unknown-model')}"
                 ),
                 category="dynamo.llm",
-                pid=pid,
-                tid=tid,
+                pid=request_pid,
+                tid=request_tid,
                 ts_us=ts_us,
                 dur_us=dur_us,
                 args=args,
@@ -347,8 +371,8 @@ def convert_records(
                 _make_instant_event(
                     name="first token",
                     category="dynamo.llm.marker",
-                    pid=pid,
-                    tid=tid,
+                    pid=stage_pid,
+                    tid=stage_tid,
                     ts_us=ts_us + ttft_us,
                     args={"ttft_ms": request.get("ttft_ms")},
                 )
@@ -367,8 +391,8 @@ def convert_records(
                     _make_complete_event(
                         name="prefill wait",
                         category="dynamo.llm.stage",
-                        pid=pid,
-                        tid=tid,
+                        pid=stage_pid,
+                        tid=stage_tid,
                         ts_us=ts_us,
                         dur_us=wait_us,
                         args={
@@ -384,8 +408,8 @@ def convert_records(
                     _make_complete_event(
                         name="prefill",
                         category="dynamo.llm.stage",
-                        pid=pid,
-                        tid=tid,
+                        pid=stage_pid,
+                        tid=stage_tid,
                         ts_us=ts_us + wait_us,
                         dur_us=prefill_us,
                         args={
@@ -399,8 +423,8 @@ def convert_records(
                     _make_complete_event(
                         name="decode",
                         category="dynamo.llm.stage",
-                        pid=pid,
-                        tid=tid,
+                        pid=stage_pid,
+                        tid=stage_tid,
                         ts_us=ts_us + ttft_us,
                         dur_us=dur_us - ttft_us,
                         args={
