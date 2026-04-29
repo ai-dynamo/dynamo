@@ -18,8 +18,8 @@ on:
         description: 'Runner to execute tests on (amd64 only)'
         required: true
         type: string
-      target_tag_plain:
-        description: 'Plain runtime image tag prefix from the build workflow'
+      container_image_tag:
+        description: 'Container image tag to use for the test'
         required: true
         type: string
       cuda_version:
@@ -73,6 +73,23 @@ on:
         required: false
         type: number
         default: 30
+      seed_model_names:
+        description: 'Space-delimited list of HuggingFace hub model directory names to copy from local_models_dir to NVMe before GPU tests (e.g. "models--Org--Name"). When empty, no seed is performed.'
+        required: false
+        type: string
+        default: >-
+          models--Qwen--Qwen3-0.6B
+          models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B
+          models--openai--gpt-oss-20b
+          models--Qwen--Qwen3-Embedding-4B
+          models--silence09--DeepSeek-R1-Small-2layers
+          models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
+          models--Wan-AI--Wan2.2-TI2V-5B-Diffusers
+          models--Tongyi-MAI--Z-Image-Turbo
+          models--Qwen--Qwen3-VL-2B-Instruct
+          models--Qwen--Qwen2-VL-7B-Instruct
+          models--codelion--Qwen3-0.6B-accuracy-recovery-lora
+          models--llava-hf--llava-1.5-7b-hf
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -164,7 +181,6 @@ jobs:
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: ${{ inputs.gpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
           gpu_tests: 'true'
           seed_model_names: ${{ inputs.seed_model_names }}

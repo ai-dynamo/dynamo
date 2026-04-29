@@ -40,16 +40,12 @@ inputs:
     description: 'Whether to verify GPU visibility via torch before running tests'
     required: false
     default: 'false'
-  local_models_dir:
-    description: 'Path to a pre-staged, read-only HuggingFace model cache on the runner. When set and the path exists, --models-dir is passed to pytest (offline mode, no downloads). Only used when gpu_tests=true.'
-    required: false
-    default: ''
   nvme_dir:
     description: 'Path to the NVMe directory on the runner. When set, the NVME_ROOT environment variable is set to this path.'
     required: false
     default: '/scratch'
   seed_model_names:
-    description: 'Space-delimited list of HuggingFace hub model directory names (e.g. "models--Org--Name models--Org2--Name2") to copy from local_models_dir to NVMe before running tests. When empty, no seed is performed. Only used when gpu_tests=true.'
+    description: 'Space-delimited list of HuggingFace hub model directory names (e.g. "models--Org--Name models--Org2--Name2") to copy from S3 bucket to NVMe before running tests. When empty, no seed is performed. Only used when gpu_tests=true.'
     required: false
     default: ''
 
@@ -125,14 +121,14 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-        # NVMe guard: GPU runners mount /scratch (nvme-scratch emptyDir, NVMe-backed via
-        # instanceStorePolicy: RAID0). CPU/ARM runners have no /scratch mount.
+        # NVMe guard: GPU runners mount ${{ inputs.nvme_dir }}" (nvme-scratch emptyDir, NVMe-backed via
+        # instanceStorePolicy: RAID0). CPU/ARM runners have no ${{ inputs.nvme_dir }} mount.
         if [[ -d "${{ inputs.nvme_dir }}" ]]; then
           NVME_ROOT="${{ inputs.nvme_dir }}"
           echo "✅ NVMe scratch available — caches will use ${NVME_ROOT}"
         else
           NVME_ROOT="/tmp"
-          echo "⚠️  No ${{ inputs.nvme_dir }} — falling back to /tmp (Probably aCPU runner)"
+          echo "⚠️  No ${{ inputs.nvme_dir }} — falling back to /tmp (Probably a CPU runner)"
         fi
 
         # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
@@ -151,20 +147,15 @@ runs:
         mkdir -p "${XDG_CACHE_HOME}"
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
-        # Pre-staged model cache: GPU test runners mount a read-only volume at
-        # /models/ci/models containing all models needed by the test suite.
-        # Passing --models-dir short-circuits predownload_models/predownload_tokenizers
-        # (no network downloads) and sets HF_HUB_OFFLINE=1 for the test session.
-        # Only enabled for GPU tests (verify_gpu=true); CPU tests do not need it.
-        MODELS_DIR_ARG=""
+        NVME_CACHE_ARGS=""
         if [[ "${{ inputs.gpu_tests }}" == "true" ]]; then
           NVME_HUB="${NVME_ROOT}/.cache/huggingface/hub"
+          # This directory exists when the models have been seeded to NVMe.
           if [[ -d "${NVME_HUB}" ]]; then
-            MODELS_DIR_ARG="--models-dir=${NVME_HUB}"
-            echo "📁 Using NVMe model cache at ${NVME_HUB} (offline mode)"
-          elif [[ -d "${{ inputs.local_models_dir }}" ]]; then
-            MODELS_DIR_ARG="--models-dir=${{ inputs.local_models_dir }}"
-            echo "📁 Falling back to S3 model cache at ${{ inputs.local_models_dir }} (offline mode)"
+            NVME_CACHE_ARGS+="HF_HUB_CACHE=${NVME_HUB}"
+            NVME_CACHE_ARGS+="HF_HUB_OFFLINE=1"
+            NVME_CACHE_ARGS+="TRANSFORMERS_OFFLINE=1"
+            NVME_CACHE_ARGS+="DYNAMO_MODELS_DIR=${NVME_HUB}"
           fi
         fi
 
@@ -177,7 +168,7 @@ runs:
 
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
-          PYTEST_CMD="pytest -v --collect-only ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest -v --collect-only ${NVME_CACHE_ARGS} -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           case "${{ inputs.parallel_mode }}" in
@@ -195,8 +186,8 @@ runs:
               ;;
           esac
 
-          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO ${NVME_CACHE_ARGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py ${NVME_CACHE_ARGS} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         umask 0022
