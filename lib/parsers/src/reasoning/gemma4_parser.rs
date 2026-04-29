@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(r.normal_text, "Hello.  Goodbye.");
     }
 
-    #[test] // upstream INVALID_SIMPLE — `<channel|>` present, `<|channel>` absent
+    #[test] // CASE.5, CASE.13 — dangling end marker, missing start (upstream INVALID_SIMPLE)
     fn detect_dangling_end_marker_extracts_prefix_as_reasoning() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("some thinking<channel|>final answer", &[]);
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(r.normal_text, "final answer");
     }
 
-    #[test] // upstream INVALID_COMPLETE — dangling end with `thought\n` prefix on the head
+    #[test] // CASE.5, CASE.13 — dangling end + thought prefix on the head (upstream INVALID_COMPLETE)
     fn detect_dangling_end_marker_strips_thought_prefix() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("thought\nrumination<channel|>final answer", &[]);
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(r.normal_text, "plain text only");
     }
 
-    #[test] // multi-span: reasoning, answer, more reasoning, more answer
+    #[test] // CASE.2 — multiple reasoning spans back-to-back
     fn streaming_multiple_reasoning_spans() {
         let mut p = Gemma4ReasoningParser::new();
         let input =

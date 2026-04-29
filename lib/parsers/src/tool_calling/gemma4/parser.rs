@@ -665,32 +665,32 @@ mod tests {
 
     // Argument-grammar unit tests (parse_args_object directly)
 
-    #[test]
+    #[test] // CASE.6 — empty args at the grammar entry point
     fn args_grammar_empty() {
         let v = parse_args_object("").unwrap();
         assert_eq!(v, serde_json::json!({}));
     }
 
-    #[test]
+    #[test] // CASE.7 — string with comma/colon/brace literals
     fn args_grammar_string_with_special_chars() {
         let v = parse_args_object(r#"x:<|"|>has,comma:and{brace}<|"|>"#).unwrap();
         assert_eq!(v["x"], "has,comma:and{brace}");
     }
 
-    #[test]
+    #[test] // CASE.7 — deeply nested object value
     fn args_grammar_deeply_nested() {
         let v = parse_args_object("a:{b:{c:{d:{e:1}}}}").unwrap();
         assert_eq!(v["a"]["b"]["c"]["d"]["e"], 1);
     }
 
-    #[test]
+    #[test] // CASE.7 — array of objects
     fn args_grammar_array_of_objects() {
         let v = parse_args_object(r#"items:[{n:<|"|>x<|"|>},{n:<|"|>y<|"|>}]"#).unwrap();
         assert_eq!(v["items"][0]["n"], "x");
         assert_eq!(v["items"][1]["n"], "y");
     }
 
-    #[test]
+    #[test] // CASE.4, CASE.5 — truncated string-arg recovery (mirrors upstream)
     fn args_grammar_unterminated_string_takes_remainder() {
         // Upstream Gemma 4 parser: when the closing <|"|> is missing,
         // everything after the opening delimiter becomes the value. We mirror
@@ -700,21 +700,21 @@ mod tests {
         assert_eq!(v["x"], "oops");
     }
 
-    #[test] // upstream test_empty_value
+    #[test] // CASE.4 — empty value mid-args (upstream test_empty_value)
     fn args_grammar_empty_value_yields_empty_string() {
         let v = parse_args_object("x:,y:1").unwrap();
         assert_eq!(v["x"], "");
         assert_eq!(v["y"], 1);
     }
 
-    #[test] // upstream test_empty_value at end-of-args
+    #[test] // CASE.4 — empty value at end-of-args (upstream test_empty_value)
     fn args_grammar_trailing_empty_value() {
         let v = parse_args_object("x:1,y:").unwrap();
         assert_eq!(v["x"], 1);
         assert_eq!(v["y"], "");
     }
 
-    #[test] // case-insensitive null aliases (upstream `value_str.lower() in (...)`)
+    #[test] // CASE.7 — typed-value null variants, case-insensitive (upstream `value_str.lower() in (...)`)
     fn args_grammar_null_aliases_case_insensitive() {
         for variant in [
             "null", "NULL", "Null", "none", "NONE", "None", "nil", "NIL", "Nil",
@@ -725,8 +725,7 @@ mod tests {
         }
     }
 
-    #[test] // ensure `nullable` (or other word-suffixed identifiers) doesn't
-    // get mis-matched as the keyword `null` plus leftovers.
+    #[test] // CASE.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
     fn args_grammar_keyword_prefix_not_consumed() {
         // `nullable` starts with "null" but is not the null keyword. Without
         // the trailing-word-char guard, `null` would match and `able` would
@@ -740,7 +739,7 @@ mod tests {
         let _ = err; // exact message not asserted, only that it errors
     }
 
-    #[test] // upstream test_incomplete_tool_call equivalent
+    #[test] // CASE.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
     fn incomplete_tool_call_echoes_raw_bytes() {
         let input = "<|tool_call>call:foo{x:1";
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
