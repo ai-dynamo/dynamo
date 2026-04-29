@@ -201,10 +201,15 @@ spec:
         app: disagg-qwen3-omni
     spec:
       imagePullSecrets:
-        - name: nvcr-imagepullsecret
+        - name: nvcr-dynamo-dev-pullsecret
+      # See vllm-serve/deploy.yaml for rationale — same PVC-ownership story.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: omni-disagg
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
           command: ["bash", "/etc/dynamo/launcher/launch.sh"]
           ports:
             - containerPort: 8000

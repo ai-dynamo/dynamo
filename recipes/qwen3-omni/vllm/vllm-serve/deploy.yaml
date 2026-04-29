@@ -32,10 +32,17 @@ spec:
         app: vllm-serve-qwen3-omni
     spec:
       imagePullSecrets:
-        - name: nvcr-imagepullsecret
+        - name: nvcr-dynamo-dev-pullsecret
+      # PVC is mounted RWX from a CSI provisioner that owns the directory as
+      # root by default; fsGroup=1000 lets kubelet chown it to the dynamo user
+      # (uid/gid 1000) on mount so HF model downloads don't hit PermissionError.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: vllm-omni
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
           command: ["bash", "-lc"]
           # NB: vllm-omni serve auto-discovers the model's modality stages from
           # the checkpoint and does NOT take --output-modalities (that flag is

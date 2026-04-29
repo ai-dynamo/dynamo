@@ -22,9 +22,9 @@ spec:
           value: /home/dynamo/.cache/huggingface
       extraPodSpec:
         imagePullSecrets:
-          - name: nvcr-imagepullsecret
+          - name: nvcr-dynamo-dev-pullsecret
         mainContainer:
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
           workingDir: /workspace
           command:
             - python3
@@ -43,7 +43,13 @@ spec:
         useAsCompilationCache: true
       extraPodSpec:
         imagePullSecrets:
-          - name: nvcr-imagepullsecret
+          - name: nvcr-dynamo-dev-pullsecret
+        # See vllm-serve/deploy.yaml — fsGroup=1000 unbreaks HF cache writes
+        # to the freshly-provisioned model-cache PVC (default owned by root).
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
         mainContainer:
           args:
           - --model
@@ -57,7 +63,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm.omni
-          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
