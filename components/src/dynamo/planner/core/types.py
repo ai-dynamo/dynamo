@@ -11,7 +11,7 @@ based on the previous tick's ``ScheduledTick`` requirements.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ class TrafficObservation:
     num_req: float
     isl: float
     osl: float
+    kv_hit_rate: Optional[float] = None
 
 
 @dataclass
@@ -93,11 +94,49 @@ class ScalingDecision:
 
 
 @dataclass
+class TickDiagnostics:
+    """Intermediate decision data populated by the state machine for
+    observability.  The adapter layer reads these to set Prometheus
+    metrics and feed the diagnostics recorder.
+    """
+
+    # Load-scaling: max estimated latency across engines (ms)
+    estimated_ttft_ms: Optional[float] = None
+    estimated_itl_ms: Optional[float] = None
+
+    # Throughput-scaling: predicted next-interval traffic
+    predicted_num_req: Optional[float] = None
+    predicted_isl: Optional[float] = None
+    predicted_osl: Optional[float] = None
+    predicted_kv_hit_rate: Optional[float] = None
+
+    # Throughput-scaling: single-engine capacity under SLA (req/s)
+    engine_rps_prefill: Optional[float] = None
+    engine_rps_decode: Optional[float] = None
+
+    # Throughput-scaling: lower bound on replicas
+    throughput_lower_bound_prefill: Optional[int] = None
+    throughput_lower_bound_decode: Optional[int] = None
+
+    # Scaling decision reasons (set by the mixin that ran)
+    # Aggregate reasons (agg mode, or combined disagg).
+    load_decision_reason: Optional[str] = None
+    throughput_decision_reason: Optional[str] = None
+    # Per-component reasons (populated in disagg mode for separate
+    # prefill / decode decision timelines).
+    load_decision_reason_prefill: Optional[str] = None
+    load_decision_reason_decode: Optional[str] = None
+    throughput_decision_reason_prefill: Optional[str] = None
+    throughput_decision_reason_decode: Optional[str] = None
+
+
+@dataclass
 class PlannerEffects:
     """What the core returns after processing a tick."""
 
     scale_to: Optional[ScalingDecision] = None
     next_tick: Optional[ScheduledTick] = None
+    diagnostics: TickDiagnostics = field(default_factory=TickDiagnostics)
 
 
 @dataclass
@@ -108,6 +147,7 @@ class EngineCapabilities:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
+    max_kv_tokens: Optional[int] = None
 
 
 @dataclass

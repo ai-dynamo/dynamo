@@ -63,7 +63,7 @@ pub(super) type ReplayScheduler = LocalScheduler<
     DefaultWorkerSelector,
 >;
 
-fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
+pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
         max_num_batched_tokens: args
             .max_num_batched_tokens
@@ -117,9 +117,6 @@ pub(crate) fn replay_router_config(
     config
 }
 
-pub(super) fn replay_policy(
-    config: &KvRouterConfig,
-    args: &MockEngineArgs,
-) -> RouterSchedulingPolicy {
-    RouterSchedulingPolicy::new(config.router_queue_policy, args.block_size)
+pub(super) fn replay_policy(config: &KvRouterConfig) -> RouterSchedulingPolicy {
+    RouterSchedulingPolicy::new(config.router_queue_policy)
 }

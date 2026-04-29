@@ -72,9 +72,11 @@ enum ZmqRawKvEvent {
         parent_block_hash: Option<u64>,
         token_ids: Vec<u32>,
         block_size: u32,
+        group_idx: u32,
     },
     BlockRemoved {
         block_hashes: Vec<u64>,
+        group_idx: u32,
     },
 }
 
@@ -277,11 +279,15 @@ fn convert_to_zmq_events(
                 parent_block_hash,
                 token_ids,
                 block_size,
+                group_idx: 0,
             }]
         }
         KvCacheEventData::Removed(remove_data) => {
             let block_hashes: Vec<u64> = remove_data.block_hashes.iter().map(|h| h.0).collect();
-            vec![ZmqRawKvEvent::BlockRemoved { block_hashes }]
+            vec![ZmqRawKvEvent::BlockRemoved {
+                block_hashes,
+                group_idx: 0,
+            }]
         }
         KvCacheEventData::Cleared => vec![],
     }
@@ -303,6 +309,8 @@ pub struct MockEngine {
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     /// Keep schedulers alive so their CancelGuards don't fire prematurely.
     _schedulers: OnceCell<Vec<Box<dyn SchedulerHandle>>>,
+    /// Forward pass metrics publisher (kept alive for the engine lifetime).
+    _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
 }
 
 impl MockEngine {
@@ -316,6 +324,7 @@ impl MockEngine {
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             _schedulers: OnceCell::new(),
+            _fpm_publisher: OnceCell::new(),
         }
     }
 
@@ -361,11 +370,33 @@ impl MockEngine {
             None
         };
 
+        // Create FPM publisher upfront and get per-dp-rank sink handles.
+        let worker_id = component.drt().connection_id().to_string();
+        let fpm_sinks = match crate::fpm_publisher::FpmDirectPublisher::new(
+            component.clone(),
+            worker_id,
+            self.engine_args.dp_size,
+        )
+        .await
+        {
+            Ok((publisher, sinks)) => {
+                let _ = self._fpm_publisher.set(publisher);
+                sinks
+            }
+            Err(e) => {
+                tracing::error!("Failed to start FPM publisher: {e}");
+                (0..self.engine_args.dp_size)
+                    .map(|_| dynamo_mocker::common::protocols::FpmPublisher::default())
+                    .collect()
+            }
+        };
+
         let schedulers = self
-            .start_schedulers(kv_component, cancel_token.clone())
+            .start_schedulers(kv_component, cancel_token.clone(), fpm_sinks)
             .await;
 
-        Self::start_metrics_publishing(&schedulers, component, cancel_token.clone()).await?;
+        Self::start_metrics_publishing(&schedulers, component.clone(), cancel_token.clone())
+            .await?;
 
         let _ = self._schedulers.set(schedulers);
 
@@ -395,17 +426,18 @@ impl MockEngine {
         let _ = senders[dp_rank].send(request);
     }
 
-    /// Create schedulers and spawn their background tasks for distributing token notifications
+    /// Create schedulers and spawn their background tasks for distributing token notifications.
     async fn start_schedulers(
         &self,
         component: Option<&Component>,
         cancel_token: CancellationToken,
+        fpm_sinks: Vec<dynamo_mocker::common::protocols::FpmPublisher>,
     ) -> Vec<Box<dyn SchedulerHandle>> {
         let args = &self.engine_args;
         let mut schedulers = Vec::<Box<dyn SchedulerHandle>>::new();
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
-        for dp_rank in 0..args.dp_size {
+        for (dp_rank, fpm_publisher) in (0..args.dp_size).zip(fpm_sinks) {
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
             let (kv_event_publishers, relay_publisher): (
@@ -493,6 +525,7 @@ impl MockEngine {
                 Some(output_tx),
                 kv_event_publishers,
                 Some(cancel_token.clone()),
+                fpm_publisher,
             );
 
             senders.push(scheduler.request_sender());

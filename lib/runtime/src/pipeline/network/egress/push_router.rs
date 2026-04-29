@@ -3,22 +3,13 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
-
-/// Check if an error chain indicates the worker should be reported as down.
-fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
-    const INHIBITED: &[ErrorType] = &[
-        ErrorType::CannotConnect,
-        ErrorType::Disconnected,
-        ErrorType::ConnectionTimeout,
-        ErrorType::Backend(BackendError::EngineShutdown),
-    ];
-    match_error_chain(err, INHIBITED, &[])
-}
 use crate::{
-    component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
+    component::{
+        Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+    },
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
-    metrics::frontend_perf::STAGE_DURATION_SECONDS,
+    metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
@@ -31,6 +22,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -42,6 +34,30 @@ use std::{
 };
 use tokio_stream::StreamExt;
 use tracing::Instrument;
+
+/// Check if an error chain indicates the worker should be reported as down.
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::ResponseTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
+}
+
+/// Read the backend response inactivity timeout from the environment.
+/// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
+/// as the HTTP-layer safety net in `disconnect.rs`.
+fn response_inactivity_timeout() -> Option<std::time::Duration> {
+    use crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
+    std::env::var(DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
+}
 
 struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
@@ -118,15 +134,15 @@ where
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
 
-    /// Threshold for determining when a worker is busy (0.0 to 1.0)
-    /// If None, busy detection is disabled
-    busy_threshold: Option<f64>,
-
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
     /// instance list instead of the filtered avail list. Use for recovery/query paths
     /// where transient failures are expected.
     fault_detection_enabled: bool,
+
+    /// Cached response inactivity timeout. Read once at construction from
+    /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
+    response_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -137,7 +153,8 @@ where
     _phantom: PhantomData<(T, U)>,
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouterMode {
     #[default]
     RoundRobin,
@@ -146,6 +163,8 @@ pub enum RouterMode {
     KV,
     Direct,
     LeastLoaded,
+    /// Device-aware weighted routing for heterogeneous workers.
+    DeviceAwareWeighted,
 }
 
 impl RouterMode {
@@ -184,6 +203,56 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
     selected
 }
 
+/// Select the target device group for the next request in `DeviceAwareWeighted` mode.
+///
+/// If only one class exists (all CPU or all non-CPU), returns that class directly.
+/// If both classes exist, compares capability-normalized load and returns the less-loaded group.
+///
+/// Budget check (integer form):
+/// `allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
+/// and choose CPU when `total_cpu_inflight < allowed_cpu_inflight`.
+///
+/// `ratio` is `non_cpu_to_cpu_ratio` (from `DYN_ENCODER_CUDA_TO_CPU_RATIO`,
+/// default `8` in `device_aware_weighted`).
+fn device_aware_candidate_group(
+    state: &RoutingOccupancyState,
+    instance_ids: &[u64],
+    device_type_map: &HashMap<u64, Option<DeviceType>>,
+    non_cpu_to_cpu_ratio: usize,
+) -> Vec<u64> {
+    let cpu_ids: Vec<u64> = instance_ids
+        .iter()
+        .copied()
+        .filter(|id| matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
+        .collect();
+    let non_cpu_ids: Vec<u64> = instance_ids
+        .iter()
+        .copied()
+        .filter(|id| !matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
+        .collect();
+
+    if cpu_ids.is_empty() {
+        return non_cpu_ids;
+    }
+    if non_cpu_ids.is_empty() {
+        return cpu_ids;
+    }
+
+    // Both classes exist: compute a budget for CPU in-flight requests.
+    let total_non_cpu_inflight: u64 = non_cpu_ids.iter().map(|id| state.load(*id)).sum();
+    let total_cpu_inflight: u64 = cpu_ids.iter().map(|id| state.load(*id)).sum();
+    let cpu_count = cpu_ids.len() as u64;
+    let non_cpu_count = non_cpu_ids.len() as u64;
+    let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
+        / ((non_cpu_to_cpu_ratio as u64).saturating_mul(non_cpu_count));
+
+    if total_cpu_inflight < allowed_cpu_inflight {
+        cpu_ids
+    } else {
+        non_cpu_ids
+    }
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
     let manager = endpoint.drt().network_manager();
@@ -203,9 +272,9 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    /// Create a new PushRouter without busy threshold (no busy detection)
+    /// Create a new PushRouter without a worker load monitor (no busy detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
-        Self::from_client_with_threshold(client, router_mode, None, None).await
+        Self::from_client_with_monitor(client, router_mode, None).await
     }
 
     /// Create a new PushRouter with fault detection disabled.
@@ -221,7 +290,9 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
@@ -233,18 +304,22 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            busy_threshold: None,
             fault_detection_enabled: false,
+            response_timeout: response_inactivity_timeout(),
             occupancy_state,
             _phantom: PhantomData,
         })
     }
 
-    /// Create a new PushRouter with optional busy threshold and worker load monitor
-    pub async fn from_client_with_threshold(
+    /// Create a new PushRouter with an optional worker load monitor.
+    ///
+    /// The rejection path is gated by `fault_detection_enabled` (true here);
+    /// busy detection itself is driven by the monitor via `client.update_free_instances(...)`.
+    /// If no thresholds are configured on the monitor (or no monitor is provided),
+    /// `client.instance_ids_free()` returns all instances and the gate never rejects.
+    pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
-        busy_threshold: Option<f64>,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
@@ -256,7 +331,9 @@ where
 
         let occupancy_state = if matches!(
             router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
         ) {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
@@ -268,8 +345,8 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            busy_threshold,
             fault_detection_enabled: true,
+            response_timeout: response_inactivity_timeout(),
             occupancy_state,
             _phantom: PhantomData,
         };
@@ -375,6 +452,84 @@ where
             .await
     }
 
+    /// Issue a request using device-aware weighted routing.
+    ///
+    /// Instances are partitioned by device type (CPU vs non-CPU), then the router
+    /// applies a budget policy and selects the least-loaded instance within the
+    /// chosen group.
+    ///
+    /// If only one device class exists (all CPU or all non-CPU), this naturally
+    /// degenerates to least-loaded routing over the available instances.
+    pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let state = self.occupancy_state()?;
+        let instance_ids = self
+            .client
+            .instance_ids_avail()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+
+        if instance_ids.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no instances found for endpoint {}",
+                self.client.endpoint.id()
+            ));
+        }
+
+        // Apply a unified policy for all endpoints.
+        let endpoint_id = self.client.endpoint.id();
+
+        // For encoder endpoints, partition by device type
+        let instances = self.client.instances();
+        let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
+            .iter()
+            .map(|inst| (inst.instance_id, inst.device_type.clone()))
+            .collect();
+
+        // Apply budget-based routing to determine which group to send to
+        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(8);
+        let candidates = device_aware_candidate_group(
+            state.as_ref(),
+            &instance_ids,
+            &device_type_map,
+            cuda_to_cpu_ratio,
+        );
+
+        // Select least-loaded within the chosen group
+        let instance_id = state
+            .select_exact_min_and_increment(&candidates)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no instances in selected device group for endpoint {}",
+                    endpoint_id
+                )
+            })?;
+        let permit = OccupancyPermit::new(state.clone(), instance_id);
+        let is_cpu = matches!(
+            device_type_map.get(&instance_id),
+            Some(Some(DeviceType::Cpu))
+        );
+        tracing::info!(
+            endpoint = %endpoint_id,
+            selected_instance = instance_id,
+            is_cpu,
+            "DeviceAwareWeighted selected instance"
+        );
+
+        match self
+            .generate_with_fault_detection(instance_id, request)
+            .await
+        {
+            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
@@ -427,7 +582,10 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded => None,
+            RouterMode::PowerOfTwoChoices
+            | RouterMode::Direct
+            | RouterMode::LeastLoaded
+            | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
@@ -459,7 +617,10 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
-            RouterMode::PowerOfTwoChoices | RouterMode::Direct | RouterMode::LeastLoaded => None,
+            RouterMode::PowerOfTwoChoices
+            | RouterMode::Direct
+            | RouterMode::LeastLoaded
+            | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
@@ -506,8 +667,8 @@ where
             )
         };
 
-        // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
-        if self.fault_detection_enabled && self.busy_threshold.is_some() {
+        // Check if all workers are busy (when fault detection is enabled).
+        if self.fault_detection_enabled {
             let free_instances = self.client.instance_ids_free();
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
@@ -609,7 +770,7 @@ where
         let request = request.map(|req| AddressedRequest::new(req, address));
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["route"])
+            .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
         let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
@@ -625,6 +786,7 @@ where
                 }
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
+                let client_for_timeout = self.client.clone();
                 let stream = stream.map(move |res| {
                     // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
@@ -637,7 +799,47 @@ where
                     }
                     res
                 });
-                Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+
+                // Request-plane inactivity timeout: emit a ResponseTimeout error item
+                // when the backend stops producing output. This triggers is_inhibited()
+                // → report_instance_down() to quarantine the worker.
+                let stream: Pin<Box<dyn Stream<Item = U> + Send>> = if let Some(timeout) =
+                    self.response_timeout
+                {
+                    Box::pin(async_stream::stream! {
+                        let mut inner = Box::pin(stream);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                item = inner.next() => {
+                                    match item {
+                                        Some(item) => yield item,
+                                        None => break,
+                                    }
+                                }
+                                _ = tokio::time::sleep(timeout) => {
+                                    tracing::warn!(
+                                        instance_id,
+                                        timeout_secs = timeout.as_secs(),
+                                        "backend response inactivity timeout — quarantining worker"
+                                    );
+                                    client_for_timeout.report_instance_down(instance_id);
+                                    yield U::from_err(
+                                        crate::error::DynamoError::builder()
+                                            .error_type(crate::error::ErrorType::ResponseTimeout)
+                                            .message("backend response inactivity timeout")
+                                            .build()
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                } else {
+                    Box::pin(stream)
+                };
+
+                Ok(ResponseStream::new(stream, engine_ctx))
             }
             Err(err) => {
                 if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
@@ -670,6 +872,7 @@ where
                 );
             }
             RouterMode::LeastLoaded => self.least_loaded(request).await,
+            RouterMode::DeviceAwareWeighted => self.device_aware_weighted(request).await,
         }
     }
 }
@@ -892,6 +1095,117 @@ mod tests {
         let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
+
+        assert_eq!(router.select_next_worker(), None);
+        assert_eq!(router.peek_next_worker(), None);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn device_aware_cpu_only_selects_least_loaded_instance() {
+        let state = RoutingOccupancyState::default();
+        // All candidates are CPU. Make worker 2 the least-loaded one.
+        for _ in 0..3 {
+            state.increment(1);
+        }
+        state.increment(3);
+
+        let instance_ids = vec![1, 2, 3];
+        let device_type_map = HashMap::from([
+            (1, Some(DeviceType::Cpu)),
+            (2, Some(DeviceType::Cpu)),
+            (3, Some(DeviceType::Cpu)),
+        ]);
+
+        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
+        assert_eq!(candidates, vec![1, 2, 3]);
+
+        let selected = state
+            .select_exact_min_and_increment(&candidates)
+            .await
+            .unwrap();
+        assert_eq!(selected, 2);
+    }
+
+    #[tokio::test]
+    async fn device_aware_non_cpu_only_selects_least_loaded_instance() {
+        let state = RoutingOccupancyState::default();
+        // All candidates are non-CPU. Make worker 2 the least-loaded one.
+        for _ in 0..3 {
+            state.increment(1);
+        }
+        state.increment(3);
+
+        let instance_ids = vec![1, 2, 3];
+        let device_type_map = HashMap::from([
+            (1, Some(DeviceType::Cuda)),
+            (2, Some(DeviceType::Cuda)),
+            (3, Some(DeviceType::Cuda)),
+        ]);
+
+        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
+        assert_eq!(candidates, vec![1, 2, 3]);
+
+        let selected = state
+            .select_exact_min_and_increment(&candidates)
+            .await
+            .unwrap();
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn device_aware_group_uses_ratio_budget() {
+        let state = RoutingOccupancyState::default();
+        // CPU ids: 1,2 ; non-CPU ids: 3,4
+        for _ in 0..4 {
+            state.increment(3);
+            state.increment(4);
+        }
+        // CPU inflight can differ across instances; budgeting uses total CPU inflight.
+        for _ in 0..3 {
+            state.increment(1);
+        }
+        // total_non_cpu_inflight=8, cpu_count=2, non_cpu_count=2, ratio=2
+        // allowed_cpu_inflight = 8*2/(2*2)=4
+        // total_cpu_inflight=3 < 4 => choose CPU group.
+        let instance_ids = vec![1, 2, 3, 4];
+        let device_type_map = HashMap::from([
+            (1, Some(DeviceType::Cpu)),
+            (2, Some(DeviceType::Cpu)),
+            (3, Some(DeviceType::Cuda)),
+            (4, Some(DeviceType::Cuda)),
+        ]);
+
+        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 2);
+        assert_eq!(candidates, vec![1, 2]);
+
+        // Within selected CPU group, final choice should be the least-loaded instance (id=2).
+        let selected =
+            futures::executor::block_on(state.select_exact_min_and_increment(&candidates)).unwrap();
+        assert_eq!(selected, 2);
+    }
+
+    #[tokio::test]
+    async fn device_aware_weighted_select_and_peek_return_none_with_available_worker() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_device_aware_router".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client, RouterMode::DeviceAwareWeighted)
+                .await
+                .unwrap();
 
         assert_eq!(router.select_next_worker(), None);
         assert_eq!(router.peek_next_worker(), None);

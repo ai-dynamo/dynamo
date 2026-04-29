@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import logging
+import re
 import threading
 import time
 
 import pytest
 import requests
+from openai import APIError, OpenAI
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import (
@@ -21,7 +22,12 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
-    def __init__(self, request, migration_limit: int):
+    def __init__(
+        self,
+        request,
+        migration_limit: int,
+        migration_max_seq_len: int | None,
+    ):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
             # These tests expect full control over requests sent to workers. The canary
@@ -33,40 +39,25 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             frontend_port=0,  # allocate a free port (xdist-safe)
             router_mode="round-robin",
             migration_limit=migration_limit,
+            migration_max_seq_len=migration_max_seq_len,
             extra_env=extra_env,
             terminate_all_matching_process_names=False,
             display_name="frontend",
         )
 
 
-def _parse_completion_sse_content(line: str) -> str | Exception | None:
+def _make_client(frontend_port: int) -> OpenAI:
+    """Build an OpenAI client pointed at the test frontend.
+
+    max_retries=0 so fault-tolerance tests see the first error instead of
+    silent retries; api_key is a placeholder since the frontend doesn't auth.
     """
-    Parse an SSE line from the completions API and extract the text content.
-
-    Args:
-        line: Raw SSE line string
-
-    Returns:
-        str: The text content if found
-        Exception: If error event or parse error
-        None: If no content (e.g., [DONE] or empty)
-    """
-    if line.startswith("event: error"):
-        return Exception(f"SSE error event received: {line}")
-
-    if not line.startswith("data: "):
-        return None  # Skip non-data lines
-
-    data_str = line[6:]  # Remove "data: " prefix
-    if data_str == "[DONE]":
-        return None
-
-    try:
-        chunk = json.loads(data_str)
-        text = chunk["choices"][0].get("text")
-        return text  # May be None if no text content
-    except Exception as e:
-        return Exception(f"Error parsing response chunk: {e}")
+    return OpenAI(
+        base_url=f"http://localhost:{frontend_port}/v1",
+        api_key="not-needed",
+        max_retries=0,
+        timeout=240,
+    )
 
 
 def start_completion_request(
@@ -95,14 +86,6 @@ def start_completion_request(
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * 8000 + "!"
-        timeout = 240  # Extended timeout for long request
-
-        payload = {
-            "model": FAULT_TOLERANCE_MODEL_NAME,
-            "prompt": prompt,
-            "stream": stream,
-        }
-        headers = {"Content-Type": "application/json"}
 
         logger.info(
             f"Sending completion request (stream={stream}) with prompt: '{prompt[:50]}...'"
@@ -111,45 +94,30 @@ def start_completion_request(
         response_list.append((None, time.time()))  # start timestamp
 
         try:
-            with requests.post(
-                f"http://localhost:{frontend_port}/v1/completions",
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-                stream=stream,
-            ) as response:
-                logger.info(
-                    f"Received response with status code: {response.status_code}"
+            client = _make_client(frontend_port)
+            if stream:
+                for chunk in client.completions.create(
+                    model=FAULT_TOLERANCE_MODEL_NAME,
+                    prompt=prompt,
+                    stream=True,
+                ):
+                    text = chunk.choices[0].text if chunk.choices else None
+                    # Match the original hand-rolled parser: keep empty strings,
+                    # drop only None. Empty chunks (e.g. the first stream frame)
+                    # still count as a response arrival for delay measurement.
+                    if text is not None:
+                        response_list.append((text, time.time()))
+            else:
+                resp = client.completions.create(
+                    model=FAULT_TOLERANCE_MODEL_NAME,
+                    prompt=prompt,
+                    stream=False,
                 )
-                if response.status_code != 200:
-                    response_list.append(
-                        (
-                            Exception(
-                                f"Request failed with status {response.status_code}: {response.text}"
-                            ),
-                            time.time(),
-                        )
-                    )
-                    return
-
-                if stream:
-                    for line in response.iter_lines():
-                        if line:
-                            content = _parse_completion_sse_content(
-                                line.decode("utf-8")
-                            )
-                            if content is not None:
-                                response_list.append((content, time.time()))
-                else:
-                    try:
-                        content = response.json()["choices"][0]["text"]
-                        response_list.append((content, time.time()))
-                    except Exception as e:
-                        response_list.append(
-                            (Exception(f"Error parsing response: {e}"), time.time())
-                        )
-
+                response_list.append((resp.choices[0].text, time.time()))
         except Exception as e:
+            # openai.APIError subclasses cover HTTP non-200, mid-stream
+            # structured `data: {"error": {...}}` frames, connection failures,
+            # and timeouts. Non-openai exceptions (network, etc.) also bubble.
             logger.error(f"Request failed with error: {e}")
             response_list.append((e, time.time()))
 
@@ -157,36 +125,6 @@ def start_completion_request(
     request_thread.start()
 
     return request_thread, response_list
-
-
-def _parse_chat_completion_sse_content(line: str) -> str | Exception | None:
-    """
-    Parse an SSE line and extract the content.
-
-    Args:
-        line: Raw SSE line string
-
-    Returns:
-        str: The content delta if found
-        Exception: If error event or parse error
-        None: If no content (e.g., [DONE] or empty delta)
-    """
-    if line.startswith("event: error"):
-        return Exception(f"SSE error event received: {line}")
-
-    if not line.startswith("data: "):
-        return None  # Skip non-data lines
-
-    data_str = line[6:]  # Remove "data: " prefix
-    if data_str == "[DONE]":
-        return None
-
-    try:
-        chunk = json.loads(data_str)
-        content = chunk["choices"][0]["delta"].get("content")
-        return content  # May be None if delta has no content
-    except Exception as e:
-        return Exception(f"Error parsing response chunk: {e}")
 
 
 def start_chat_completion_request(
@@ -215,14 +153,6 @@ def start_chat_completion_request(
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * 8000 + "!"
-        timeout = 240  # Extended timeout for long request
-
-        payload = {
-            "model": FAULT_TOLERANCE_MODEL_NAME,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": stream,
-        }
-        headers = {"Content-Type": "application/json"}
 
         logger.info(
             f"Sending chat completion request (stream={stream}) with prompt: '{prompt[:50]}...'"
@@ -231,45 +161,31 @@ def start_chat_completion_request(
         response_list.append((None, time.time()))  # start timestamp
 
         try:
-            with requests.post(
-                f"http://localhost:{frontend_port}/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-                stream=stream,
-            ) as response:
-                logger.info(
-                    f"Received response with status code: {response.status_code}"
-                )
-                if response.status_code != 200:
-                    response_list.append(
-                        (
-                            Exception(
-                                f"Request failed with status {response.status_code}: {response.text}"
-                            ),
-                            time.time(),
-                        )
-                    )
-                    return
-
-                if stream:
-                    for line in response.iter_lines():
-                        if line:
-                            content = _parse_chat_completion_sse_content(
-                                line.decode("utf-8")
-                            )
-                            if content is not None:
-                                response_list.append((content, time.time()))
-                else:
-                    try:
-                        content = response.json()["choices"][0]["message"]["content"]
+            client = _make_client(frontend_port)
+            if stream:
+                for chunk in client.chat.completions.create(
+                    model=FAULT_TOLERANCE_MODEL_NAME,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=True,
+                ):
+                    content = chunk.choices[0].delta.content if chunk.choices else None
+                    # Match the original hand-rolled parser: keep empty strings,
+                    # drop only None. Empty chunks (e.g. the first `role`-only
+                    # stream frame) still count as a response arrival for delay
+                    # measurement.
+                    if content is not None:
                         response_list.append((content, time.time()))
-                    except Exception as e:
-                        response_list.append(
-                            (Exception(f"Error parsing response: {e}"), time.time())
-                        )
-
+            else:
+                resp = client.chat.completions.create(
+                    model=FAULT_TOLERANCE_MODEL_NAME,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False,
+                )
+                response_list.append((resp.choices[0].message.content, time.time()))
         except Exception as e:
+            # openai.APIError subclasses cover HTTP non-200, mid-stream
+            # structured `data: {"error": {...}}` frames, connection failures,
+            # and timeouts. Non-openai exceptions also bubble for visibility.
             logger.error(f"Request failed with error: {e}")
             response_list.append((e, time.time()))
 
@@ -464,8 +380,6 @@ def _parse_migration_metric(
     Returns:
         The metric count, or 0 if not found
     """
-    import re
-
     # Match pattern like:
     # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
     # Labels can be in any order
@@ -485,10 +399,25 @@ def _parse_migration_metric(
     return 0
 
 
+def _parse_migration_max_seq_len_exceeded_metric(
+    metrics_text: str, model_name: str
+) -> int:
+    """
+    Parse the migration max_seq_len exceeded counter from Prometheus metrics text.
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    pattern = rf'dynamo_frontend_model_migration_max_seq_len_exceeded_total\{{[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
+    match = re.search(pattern, metrics_text)
+    return int(match.group(1)) if match else 0
+
+
 def verify_migration_metrics(
     frontend_port: int,
     expected_ongoing_request_count: int = 0,
     expected_new_request_count: int = 0,
+    expected_max_seq_len_exceeded_count: int = 0,
 ) -> None:
     """
     Verify migration metrics by querying the frontend's /metrics endpoint.
@@ -497,6 +426,7 @@ def verify_migration_metrics(
         frontend_port: Port where the frontend is running
         expected_ongoing_request_count: Expected count of ongoing_request migrations
         expected_new_request_count: Expected count of new_request migrations
+        expected_max_seq_len_exceeded_count: Expected count of max_seq_len exceeded events
     """
     metrics_url = f"http://localhost:{frontend_port}/metrics"
 
@@ -516,9 +446,14 @@ def verify_migration_metrics(
     new_request_count = _parse_migration_metric(
         metrics_text, FAULT_TOLERANCE_MODEL_NAME, "new_request"
     )
+    max_seq_len_exceeded_count = _parse_migration_max_seq_len_exceeded_metric(
+        metrics_text, FAULT_TOLERANCE_MODEL_NAME
+    )
 
     logger.info(
-        f"Migration metrics - ongoing_request: {ongoing_count}, new_request: {new_request_count}"
+        f"Migration metrics - ongoing_request: {ongoing_count}, "
+        f"new_request: {new_request_count}, "
+        f"max_seq_len_exceeded: {max_seq_len_exceeded_count}"
     )
 
     if expected_ongoing_request_count > 0:
@@ -533,6 +468,11 @@ def verify_migration_metrics(
             f"but got {new_request_count}"
         )
 
+    assert max_seq_len_exceeded_count == expected_max_seq_len_exceeded_count, (
+        f"Expected {expected_max_seq_len_exceeded_count} "
+        f"max_seq_len_exceeded events, but got {max_seq_len_exceeded_count}"
+    )
+
 
 def run_migration_test(
     frontend: DynamoFrontendProcess,
@@ -540,6 +480,7 @@ def run_migration_test(
     worker2: ManagedProcess,
     receiving_pattern: str,
     migration_limit: int,
+    migration_max_seq_len: int | None,
     immediate_kill: bool,
     use_chat_completion: bool,
     stream: bool,
@@ -555,6 +496,7 @@ def run_migration_test(
         worker2: Second worker process
         receiving_pattern: Log pattern to identify which worker received the request
         migration_limit: Migration limit setting (0 = disabled)
+        migration_max_seq_len: Max sequence length for migration (None = no limit)
         immediate_kill: True for immediate kill, False for graceful shutdown
         use_chat_completion: Whether to use chat completion API (True) or completion API (False)
         stream: Whether to use streaming responses
@@ -590,27 +532,33 @@ def run_migration_test(
         )
         terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-    # Step 5: Validate response based on migration setting
-    if migration_limit > 0:
+    # Step 5: Validate response and verify migration occurred.
+    # migration_enabled and not max_seq_len_exceeded -> migration should succeed
+    if migration_limit > 0 and migration_max_seq_len != 1:
         validate_response(request_thread, response_list, validate_delay=stream)
         verify_migration_occurred(frontend)
-        verify_migration_metrics(
-            frontend.frontend_port, expected_ongoing_request_count=1
-        )
     else:
         try:
             validate_response(request_thread, response_list, validate_delay=stream)
-            pytest.fail("Request succeeded unexpectedly when migration was disabled")
-        except Exception as e:
-            # Request failed as expected - verify it's a known error type
-            error_str = str(e)
-            assert (
-                "SSE error event received:" in error_str
-                or "Request failed with status" in error_str
-            ), f"Unexpected error: {e}"
+            pytest.fail(
+                "Request succeeded unexpectedly when migration should have failed"
+            )
+        except APIError as e:
+            # Expected: openai.APIError covers mid-stream structured error
+            # frames (DIS-1768 contract) and HTTP non-200 responses. A typed
+            # check is more robust than matching the exception's stringified
+            # message against a specific wire-format prefix.
+            logger.info(f"Got expected APIError: {e}")
 
         try:
             verify_migration_occurred(frontend)
-            pytest.fail("Migration unexpectedly occurred when disabled")
+            pytest.fail("Migration unexpectedly succeeded")
         except AssertionError as e:
             assert "'Cannot recreate stream: ...' error found in logs" in str(e)
+
+    # Step 6: Verify migration metrics
+    verify_migration_metrics(
+        frontend.frontend_port,
+        expected_ongoing_request_count=1 if migration_limit > 0 else 0,
+        expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
+    )
