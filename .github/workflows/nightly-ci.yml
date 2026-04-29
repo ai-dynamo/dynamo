@@ -141,7 +141,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 120
+      gpu_test_timeout_minutes: 45
     secrets: inherit
 
   sglang-test:
@@ -159,6 +159,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: sglang and gpu_0
       gpu_test_markers: sglang and gpu_1
+      gpu_test_timeout_minutes: 240
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -175,7 +176,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: sglang and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 120
+      gpu_test_timeout_minutes: 45
     secrets: inherit
 
   trtllm-test:
@@ -193,6 +194,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: trtllm and gpu_0
       gpu_test_markers: trtllm and gpu_1
+      gpu_test_timeout_minutes: 240
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -209,7 +211,7 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 120
+      gpu_test_timeout_minutes: 45
     secrets: inherit
 
   # ============================================================================
