@@ -34,7 +34,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
           # Approximate KV-aware routing: uses prefix hashing to route
           # requests to workers likely to have relevant KV cache, without
           # requiring KV events from the backend.
@@ -59,7 +59,7 @@ spec:
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
           workingDir: /workspace
           command:
             - python3

@@ -770,8 +770,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray"},
 										Env: []corev1.EnvVar{
+											{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+											{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
@@ -912,8 +914,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
+											{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+											{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
 											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
@@ -1681,7 +1685,11 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 		}
 	}
 
-	t.Run("ready checkpoint forces Recreate strategy", func(t *testing.T) {
+	t.Run("ready checkpoint keeps RollingUpdate strategy", func(t *testing.T) {
+		// Restore-target pods do not need a special Recreate override. The
+		// default RollingUpdate strategy works for failure-replacement and
+		// scale-up; users who specifically want Recreate on tight-GPU nodes
+		// can still opt in via the nvidia.com/deployment-strategy annotation.
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1709,8 +1717,8 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 		if toDelete {
 			t.Fatalf("expected deployment to be retained")
 		}
-		if deploy.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-			t.Fatalf("expected Recreate strategy, got %s", deploy.Spec.Strategy.Type)
+		if deploy.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Fatalf("expected RollingUpdate strategy, got %s", deploy.Spec.Strategy.Type)
 		}
 	})
 

@@ -230,29 +230,41 @@ fn tree_size_indexer_template(
 }
 
 fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
-    let token = CancellationToken::new();
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    make_indexer_with_metrics(variant, metrics).0
+}
+
+fn make_indexer_with_metrics(
+    variant: &str,
+    metrics: Arc<KvIndexerMetrics>,
+) -> (Box<dyn KvIndexerInterface>, Arc<KvIndexerMetrics>) {
+    let token = CancellationToken::new();
     let kv_block_size = 32;
 
-    match variant {
-        "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
-        "flat" => Box::new(ThreadPoolIndexer::new(
+    let indexer: Box<dyn KvIndexerInterface> = match variant {
+        "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics.clone())),
+        "flat" => Box::new(ThreadPoolIndexer::new_with_metrics(
             PositionalIndexer::new(32),
             4,
             kv_block_size,
+            Some(metrics.clone()),
         )),
-        "concurrent" => Box::new(ThreadPoolIndexer::new(
+        "concurrent" => Box::new(ThreadPoolIndexer::new_with_metrics(
             ConcurrentRadixTree::new(),
             4,
             kv_block_size,
+            Some(metrics.clone()),
         )),
-        "concurrent_compressed" => Box::new(ThreadPoolIndexer::new(
+        "concurrent_compressed" => Box::new(ThreadPoolIndexer::new_with_metrics(
             ConcurrentRadixTreeCompressed::new(),
             4,
             kv_block_size,
+            Some(metrics.clone()),
         )),
         _ => panic!("Unknown variant: {}", variant),
-    }
+    };
+
+    (indexer, metrics)
 }
 
 /// Ensure queued indexer work is drained, then give a short settle window.
@@ -309,9 +321,109 @@ async fn assert_exact_scores(
     }
 }
 
+#[cfg(feature = "metrics")]
+fn event_metric_value(
+    metrics: &KvIndexerMetrics,
+    event_type: &'static str,
+    status: &'static str,
+) -> u64 {
+    metrics
+        .kv_cache_events_applied
+        .get_metric_with_label_values(&[event_type, status])
+        .unwrap()
+        .get()
+}
+
+#[cfg(feature = "metrics")]
+fn warning_metric_value(metrics: &KvIndexerMetrics, warning_kind: &'static str) -> u64 {
+    metrics
+        .kv_cache_event_warnings
+        .get_metric_with_label_values(&[warning_kind])
+        .unwrap()
+        .get()
+}
+
+#[cfg(feature = "metrics")]
+fn assert_no_event_errors(metrics: &KvIndexerMetrics) {
+    let invalid_count = [
+        (METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND),
+        (METRIC_EVENT_STORED, METRIC_STATUS_BLOCK_NOT_FOUND),
+        (METRIC_EVENT_STORED, METRIC_STATUS_INVALID_BLOCK),
+        (METRIC_EVENT_REMOVED, METRIC_STATUS_PARENT_NOT_FOUND),
+        (METRIC_EVENT_REMOVED, METRIC_STATUS_BLOCK_NOT_FOUND),
+        (METRIC_EVENT_REMOVED, METRIC_STATUS_INVALID_BLOCK),
+    ]
+    .into_iter()
+    .map(|(event_type, status)| event_metric_value(metrics, event_type, status))
+    .sum::<u64>();
+    assert_eq!(
+        invalid_count, 0,
+        "router indexer reported invalid KV events"
+    );
+}
+
+#[cfg(feature = "metrics")]
+fn assert_no_event_warnings(metrics: &KvIndexerMetrics) {
+    assert_eq!(
+        warning_metric_value(metrics, METRIC_WARNING_DUPLICATE_STORE),
+        0,
+        "router indexer reported suspicious KV events",
+    );
+}
+
 mod interface_tests {
     use super::*;
     use rstest_reuse::apply;
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_duplicate_store_replay_warns_without_error(variant: &str) {
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let (index, metrics) = make_indexer_with_metrics(variant, metrics);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let event = make_store_event(0, &[1, 2, 3]);
+
+        index.apply_event(event.clone()).await;
+        flush_and_settle(index.as_ref()).await;
+        let first_snapshot = snapshot_tree(index.as_ref()).await;
+
+        index.apply_event(event).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            first_snapshot,
+            snapshot_tree(index.as_ref()).await,
+            "replaying the same store event should not change the tree structure"
+        );
+        assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
+        assert_no_event_errors(metrics.as_ref());
+        assert_eq!(
+            warning_metric_value(metrics.as_ref(), METRIC_WARNING_DUPLICATE_STORE),
+            1
+        );
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_continuation_store_does_not_warn(variant: &str) {
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let (index, metrics) = make_indexer_with_metrics(variant, metrics);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        flush_and_settle(index.as_ref()).await;
+
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_score(index.as_ref(), &[1, 2, 3, 4, 5], worker, 5).await;
+        assert_no_event_errors(metrics.as_ref());
+        assert_no_event_warnings(metrics.as_ref());
+    }
 
     #[tokio::test]
     #[apply(indexer_template)]
@@ -2138,6 +2250,16 @@ mod metrics_tests {
                     METRIC_EVENT_REMOVED,
                     METRIC_STATUS_BLOCK_NOT_FOUND
                 ])
+                .unwrap()
+                .get(),
+            1
+        );
+
+        metrics.increment_event_warning(METRIC_WARNING_DUPLICATE_STORE);
+        assert_eq!(
+            metrics
+                .kv_cache_event_warnings
+                .get_metric_with_label_values(&[METRIC_WARNING_DUPLICATE_STORE])
                 .unwrap()
                 .get(),
             1

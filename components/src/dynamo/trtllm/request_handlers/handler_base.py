@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
+from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
@@ -34,6 +35,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -107,13 +109,8 @@ class TRTLLMEngineQuiesceController:
                 "TRT-LLM does not expose _collective_rpc; skipping %s", method
             )
             return
-        try:
-            rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
-        except Exception:
-            if method != "wakeup":
-                raise
-            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
-            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+
+        rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
 
     @staticmethod
     def _release_gms_weights() -> None:
@@ -221,7 +218,6 @@ class RequestHandlerConfig:
     shutdown_event: Optional[asyncio.Event] = None
     generate_endpoint: Optional[Any] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
-    disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
@@ -254,7 +250,6 @@ class HandlerBase(BaseGenerativeHandler):
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
         self.generate_endpoint = config.generate_endpoint
-        self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
@@ -469,15 +464,8 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation unless disabled
-            if self.disable_request_abort:
-                logging.debug(
-                    f"Request ID {context.id()} cancelled but abort() skipped "
-                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
-                )
-            else:
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
+            generation_result.abort()
+            logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -710,6 +698,11 @@ class HandlerBase(BaseGenerativeHandler):
         """
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
+
+        # Canary probe: use its pre-built disagg params (skip prefill_result decode
+        # and skip the mode-specific request_type overrides).
+        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
+            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -1102,6 +1095,9 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
+        # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
+        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -1111,6 +1107,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                priority=priority,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
@@ -1211,15 +1208,12 @@ class HandlerBase(BaseGenerativeHandler):
                                 # Record KV transfer latency/bytes/speed from timing_metrics
                                 tm = output.request_perf_metrics.timing_metrics
                                 if tm is not None:
-                                    recorded = (
-                                        metrics_collector.record_kv_transfer_perf(tm)
-                                    )
-                                    # Only count success if a transfer actually occurred
-                                    if (
-                                        recorded
-                                        and self.disaggregation_mode
-                                        == DisaggregationMode.PREFILL
-                                    ):
+                                    # record_kv_transfer_perf() only returns True on the
+                                    # decode worker (the receiver), which observes non-zero
+                                    # kv_cache_transfer_{start,end} in timing_metrics. Count
+                                    # the success counter on the same signal so it stays in
+                                    # lock-step with the sibling histograms' _count. DYN-2781.
+                                    if metrics_collector.record_kv_transfer_perf(tm):
                                         metrics_collector.record_kv_transfer_success()
                         except Exception as e:
                             logging.warning(

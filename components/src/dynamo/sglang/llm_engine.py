@@ -25,6 +25,7 @@ from dynamo.common.backend.engine import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
+from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import parse_args
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ class SglangLLMEngine(LLMEngine):
         # Capacity fields -- sourced the same way as register.py in the
         # non-unified path so the Rust runtime gets consistent values.
         total_kv_blocks = None
-        scheduler_info = getattr(self.engine, "scheduler_info", None) or {}
+        scheduler_info = get_scheduler_info(self.engine)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
         page_size = self.server_args.page_size
         if max_total_tokens and page_size:
@@ -111,7 +112,7 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: GenerateChunk = {"token_ids": []}
+            out: GenerateChunk = {"token_ids": [], "index": 0}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 
@@ -122,6 +123,7 @@ class SglangLLMEngine(LLMEngine):
                     completion_tokens = meta_info.get("completion_tokens", 0)
                     yield {
                         "token_ids": [],
+                        "index": 0,
                         "finish_reason": "cancelled",
                         "completion_usage": {
                             "prompt_tokens": prompt_tokens,
@@ -149,6 +151,7 @@ class SglangLLMEngine(LLMEngine):
                 completion_tokens = meta_info.get("completion_tokens", 0)
                 yield {
                     "token_ids": output_ids,
+                    "index": 0,
                     "finish_reason": "cancelled",
                     "completion_usage": {
                         "prompt_tokens": prompt_tokens,

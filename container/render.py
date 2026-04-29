@@ -165,23 +165,30 @@ def validate_args(args):
     )
 
 
-def render(args, context, script_dir):
-    env = Environment(
+def _make_jinja_env(script_dir):
+    return Environment(
         loader=FileSystemLoader(script_dir),
         trim_blocks=False,
         lstrip_blocks=True,
-        undefined=StrictUndefined,  # Raise an error if a variable in the template is not provided in the context
+        undefined=StrictUndefined,
     )
-    template = env.get_template("Dockerfile.template")
-    rendered = template.render(
-        context=context,
+
+
+def _render_context(args):
+    return dict(
         framework=args.framework,
         device=args.device,
         target=args.target,
-        platform=args.platform,  # normalized: 'amd64', 'arm64', or 'multi'
+        platform=args.platform,
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
     )
+
+
+def render(args, context, script_dir):
+    env = _make_jinja_env(script_dir)
+    template = env.get_template("Dockerfile.template")
+    rendered = template.render(context=context, **_render_context(args))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
 
@@ -201,8 +208,6 @@ def render(args, context, script_dir):
         print("##############")
 
     print(f"INFO: Generated Dockerfile written to {script_dir}/{filename}")
-
-    return
 
 
 def main():

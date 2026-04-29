@@ -264,36 +264,39 @@ class TestParseOmniRequest:
     """parse_omni_request: original_prompt only has prompt/negative_prompt,
     geometry goes into sampling_params_list dict."""
 
-    def test_image_sampling_params_has_geometry(self):
+    @pytest.mark.asyncio
+    async def test_image_sampling_params_has_geometry(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
-        result = parse_omni_request(request, ["image"])
+        result = await parse_omni_request(request, ["image"])
         sp = result["sampling_params_list"]
         assert sp["height"] == 512
         assert sp["width"] == 512
 
-    def test_image_original_prompt_no_geometry(self):
+    @pytest.mark.asyncio
+    async def test_image_original_prompt_no_geometry(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
-        result = parse_omni_request(request, ["image"])
+        result = await parse_omni_request(request, ["image"])
         op = result["original_prompt"]
         assert op["prompt"] == "a sunset"
         assert "height" not in op
         assert "width" not in op
 
-    def test_nvext_params_go_into_sampling_params_not_prompt(self):
+    @pytest.mark.asyncio
+    async def test_nvext_params_go_into_sampling_params_not_prompt(self):
         request = {
             "prompt": "x",
             "size": "512x512",
             "nvext": {"num_inference_steps": 30, "guidance_scale": 4.0},
         }
-        result = parse_omni_request(request, ["image"])
+        result = await parse_omni_request(request, ["image"])
         sp = result["sampling_params_list"]
         assert sp["num_inference_steps"] == 30
         assert sp["guidance_scale"] == 4.0

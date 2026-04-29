@@ -27,6 +27,8 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	DynamoFPMBasePort = 20380
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -121,7 +123,11 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+	GroveRoleSuffixGMS    = "gms"
 
+	KubeLabelDynamoFailoverEngineGroupMember = "nvidia.com/dynamo-failover-engine-group-member"
+
+	DiscoveryBackendKubernetes   = "kubernetes" // label value for KubeLabelDynamoDiscoveryBackend
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 

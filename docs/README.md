@@ -182,7 +182,7 @@ navigation:
   - section: Getting Started
     contents:
       - page: Quickstart
-        path: getting-started/quickstart.md
+        path: getting-started/quickstart.mdxx
       - page: Support Matrix
         path: reference/support-matrix.md
 ```
