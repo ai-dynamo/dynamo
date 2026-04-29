@@ -83,7 +83,8 @@ spec:
   secretName: {{ .Values.webhook.certificateSecret.name }}
   duration: {{ .Values.webhook.certManager.certificate.duration }}
   renewBefore: {{ .Values.webhook.certManager.certificate.renewBefore }}
-  commonName: {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+  # commonName intentionally omitted: the FQDN below can exceed the 64-byte X.509 CN limit
+  # for longer release names / namespaces. Identity is asserted via the DNS SANs (RFC 6125).
   dnsNames:
   - {{ include "dynamo-operator.fullname" . }}-webhook-service
   - {{ include "dynamo-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
