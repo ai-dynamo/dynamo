@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 /// Cloning shares the underlying map.
 #[derive(Clone, Debug, Default)]
@@ -23,13 +25,13 @@ impl MetadataArtifactRegistry {
     }
 
     pub fn register(&self, model_slug: &str, filename: &str, path: PathBuf) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.insert((model_slug.to_string(), filename.to_string()), path);
         tracing::debug!(model_slug, filename, "registered metadata artifact");
     }
 
     pub fn get(&self, model_slug: &str, filename: &str) -> Option<PathBuf> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries
             .get(&(model_slug.to_string(), filename.to_string()))
             .cloned()
@@ -37,16 +39,16 @@ impl MetadataArtifactRegistry {
 
     /// Drop all entries for a model.
     pub fn unregister_model(&self, model_slug: &str) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.retain(|(slug, _), _| slug != model_slug);
     }
 
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries.read().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap().is_empty()
+        self.entries.read().is_empty()
     }
 }
 

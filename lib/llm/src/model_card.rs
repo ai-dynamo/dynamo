@@ -262,12 +262,6 @@ fn mdc_slug_dir(slug: &Slug, mdcsum: &str) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-fn blake3_hex_of(checksum: &str) -> anyhow::Result<&str> {
-    checksum
-        .strip_prefix("blake3:")
-        .with_context(|| format!("expected blake3 checksum, got: {checksum}"))
-}
-
 /// Stage `uri` into `dest`, verifying staged bytes against `expected`
 /// before publishing. Schemes: `http(s)`, `file`, `hf`. Concurrent-safe
 /// via `BlobLock` + atomic rename.
@@ -916,8 +910,8 @@ impl ModelDeploymentCard {
 
         let mut fetched = 0usize;
         for (uri, expected, filename) in &entries {
-            let blake3_hex = blake3_hex_of(&expected.checksum().to_string())?.to_string();
-            let blob = blobs.join(&blake3_hex);
+            let blake3_hex = expected.checksum().hash();
+            let blob = blobs.join(blake3_hex);
 
             let scheme = url::Url::parse(uri)
                 .map(|u| u.scheme().to_string())

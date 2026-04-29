@@ -239,6 +239,14 @@ impl Checksum {
             algorithm,
         }
     }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn algorithm(&self) -> CryptographicHashMethods {
+        self.algorithm
+    }
 }
 
 impl Serialize for Checksum {
