@@ -52,9 +52,7 @@ def test_convert_records_emits_request_stages_and_metadata():
     events = trace["traceEvents"]
     assert [event for event in events if event["ph"] == "M"]
 
-    request_events = [
-        event for event in events if event.get("cat") == "dynamo.llm"
-    ]
+    request_events = [event for event in events if event.get("cat") == "dynamo.llm"]
     assert len(request_events) == 1
     request = request_events[0]
     assert request["name"] == "LLM request: test-model"
@@ -63,20 +61,13 @@ def test_convert_records_emits_request_stages_and_metadata():
     assert request["args"]["x_request_id"] == "caller-1"
     assert request["args"]["worker.decode_worker_id"] == 2
 
-    stage_events = [
-        event for event in events if event.get("cat") == "dynamo.llm.stage"
-    ]
+    stage_events = [event for event in events if event.get("cat") == "dynamo.llm.stage"]
     assert {event["tid"] for event in stage_events} == {request["tid"]}
 
-    stage_names = {
-        event["name"]
-        for event in stage_events
-    }
+    stage_names = {event["name"] for event in stage_events}
     assert stage_names == {"prefill wait", "prefill", "decode"}
 
-    markers = [
-        event for event in events if event.get("cat") == "dynamo.llm.marker"
-    ]
+    markers = [event for event in events if event.get("cat") == "dynamo.llm.marker"]
     assert len(markers) == 1
     assert markers[0]["name"] == "first token"
     assert markers[0]["ts"] == 1_012_000
@@ -209,7 +200,9 @@ def test_convert_records_splits_overlapping_program_requests_into_lanes():
 
     assert converted == 2
     assert not [
-        event for event in trace["traceEvents"] if event.get("cat") == "dynamo.llm.marker"
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.llm.marker"
     ]
 
     thread_names = [

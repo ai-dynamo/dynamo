@@ -11,8 +11,8 @@ directories containing trace shards, or glob patterns.
 from __future__ import annotations
 
 import argparse
-import gzip
 import glob
+import gzip
 import heapq
 import json
 import sys
@@ -96,7 +96,9 @@ def _request_start_ms(event: dict[str, Any], request: dict[str, Any]) -> float |
     return _as_float(event.get("event_time_unix_ms"))
 
 
-def _request_duration_ms(event: dict[str, Any], request: dict[str, Any], start_ms: float) -> float:
+def _request_duration_ms(
+    event: dict[str, Any], request: dict[str, Any], start_ms: float
+) -> float:
     duration = _as_float(request.get("total_time_ms"))
     if duration is not None and duration >= 0:
         return duration
@@ -196,9 +198,10 @@ class TrackTable:
 
         track_key = (workflow_id, program_id, lane, track_kind)
         if track_key not in self._track_tids:
-            self._track_tids[track_key] = len(
-                [1 for existing in self._track_tids if existing[0] == workflow_id]
-            ) + 1
+            self._track_tids[track_key] = (
+                len([1 for existing in self._track_tids if existing[0] == workflow_id])
+                + 1
+            )
         return pid, self._track_tids[track_key]
 
     def metadata_events(self) -> list[dict[str, Any]]:
@@ -421,9 +424,7 @@ def convert_records(
                         dur_us=wait_dur_us,
                         args={
                             **common_stage_args,
-                            "prefill_wait_time_ms": request.get(
-                                "prefill_wait_time_ms"
-                            ),
+                            "prefill_wait_time_ms": request.get("prefill_wait_time_ms"),
                         },
                     )
                 )
