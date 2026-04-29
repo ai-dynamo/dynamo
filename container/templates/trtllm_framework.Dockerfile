@@ -7,12 +7,14 @@
 # Copy artifacts from NGC PyTorch image
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS pytorch_base
 
+{%- if context.trtllm.has_trtllm_context != "1" %}
 # Empty fallback for TRTLLM wheel image copy
 FROM alpine:3.20 AS trtllm_wheel_image_empty
 RUN mkdir -p /app/tensorrt_llm
 
 # Resolve TRTLLM wheel image (can be a stage name or a registry image)
 FROM ${TRTLLM_WHEEL_IMAGE} AS trtllm_wheel_image
+{%- endif %}
 
 ##################################################
 ########## Framework Builder Stage ##############
@@ -105,8 +107,9 @@ ARG GITHUB_TRTLLM_COMMIT
 {% if context.trtllm.has_trtllm_context == "1" %}
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel / /trtllm_wheel/
-{%- endif %}
+{%- else %}
 COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
+{%- endif %}
 
 # Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=cache,target=/root/.cache/uv \
