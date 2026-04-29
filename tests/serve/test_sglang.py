@@ -26,6 +26,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -90,6 +91,9 @@ sglang_configs = {
             completion_payload_default(),
             responses_payload_default(),
             responses_stream_payload_default(),
+            # DYN-2912: regression guard — fails if SGLang's grammar backend
+            # is silently disabled (e.g. --skip-tokenizer-init resurfaces in agg.sh).
+            guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),

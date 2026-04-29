@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import json
 import logging
 import math
 import re
@@ -314,6 +315,45 @@ class ToolCallingChatPayload(ChatPayload):
                 )
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
+
+
+@dataclass
+class GuidedDecodingChatPayload(ChatPayload):
+    """ChatPayload that validates a json_schema response_format produces JSON.
+
+    Regression guard for DYN-2912: SGLang's GrammarManager silently disables the
+    grammar backend when the worker launches with --skip-tokenizer-init, so JSON
+    schema requests fall back to unconstrained text. A failure here usually means
+    the launch script reintroduced --skip-tokenizer-init or SGLang changed the
+    conditions under which it disables grammar generation.
+    """
+
+    def __init__(self, *args, required_keys: Optional[List[str]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.required_keys = required_keys or []
+
+    def validate(self, response, content: str) -> None:
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise AssertionError(
+                "Guided decoding response is not valid JSON — grammar backend "
+                "likely disabled (see DYN-2912). "
+                f"Content: {content!r}"
+            ) from e
+
+        assert isinstance(parsed, dict), (
+            "Guided decoding response should be a JSON object, "
+            f"got {type(parsed).__name__}: {content!r}"
+        )
+
+        for key in self.required_keys:
+            assert key in parsed, (
+                f"Guided decoding response missing required key {key!r}. "
+                f"Parsed: {parsed}"
+            )
+
+        logger.info(f"Guided decoding validation passed: {parsed}")
 
 
 @dataclass
