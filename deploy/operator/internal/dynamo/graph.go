@@ -267,10 +267,8 @@ type RollingUpdateContext struct {
 	NewWorkerHash string
 	// OldWorkerReplicas maps service name to the desired replica count for old workers.
 	// Used by the controller to patch old worker DCDs directly.
-	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
 	OldWorkerReplicas map[string]int32
 	// NewWorkerReplicas maps service name to the desired replica count for new workers.
-	// Calculated as: min(desiredReplicas, newReadyReplicas + 1) to gradually scale up.
 	NewWorkerReplicas map[string]int32
 }
 
@@ -380,8 +378,8 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && rollingUpdateCtx.NewWorkerReplicas[componentName] != 0 {
-		deployment.Spec.Replicas = ptr.To(rollingUpdateCtx.NewWorkerReplicas[componentName])
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && ok {
+		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
 	}

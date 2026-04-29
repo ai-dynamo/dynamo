@@ -65,11 +65,6 @@ enum IndexerArgs {
         /// keys, while depth=2 gives a much larger set of distinguishable branches.
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
-
-        /// Number of OS threads per shard dedicated to find_matches (read isolation).
-        /// 0 (default): reads run inline on the calling tokio thread.
-        #[clap(long, default_value = "0")]
-        num_read_threads_per_shard: usize,
     },
 }
 
@@ -91,7 +86,6 @@ impl IndexerArgs {
                 num_shards,
                 num_event_workers_per_shard,
                 prefix_depth,
-                num_read_threads_per_shard: _,
             } => MooncakeIndexerConfig::branch_sharded_crtc(
                 *num_shards,
                 *num_event_workers_per_shard,
