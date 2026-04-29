@@ -474,7 +474,7 @@ jobs:
       test_suite_name: planner
       test_type: CPU Test
       amd_runner: stg-tester-amd-v2
-      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      container_image_tag: ${{ github.sha }}-dynamo-planner-test
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
