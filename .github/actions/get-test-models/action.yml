@@ -1,0 +1,91 @@
+name: 'Get Test Models'
+description: 'Get test models from S3 and seed them to a given directory.'
+inputs:
+  s3_base_uri:
+    description: 'S3 base URI to get test models from.'
+    required: true
+    default: 's3://dynamo-infra-utils/ci/models'
+  nvme_dir:
+    description: 'Path to the NVMe directory to seed the models to.'
+    required: true
+  s5cmd_bin:
+    description: 'Path to the s5cmd binary.'
+    required: false
+    default: '/tmp/s5cmd'
+  seed_model_names:
+    description: 'Space-delimited list of HuggingFace hub model directory names to copy from local_models_dir to NVMe before GPU tests (e.g. "models--Org--Name"). When empty, no seed is performed.'
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Download s5cmd
+      shell: bash
+      run: |
+        S5CMD_BIN="${{ inputs.s5cmd_bin }}"
+        if ! command -v s5cmd &> /dev/null; then
+          echo "⬇️ s5cmd not found. Detecting architecture..."
+          S5CMD_VERSION="2.3.0"
+          ARCH=$(uname -m)
+          if [[ "${ARCH}" == "x86_64" ]]; then
+            S5CMD_ARCH="64bit"
+          elif [[ "${ARCH}" == "aarch64" || "${ARCH}" == "arm64" ]]; then
+            S5CMD_ARCH="arm64"
+          else
+            echo "❌ Unsupported architecture: ${ARCH}"
+            exit 1
+          fi
+
+          echo "⬇️ Downloading s5cmd v${S5CMD_VERSION} for Linux-${S5CMD_ARCH}..."
+          curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${S5CMD_ARCH}.tar.gz" | tar -xz -C /tmp s5cmd
+          chmod +x "${S5CMD_BIN}"
+        fi
+        ${S5CMD_BIN} version
+
+    - name: Seed model cache to NVMe
+      shell: bash
+      run: |
+        set +e
+        S5CMD_BIN="${{ inputs.s5cmd_bin }}"
+        NVME_ROOT="${{ inputs.nvme_dir }}"
+        [[ -z "${NVME_ROOT}" || ! -d "${NVME_ROOT}" ]] && NVME_ROOT="/tmp"
+
+        HUB_DEST="${NVME_ROOT}/.cache/huggingface/hub"
+        mkdir -p "${HUB_DEST}"
+
+        S3_BASE_URI="${{ inputs.s3_base_uri }}"
+
+        echo "📦 Seeding models: ${S3_BASE_URI} → ${HUB_DEST}"
+        COPIED=0
+        FAILED=0
+
+        for model_name in ${{ inputs.seed_model_names }}; do
+          dest="${HUB_DEST}/${model_name}"
+          mkdir -p "${dest}"
+
+          t0=$(date +%s)
+          echo "  ⏳ Downloading ${model_name}..."
+          CONCURRENCY=32
+          if ${S5CMD_BIN} sync \
+              --concurrency ${CONCURRENCY} \
+              --exclude "*.bin" \
+              --exclude "*.bin.index.json" \
+              --exclude "*.h5" \
+              --exclude "*.msgpack" \
+              --exclude "*.pth" \
+              --exclude "*.pt" \
+              --exclude "*/onnx/*" \
+              --exclude "*/blobs/*" \
+              --exclude "*/ci-local/*" \
+              "${S3_BASE_URI}/${model_name}/*" "${dest}/" > "/tmp/s5cmd_${model_name}.log" 2>&1; then
+            echo "  ✅ ${model_name} ($(( $(date +%s) - t0 ))s)"
+            COPIED=$((COPIED+1))
+          else
+            echo "  ❌ ${model_name} download failed!"
+            echo "  --- ERROR LOG FOR ${model_name} ---"
+            cat "/tmp/s5cmd_${model_name}.log"
+            echo "  -----------------------------------"
+            FAILED=$((FAILED+1))
+          fi
+        done
+        
+        echo "📊 Seeded ${COPIED} model(s) to ${HUB_DEST} (${FAILED} failed)"

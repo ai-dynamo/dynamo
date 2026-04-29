@@ -1,0 +1,274 @@
+name: 'Pytest (local)'
+description: 'Run pytest directly on the runner (no docker-in-docker). Assumes the job already runs inside the test container image.'
+inputs:
+  pytest_marks:
+    description: 'Pytest marks'
+    required: true
+    default: 'e2e and vllm and gpu_1 and not slow'
+  test_suite_name:
+    description: 'Test suite name for test metrics'
+    required: false
+    default: 'unknown'
+  test_type:
+    description: 'Test type (unit, e2e, integration)'
+    required: false
+    default: 'e2e'
+  platform_arch:
+    description: 'Platform architecture (amd64, arm64)'
+    required: false
+    default: 'amd64'
+  dry_run:
+    description: 'Run pytest in dry-run mode (collect tests only, do not execute)'
+    required: false
+    default: 'false'
+  hf_token:
+    description: 'Hugging Face access token passed through as HF_TOKEN for model downloads.'
+    required: false
+  parallel_mode:
+    description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
+    required: false
+    default: 'auto'
+  framework:
+    description: 'Framework label exported as DYNAMO_TEST_FRAMEWORK'
+    required: false
+    default: ''
+  container_workspace:
+    description: 'Path inside the container to run pytest from. The image ships the dynamo source/tests here; kept separate from the GitHub Actions checkout at $GITHUB_WORKSPACE.'
+    required: false
+    default: '/workspace'
+  gpu_tests:
+    description: 'Whether to verify GPU visibility via torch before running tests'
+    required: false
+    default: 'false'
+  local_models_dir:
+    description: 'Path to a pre-staged, read-only HuggingFace model cache on the runner. When set and the path exists, --models-dir is passed to pytest (offline mode, no downloads). Only used when gpu_tests=true.'
+    required: false
+    default: ''
+  nvme_dir:
+    description: 'Path to the NVMe directory on the runner. When set, the NVME_ROOT environment variable is set to this path.'
+    required: false
+    default: '/scratch'
+  seed_model_names:
+    description: 'Space-delimited list of HuggingFace hub model directory names (e.g. "models--Org--Name models--Org2--Name2") to copy from local_models_dir to NVMe before running tests. When empty, no seed is performed. Only used when gpu_tests=true.'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Initialize test type env var
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo '${{ inputs.test_type }}' | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+    - name: verify minio
+      if: inputs.gpu_tests == 'true' # only gpu tests require minio
+      shell: bash
+      run: |
+        # Wait for MinIO to be ready
+        echo "⏳ Waiting for MinIO to be ready..."
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+            echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
+            break
+          fi
+          ATTEMPT=$((ATTEMPT + 1))
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
+            exit 1
+          fi
+          sleep 1
+        done
+    - name: Verify GPU visibility
+      if: inputs.gpu_tests == 'true'
+      shell: python
+      run: |
+        import sys
+        import torch
+        available = torch.cuda.is_available()
+        count = torch.cuda.device_count() if available else 0
+        name = torch.cuda.get_device_name(0) if available else "None"
+        print(f"Python version: {sys.version}")
+        print(f"Is CUDA available? {available}")
+        print(f"GPU count: {count}")
+        print(f"GPU Name: {name}")
+        if not available:
+            sys.exit("GPU tests requested but torch.cuda.is_available() is False")
+    - name: Get Models from S3 and seed them to NVMe
+      if: inputs.gpu_tests == 'true' && inputs.seed_model_names != ''
+      uses: ./.github/actions/get-test-models
+      with:
+        nvme_dir: "${{ inputs.nvme_dir }}"
+        seed_model_names: ${{ inputs.seed_model_names }}
+    - name: Run pytest
+      shell: bash
+      env:
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_TOKEN: ${{ inputs.hf_token }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+      run: |
+        set +e
+
+        # Default to failure so a killed/interrupted pytest process doesn't
+        # inherit a stale TEST_EXIT_CODE=0 from a prior step in $GITHUB_ENV.
+        echo "TEST_EXIT_CODE=1" >> $GITHUB_ENV
+
+        # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
+        TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
+        mkdir -p "${TEST_RESULTS_DIR}"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        # NVMe guard: GPU runners mount /scratch (nvme-scratch emptyDir, NVMe-backed via
+        # instanceStorePolicy: RAID0). CPU/ARM runners have no /scratch mount.
+        if [[ -d "${{ inputs.nvme_dir }}" ]]; then
+          NVME_ROOT="${{ inputs.nvme_dir }}"
+          echo "✅ NVMe scratch available — caches will use ${NVME_ROOT}"
+        else
+          NVME_ROOT="/tmp"
+          echo "⚠️  No ${{ inputs.nvme_dir }} — falling back to /tmp (Probably aCPU runner)"
+        fi
+
+        # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
+        # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
+        # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
+        # that reads HOME (git, getpass.getuser) gets a writable path.
+        export HOME="${GITHUB_WORKSPACE}"
+
+        # HF cache → NVMe when available (model weight reads are the largest I/O)
+        export HF_HOME="${NVME_ROOT}/.cache/huggingface"
+        mkdir -p "${HF_HOME}"
+        echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
+
+        # XDG cache (flashinfer JIT, torch compile) → NVMe when available
+        export XDG_CACHE_HOME="${NVME_ROOT}/.cache"
+        mkdir -p "${XDG_CACHE_HOME}"
+        echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
+
+        # Pre-staged model cache: GPU test runners mount a read-only volume at
+        # /models/ci/models containing all models needed by the test suite.
+        # Passing --models-dir short-circuits predownload_models/predownload_tokenizers
+        # (no network downloads) and sets HF_HUB_OFFLINE=1 for the test session.
+        # Only enabled for GPU tests (verify_gpu=true); CPU tests do not need it.
+        MODELS_DIR_ARG=""
+        if [[ "${{ inputs.gpu_tests }}" == "true" ]]; then
+          NVME_HUB="${NVME_ROOT}/.cache/huggingface/hub"
+          if [[ -d "${NVME_HUB}" ]]; then
+            MODELS_DIR_ARG="--models-dir=${NVME_HUB}"
+            echo "📁 Using NVMe model cache at ${NVME_HUB} (offline mode)"
+          elif [[ -d "${{ inputs.local_models_dir }}" ]]; then
+            MODELS_DIR_ARG="--models-dir=${{ inputs.local_models_dir }}"
+            echo "📁 Falling back to S3 model cache at ${{ inputs.local_models_dir }} (offline mode)"
+          fi
+        fi
+
+        CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
+        if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
+          echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
+          exit 1
+        fi
+        echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
+
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
+          PYTEST_CMD="pytest -v --collect-only ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+        else
+          echo "🚀 Running pytest in normal mode"
+          case "${{ inputs.parallel_mode }}" in
+            "auto")
+              PARALLEL_OPTS="-n auto"
+              echo "📊 Parallelization: auto (use all available cores)"
+              ;;
+            "none"|"0")
+              PARALLEL_OPTS="-n 0"
+              echo "📊 Parallelization: disabled (sequential execution)"
+              ;;
+            *)
+              PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
+              echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
+              ;;
+          esac
+
+          PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py ${MODELS_DIR_ARG} -m \"${{ inputs.pytest_marks }}\""
+        fi
+
+        umask 0022
+        cd "${CONTAINER_WORKSPACE}"
+
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          echo "▶️ Predownloading models (cwd=${CONTAINER_WORKSPACE}): ${PREDOWNLOAD_CMD}"
+          bash -c "${PREDOWNLOAD_CMD}"
+          PREDOWNLOAD_EXIT=$?
+          # Exit code 5 = no tests collected (predownload test not selected by this marker set, e.g. gpu_0 CPU runs)
+          if [[ ${PREDOWNLOAD_EXIT} -ne 0 && ${PREDOWNLOAD_EXIT} -ne 5 ]]; then
+            echo "❌ Model predownload failed with exit code ${PREDOWNLOAD_EXIT}"
+            echo "TEST_EXIT_CODE=${PREDOWNLOAD_EXIT}" >> $GITHUB_ENV
+            exit ${PREDOWNLOAD_EXIT}
+          fi
+        fi
+
+        echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
+        bash -c "${PYTEST_CMD}"
+        TEST_EXIT_CODE=$?
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+        echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
+          if [[ -f "${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}" ]]; then
+            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+          else
+            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+          fi
+        fi
+
+        exit ${TEST_EXIT_CODE}
+
+    - name: Process Test Results
+      if: always()
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+
+        if [[ -f "$JUNIT_FILE" ]]; then
+          echo "✅ JUnit XML generated successfully"
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
+          echo "📝 Renamed XML file to: $JUNIT_NAME"
+        else
+          echo "❌ JUnit XML not found — treating missing results as failure"
+          exit 1
+        fi
+
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always()
+      with:
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always()
+      with:
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore
