@@ -2161,6 +2161,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "19090",
 													},
 													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
+													},
+													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -2373,6 +2377,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3188,6 +3196,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "19090",
 													},
 													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
+													},
+													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
 														Value: "test-dynamo-graph-deployment",
 													},
@@ -3387,6 +3399,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -5635,6 +5651,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
@@ -7393,6 +7410,34 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	assert.Equal(t, "my-dgd-worker", dcd.Name)
 	assert.Empty(t, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash])
 	assert.Equal(t, int32(3), *dcd.Spec.Replicas)
+}
+
+// TestGenerateSingleDCD_RollingUpdateZeroReplicas verifies that when
+// NewWorkerReplicas is explicitly 0 (maxSurge=0, first reconcile), the new DCD
+// is created with 0 replicas instead of falling through to the desired count.
+func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(4))},
+			},
+		},
+	}
+
+	ruCtx := RollingUpdateContext{
+		NewWorkerHash:     "aabb1122",
+		OldWorkerReplicas: map[string]int32{"decode": 3},
+		NewWorkerReplicas: map[string]int32{"decode": 0},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, ruCtx)
+	assert.NoError(t, err)
+
+	decodeDCD := dcds["decode"]
+	assert.Equal(t, "my-dgd-decode-aabb1122", decodeDCD.Name)
+	assert.Equal(t, int32(0), *decodeDCD.Spec.Replicas,
+		"new DCD must respect NewWorkerReplicas=0, not fall through to desired=4")
 }
 
 func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {

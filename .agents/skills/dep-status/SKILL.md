@@ -1,3 +1,8 @@
+---
+name: dep-status
+description: Check Dynamo Enhancement Proposal issue status, list DEPs by lifecycle state or area, and find related DEP issues in ai-dynamo/dynamo.
+---
+
 # Skill: Check DEP Status
 
 ## Purpose

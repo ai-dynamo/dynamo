@@ -1,3 +1,8 @@
+---
+name: dep-create
+description: Create or update Dynamo Enhancement Proposals as GitHub issues, including lightweight DEPs, implementation plans, and retroactive DEPs for ai-dynamo/dynamo.
+---
+
 # Skill: Create a DEP as a GitHub Issue
 
 ## Purpose
