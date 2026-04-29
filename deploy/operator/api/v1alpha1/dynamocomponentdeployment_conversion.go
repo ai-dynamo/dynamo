@@ -53,41 +53,30 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 	var restored *v1beta1.DynamoComponentDeployment
 
+	if dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue {
+		restored = &v1beta1.DynamoComponentDeployment{}
+	}
 	if raw, ok := dst.ObjectMeta.Annotations[annDCDHubSpec]; ok && raw != "" {
 		var spec v1beta1.DynamoComponentDeploymentSpec
 		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
 			return fmt.Errorf("restore DCD hub spec: %w", err)
 		}
-		restored = &v1beta1.DynamoComponentDeployment{Spec: spec}
+		if restored == nil {
+			restored = &v1beta1.DynamoComponentDeployment{}
+		}
+		restored.Spec = spec
 		delAnnFromObj(&dst.ObjectMeta, annDCDHubSpec)
 	}
-	hubOrigin := restored != nil || dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue
 	delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
 
-	save := &DynamoComponentDeployment{}
-	if err := convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src, dst, restored, save); err != nil {
+	save, err := convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src, dst, restored)
+	if err != nil {
 		return err
 	}
-
-	// v1beta1 requires DCD.spec.name (it is the +listMapKey on
-	// DGD.spec.components and is enforced as Required by the schema). When a
-	// v1alpha1 caller omits ServiceName -- the common case for standalone
-	// DCDs -- fall back to ObjectMeta.Name so the converted object is
-	// schema-valid. The v1beta1 defaulting webhook owns the same defaulting
-	// at admission time.
-	if dst.Spec.ComponentName == "" && !hubOrigin {
-		dst.Spec.ComponentName = dst.ObjectMeta.Name
-	}
-
-	preserveSpoke := !hubOrigin ||
-		hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec) ||
-		len(src.Status.PodSelector) > 0 ||
-		(src.Status.Service != nil &&
-			serviceStatusComponentNameNeedsPreservation(src.Status.Service))
-	if hubOrigin {
+	if restored != nil {
 		scrubDCDAnnotations(&dst.ObjectMeta)
 	}
-	if preserveSpoke {
+	if save != nil {
 		data, err := json.Marshal(save.Spec)
 		if err != nil {
 			return fmt.Errorf("preserve DCD spoke spec: %w", err)
@@ -107,18 +96,38 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	return nil
 }
 
-func convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src *DynamoComponentDeployment, dst *v1beta1.DynamoComponentDeployment, restored *v1beta1.DynamoComponentDeployment, save *DynamoComponentDeployment) error {
+func convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src *DynamoComponentDeployment, dst *v1beta1.DynamoComponentDeployment, restored *v1beta1.DynamoComponentDeployment) (*DynamoComponentDeployment, error) {
+	save := &DynamoComponentDeployment{}
 	if restored == nil {
 		if err := convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(&src.Spec, &dst.Spec, nil, &save.Spec, newDCDCarrier(&dst.ObjectMeta)); err != nil {
-			return err
+			return nil, err
 		}
 	} else if err := convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(&src.Spec, &dst.Spec, &restored.Spec, &save.Spec, newDCDCarrier(&dst.ObjectMeta)); err != nil {
-		return err
+		return nil, err
+	}
+
+	// v1beta1 requires DCD.spec.name (it is the +listMapKey on
+	// DGD.spec.components and is enforced as Required by the schema). When a
+	// v1alpha1 caller omits ServiceName, fall back to ObjectMeta.Name so the
+	// converted object is schema-valid. Hub-origin conversions restore the
+	// original hub shape instead.
+	if dst.Spec.ComponentName == "" && restored == nil {
+		dst.Spec.ComponentName = dst.ObjectMeta.Name
 	}
 	if err := convert_v1alpha1_DynamoComponentDeploymentStatus_To_v1beta1_DynamoComponentDeploymentStatus(&src.Status, &dst.Status, nil, &save.Status); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	// Save source-only fields that dst cannot represent.
+	hasSourceOnlyState := restored == nil ||
+		hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec) ||
+		len(src.Status.PodSelector) > 0 ||
+		(src.Status.Service != nil &&
+			serviceStatusComponentNameNeedsPreservation(src.Status.Service))
+	if !hasSourceOnlyState {
+		return nil, nil
+	}
+	return save, nil
 }
 
 func convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(src *DynamoComponentDeploymentSpec, dst *v1beta1.DynamoComponentDeploymentSpec, restored *v1beta1.DynamoComponentDeploymentSpec, save *DynamoComponentDeploymentSpec, carrier *annCarrier) error {
