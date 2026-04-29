@@ -32,6 +32,9 @@
 # --- SGLang Stages
 {% if framework == "sglang" %}
     # SGLang is the only framework without a `framework` target currently, needs special treatment
+    {% if device == "xpu" %}
+        {% include "templates/sglang_framework.Dockerfile" %}
+    {% endif %}
     {% include "templates/sglang_runtime.Dockerfile" %}
 {% else %}
 # --- No SGLANG stages included

@@ -68,6 +68,9 @@ ARG SCCACHE_REGION=""
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
 {% if "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
+{% elif device == "xpu" -%}
+{# XPU SGLang needs NIXL built from source; inherit ref from dynamo section #}
+ARG NIXL_REF={{ context.dynamo.nixl_ref }}
 {% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
@@ -134,6 +137,14 @@ ARG FLASH_ATTN_VER={{ context.trtllm.flash_attn_version }}
 
 # Python configuration
 ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
+{%- endif -%}
+
+{% if framework == "sglang" and device == "xpu" -%}
+# SGLang XPU build: clone and build from source (no pre-built runtime image)
+ARG SGLANG_GIT_URL=https://github.com/sgl-project/sglang.git
+ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
+ARG SGLANG_KERNEL_GIT_URL=https://github.com/sgl-project/sgl-kernel-xpu.git
+ARG SGLANG_KERNEL_REF=ac2fa3d549948fde822222dc1c259f55519ad021
 {%- endif -%}
 
 {% if make_efa == true %}

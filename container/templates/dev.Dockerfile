@@ -262,6 +262,17 @@ ARG WORKSPACE_DIR=/workspace
 
 # Dev environment variables (aligned with framework dev stages)
 # Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
+{% if device == "xpu" and framework == "sglang" %}
+# XPU SGLang: reuse the conda env created in the framework stage
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/home/dynamo/.rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    CONDA_DIR=/opt/miniforge3 \
+    VIRTUAL_ENV=/opt/miniforge3/envs/sglang \
+    PATH=/opt/miniforge3/envs/sglang/bin:/opt/miniforge3/bin:/usr/local/cargo/bin:$PATH
+{% else %}
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/home/dynamo/.rustup \
@@ -269,6 +280,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     CARGO_TARGET_DIR=/workspace/target \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
+{% endif %}
 
 # Copy Rust/Cargo/Maturin from the concatenated framework stages.
 # - Rust/Cargo: from `wheel_builder` (already installed there)
@@ -278,7 +290,16 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/loc
 COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/maturin /usr/local/bin/maturin
 
 {% if framework == "sglang" %}
-# SGLang: Create venv with --system-site-packages to inherit runtime packages
+{% if device == "xpu" %}
+# SGLang XPU: conda env from framework stage; install uv and maturin.
+# uv doesn't natively recognize conda envs (no pyvenv.cfg), so we use
+# --python to target the conda interpreter explicitly.
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
+    chmod +x ${VIRTUAL_ENV}/bin/uv && \
+    pip install maturin[patchelf]
+{% else %}
+# SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
 COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
@@ -288,6 +309,7 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
+{% endif %}
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
 RUN if [ ! -d /opt/dynamo/venv ]; then \
@@ -309,6 +331,15 @@ RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/r
     # Cache uv downloads; uv handles its own locking for this cache.
     --mount=type=cache,target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+{% if device == "xpu" and framework == "sglang" %}
+    uv pip install \
+        --python ${VIRTUAL_ENV}/bin/python \
+        --index-strategy unsafe-best-match \
+        --extra-index-url https://download.pytorch.org/whl/xpu \
+        --requirement /tmp/requirements.dev.txt \
+        --requirement /tmp/requirements.test.txt && \
+    uv pip install --python ${VIRTUAL_ENV}/bin/python --force-reinstall --no-deps pytest
+{% else %}
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
@@ -317,6 +348,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/r
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi
+{% endif %}
 
 # Copy entire workspace (old design - simpler for CI)
 # .dockerignore filters out unwanted files (.git, build artifacts, etc.)
@@ -331,17 +363,25 @@ RUN mkdir -p ${WORKSPACE_DIR} && chmod g+w ${WORKSPACE_DIR}
 # NOTE: This does NOT reclaim disk space in the image (files still exist in lower layers).
 # Space is only recovered if the image is later squashed / compacted (e.g. docker-squash,
 # `docker build --squash`, or export/import).
+{% if device == "xpu" and framework == "sglang" %}
+RUN uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
+{% else %}
 RUN uv pip uninstall ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
+{% endif %}
 
 # Install maturin only (no editable install of the dynamo package).
 # /workspace is empty at build time — the repo is bind-mounted at container start, not COPYed.
 # `uv pip install -e .` would fail here because there is no pyproject.toml in /workspace yet.
 # The editable install must be done at runtime after the volume mount (e.g. `maturin develop`).
+{% if device == "xpu" and framework == "sglang" %}
+RUN uv pip install --python ${VIRTUAL_ENV}/bin/python maturin[patchelf]
+{% else %}
 RUN if command -v uv >/dev/null 2>&1; then \
         uv pip install maturin[patchelf] ; \
     else \
         python3 -m pip install maturin[patchelf] ; \
     fi
+{% endif %}
 
 # Set commit SHA for tests (passed via docker build as --build-arg)
 ARG DYNAMO_COMMIT_SHA

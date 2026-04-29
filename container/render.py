@@ -123,7 +123,7 @@ def validate_args(args):
             "cuda_version": ["13.1"],
         },
         "sglang": {
-            "device": ["cuda"],
+            "device": ["cuda", "xpu"],
             "target": [
                 "runtime",
                 "dev",
@@ -154,6 +154,12 @@ def validate_args(args):
             and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
             and args.device in valid_inputs[args.framework]["device"]
         ):
+            # XPU is only supported on amd64 (Intel discrete GPUs)
+            if args.device == "xpu" and args.platform != "amd64":
+                raise ValueError(
+                    f"XPU builds require --platform linux/amd64, "
+                    f"got '{args.platform}'"
+                )
             return
 
         raise ValueError(
