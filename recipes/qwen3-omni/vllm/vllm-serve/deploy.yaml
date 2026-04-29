@@ -4,6 +4,7 @@
 # Upstream `vllm-omni serve` baseline for DYN-2581 agg-vs-disagg benchmarking.
 # Plain k8s Deployment + Service — no Dynamo frontend / router. Used as the
 # reference point that the dynamo agg + disagg topologies are compared against.
+# Sized for 2x NVIDIA H200 (141 GB HBM3e).
 apiVersion: v1
 kind: Service
 metadata:
@@ -30,13 +31,12 @@ spec:
       labels:
         app: vllm-serve-qwen3-omni
     spec:
+      imagePullSecrets:
+        - name: gitlab-imagepullsecret
       containers:
         - name: vllm-omni
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
           command: ["bash", "-lc"]
-          # vllm-omni ships in the same runtime image dynamo uses, so we just
-          # invoke its CLI directly. If the image ever drops vllm-omni, add a
-          # `pip install vllm-omni` here.
           args:
             - >-
               vllm-omni serve
@@ -59,14 +59,20 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "2"
-              memory: "200Gi"
+              memory: "300Gi"
             requests:
               nvidia.com/gpu: "2"
-              memory: "150Gi"
+              memory: "200Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /home/dynamo/.cache/huggingface
+            - name: dshm
+              mountPath: /dev/shm
       volumes:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

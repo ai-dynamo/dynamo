@@ -3,6 +3,7 @@
 #
 # Aggregated Qwen3-Omni-MoE deployment for DYN-2581 agg-vs-disagg benchmarking.
 # Single AsyncOmni instance — text + audio output served from one endpoint.
+# Sized for NVIDIA H200 (141 GB HBM3e); 1 GPU is sufficient for the 30B-A3B MoE.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -20,8 +21,10 @@ spec:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
       extraPodSpec:
+        imagePullSecrets:
+          - name: gitlab-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
           workingDir: /workspace
           command:
             - python3
@@ -39,6 +42,8 @@ spec:
         mountPoint: /home/dynamo/.cache/vllm
         useAsCompilationCache: true
       extraPodSpec:
+        imagePullSecrets:
+          - name: gitlab-imagepullsecret
         mainContainer:
           args:
           - --model
@@ -52,7 +57,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm.omni
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
@@ -66,8 +71,8 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: "2"
+          gpu: "1"
           memory: "200Gi"
         requests:
-          gpu: "2"
+          gpu: "1"
           memory: "150Gi"

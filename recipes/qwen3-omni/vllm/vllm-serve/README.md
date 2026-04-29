@@ -6,17 +6,23 @@ reference point the Dynamo agg + disagg topologies are compared against.
 
 ## Hardware
 
-- **2x NVIDIA H100-80GB** (matches the agg recipe so we measure the Dynamo
-  overhead at the same hardware envelope).
+- **2x NVIDIA H200 (141 GB HBM3e)**. Matches the disagg recipe so we measure
+  the Dynamo overhead at the same hardware envelope.
 
 ## Prerequisites
 
 1. Pre-existing `model-cache` PVC.
 2. `hf-token-secret` Secret in the target namespace.
-3. A container image that includes `vllm-omni` on `$PATH`. The Dynamo
-   `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2` image satisfies this; if
-   you swap to a fresh image, add `pip install vllm-omni` to `args` in
-   `deploy.yaml`.
+3. `gitlab-imagepullsecret` Secret to pull `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64`
+   (the nightly Dynamo runtime; already includes `vllm-omni` on `$PATH`):
+
+   ```bash
+   kubectl create secret docker-registry gitlab-imagepullsecret \
+     --docker-server=gitlab-master.nvidia.com:5005 \
+     --docker-username="$GITLAB_USERNAME" \
+     --docker-password="$GITLAB_PAT" \
+     -n ${NAMESPACE}
+   ```
 
 ## Deploy
 

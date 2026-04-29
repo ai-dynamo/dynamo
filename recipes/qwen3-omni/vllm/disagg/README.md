@@ -4,48 +4,65 @@ Disaggregated reference for the DYN-2581 agg-vs-disagg perf benchmark. The
 3-stage Qwen3-Omni-MoE pipeline is split across separate pods so each stage
 gets its own GPU and scheduler:
 
-| Stage | Component   | GPU | Final output     |
-|-------|-------------|-----|------------------|
-| 0     | OmniThinker | 1   | text (chat path) |
-| 1     | OmniTalker  | 1   | (intermediate)   |
-| 2     | OmniCode2Wav| 1   | audio            |
+| Stage | Process     | CUDA_VISIBLE_DEVICES | Final output     |
+|-------|-------------|----------------------|------------------|
+| 0     | thinker     | 0                    | text (chat path) |
+| 1     | talker      | 1                    | (intermediate)   |
+| 2     | code2wav    | 1                    | audio            |
 
-`OmniRouter` orchestrates the DAG; chat requests stop at stage 0, audio
-requests run the full pipeline through stage 2.
+The omni router orchestrates the DAG; chat requests stop at stage 0, audio
+requests run the full pipeline through stage 2. The frontend listens on
+port 8000.
+
+## Single-pod layout (why)
+
+The Qwen3-Omni stage YAML uses the **SharedMemoryConnector** for stage-to-stage
+hand-off, which depends on `/dev/shm`. K8s Pods don't share `/dev/shm` across
+each other, so all stage workers + router + frontend are colocated in one
+container backed by an `emptyDir{medium: Memory}` volume mounted at `/dev/shm`.
+This mirrors `examples/backends/vllm/launch/disagg_omni_qwen3.sh` exactly.
+
+The deploy ships as plain k8s `Deployment` + `Service` (not a
+`DynamoGraphDeployment`) for the same reason: a DynamoGraphDeployment would
+spawn one Pod per service entry, breaking SHM.
 
 ## Hardware
 
-- **3x NVIDIA H100-80GB** (one per stage worker), plus a router/frontend pod
-  on CPU. The thinker pod owns the heavy LLM (~MoE weights), talker is a
-  smaller AR head, code2wav is a small generation head. If GPU count is the
-  constraint, the talker and code2wav pods can be coscheduled on the same
-  node and share a GPU — set `nvidia.com/gpu` to `"0"` on the smaller one and
-  rely on `CUDA_VISIBLE_DEVICES` from the larger pod (advanced; out of scope
-  for this recipe).
-- ≥ 150 GiB host memory on the thinker / talker nodes.
+- **2x NVIDIA H200 (141 GB HBM3e)** in a single Pod. Thinker takes GPU 0;
+  talker + code2wav share GPU 1 (per the stage config). On 80 GB H100 you
+  may need a third GPU and adjusted `gpu_memory_utilization`.
+- ≥ 200 GiB host memory.
 
 ## Prerequisites
 
-1. Dynamo Platform installed.
+1. Dynamo Platform installed (operator only — this deploy doesn't depend on it,
+   but the cluster's PVCs/secrets do).
 2. Pre-existing `model-cache` and `compilation-cache` PVCs.
-3. `hf-token-secret` in the target namespace.
-4. The `qwen3-omni-stage-config` ConfigMap shipped inline in `deploy.yaml`
-   (it inlines the same stage YAML colocated at
-   `examples/backends/vllm/launch/stage_configs/qwen3_omni_moe.yaml`).
+3. `hf-token-secret` Secret in the target namespace.
+4. `gitlab-imagepullsecret` Secret to pull `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo`
+   (nightly Dynamo image, tag `latest-vllm-amd64`):
+
+   ```bash
+   kubectl create secret docker-registry gitlab-imagepullsecret \
+     --docker-server=gitlab-master.nvidia.com:5005 \
+     --docker-username="$GITLAB_USERNAME" \
+     --docker-password="$GITLAB_PAT" \
+     -n ${NAMESPACE}
+   ```
 
 ## Deploy
 
 ```bash
 kubectl apply -f deploy.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=disagg-qwen3-omni \
+  -l app=disagg-qwen3-omni \
   -n ${NAMESPACE} --timeout=1800s
 ```
 
 ## Verify
 
 ```bash
-kubectl port-forward svc/disagg-qwen3-omni-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/disagg-qwen3-omni 8000:8000 -n ${NAMESPACE}
 
 # text output — stops at thinker
 curl -s http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{

@@ -8,11 +8,10 @@ HTTP endpoint.
 
 ## Hardware
 
-- **2x NVIDIA H100-80GB** (Hopper). Verified by upstream vllm-omni on the same
-  SKU; talker + code2wav share the second GPU, thinker takes the first. If you
-  only have a single H100, drop to `gpu: "1"` and enable
-  `--enforce-eager`/`--enable-cpu-offload` for the talker — expect throughput
-  to fall significantly.
+- **1x NVIDIA H200 (141 GB HBM3e)** is sufficient for Qwen3-Omni-30B-A3B in
+  aggregated mode (one AsyncOmni process; thinker / talker / code2wav share
+  the same device and partition GPU memory internally). On 80 GB H100 you'll
+  want 2 GPUs and `--enforce-eager` to avoid OOM.
 - ≥ 150 GiB host memory.
 
 ## Prerequisites
@@ -20,11 +19,21 @@ HTTP endpoint.
 1. Dynamo Platform installed — see [Kubernetes Deployment Guide](../../../../docs/kubernetes/README.md).
 2. Pre-existing `model-cache` and `compilation-cache` PVCs.
 3. `hf-token-secret` Secret in the target namespace.
+4. `gitlab-imagepullsecret` Secret to pull from `gitlab-master.nvidia.com:5005`
+   (the nightly Dynamo image — `dl/ai-dynamo/dynamo:latest-vllm-amd64`).
 
 ```bash
 export NAMESPACE=your-namespace
+
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n ${NAMESPACE}
+
+# GITLAB_PAT must have read_registry scope on dl/ai-dynamo/dynamo.
+kubectl create secret docker-registry gitlab-imagepullsecret \
+  --docker-server=gitlab-master.nvidia.com:5005 \
+  --docker-username="$GITLAB_USERNAME" \
+  --docker-password="$GITLAB_PAT" \
   -n ${NAMESPACE}
 ```
 
