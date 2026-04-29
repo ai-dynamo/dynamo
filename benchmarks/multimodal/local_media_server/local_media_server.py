@@ -57,9 +57,9 @@ class LocalMediaServer(BaseHTTPRequestHandler):
         # wfile.write above starts the byte transfer, but with no
         # Content-Length and HTTP/1.0 the response body runs until
         # connection close — the client only sees end-of-body when do_GET
-        # returns and finish() sends FIN. Sleeping here therefore extends
-        # the client's observed response time even though the bytes are
-        # already in flight.
+        # returns and the stdlib closes the socket (sending FIN) for us.
+        # Sleeping here therefore extends the client's observed response
+        # time even though the bytes are already in flight.
         remaining = target_s - (time.monotonic() - start)
         if remaining > 0:
             time.sleep(remaining)
