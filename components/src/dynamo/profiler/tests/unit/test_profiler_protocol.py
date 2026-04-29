@@ -33,6 +33,12 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def dgdr_name_env(monkeypatch):
+    """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
+    monkeypatch.setenv("DGDR_NAME", "test-dgdr")
+
+
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     """build_dgd_config applies per-node GPU shaping when topology is provided."""
     modifier = CONFIG_MODIFIERS["sglang"]
