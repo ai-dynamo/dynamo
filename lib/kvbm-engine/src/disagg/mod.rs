@@ -6,6 +6,12 @@
 //! Hub-visible request metadata lives in `kvbm-disagg-protocol`. This module
 //! owns the engine-to-engine session messages, remote block-set model, metadata
 //! cache, and velo-streaming bidi session implementation.
+//!
+//! The submodule [`session`] contains the in-progress symmetric
+//! `Session` API replacing the asymmetric `PrefillSession` trait.
+//! See `/home/ryan/.claude/plans/cd-session-refactor.md`.
+
+pub mod session;
 
 use std::collections::HashMap;
 use std::pin::Pin;
