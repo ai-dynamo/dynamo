@@ -34,6 +34,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -1570,7 +1571,29 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	// GMS weight servers load weights fresh from disk and are not CRIU targets.
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role == RoleGMS && p.component.IsInterPodGMSEnabled() &&
+		p.checkpointInfo != nil && p.checkpointInfo.Enabled && p.checkpointInfo.Ready &&
+		p.checkpointInfo.GPUMemoryService != nil && p.checkpointInfo.GPUMemoryService.Enabled {
+		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
+			p.ctx,
+			p.kubeClient,
+			p.dynamoDeployment.Namespace,
+			p.checkpointInfo.Hash,
+			p.checkpointInfo.ArtifactVersion,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inject GMS restore loader for role %s: %w", p.r.Name, err)
+		}
+		p.checkpointInfo.GMSArtifactDir = checkpoint.ResolveGMSArtifactDir(storage)
+		injectInterPodGMSRestoreLoader(podSpec, storage)
+	}
+
+	// GMS weight-server pods are not a checkpoint/restore target: they run
+	// gpu_memory_service.cli.server (not the dynamo runtime) and have no CRIU
+	// state to capture. Shaping them as restore targets would replace the GMS
+	// wrapper command with `sleep infinity` and break the inter-pod GMS layout
+	// entirely. The companion ApplyRestorePodMetadata call below is also
+	// skipped for GMS.
 	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,

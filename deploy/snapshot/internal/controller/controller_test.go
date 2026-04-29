@@ -577,3 +577,38 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		t.Fatalf("unexpected remaining lease holder: %#v", remainingLease.Spec.HolderIdentity)
 	}
 }
+
+func TestWaitForFile(t *testing.T) {
+	t.Run("returns when file exists", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "sentinel")
+		if err := os.WriteFile(path, []byte("ok\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := waitForFile(context.Background(), path, time.Millisecond); err != nil {
+			t.Fatalf("waitForFile returned error: %v", err)
+		}
+	})
+
+	t.Run("returns context error when missing", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		err := waitForFile(ctx, filepath.Join(t.TempDir(), "missing"), time.Millisecond)
+		if err == nil {
+			t.Fatal("expected waitForFile to return an error")
+		}
+	})
+}
+
+func TestGMSCompletionFileName(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-uid"}}
+	if got := gmsCompletionFileName(pod, snapshotprotocol.GMSLoadCompleteFile); got != "gms-load-complete-pod-uid" {
+		t.Fatalf("pod uid completion file = %q", got)
+	}
+
+	pod.Annotations = map[string]string{
+		snapshotprotocol.GMSCompletionFileModeAnnotation: snapshotprotocol.GMSCompletionFileModeShared,
+	}
+	if got := gmsCompletionFileName(pod, snapshotprotocol.GMSLoadCompleteFile); got != snapshotprotocol.GMSLoadCompleteFile {
+		t.Fatalf("shared completion file = %q", got)
+	}
+}

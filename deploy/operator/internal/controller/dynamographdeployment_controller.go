@@ -1486,6 +1486,19 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
 	}
+	if backendFramework == dynamo.BackendFrameworkVLLM && component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+		foundMain := false
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == consts.MainContainerName {
+				dynamo.EnsureVLLMGMSLoadFormat(&podSpec.Containers[i])
+				foundMain = true
+				break
+			}
+		}
+		if !foundMain {
+			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint job pod template has no container named %q", consts.MainContainerName)
+		}
+	}
 
 	// Override RestartPolicy for job (must be Never or OnFailure)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever

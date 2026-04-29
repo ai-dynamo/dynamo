@@ -7338,7 +7338,15 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 	}).Build()
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
-		"decode": {Enabled: true, Ready: true, Hash: "abc123def4567890"},
+		"decode": {
+			Enabled: true,
+			Ready:   true,
+			Hash:    "abc123def4567890",
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled: true,
+				Mode:    v1alpha1.GMSModeInterPod,
+			},
+		},
 	}
 
 	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
@@ -7353,10 +7361,13 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 
 		if strings.Contains(clique.Name, "gms") {
 			sawGMS = true
+			loader := findContainerInClique(t, clique, checkpoint.GMSLoaderContainer)
 			assert.Empty(t, targetAnnotation, "GMS clique %q must not carry snapshot-target-containers annotation", clique.Name)
 			assert.Empty(t, checkpointID, "GMS clique %q must not carry checkpoint-id label (would make it look like a restore target)", clique.Name)
 			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
 				"GMS clique %q main container command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name)
+			assert.Equal(t, []string{"python3", "-m", checkpoint.GMSCheckpointLoaderModule}, loader.Command,
+				"GMS clique %q should run the inter-pod GMS loader as a regular sidecar", clique.Name)
 		} else {
 			sawEngine = true
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
@@ -7365,6 +7376,8 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 				"engine clique %q must carry checkpoint-id label (selected by snapshot-agent restore informer)", clique.Name)
 			assert.Equal(t, []string{"sleep", "infinity"}, mainContainer.Command,
 				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
+			assert.Equal(t, snapshotprotocol.GMSCompletionFileModeShared, clique.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation],
+				"engine clique %q must wait for the shared inter-pod GMS loader sentinel", clique.Name)
 		}
 	}
 	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")

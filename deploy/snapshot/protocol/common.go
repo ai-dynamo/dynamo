@@ -18,7 +18,30 @@ const (
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 
-	// Required comma-separated checkpoint/restore target container list.
+	// GMSCheckpointDirAnnotation tells snapshot-agent where the companion
+	// GMS saver/loader sidecar writes its lifecycle sentinel on the checkpoint
+	// PVC. When absent, the snapshot flow has no GMS barrier.
+	GMSCheckpointDirAnnotation = "nvidia.com/snapshot-gms-checkpoint-dir"
+
+	// GMSCompletionFileModeAnnotation controls whether snapshot-agent waits
+	// for a pod-UID-scoped GMS completion file or for a shared file written
+	// by a separate inter-pod GMS weight-server pod.
+	GMSCompletionFileModeAnnotation = "nvidia.com/snapshot-gms-completion-file-mode"
+	GMSCompletionFileModePodUID     = "pod-uid"
+	GMSCompletionFileModeShared     = "shared"
+
+	// TargetContainersAnnotation names the container(s) a checkpoint or
+	// restore operation should act on. It is required — snapshotprotocol /
+	// snapshotctl / snapshot-agent all error out when the annotation is
+	// missing. Comma-separated list of container names in a single pod:
+	//
+	//   nvidia.com/snapshot-target-containers = "engine-0,engine-1"
+	//
+	// Checkpoint Jobs must carry exactly one target container (the snapshot
+	// contract captures one workload container per checkpoint). Restore pods
+	// may carry one or more target containers; the agent replays the same
+	// checkpoint into each of them. The operator stamps the annotation for
+	// both user-facing paths (DynamoCheckpoint Jobs and DGD restore pods).
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
 
 	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
@@ -40,6 +63,8 @@ const (
 	RestoreStatusInProgress   = "in_progress"
 	RestoreStatusCompleted    = "completed"
 	RestoreStatusFailed       = "failed"
+	GMSSaveCompleteFile       = "gms-save-complete"
+	GMSLoadCompleteFile       = "gms-load-complete"
 )
 
 type Storage struct {

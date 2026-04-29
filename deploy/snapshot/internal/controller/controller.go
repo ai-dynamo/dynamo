@@ -472,6 +472,21 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		}
 		return nil
 	}
+	if gmsDir := strings.TrimSpace(pod.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation]); gmsDir != "" {
+		sentinel := filepath.Join(gmsDir, gmsCompletionFileName(pod, snapshotprotocol.GMSSaveCompleteFile))
+		log.Info("Waiting for GMS checkpoint saver", "sentinel", sentinel)
+		if err := waitForFile(leaseCtx, sentinel, time.Second); err != nil {
+			log.Error(err, "GMS checkpoint saver did not complete")
+			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
+			if signalErr := snapshotruntime.SendSignalToPID(log, containerPID, syscall.SIGKILL, "gms checkpoint save failed"); signalErr != nil {
+				log.Error(signalErr, "Failed to signal GMS checkpoint save failure to runtime process")
+			}
+			if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
+				return statusErr
+			}
+			return nil
+		}
+	}
 
 	// Step 2: Sentinel on success. Workload observes via polling on the
 	// snapshot-control volume; containerPID is a PID inside the container's
@@ -559,6 +574,21 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return nil
 	}
+	if gmsDir := strings.TrimSpace(pod.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation]); gmsDir != "" {
+		sentinel := filepath.Join(gmsDir, gmsCompletionFileName(pod, snapshotprotocol.GMSLoadCompleteFile))
+		log.Info("Waiting for GMS checkpoint loader", "sentinel", sentinel)
+		if err := waitForFile(restoreCtx, sentinel, time.Second); err != nil {
+			log.Error(err, "GMS checkpoint loader did not complete")
+			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+				return statusErr
+			}
+			if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "gms restore load failed"); killErr != nil {
+				return fmt.Errorf("gms restore load failed and placeholder could not be killed: %w", killErr)
+			}
+			return nil
+		}
+	}
 
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
@@ -579,6 +609,44 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return err
 	}
 	return nil
+}
+
+func gmsCompletionFileName(pod *corev1.Pod, base string) string {
+	if pod == nil {
+		return base
+	}
+	switch pod.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] {
+	case snapshotprotocol.GMSCompletionFileModeShared:
+		return base
+	}
+	uid := strings.TrimSpace(string(pod.UID))
+	if uid == "" {
+		return base
+	}
+	return fmt.Sprintf("%s-%s", base, uid)
+}
+
+func waitForFile(ctx context.Context, path string, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		info, err := os.Stat(path)
+		switch {
+		case err == nil && !info.IsDir():
+			return nil
+		case err == nil:
+			return fmt.Errorf("%s exists but is a directory", path)
+		case !os.IsNotExist(err):
+			return fmt.Errorf("failed to stat %s: %w", path, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for %s: %w", path, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (w *NodeController) tryAcquire(podKey string) bool {

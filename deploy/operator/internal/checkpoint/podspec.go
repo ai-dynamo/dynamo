@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
@@ -38,6 +39,8 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
 	if !enabled {
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
+		delete(annotations, snapshotprotocol.GMSCompletionFileModeAnnotation)
 		return
 	}
 	targets := checkpointInfo.RestoreTargetContainers
@@ -45,6 +48,17 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		targets = []string{commonconsts.MainContainerName}
 	}
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
+	if checkpointInfo.GPUMemoryService != nil && checkpointInfo.GPUMemoryService.Enabled && checkpointInfo.GMSArtifactDir != "" {
+		annotations[snapshotprotocol.GMSCheckpointDirAnnotation] = checkpointInfo.GMSArtifactDir
+		if checkpointInfo.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+			annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModeShared
+		} else {
+			annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModePodUID
+		}
+	} else {
+		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
+		delete(annotations, snapshotprotocol.GMSCompletionFileModeAnnotation)
+	}
 }
 
 func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
@@ -144,10 +158,8 @@ func InjectCheckpointIntoPodSpec(
 		EnsurePodInfoMount(c)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		// GMS restore is still single-main-container only.
-		mainContainer, err := RequireMainContainer(podSpec)
-		if err != nil {
-			return fmt.Errorf("gpuMemoryService enabled: %w", err)
+		if len(info.RestoreTargetContainers) > 0 {
+			return fmt.Errorf("gpuMemoryService checkpoint restore is not supported with multiple restore targets")
 		}
 		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
 			ctx,
@@ -158,6 +170,18 @@ func InjectCheckpointIntoPodSpec(
 		)
 		if err != nil {
 			return err
+		}
+		info.GMSArtifactDir = ResolveGMSArtifactDir(storage)
+		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+			return nil
+		}
+		// GMS today is wired to a single main container. Multi-target
+		// (failover) support for GMS is tracked separately; stick to
+		// the legacy main-container path so single-engine GMS restore
+		// continues to work.
+		mainContainer := resolveMainContainer(podSpec)
+		if mainContainer == nil {
+			return fmt.Errorf("gpuMemoryService enabled but no container named %q found in pod spec", commonconsts.MainContainerName)
 		}
 		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
 	}

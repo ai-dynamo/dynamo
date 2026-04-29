@@ -10,6 +10,9 @@ from typing import NoReturn
 
 logger = logging.getLogger(__name__)
 
+GMS_GPU_UUIDS_ENV = "GMS_GPU_UUIDS"
+GMS_GPU_UUID_ENV_PREFIX = "GMS_GPU_UUID_"
+
 
 # Canonical names for GMS-related environment variables. Defined here so
 # operator code, launcher code, and engine integration code all reference
@@ -45,11 +48,47 @@ def invalidate_uuid_cache() -> None:
     _uuid_cache.clear()
 
 
+def _split_visible_device_uuids(value: str) -> list[str]:
+    return [
+        part.strip()
+        for part in value.replace(";", ",").split(",")
+        if part.strip().startswith(("GPU-", "MIG-"))
+    ]
+
+
+def _get_uuid_from_env(device: int) -> str | None:
+    direct = os.environ.get(f"{GMS_GPU_UUID_ENV_PREFIX}{device}")
+    if direct:
+        direct = direct.strip()
+        if direct:
+            return direct
+
+    ordered = os.environ.get(GMS_GPU_UUIDS_ENV)
+    if ordered:
+        uuids = [
+            part.strip()
+            for part in ordered.replace(";", ",").split(",")
+            if part.strip()
+        ]
+        if device < len(uuids):
+            return uuids[device]
+
+    # Some runtimes already expose UUIDs in visible-device order. Treat those
+    # as a free fast path, but prefer the explicit GMS_* env vars above.
+    for name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        uuids = _split_visible_device_uuids(os.environ.get(name, ""))
+        if device < len(uuids):
+            return uuids[device]
+    return None
+
+
 def get_socket_path(device: int, tag: str = "weights") -> str:
     """Get GMS socket path for the given CUDA device and tag.
 
     The socket path is based on GPU UUID, making it stable across different
     CUDA_VISIBLE_DEVICES configurations. UUIDs are cached per device index.
+    When the runtime provides GPU UUIDs through GMS_GPU_UUIDS or
+    GMS_GPU_UUID_<index>, those env vars are used instead of querying NVML.
 
     Args:
         device: CUDA device index.
@@ -60,14 +99,16 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
     """
     uuid = _uuid_cache.get(device)
     if uuid is None:
-        import pynvml  # deferred: not available in all environments
+        uuid = _get_uuid_from_env(device)
+        if uuid is None:
+            import pynvml  # deferred: not available in all environments
 
-        pynvml.nvmlInit()
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-            uuid = pynvml.nvmlDeviceGetUUID(handle)
-        finally:
-            pynvml.nvmlShutdown()
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+            finally:
+                pynvml.nvmlShutdown()
         _uuid_cache[device] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
