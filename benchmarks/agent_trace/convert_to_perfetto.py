@@ -285,6 +285,7 @@ def convert_records(
     *,
     include_stages: bool,
     include_markers: bool,
+    separate_stage_tracks: bool = False,
 ) -> tuple[dict[str, Any], int]:
     prepared: list[dict[str, Any]] = []
 
@@ -345,7 +346,7 @@ def convert_records(
         )
         stage_pid, stage_tid = (
             tracks.track_for(item["workflow_id"], item["program_id"], lane, "stages")
-            if include_stages
+            if include_stages and separate_stage_tracks
             else (request_pid, request_tid)
         )
 
@@ -463,7 +464,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-stages",
         action="store_true",
-        help="Also emit prefill wait, prefill, and decode stage slices.",
+        default=True,
+        help=(
+            "Emit prefill wait, prefill, and decode stage slices. This is the "
+            "default; kept for compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--no-stages",
+        action="store_false",
+        dest="include_stages",
+        help="Emit only full LLM request slices.",
+    )
+    parser.add_argument(
+        "--separate-stage-tracks",
+        action="store_true",
+        help=(
+            "Place stage slices on adjacent stage tracks instead of stacking "
+            "them under the request slice."
+        ),
     )
     parser.add_argument(
         "--include-markers",
@@ -493,6 +512,7 @@ def main() -> int:
         _iter_records(input_paths),
         include_stages=args.include_stages,
         include_markers=args.include_markers,
+        separate_stage_tracks=args.separate_stage_tracks,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

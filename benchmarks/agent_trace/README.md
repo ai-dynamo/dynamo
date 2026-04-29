@@ -8,8 +8,7 @@ Utilities for working with Dynamo agent trace files emitted by
 ```bash
 python3 benchmarks/agent_trace/convert_to_perfetto.py \
   "/tmp/dynamo-agent-trace.*.jsonl.gz" \
-  --output /tmp/dynamo-agent-trace.perfetto.json \
-  --include-stages
+  --output /tmp/dynamo-agent-trace.perfetto.json
 ```
 
 Open the output JSON in [Perfetto UI](https://ui.perfetto.dev/).
@@ -18,8 +17,12 @@ Inputs may be `.jsonl`, `.jsonl.gz`, a directory containing trace shards, or a
 glob pattern. The converter emits Chrome Trace Event JSON:
 
 - one workflow per Perfetto process
-- one program lane per Perfetto request thread
+- one program lane per Perfetto thread
 - one LLM request slice per Dynamo `request_end`
-- optional prefill wait, prefill, and decode stage slices on separate stage
-  threads
+- prefill wait, prefill, and decode stage slices stacked under the request by
+  default
 - optional first-token markers with `--include-markers`
+
+Use `--no-stages` for a compact request-only view. Use
+`--separate-stage-tracks` to place stage slices on adjacent stage tracks when
+debugging Perfetto nesting or label rendering.

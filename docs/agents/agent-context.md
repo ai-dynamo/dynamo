@@ -137,17 +137,18 @@ Convert Dynamo agent trace shards to Chrome Trace JSON for Perfetto UI:
 ```bash
 python3 benchmarks/agent_trace/convert_to_perfetto.py \
   "/tmp/dynamo-agent-trace.*.jsonl.gz" \
-  --output /tmp/dynamo-agent-trace.perfetto.json \
-  --include-stages
+  --output /tmp/dynamo-agent-trace.perfetto.json
 ```
 
 Open `/tmp/dynamo-agent-trace.perfetto.json` in
 [Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
 slice grouped by workflow and program lane. The slice args include request IDs,
 model, token counts, cache metrics, TTFT, average ITL, queue depth, and worker
-IDs. With `--include-stages`, the converter emits prefill wait, prefill, and
-decode slices on separate stage tracks when those timings are present. Add
-`--include-markers` to emit first-token instant markers.
+IDs. By default, the converter stacks prefill wait, prefill, and decode slices
+under each request when those timings are present. Add `--include-markers` to
+emit first-token instant markers, `--no-stages` for a compact request-only
+view, or `--separate-stage-tracks` to place stages on adjacent tracks when
+debugging Perfetto nesting or label rendering.
 
 ## Operator Notes
 
