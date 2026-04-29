@@ -454,7 +454,7 @@ spec:
           - -lc
           - |
             apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
-            pip install -q aiperf==0.5.0
+            pip install -q aiperf==0.7.0
             echo "Benchmark pod ready (tmux + aiperf installed)."
             sleep infinity
         imagePullPolicy: IfNotPresent
