@@ -543,6 +543,10 @@ func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDe
 func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
 	if v, ok := c.get(suffixSharedMemOrigin); ok {
 		c.del(suffixSharedMemOrigin)
+		if src != nil && src.Sign() != 0 {
+			dst.SharedMemory = &SharedMemorySpec{Size: src.DeepCopy()}
+			return
+		}
 		if v == "empty" {
 			// A bare SharedMemorySpec{} carries Size: Quantity{}, which
 			// serializes to "0" because resource.Quantity is a non-pointer
@@ -654,6 +658,50 @@ func convertScalingAdapterFrom(src *v1beta1.ScalingAdapter, dst *DynamoComponent
 // Experimental (gpuMemoryService, failover, checkpoint)
 // ---------------------------------------------------------------------------
 
+func gmsModeToV1beta1(mode GPUMemoryServiceMode) v1beta1.GPUMemoryServiceMode {
+	switch mode {
+	case GMSModeIntraPod:
+		return v1beta1.GMSModeIntraPod
+	case GMSModeInterPod:
+		return v1beta1.GMSModeInterPod
+	default:
+		return v1beta1.GPUMemoryServiceMode(mode)
+	}
+}
+
+func gmsModeFromV1beta1(mode v1beta1.GPUMemoryServiceMode) GPUMemoryServiceMode {
+	switch mode {
+	case v1beta1.GMSModeIntraPod:
+		return GMSModeIntraPod
+	case v1beta1.GMSModeInterPod:
+		return GMSModeInterPod
+	default:
+		return GPUMemoryServiceMode(mode)
+	}
+}
+
+func checkpointModeToV1beta1(mode CheckpointMode) v1beta1.CheckpointMode {
+	switch mode {
+	case CheckpointModeAuto:
+		return v1beta1.CheckpointModeAuto
+	case CheckpointModeManual:
+		return v1beta1.CheckpointModeManual
+	default:
+		return v1beta1.CheckpointMode(mode)
+	}
+}
+
+func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
+	switch mode {
+	case v1beta1.CheckpointModeAuto:
+		return CheckpointModeAuto
+	case v1beta1.CheckpointModeManual:
+		return CheckpointModeManual
+	default:
+		return CheckpointMode(mode)
+	}
+}
+
 func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) {
 	var exp *v1beta1.ExperimentalSpec
 	ensureExp := func() *v1beta1.ExperimentalSpec {
@@ -670,7 +718,7 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 	if src.GPUMemoryService != nil {
 		if src.GPUMemoryService.Enabled {
 			ensureExp().GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
-				Mode:            v1beta1.GPUMemoryServiceMode(src.GPUMemoryService.Mode),
+				Mode:            gmsModeToV1beta1(src.GPUMemoryService.Mode),
 				DeviceClassName: src.GPUMemoryService.DeviceClassName,
 			}
 		} else if !gmsIsZeroPayload(src.GPUMemoryService) {
@@ -688,7 +736,7 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 	if src.Failover != nil {
 		if src.Failover.Enabled {
 			ensureExp().Failover = &v1beta1.FailoverSpec{
-				Mode:       v1beta1.GPUMemoryServiceMode(src.Failover.Mode),
+				Mode:       gmsModeToV1beta1(src.Failover.Mode),
 				NumShadows: src.Failover.NumShadows,
 			}
 		} else if !failoverIsZeroPayload(src.Failover) {
@@ -729,7 +777,7 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{
 			Enabled:         true,
-			Mode:            GPUMemoryServiceMode(src.Experimental.GPUMemoryService.Mode),
+			Mode:            gmsModeFromV1beta1(src.Experimental.GPUMemoryService.Mode),
 			DeviceClassName: src.Experimental.GPUMemoryService.DeviceClassName,
 		}
 		c.del(suffixGMSDisabled)
@@ -745,7 +793,7 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 	if src.Experimental != nil && src.Experimental.Failover != nil {
 		dst.Failover = &FailoverSpec{
 			Enabled:    true,
-			Mode:       GPUMemoryServiceMode(src.Experimental.Failover.Mode),
+			Mode:       gmsModeFromV1beta1(src.Experimental.Failover.Mode),
 			NumShadows: src.Experimental.Failover.NumShadows,
 		}
 		c.del(suffixFailoverDisabled)
@@ -785,7 +833,7 @@ func checkpointIsZeroPayload(s *ServiceCheckpointConfig) bool {
 
 func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpointConfig {
 	dst := &v1beta1.ComponentCheckpointConfig{
-		Mode: v1beta1.CheckpointMode(src.Mode),
+		Mode: checkpointModeToV1beta1(src.Mode),
 	}
 	// Deep-copy CheckpointRef so the v1alpha1 and v1beta1 objects do not
 	// share the same *string. A shared pointer would let a mutation on one
@@ -812,7 +860,7 @@ func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpo
 func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool) *ServiceCheckpointConfig {
 	dst := &ServiceCheckpointConfig{
 		Enabled: enabled,
-		Mode:    CheckpointMode(src.Mode),
+		Mode:    checkpointModeFromV1beta1(src.Mode),
 	}
 	// Deep-copy CheckpointRef -- see checkpointToV1beta1 for the rationale.
 	if src.CheckpointRef != nil {
@@ -1196,32 +1244,9 @@ func containerIsEmpty(c *corev1.Container) bool {
 	if c == nil {
 		return true
 	}
-	return c.Name == "" &&
-		c.Image == "" &&
-		len(c.Command) == 0 &&
-		len(c.Args) == 0 &&
-		c.WorkingDir == "" &&
-		len(c.Ports) == 0 &&
-		len(c.EnvFrom) == 0 &&
-		len(c.Env) == 0 &&
-		len(c.Resources.Requests) == 0 &&
-		len(c.Resources.Limits) == 0 &&
-		len(c.Resources.Claims) == 0 &&
-		len(c.ResizePolicy) == 0 &&
-		c.RestartPolicy == nil &&
-		len(c.VolumeMounts) == 0 &&
-		len(c.VolumeDevices) == 0 &&
-		c.LivenessProbe == nil &&
-		c.ReadinessProbe == nil &&
-		c.StartupProbe == nil &&
-		c.Lifecycle == nil &&
-		c.TerminationMessagePath == "" &&
-		c.TerminationMessagePolicy == "" &&
-		c.ImagePullPolicy == "" &&
-		c.SecurityContext == nil &&
-		!c.Stdin &&
-		!c.StdinOnce &&
-		!c.TTY
+	copy := *c
+	copy.Name = ""
+	return apiequality.Semantic.DeepEqual(copy, corev1.Container{})
 }
 
 // appendFrontendSidecar ensures a container named

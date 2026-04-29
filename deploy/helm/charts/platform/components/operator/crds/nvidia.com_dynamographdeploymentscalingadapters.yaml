@@ -36,6 +36,8 @@ spec:
         - jsonPath: .metadata.creationTimestamp
           name: AGE
           type: date
+      deprecated: true
+      deprecationWarning: nvidia.com/v1alpha1 DynamoGraphDeploymentScalingAdapter is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentScalingAdapter
       name: v1alpha1
       schema:
         openAPIV3Schema:
