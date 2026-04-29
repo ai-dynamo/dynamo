@@ -565,8 +565,23 @@ impl LocalModel {
             let Some(local_path) = cf.path().map(Path::to_path_buf) else {
                 continue;
             };
-            // Canonicalize so `Url::from_file_path` accepts it and the
-            // registry holds an absolute path.
+            // Take the filename from the original path *before*
+            // canonicalize. HuggingFace's cache stores files as symlinks
+            // from `snapshots/<rev>/<filename>` → `blobs/<git-sha1>`;
+            // canonicalize follows the symlink and would produce a SHA1
+            // for `file_name`, breaking downstream lookups that find files
+            // by literal name (e.g. `parent.join("generation_config.json")`
+            // in `HFConfig::from_json_file`).
+            let Some(filename) = local_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            // Canonicalize for the registry value so the http handler
+            // can serve from the resolved blob path regardless of any
+            // symlink reshuffling.
             let absolute = match fs::canonicalize(&local_path) {
                 Ok(p) => p,
                 Err(err) => {
@@ -577,13 +592,6 @@ impl LocalModel {
                     );
                     continue;
                 }
-            };
-            let Some(filename) = absolute
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|s| s.to_string())
-            else {
-                continue;
             };
 
             let url = url::Url::parse(&format!("{base_url}/v1/metadata/{model_slug}/{filename}"))?;
