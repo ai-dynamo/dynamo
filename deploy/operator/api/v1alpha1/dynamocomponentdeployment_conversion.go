@@ -69,14 +69,14 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
 
-	save, err := convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src, dst, restored)
-	if err != nil {
+	save := &DynamoComponentDeployment{}
+	if err := convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src, dst, restored, save); err != nil {
 		return err
 	}
 	if restored != nil {
 		scrubDCDAnnotations(&dst.ObjectMeta)
 	}
-	if save != nil {
+	if !apiequality.Semantic.DeepEqual(save, &DynamoComponentDeployment{}) {
 		data, err := json.Marshal(save.Spec)
 		if err != nil {
 			return fmt.Errorf("preserve DCD spoke spec: %w", err)
@@ -96,14 +96,13 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	return nil
 }
 
-func convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src *DynamoComponentDeployment, dst *v1beta1.DynamoComponentDeployment, restored *v1beta1.DynamoComponentDeployment) (*DynamoComponentDeployment, error) {
-	save := &DynamoComponentDeployment{}
+func convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src *DynamoComponentDeployment, dst *v1beta1.DynamoComponentDeployment, restored *v1beta1.DynamoComponentDeployment, save *DynamoComponentDeployment) error {
 	if restored == nil {
 		if err := convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(&src.Spec, &dst.Spec, nil, &save.Spec, newDCDCarrier(&dst.ObjectMeta)); err != nil {
-			return nil, err
+			return err
 		}
 	} else if err := convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(&src.Spec, &dst.Spec, &restored.Spec, &save.Spec, newDCDCarrier(&dst.ObjectMeta)); err != nil {
-		return nil, err
+		return err
 	}
 
 	// v1beta1 requires DCD.spec.name (it is the +listMapKey on
@@ -113,21 +112,22 @@ func convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeploy
 	// original hub shape instead.
 	if dst.Spec.ComponentName == "" && restored == nil {
 		dst.Spec.ComponentName = dst.ObjectMeta.Name
+		// TypeMeta is not encoded into the preservation annotations. It only
+		// keeps root zero-pruning from dropping this intentional empty spec.
+		save.TypeMeta.Kind = "DynamoComponentDeployment"
 	}
 	if err := convert_v1alpha1_DynamoComponentDeploymentStatus_To_v1beta1_DynamoComponentDeploymentStatus(&src.Status, &dst.Status, nil, &save.Status); err != nil {
-		return nil, err
+		return err
 	}
-
-	// Save source-only fields that dst cannot represent.
-	hasSourceOnlyState := restored == nil ||
-		hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec) ||
-		len(src.Status.PodSelector) > 0 ||
-		(src.Status.Service != nil &&
-			serviceStatusComponentNameNeedsPreservation(src.Status.Service))
-	if !hasSourceOnlyState {
-		return nil, nil
+	if restored == nil && dst.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated" {
+		// TypeMeta is not encoded into the preservation annotations. It only
+		// keeps root zero-pruning from dropping the generated-podTemplate hint.
+		save.TypeMeta.Kind = "DynamoComponentDeployment"
 	}
-	return save, nil
+	if !apiequality.Semantic.DeepEqual(save, &DynamoComponentDeployment{}) {
+		save.Spec.ServiceName = src.Spec.ServiceName
+	}
+	return nil
 }
 
 func convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDeploymentSpec(src *DynamoComponentDeploymentSpec, dst *v1beta1.DynamoComponentDeploymentSpec, restored *v1beta1.DynamoComponentDeploymentSpec, save *DynamoComponentDeploymentSpec, carrier *annCarrier) error {
@@ -171,8 +171,64 @@ func convert_v1alpha1_DynamoComponentDeploymentSpec_To_v1beta1_DynamoComponentDe
 	}
 
 	// Save source-only fields that dst cannot represent.
-	*save = *src
+	save.SubComponentType = src.SubComponentType
+	save.DynamoNamespace = src.DynamoNamespace
+	save.Autoscaling = src.Autoscaling
+	save.Ingress = src.Ingress
+	save.Annotations = src.Annotations
+	save.Labels = src.Labels
+	save.EnvFromSecret = src.EnvFromSecret
+	if sharedMemoryNeedsPreservation(src.SharedMemory) {
+		save.SharedMemory = src.SharedMemory
+	}
+	if extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) {
+		save.ExtraPodMetadata = src.ExtraPodMetadata
+	}
+	if src.ScalingAdapter != nil && !src.ScalingAdapter.Enabled {
+		save.ScalingAdapter = src.ScalingAdapter
+	}
+	if src.ExtraPodSpec != nil && src.ExtraPodSpec.MainContainer != nil {
+		saveMainContainerOrigin(&src.DynamoComponentDeploymentSharedSpec, &save.DynamoComponentDeploymentSharedSpec)
+	}
+	if src.ExtraPodSpec != nil && extraPodSpecIsZero(src.ExtraPodSpec) {
+		save.ExtraPodSpec = &ExtraPodSpec{}
+	}
 	return nil
+}
+
+func saveMainContainerOrigin(src *DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec) {
+	main := src.ExtraPodSpec.MainContainer
+	if main.Name == "" &&
+		len(main.Env) == 0 &&
+		apiequality.Semantic.DeepEqual(main.Resources, corev1.ResourceRequirements{}) &&
+		len(main.VolumeMounts) == 0 &&
+		main.LivenessProbe == nil &&
+		main.ReadinessProbe == nil {
+		return
+	}
+	save.ExtraPodSpec = &ExtraPodSpec{MainContainer: &corev1.Container{
+		Name:           main.Name,
+		Env:            main.Env,
+		Resources:      main.Resources,
+		VolumeMounts:   main.VolumeMounts,
+		LivenessProbe:  main.LivenessProbe,
+		ReadinessProbe: main.ReadinessProbe,
+	}}
+	if len(main.Env) > 0 {
+		save.Envs = src.Envs
+	}
+	if !apiequality.Semantic.DeepEqual(main.Resources, corev1.ResourceRequirements{}) {
+		save.Resources = src.Resources
+	}
+	if len(main.VolumeMounts) > 0 {
+		save.VolumeMounts = src.VolumeMounts
+	}
+	if main.LivenessProbe != nil {
+		save.LivenessProbe = src.LivenessProbe
+	}
+	if main.ReadinessProbe != nil {
+		save.ReadinessProbe = src.ReadinessProbe
+	}
 }
 
 func mergeDCDHubOnlyPodTemplateFields(dst **corev1.PodTemplateSpec, restored *corev1.PodTemplateSpec, frontendSidecar *string, keepMainContainer, keepFrontendSidecar bool) {
@@ -422,7 +478,14 @@ func convert_v1beta1_DynamoComponentDeploymentSpec_To_v1alpha1_DynamoComponentDe
 	}
 
 	// Save source-only fields that dst cannot represent.
-	*save = *src
+	save.FrontendSidecar = src.FrontendSidecar
+	save.PodTemplate = src.PodTemplate
+	if src.Experimental != nil &&
+		src.Experimental.GPUMemoryService == nil &&
+		src.Experimental.Failover == nil &&
+		src.Experimental.Checkpoint == nil {
+		save.Experimental = src.Experimental
+	}
 	return nil
 }
 
@@ -518,7 +581,13 @@ func convert_v1alpha1_DynamoComponentDeploymentStatus_To_v1beta1_DynamoComponent
 	_ = restored
 
 	// Save source-only fields that dst cannot represent.
-	*save = *src
+	save.PodSelector = maps.Clone(src.PodSelector)
+	if serviceStatusComponentNameNeedsPreservation(src.Service) {
+		save.Service = &ServiceReplicaStatus{
+			ComponentName:  src.Service.ComponentName,
+			ComponentNames: src.Service.ComponentNames,
+		}
+	}
 	return nil
 }
 
@@ -544,7 +613,6 @@ func convert_v1beta1_DynamoComponentDeploymentStatus_To_v1alpha1_DynamoComponent
 	}
 
 	// Save source-only fields that dst cannot represent.
-	*save = *src
 	return nil
 }
 
