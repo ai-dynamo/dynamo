@@ -872,11 +872,45 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
             .context("Failed to convert response_format to JSON")?;
 
         if tools_json.is_some() || response_format_json.is_some() {
-            let system_idx = messages_array
-                .iter()
-                .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+            // P1.2 / P2.10: only merge tools/response_format into a leading
+            // system message — i.e. the system block at idx 0 (or a prefix
+            // of consecutive system blocks starting at idx 0). If the
+            // first system message is NOT at idx 0, treat the request as
+            // "no usable system slot" and synthesize a fresh one at idx 0
+            // instead. The previous logic merged into the FIRST system
+            // anywhere in the message list, which renders tool
+            // instructions AFTER a preceding user turn (P1.2). It also
+            // mishandles the [system, system, ...] case by merging into
+            // the first system instead of the closest-to-user one
+            // (P2.10).
+            //
+            // The right invariant: tool-injection always anchors to a
+            // canonical position (idx 0), never to "first match". Merging
+            // into a leading system at idx 0 preserves the operator's
+            // existing system content; everything else gets a fresh one.
+            let leading_system_idx = if messages_array
+                .first()
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                == Some("system")
+            {
+                // Find the LAST consecutive system message in the leading
+                // run starting at idx 0. With multiple system messages,
+                // tools/response_format belong on the closest-to-user one
+                // (matches HF Python behavior; see encoding_dsv4.py
+                // render_message line 263-268, which renders each
+                // system in order).
+                let last_leading = messages_array
+                    .iter()
+                    .take_while(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"))
+                    .count()
+                    - 1;
+                Some(last_leading)
+            } else {
+                None
+            };
 
-            if let Some(idx) = system_idx {
+            if let Some(idx) = leading_system_idx {
                 if let Some(msg) = messages_array.get_mut(idx)
                     && let Some(obj) = msg.as_object_mut()
                 {

@@ -33,9 +33,17 @@ pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bo
         return true;
     }
 
-    // Check for partial match at the end (streaming scenario)
+    // Check for partial match at the end (streaming scenario).
+    //
+    // P1.5: floor the partial match length at 4 chars. The original loop
+    // started at i=1, which means a chunk ending in plain `<` (or `<｜`,
+    // `<｜D`) would match — a very common false positive when the model
+    // generates an inequality like `1 < 2` near a chunk boundary. Floor=4
+    // requires at least `<｜DS` of the canonical `<｜DSML｜...>` token,
+    // which is distinctive enough to be a real tool-call start signal.
+    const MIN_PARTIAL_PREFIX: usize = 4;
     let start_chars: Vec<char> = start_token.chars().collect();
-    for i in 1..start_chars.len() {
+    for i in MIN_PARTIAL_PREFIX..start_chars.len() {
         let partial: String = start_chars[..i].iter().collect();
         if chunk.ends_with(&partial) {
             return true;
@@ -207,8 +215,13 @@ fn parse_parameters(
 
     // The `string="true|false"` attribute is optional: some model outputs omit it.
     // When absent we best-effort parse the value (JSON → String fallback).
+    //
+    // P2.13b: `(?i:...)` makes the boolean literal case-insensitive. The
+    // V4 model is documented to emit lowercase, but real-world output (and
+    // hand-authored fixtures) sometimes use `string="True"` / `string="TRUE"`.
+    // Per the HF Python decoder spec, capitalization is not significant.
     let param_pattern = format!(
-        r#"(?s){}\"([^"]+)\"(?:\s+string=\"(true|false)\")?\s*>(.*?){}"#,
+        r#"(?s){}\"([^"]+)\"(?:\s+string=\"(?i:(true|false))\")?\s*>(.*?){}"#,
         prefix_escaped, end_escaped
     );
 
@@ -222,9 +235,9 @@ fn parse_parameters(
             // Parse value based on string attribute (if present).
             // `string="true"` forces the String branch; every other case
             // (`string="false"` or attribute omitted) tries JSON first and
-            // falls back to String.
+            // falls back to String. Match is case-insensitive (P2.13b).
             let string_attr = param_match.get(2).map(|m| m.as_str());
-            let value = if string_attr == Some("true") {
+            let value = if string_attr.is_some_and(|s| s.eq_ignore_ascii_case("true")) {
                 serde_json::Value::String(param_value.to_string())
             } else {
                 serde_json::from_str(param_value)

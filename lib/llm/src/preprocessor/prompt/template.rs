@@ -251,7 +251,13 @@ fn is_deepseek_v3_2_non_exp(model_type_lower: &Option<String>, display_name_lowe
 /// - `deepseek-v40` / `deepseek-v4pro` (no separator after `v4`)
 /// - `my-deepseek-v4` (prefix must be at the start)
 fn is_deepseek_v4_name(name_lower: &str) -> bool {
-    let Some(rest) = name_lower.strip_prefix("deepseek") else {
+    // Accept HF-style "owner/repo" by trimming an optional leading "<owner>/"
+    // segment before checking for the deepseek-v4 stem. Without this,
+    // canonical HF ids like "deepseek-ai/deepseek-v4-flash" fail name
+    // detection because strip_prefix("deepseek") would leave "-ai/..."
+    // and the subsequent v4 check would not find it.
+    let stem = name_lower.rsplit_once('/').map_or(name_lower, |(_, s)| s);
+    let Some(rest) = stem.strip_prefix("deepseek") else {
         return false;
     };
     // Optional single separator between "deepseek" and "v4".
@@ -363,5 +369,25 @@ mod detection_tests {
         assert!(is_deepseek_v3_2_non_exp(&None, "deepseek-v3.2-pro"));
         assert!(!is_deepseek_v3_2_non_exp(&None, "deepseek-v3.2-exp"));
         assert!(!is_deepseek_v3_2_non_exp(&None, "deepseek-v4"));
+    }
+}
+
+#[cfg(test)]
+mod p0_1_hf_style_test {
+    use super::is_deepseek_v4_name;
+
+    #[test]
+    fn hf_style_owner_repo_id_is_recognized() {
+        // P0.1 regression test: HF canonical id "deepseek-ai/DeepSeek-V4-Flash"
+        // (lowercased to "deepseek-ai/deepseek-v4-flash") must hit V4 detection
+        // even though it has an "<owner>/" prefix.
+        assert!(is_deepseek_v4_name("deepseek-ai/deepseek-v4-flash"));
+        assert!(is_deepseek_v4_name("deepseek-ai/deepseek-v4-pro"));
+        assert!(is_deepseek_v4_name("deepseek-ai/deepseek_v4"));
+        // Without an owner prefix still works
+        assert!(is_deepseek_v4_name("deepseek-v4-flash"));
+        // Non-V4 owners still rejected
+        assert!(!is_deepseek_v4_name("deepseek-ai/llama-3-70b"));
+        assert!(!is_deepseek_v4_name("foo/dflash"));
     }
 }

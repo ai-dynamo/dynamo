@@ -755,17 +755,24 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Tool-continuation turns (last message role=tool) gate the force-
-        // reasoning flag off: the model produces the final user-facing answer
-        // directly from the tool result and typically does not re-enter
-        // reasoning, so leaving the parser in forced-reasoning mode would
-        // mislabel the final answer as reasoning_content. Matches SGLang's
-        // observed behavior for Kimi K2.5 tool-result follow-ups.
-        let last_is_tool = matches!(
-            request.inner.messages.last(),
-            Some(ChatCompletionRequestMessage::Tool(_))
-        );
-        let prompt_injected_reasoning = prompt_injected_reasoning && !last_is_tool;
+        // P1.7: trust the rendered prompt as the source of truth for
+        // whether the parser should start in reasoning mode. The previous
+        // override gated `prompt_injected_reasoning=false` whenever the
+        // last incoming message had role=tool — but that contradicts
+        // DeepSeek-V4's chat template, which merges the terminal `tool`
+        // turn into a synthetic `user` turn and still seeds the next
+        // assistant turn with `<think>` (verified against
+        // encoding_dsv4.py:render_message line 384-390). With the override
+        // active, V4 tool-result follow-ups had their first reasoning
+        // tokens classified as `content` instead of `reasoning_content`.
+        //
+        // Removing the override defers to the prompt-tail check made
+        // earlier: `prompt.trim_end().ends_with("<think>")`. Any model
+        // family whose template suppresses `<think>` post-tool will see
+        // `prompt_injected_reasoning=false` automatically; no override
+        // needed. If a future model template ends in `<think>` but does
+        // NOT want reasoning extracted, it should fix its formatter to
+        // not seed `<think>` rather than re-introduce a role-based override.
 
         // tool_choice=required/named forces the backend into guided decoding,
         // which constrains output to a bare JSON shape with no reasoning
