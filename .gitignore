@@ -117,6 +117,8 @@ core.*
 /.cursor
 /.claude/*
 !/.claude/skills/
+/.agents/*
+!/.agents/skills/
 /CLAUDE.md
 /CLAUDE.md.bak
 
