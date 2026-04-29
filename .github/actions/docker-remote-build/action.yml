@@ -55,8 +55,8 @@ inputs:
     description: 'Docker build target stage (passed as --target); empty = build to last stage'
     required: false
     default: ''
-  cache_tag_prefix:
-    description: 'Prefix for the registry cache tag (e.g. "test"). When set, the primary cache slot becomes "{prefix}-{framework}-cuda{N}-{arch}-cache" and the unprefixed base-image cache is also read so shared layers are reused.'
+  tag_suffix:
+    description: 'Suffix appended to image tags, cache tags, artifact names, and log filenames (e.g. "test"). When set, the primary cache slot becomes "{framework}-cuda{N}-{arch}-{suffix}-cache" and the unsuffixed base-image cache is also read so shared layers are reused.'
     required: false
     default: ''
 outputs:
@@ -101,7 +101,7 @@ runs:
 
         # Compute an optional tag suffix so test-image artifacts don't collide with
         # the normal-image artifacts when both run in the same job.
-        TAG_SUFFIX="${{ inputs.cache_tag_prefix }}"
+        TAG_SUFFIX="${{ inputs.tag_suffix }}"
         TAG_SUFFIX="${TAG_SUFFIX:+-${TAG_SUFFIX}}"   # "-test" when set, "" otherwise
         echo "TAG_SUFFIX=${TAG_SUFFIX}" >> $GITHUB_ENV
 
@@ -116,9 +116,9 @@ runs:
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
           BASE_CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
-          if [ -n "${{ inputs.cache_tag_prefix }}" ]; then
-            PRIMARY_CACHE_TAG="${{ inputs.cache_tag_prefix }}-${BASE_CACHE_TAG}"
-            # Read the prefixed (e.g. test-specific) cache first, then fall back to
+          if [ -n "${{ inputs.tag_suffix }}" ]; then
+            PRIMARY_CACHE_TAG="${BASE_CACHE_TAG%-cache}-${{ inputs.tag_suffix }}-cache"
+            # Read the suffixed (e.g. test-specific) cache first, then fall back to
             # the base image cache so layers shared with the normal build are reused.
             CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PRIMARY_CACHE_TAG} "
             CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${BASE_CACHE_TAG} "

@@ -309,7 +309,7 @@ jobs:
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
           build_target: ${{ inputs.target }}_test
-          cache_tag_prefix: test
+          tag_suffix: test
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
