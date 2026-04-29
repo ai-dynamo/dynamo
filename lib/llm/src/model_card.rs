@@ -194,6 +194,22 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
+    }
+}
+
+fn pf_checked_file_mut(p: &mut PromptFormatterArtifact) -> &mut CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -520,6 +536,62 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    /// Iterate every populated metadata `CheckedFile` on this MDC, in
+    /// deterministic slot order: model_info, tokenizer, prompt_formatter,
+    /// chat_template_file, gen_config.
+    pub fn iter_metadata_files(&self) -> impl Iterator<Item = &CheckedFile> {
+        let model_info = self.model_info.as_ref().map(|m| match m {
+            ModelInfoType::HfConfigJson(cf) => cf,
+        });
+        let tokenizer = self.tokenizer.as_ref().map(|t| match t {
+            TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => cf,
+        });
+        let prompt_formatter = self.prompt_formatter.as_ref().map(pf_checked_file);
+        let chat_template_file = self.chat_template_file.as_ref().map(pf_checked_file);
+        let gen_config = self.gen_config.as_ref().map(|g| match g {
+            GenerationConfig::HfGenerationConfigJson(cf) => cf,
+        });
+
+        [
+            model_info,
+            tokenizer,
+            prompt_formatter,
+            chat_template_file,
+            gen_config,
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Mutable variant of [`Self::iter_metadata_files`].
+    pub fn iter_metadata_files_mut(&mut self) -> Vec<&mut CheckedFile> {
+        let mut out: Vec<&mut CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_mut() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_mut() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_mut() {
+            out.push(pf_checked_file_mut(p));
+        }
+        if let Some(c) = self.chat_template_file.as_mut() {
+            out.push(pf_checked_file_mut(c));
+        }
+        if let Some(g) = self.gen_config.as_mut() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
     }
 
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.
