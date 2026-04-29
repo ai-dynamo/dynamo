@@ -121,6 +121,54 @@ KVBM_OFFLOAD_G2_TO_G3_PRESENCE_LFU_MIN_LFU_COUNT=3
 KVBM_OFFLOAD_G2_TO_G3_POLICIES='["pass_all"]'
 ```
 
+## Enable and View KVBM Metrics
+
+### Setup Monitoring Stack
+
+```bash
+# Start Prometheus and Grafana (KVBM v2 itself does not require etcd or NATS,
+# but the bundled observability stack is shared with v1 and reused here).
+docker compose -f deploy/docker-observability.yml up -d
+```
+
+### Enable Metrics for vLLM
+
+Set `DYN_KVBM_METRICS=true` when launching the worker. The KVBM metrics endpoint binds to port `6880`; the bundled Prometheus stack scrapes it automatically.
+
+```bash
+DYN_KVBM_METRICS=true \
+DYN_KVBM_CPU_CACHE_GB=20 \
+  python -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.v2.vllm.connector","kv_role":"kv_both"}' \
+    --enforce-eager
+```
+
+### Firewall Configuration (Optional)
+
+```bash
+# If a firewall blocks the KVBM metrics port
+sudo ufw allow 6880/tcp
+```
+
+### View Metrics
+
+Access Grafana at http://localhost:3000 (default login: `dynamo`/`dynamo`) and look for the **KVBM Dashboard**.
+
+### Available Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `kvbm_matched_tokens` | Number of matched tokens |
+| `kvbm_offload_blocks_d2h` | Offload blocks from device to host (G1→G2) |
+| `kvbm_offload_blocks_h2d` | Offload blocks from host to disk (G2→G3) |
+| `kvbm_offload_blocks_d2d` | Offload blocks from device to disk, bypassing host (G1→G3) |
+| `kvbm_onboard_blocks_d2h` | Onboard blocks from disk to host (G3→G2 staging step, v2 only) |
+| `kvbm_onboard_blocks_h2d` | Onboard blocks from host to device (G2→G1) |
+| `kvbm_onboard_blocks_d2d` | Onboard blocks from disk to device direct (G3→G1, e.g. via GDS) |
+| `kvbm_host_cache_hit_rate` | Host cache hit rate (0.0–1.0) |
+| `kvbm_disk_cache_hit_rate` | Disk cache hit rate (0.0–1.0) |
+
 ## Benchmarking
 
 Use [LMBenchmark](https://github.com/LMCache/LMBenchmark) to evaluate KVBM v2 performance, same as v1:
