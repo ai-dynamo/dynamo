@@ -438,6 +438,120 @@ func hasSharedAlphaOnlyFields(src *DynamoComponentDeploymentSharedSpec) bool {
 			src.ExtraPodSpec.MainContainer.Name != "")
 }
 
+func saveSharedAlphaOnlyFields(src *DynamoComponentDeploymentSharedSpec, includeOriginSplits bool) *DynamoComponentDeploymentSharedSpec {
+	if src == nil {
+		return nil
+	}
+	save := &DynamoComponentDeploymentSharedSpec{}
+	hasSave := false
+
+	if src.SubComponentType != "" {
+		save.SubComponentType = src.SubComponentType
+		hasSave = true
+	}
+	if src.DynamoNamespace != nil {
+		save.DynamoNamespace = ptr.To(*src.DynamoNamespace)
+		hasSave = true
+	}
+	if src.Autoscaling != nil {
+		save.Autoscaling = src.Autoscaling.DeepCopy()
+		hasSave = true
+	}
+	if src.Ingress != nil {
+		save.Ingress = src.Ingress.DeepCopy()
+		hasSave = true
+	}
+	if len(src.Annotations) > 0 {
+		save.Annotations = maps.Clone(src.Annotations)
+		hasSave = true
+	}
+	if len(src.Labels) > 0 {
+		save.Labels = maps.Clone(src.Labels)
+		hasSave = true
+	}
+	if src.EnvFromSecret != nil {
+		save.EnvFromSecret = ptr.To(*src.EnvFromSecret)
+		hasSave = true
+	}
+	if resourcesNeedPreservation(src.Resources) {
+		save.Resources = src.Resources.DeepCopy()
+		hasSave = true
+	}
+	if len(src.VolumeMounts) > 0 && !volumeMountsRoundTripThroughHub(src.VolumeMounts) {
+		save.VolumeMounts = slices.Clone(src.VolumeMounts)
+		hasSave = true
+	}
+	if sharedMemoryNeedsPreservation(src.SharedMemory) {
+		save.SharedMemory = src.SharedMemory.DeepCopy()
+		hasSave = true
+	}
+	if extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) {
+		save.ExtraPodMetadata = src.ExtraPodMetadata.DeepCopy()
+		hasSave = true
+	}
+	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) {
+		save.ExtraPodSpec = src.ExtraPodSpec.DeepCopy()
+		hasSave = true
+	}
+	if src.ScalingAdapter != nil && !src.ScalingAdapter.Enabled {
+		save.ScalingAdapter = src.ScalingAdapter.DeepCopy()
+		hasSave = true
+	}
+	if (includeOriginSplits || hasSave) && saveSharedMainContainerOrigins(src, save) {
+		hasSave = true
+	}
+	if !hasSave {
+		return nil
+	}
+	return save
+}
+
+func saveSharedMainContainerOrigins(src, save *DynamoComponentDeploymentSharedSpec) bool {
+	if src == nil || save == nil || src.ExtraPodSpec == nil || src.ExtraPodSpec.MainContainer == nil {
+		return false
+	}
+	main := src.ExtraPodSpec.MainContainer
+	hasSave := false
+
+	if main.Name != "" {
+		ensureExtraPodSpecMainContainer(save).Name = main.Name
+		hasSave = true
+	}
+	if len(src.Envs) > 0 || len(main.Env) > 0 {
+		save.Envs = slices.Clone(src.Envs)
+		ensureExtraPodSpecMainContainer(save).Env = slices.Clone(main.Env)
+		hasSave = true
+	}
+	if src.EnvFromSecret != nil || len(main.EnvFrom) > 0 {
+		if src.EnvFromSecret != nil {
+			save.EnvFromSecret = ptr.To(*src.EnvFromSecret)
+		}
+		ensureExtraPodSpecMainContainer(save).EnvFrom = slices.Clone(main.EnvFrom)
+		hasSave = true
+	}
+	if src.Resources != nil || !resourceRequirementsEqual(main.Resources, corev1.ResourceRequirements{}) {
+		save.Resources = src.Resources.DeepCopy()
+		ensureExtraPodSpecMainContainer(save).Resources = *main.Resources.DeepCopy()
+		hasSave = true
+	}
+	if len(src.VolumeMounts) > 0 || len(main.VolumeMounts) > 0 {
+		save.VolumeMounts = slices.Clone(src.VolumeMounts)
+		ensureExtraPodSpecMainContainer(save).VolumeMounts = cloneNativeVolumeMounts(main.VolumeMounts)
+		hasSave = true
+	}
+	if src.LivenessProbe != nil || main.LivenessProbe != nil {
+		save.LivenessProbe = src.LivenessProbe.DeepCopy()
+		ensureExtraPodSpecMainContainer(save).LivenessProbe = main.LivenessProbe.DeepCopy()
+		hasSave = true
+	}
+	if src.ReadinessProbe != nil || main.ReadinessProbe != nil {
+		save.ReadinessProbe = src.ReadinessProbe.DeepCopy()
+		ensureExtraPodSpecMainContainer(save).ReadinessProbe = main.ReadinessProbe.DeepCopy()
+		hasSave = true
+	}
+	return hasSave
+}
+
 func sharedMemoryNeedsPreservation(src *SharedMemorySpec) bool {
 	if src == nil {
 		return false

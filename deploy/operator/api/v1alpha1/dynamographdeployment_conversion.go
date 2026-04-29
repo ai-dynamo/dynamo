@@ -55,6 +55,27 @@ const (
 	annDGDHubOrigin   = "nvidia.com/dgd-hub-origin"
 )
 
+type dgdConversionContext struct {
+	carrierForComponent func(componentName string) *annCarrier
+	sourceCarrier       func(componentName string) *annCarrier
+	sourceUnmodified    bool
+	includeOriginSplits bool
+}
+
+func (ctx dgdConversionContext) carrier(componentName string) *annCarrier {
+	if ctx.carrierForComponent == nil {
+		return nil
+	}
+	return ctx.carrierForComponent(componentName)
+}
+
+func (ctx dgdConversionContext) originalCarrier(componentName string) *annCarrier {
+	if ctx.sourceCarrier != nil {
+		return ctx.sourceCarrier(componentName)
+	}
+	return ctx.carrier(componentName)
+}
+
 // ConvertTo converts this DynamoGraphDeployment (v1alpha1) into the hub
 // version (v1beta1).
 func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
@@ -78,26 +99,6 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		scrubDGDInternalAnnotations(&dst.ObjectMeta)
 	}
 
-	var semanticSpec v1beta1.DynamoGraphDeploymentSpec
-	semanticSpec.Annotations = maps.Clone(src.Spec.Annotations)
-	semanticSpec.Labels = maps.Clone(src.Spec.Labels)
-	semanticSpec.BackendFramework = src.Spec.BackendFramework
-
-	if src.Spec.Restart != nil {
-		semanticSpec.Restart = convertRestartTo(src.Spec.Restart)
-	}
-	if src.Spec.TopologyConstraint != nil {
-		semanticSpec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{
-			ClusterTopologyName: src.Spec.TopologyConstraint.TopologyProfile,
-			PackDomain:          v1beta1.TopologyDomain(src.Spec.TopologyConstraint.PackDomain),
-		}
-	}
-
-	// DGD.spec.envs -> DGD.spec.env.
-	if len(src.Spec.Envs) > 0 {
-		semanticSpec.Env = slices.Clone(src.Spec.Envs)
-	}
-
 	// DGD.spec.pvcs has no v1beta1 equivalent -- users now declare PVC volumes
 	// directly on podTemplate. Stash as an annotation.
 	if len(src.Spec.PVCs) > 0 {
@@ -107,26 +108,71 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		}
 		setAnnOnObj(&dst.ObjectMeta, annDGDPVCs, string(data))
 	}
+	ctx := dgdConversionContext{
+		includeOriginSplits: !hubOrigin,
+		carrierForComponent: func(componentName string) *annCarrier {
+			return newDGDComponentCarrier(&dst.ObjectMeta, componentName)
+		},
+	}
+	var spokeSave DynamoGraphDeploymentSpec
+	if err := convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, preservedHubSpec, &spokeSave, ctx); err != nil {
+		return err
+	}
+	var statusSave DynamoGraphDeploymentStatus
+	saveDGDAlphaOnlyStatus(&src.Status, &statusSave)
 	preserveSpoke := !hubOrigin ||
-		dgdHasAlphaOnlyFields(&src.Spec) ||
-		dgdStatusHasAlphaOnlyFields(&src.Status)
+		!dgdAlphaSpecSaveIsZero(&spokeSave) ||
+		!dgdAlphaStatusSaveIsZero(&statusSave)
+
+	convertDGDStatusTo(&src.Status, &dst.Status)
+	if preserveSpoke {
+		preserveDGDSpoke(&spokeSave, &statusSave, dst)
+		preserveDGDSpokeHub(dst)
+	}
+	return nil
+}
+
+func convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, ctx dgdConversionContext) error {
+	if src == nil || dst == nil {
+		return nil
+	}
+
+	// Convert fields represented by both versions from the live source.
+	dst.Annotations = maps.Clone(src.Annotations)
+	dst.Labels = maps.Clone(src.Labels)
+	dst.BackendFramework = src.BackendFramework
+
+	if src.Restart != nil {
+		dst.Restart = convertRestartTo(src.Restart)
+	}
+	if src.TopologyConstraint != nil {
+		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{
+			ClusterTopologyName: src.TopologyConstraint.TopologyProfile,
+			PackDomain:          v1beta1.TopologyDomain(src.TopologyConstraint.PackDomain),
+		}
+	}
+	if len(src.Envs) > 0 {
+		dst.Env = slices.Clone(src.Envs)
+	}
+
+	// Restore target-only component leaves from the preserved hub snapshot.
+	preservedHubComponents := preservedDGDHubComponentsByName(restored)
 
 	// Components: v1alpha1 map -> v1beta1 list. Sort by name for a deterministic
 	// emission order; the unordered map cannot faithfully represent the
 	// v1beta1 list order, so round-trip V1 -> A1 -> V2 may reorder entries.
-	// This is called out in the golden-file test fixtures.
-	preservedHubComponents := preservedDGDHubComponentsByName(preservedHubSpec)
-	if len(src.Spec.Services) > 0 {
-		names := slices.Sorted(maps.Keys(src.Spec.Services))
-		semanticSpec.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
-		nilServices := make([]string, 0)
+	if len(src.Services) > 0 {
+		names := slices.Sorted(maps.Keys(src.Services))
+		dst.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
 		for _, name := range names {
-			compSrc := src.Spec.Services[name]
+			compSrc := src.Services[name]
 			if compSrc == nil {
-				nilServices = append(nilServices, name)
 				continue
 			}
-			carrier := newDGDComponentCarrier(&dst.ObjectMeta, name)
+			carrier := ctx.carrier(name)
+			if carrier == nil {
+				return fmt.Errorf("component %q: missing annotation carrier", name)
+			}
 			preservedShared := preservedHubComponents[name]
 			if preservedShared != nil && preservedShared.PodTemplate != nil {
 				carrier.set(suffixPodTemplateOrig, annotationTrue)
@@ -146,30 +192,28 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 			if compSrc.ServiceName != "" && compSrc.ServiceName != name {
 				carrier.set(suffixServiceName, compSrc.ServiceName)
 			}
-			semanticSpec.Components = append(semanticSpec.Components, compDst)
-		}
-		if len(nilServices) > 0 {
-			if data, err := json.Marshal(nilServices); err == nil {
-				setAnnOnObj(&dst.ObjectMeta, annDGDNilServices, string(data))
-			}
+			dst.Components = append(dst.Components, compDst)
 		}
 	}
 
-	dst.Spec = semanticSpec
-	convertDGDStatusTo(&src.Status, &dst.Status)
-	if preserveSpoke {
-		preserveDGDSpoke(src, dst)
-		preserveDGDSpokeHub(dst)
+	if save != nil {
+		saveDGDAlphaOnlySpec(src, save, ctx.includeOriginSplits)
 	}
 	return nil
 }
 
-func preserveDGDSpoke(src *DynamoGraphDeployment, dst *v1beta1.DynamoGraphDeployment) {
-	if data, err := marshalDGDSpokeSpec(&src.Spec); err == nil {
-		setAnnOnObj(&dst.ObjectMeta, annDGDSpokeSpec, string(data))
+func preserveDGDSpoke(specSave *DynamoGraphDeploymentSpec, statusSave *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeployment) {
+	if !dgdAlphaSpecSaveIsZero(specSave) {
+		data, err := marshalDGDSpokeSpec(specSave)
+		if err == nil {
+			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeSpec, string(data))
+		}
 	}
-	if data, err := json.Marshal(src.Status); err == nil {
-		setAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, string(data))
+	if !dgdAlphaStatusSaveIsZero(statusSave) {
+		data, err := json.Marshal(statusSave)
+		if err == nil {
+			setAnnOnObj(&dst.ObjectMeta, annDGDSpokeStatus, string(data))
+		}
 	}
 }
 
@@ -265,34 +309,114 @@ func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *Dy
 	}
 }
 
-func dgdHasAlphaOnlyFields(src *DynamoGraphDeploymentSpec) bool {
-	if src == nil {
-		return false
+func saveDGDAlphaOnlySpec(src *DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, includeOriginSplits bool) {
+	if src == nil || save == nil {
+		return
 	}
 	if len(src.PVCs) > 0 {
-		return true
+		save.PVCs = slices.Clone(src.PVCs)
 	}
-	for _, svc := range src.Services {
+	for name, svc := range src.Services {
 		if svc == nil {
-			return true
+			if save.Services == nil {
+				save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+			}
+			save.Services[name] = nil
+			continue
 		}
-		if hasSharedAlphaOnlyFields(svc) {
-			return true
+		if sharedSave := saveSharedAlphaOnlyFields(svc, includeOriginSplits); sharedSave != nil {
+			if save.Services == nil {
+				save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+			}
+			save.Services[name] = sharedSave
 		}
 	}
-	return false
 }
 
-func dgdStatusHasAlphaOnlyFields(src *DynamoGraphDeploymentStatus) bool {
-	if src == nil {
-		return false
+func dgdAlphaSpecSaveIsZero(save *DynamoGraphDeploymentSpec) bool {
+	return save == nil ||
+		len(save.PVCs) == 0 &&
+			len(save.Services) == 0
+}
+
+func saveDGDAlphaOnlyStatus(src *DynamoGraphDeploymentStatus, save *DynamoGraphDeploymentStatus) {
+	if src == nil || save == nil {
+		return
 	}
-	for _, svc := range src.Services {
-		if serviceStatusComponentNameNeedsPreservation(&svc) {
-			return true
+	for name, svc := range src.Services {
+		if !serviceStatusComponentNameNeedsPreservation(&svc) {
+			continue
+		}
+		if save.Services == nil {
+			save.Services = map[string]ServiceReplicaStatus{}
+		}
+		save.Services[name] = ServiceReplicaStatus{
+			ComponentName:  svc.ComponentName,
+			ComponentNames: slices.Clone(svc.ComponentNames),
 		}
 	}
-	return false
+}
+
+func dgdAlphaStatusSaveIsZero(save *DynamoGraphDeploymentStatus) bool {
+	return save == nil || len(save.Services) == 0
+}
+
+func saveDGDHubOnlySpec(src *v1beta1.DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx dgdConversionContext) {
+	if src == nil || save == nil {
+		return
+	}
+	for i := range src.Components {
+		comp := &src.Components[i]
+		var compSave v1beta1.DynamoComponentDeploymentSharedSpec
+		compSave.ComponentName = comp.ComponentName
+		if dgdFrontendSidecarNeedsPreservationInContext(ctx, comp) {
+			compSave.FrontendSidecar = ptr.To(*comp.FrontendSidecar)
+		}
+		if comp.PodTemplate != nil && !dgdGeneratedPodTemplateUnmodifiedInContext(ctx, comp.ComponentName) {
+			compSave.PodTemplate = comp.PodTemplate.DeepCopy()
+		}
+		if experimentalIsHubOnlyShape(comp.Experimental) {
+			compSave.Experimental = comp.Experimental.DeepCopy()
+		}
+		if !dgdHubComponentSaveIsZero(&compSave) {
+			save.Components = append(save.Components, compSave)
+		}
+	}
+}
+
+func dgdFrontendSidecarNeedsPreservationInContext(ctx dgdConversionContext, comp *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if comp == nil || comp.FrontendSidecar == nil {
+		return false
+	}
+	carrier := ctx.originalCarrier(comp.ComponentName)
+	if carrier == nil {
+		return *comp.FrontendSidecar != defaultFrontendSidecarContainerName
+	}
+	_, hasV1Alpha1Origin := carrier.get(suffixFrontendSidecar)
+	return !hasV1Alpha1Origin || *comp.FrontendSidecar != defaultFrontendSidecarContainerName
+}
+
+func dgdGeneratedPodTemplateUnmodifiedInContext(ctx dgdConversionContext, componentName string) bool {
+	if !ctx.sourceUnmodified {
+		return false
+	}
+	carrier := ctx.originalCarrier(componentName)
+	if carrier == nil {
+		return false
+	}
+	v, ok := carrier.get(suffixPodTemplateOrig)
+	return ok && v == annotationPodTemplateGenerated
+}
+
+func dgdHubSpecSaveIsZero(save *v1beta1.DynamoGraphDeploymentSpec) bool {
+	return save == nil || len(save.Components) == 0
+}
+
+func dgdHubComponentSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return save == nil ||
+		save.FrontendSidecar == nil &&
+			save.PodTemplate == nil &&
+			save.Experimental == nil
 }
 
 func serviceStatusComponentNameNeedsPreservation(src *ServiceReplicaStatus) bool {
@@ -339,25 +463,8 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	preservedSpokeSpec, preservedSpokeStatus := decodeDGDSpokePreserved(&dst.ObjectMeta)
+	_, hadSpokeHubSnapshot := getAnnFromObj(&dst.ObjectMeta, annDGDSpokeHub)
 	spokeHubUnmodified := dgdSpokeHubUnmodified(src)
-
-	dst.Spec.Annotations = maps.Clone(src.Spec.Annotations)
-	dst.Spec.Labels = maps.Clone(src.Spec.Labels)
-	dst.Spec.BackendFramework = src.Spec.BackendFramework
-
-	if src.Spec.Restart != nil {
-		dst.Spec.Restart = convertRestartFrom(src.Spec.Restart)
-	}
-	if src.Spec.TopologyConstraint != nil {
-		dst.Spec.TopologyConstraint = &SpecTopologyConstraint{
-			TopologyProfile: src.Spec.TopologyConstraint.ClusterTopologyName,
-			PackDomain:      TopologyDomain(src.Spec.TopologyConstraint.PackDomain),
-		}
-	}
-
-	if len(src.Spec.Env) > 0 {
-		dst.Spec.Envs = slices.Clone(src.Spec.Env)
-	}
 
 	if v, ok := getAnnFromObj(&dst.ObjectMeta, annDGDPVCs); ok {
 		var pvcs []PVC
@@ -367,41 +474,18 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		delAnnFromObj(&dst.ObjectMeta, annDGDPVCs)
 	}
 
-	if len(src.Spec.Components) > 0 {
-		dst.Spec.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Spec.Components))
-		for i := range src.Spec.Components {
-			compSrc := &src.Spec.Components[i]
-			// v1beta1 declares +listType=map +listMapKey=name so
-			// the API server normally rejects duplicates, but the
-			// conversion path is also reached from in-memory unit-test
-			// fixtures and other code paths that bypass CRD validation.
-			// Surface duplicates here as a hard error rather than
-			// silently overwriting the earlier entry on map insertion.
-			if _, dup := dst.Spec.Services[compSrc.ComponentName]; dup {
-				return fmt.Errorf("duplicate component name %q in spec.components", compSrc.ComponentName)
-			}
-			carrier := newDGDComponentCarrier(&dst.ObjectMeta, compSrc.ComponentName)
-			compDst := &DynamoComponentDeploymentSharedSpec{}
-			var preservedShared *DynamoComponentDeploymentSharedSpec
-			if preservedSpokeSpec != nil && preservedSpokeSpec.Services != nil {
-				preservedShared = preservedSpokeSpec.Services[compSrc.ComponentName]
-			}
-			if err := convertSharedSpecFrom(compSrc, compDst, carrier, preservedShared); err != nil {
-				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
-			}
-			// In v1alpha1 the services-map key is the canonical name; the
-			// per-entry ServiceName field is redundant. Restore a non-matching
-			// legacy ServiceName from the origin annotation if present;
-			// otherwise leave it empty so v1beta1-first inputs round-trip
-			// without spurious values.
-			if v, ok := carrier.get(suffixServiceName); ok {
-				compDst.ServiceName = v
-				carrier.del(suffixServiceName)
-			} else {
-				compDst.ServiceName = ""
-			}
-			dst.Spec.Services[compSrc.ComponentName] = compDst
-		}
+	ctx := dgdConversionContext{
+		sourceUnmodified: spokeHubUnmodified,
+		carrierForComponent: func(componentName string) *annCarrier {
+			return newDGDComponentCarrier(&dst.ObjectMeta, componentName)
+		},
+		sourceCarrier: func(componentName string) *annCarrier {
+			return newDGDComponentCarrier(&src.ObjectMeta, componentName)
+		},
+	}
+	var hubSave v1beta1.DynamoGraphDeploymentSpec
+	if err := convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, preservedSpokeSpec, &hubSave, ctx); err != nil {
+		return err
 	}
 	if v, ok := getAnnFromObj(&dst.ObjectMeta, annDGDNilServices); ok {
 		var nilServices []string
@@ -421,17 +505,86 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	convertDGDStatusFrom(&src.Status, &dst.Status)
 	fillDGDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus)
 	scrubStaleDGDAnnotations(&dst.ObjectMeta, dst.Spec.Services)
-	if preservedSpokeSpec != nil || preservedSpokeStatus != nil {
+	if preservedSpokeSpec != nil || preservedSpokeStatus != nil || hadSpokeHubSnapshot {
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec)
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus)
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeHub)
 	}
-	if dgdNeedsHubSpecPreservation(src, spokeHubUnmodified) {
-		if data, err := marshalDGDHubSpec(&src.Spec); err == nil {
+	if !dgdHubSpecSaveIsZero(&hubSave) {
+		if data, err := marshalDGDHubSpec(&hubSave); err == nil {
 			setAnnOnObj(&dst.ObjectMeta, annDGDHubSpec, string(data))
 		}
 	} else if !hasDGDInternalAnnotations(src.ObjectMeta.Annotations) {
 		setAnnOnObj(&dst.ObjectMeta, annDGDHubOrigin, annotationTrue)
+	}
+	return nil
+}
+
+func convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx dgdConversionContext) error {
+	if src == nil || dst == nil {
+		return nil
+	}
+
+	// Convert fields represented by both versions from the live source.
+	dst.Annotations = maps.Clone(src.Annotations)
+	dst.Labels = maps.Clone(src.Labels)
+	dst.BackendFramework = src.BackendFramework
+
+	if src.Restart != nil {
+		dst.Restart = convertRestartFrom(src.Restart)
+	}
+	if src.TopologyConstraint != nil {
+		dst.TopologyConstraint = &SpecTopologyConstraint{
+			TopologyProfile: src.TopologyConstraint.ClusterTopologyName,
+			PackDomain:      TopologyDomain(src.TopologyConstraint.PackDomain),
+		}
+	}
+	if len(src.Env) > 0 {
+		dst.Envs = slices.Clone(src.Env)
+	}
+
+	if len(src.Components) > 0 {
+		dst.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Components))
+		for i := range src.Components {
+			compSrc := &src.Components[i]
+			// v1beta1 declares +listType=map +listMapKey=name so
+			// the API server normally rejects duplicates, but the
+			// conversion path is also reached from in-memory unit-test
+			// fixtures and other code paths that bypass CRD validation.
+			// Surface duplicates here as a hard error rather than
+			// silently overwriting the earlier entry on map insertion.
+			if _, dup := dst.Services[compSrc.ComponentName]; dup {
+				return fmt.Errorf("duplicate component name %q in spec.components", compSrc.ComponentName)
+			}
+			carrier := ctx.carrier(compSrc.ComponentName)
+			if carrier == nil {
+				return fmt.Errorf("component %q: missing annotation carrier", compSrc.ComponentName)
+			}
+			compDst := &DynamoComponentDeploymentSharedSpec{}
+			var preservedShared *DynamoComponentDeploymentSharedSpec
+			if restored != nil && restored.Services != nil {
+				preservedShared = restored.Services[compSrc.ComponentName]
+			}
+			if err := convertSharedSpecFrom(compSrc, compDst, carrier, preservedShared); err != nil {
+				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
+			}
+			// In v1alpha1 the services-map key is the canonical name; the
+			// per-entry ServiceName field is redundant. Restore a non-matching
+			// legacy ServiceName from the origin annotation if present;
+			// otherwise leave it empty so v1beta1-first inputs round-trip
+			// without spurious values.
+			if v, ok := carrier.get(suffixServiceName); ok {
+				compDst.ServiceName = v
+				carrier.del(suffixServiceName)
+			} else {
+				compDst.ServiceName = ""
+			}
+			dst.Services[compSrc.ComponentName] = compDst
+		}
+	}
+
+	if save != nil {
+		saveDGDHubOnlySpec(src, save, ctx)
 	}
 	return nil
 }
@@ -474,39 +627,6 @@ func restoreDGDSpokeSpec(raw string) (DynamoGraphDeploymentSpec, bool) {
 			}
 		}
 	})
-}
-
-func dgdNeedsHubSpecPreservation(src *v1beta1.DynamoGraphDeployment, sourceUnmodified bool) bool {
-	for i := range src.Spec.Components {
-		comp := &src.Spec.Components[i]
-		if dgdFrontendSidecarNeedsPreservation(src, comp) {
-			return true
-		}
-		if comp.PodTemplate != nil &&
-			!dgdGeneratedPodTemplateUnmodified(src, comp.ComponentName, sourceUnmodified) {
-			return true
-		}
-		if experimentalIsHubOnlyShape(comp.Experimental) {
-			return true
-		}
-	}
-	return false
-}
-
-func dgdFrontendSidecarNeedsPreservation(src *v1beta1.DynamoGraphDeployment, comp *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	if comp.FrontendSidecar == nil {
-		return false
-	}
-	_, hasV1Alpha1Origin := newDGDComponentCarrier(&src.ObjectMeta, comp.ComponentName).get(suffixFrontendSidecar)
-	return !hasV1Alpha1Origin || *comp.FrontendSidecar != defaultFrontendSidecarContainerName
-}
-
-func dgdGeneratedPodTemplateUnmodified(src *v1beta1.DynamoGraphDeployment, componentName string, sourceUnmodified bool) bool {
-	if !sourceUnmodified {
-		return false
-	}
-	v, ok := newDGDComponentCarrier(&src.ObjectMeta, componentName).get(suffixPodTemplateOrig)
-	return ok && v == annotationPodTemplateGenerated
 }
 
 func hasDGDInternalAnnotations(annotations map[string]string) bool {
