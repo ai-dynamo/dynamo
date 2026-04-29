@@ -584,14 +584,6 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}'
 ```
-
-### Verified Models
-
-| Model | Status | Notes |
-|-------|--------|-------|
-| Qwen/Qwen2-0.5B | ✅ Working | |
-| Qwen/Qwen3-0.6B | ✅ Working | Requires sgl-kernel-xpu ≥ c668bb67 (rmsnorm 3D tensor fix) |
-
 ### XPU Requirements
 
 - **Hardware**: Intel Data Center GPU Max Series (e.g., Max 1550) or Intel Arc B-Series (BMG, e.g., B580)
