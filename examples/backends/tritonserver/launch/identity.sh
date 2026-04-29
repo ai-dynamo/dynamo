@@ -23,7 +23,7 @@ TRITON_DIR="$(dirname "$SCRIPT_DIR")"
 # Default values
 MODEL_NAME="identity"
 MODEL_REPO="${TRITON_DIR}/model_repo"
-BACKEND_DIR="${TRITON_DIR}/backends"
+BACKEND_DIR="${BACKEND_DIR:-${TRITON_DIR}/backends}"
 LOG_VERBOSE=1
 DISCOVERY_BACKEND="${DYN_DISCOVERY_BACKEND:-file}"  # Default to file-based discovery (no etcd required)
 
@@ -65,6 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help                  Show this help message"
             echo ""
             echo "Environment variables:"
+            echo "  BACKEND_DIR             Override default Triton backends path"
             echo "  DYN_DISCOVERY_BACKEND  Discovery backend (default: file)"
             echo "  DYN_HTTP_PORT    Frontend HTTP port (default: 8000)"
             echo "  DYN_SYSTEM_PORT  Worker metrics port (default: 8081)"
@@ -126,4 +127,3 @@ python3 "${TRITON_DIR}/src/tritonworker.py" \
     --backend-directory "$BACKEND_DIR" \
     --log-verbose "$LOG_VERBOSE" \
     "${EXTRA_ARGS[@]}"
-
