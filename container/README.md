@@ -114,9 +114,11 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 
 ### 1. runtime target (runs as non-root dynamo user):
 ```bash
-# Build runtime image
+# Generate Dockerfile with runtime and runtime_test stages
 container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+
+# Build runtime stage
+docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile --target runtime .
 
 # Run runtime container
 container/run.sh --image dynamo:latest-vllm-runtime -it
@@ -126,7 +128,9 @@ container/run.sh --image dynamo:latest-vllm-runtime -it
 ```bash
 # Generate the Dockerfile first (runtime_test stage is included automatically), then build
 container/render.py --target=runtime --framework=vllm --output-short-filename
-docker build -f container/rendered.Dockerfile --target runtime_test -t dynamo:latest-vllm-test .
+
+# Build runtime_test stage
+docker build -t dynamo:latest-vllm-test -f container/rendered.Dockerfile --target runtime_test .
 ```
 
 ### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
