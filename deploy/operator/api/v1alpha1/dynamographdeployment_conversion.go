@@ -69,13 +69,6 @@ func (ctx dgdConversionContext) carrier(componentName string) *annCarrier {
 	return ctx.carrierForComponent(componentName)
 }
 
-func (ctx dgdConversionContext) originalCarrier(componentName string) *annCarrier {
-	if ctx.sourceCarrier != nil {
-		return ctx.sourceCarrier(componentName)
-	}
-	return ctx.carrier(componentName)
-}
-
 // ConvertTo converts this DynamoGraphDeployment (v1alpha1) into the hub
 // version (v1beta1).
 func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
@@ -154,6 +147,9 @@ func convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeployment
 	if len(src.Envs) > 0 {
 		dst.Env = slices.Clone(src.Envs)
 	}
+	if save != nil && len(src.PVCs) > 0 {
+		save.PVCs = slices.Clone(src.PVCs)
+	}
 
 	// Restore target-only component leaves from the preserved hub snapshot.
 	preservedHubComponents := preservedDGDHubComponentsByName(restored)
@@ -167,6 +163,12 @@ func convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeployment
 		for _, name := range names {
 			compSrc := src.Services[name]
 			if compSrc == nil {
+				if save != nil {
+					if save.Services == nil {
+						save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+					}
+					save.Services[name] = nil
+				}
 				continue
 			}
 			carrier := ctx.carrier(name)
@@ -178,7 +180,15 @@ func convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeployment
 				carrier.set(suffixPodTemplateOrig, annotationTrue)
 			}
 			var compDst v1beta1.DynamoComponentDeploymentSharedSpec
-			if err := convertSharedSpecTo(compSrc, &compDst, carrier, preservedShared); err != nil {
+			var compSave *DynamoComponentDeploymentSharedSpec
+			if save != nil {
+				compSave = &DynamoComponentDeploymentSharedSpec{}
+			}
+			sharedCtx := sharedSpecConversionContext{
+				carrier:             carrier,
+				includeOriginSplits: ctx.includeOriginSplits,
+			}
+			if err := convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(compSrc, &compDst, preservedShared, compSave, sharedCtx); err != nil {
 				return fmt.Errorf("component %q: %w", name, err)
 			}
 			// In v1alpha1 DGD, the services-map key is the canonical name and
@@ -192,13 +202,16 @@ func convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeployment
 			if compSrc.ServiceName != "" && compSrc.ServiceName != name {
 				carrier.set(suffixServiceName, compSrc.ServiceName)
 			}
+			if save != nil && !sharedAlphaSpecSaveIsZero(compSave) {
+				if save.Services == nil {
+					save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+				}
+				save.Services[name] = compSave
+			}
 			dst.Components = append(dst.Components, compDst)
 		}
 	}
 
-	if save != nil {
-		saveDGDAlphaOnlySpec(src, save, ctx.includeOriginSplits)
-	}
 	return nil
 }
 
@@ -309,30 +322,6 @@ func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *Dy
 	}
 }
 
-func saveDGDAlphaOnlySpec(src *DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, includeOriginSplits bool) {
-	if src == nil || save == nil {
-		return
-	}
-	if len(src.PVCs) > 0 {
-		save.PVCs = slices.Clone(src.PVCs)
-	}
-	for name, svc := range src.Services {
-		if svc == nil {
-			if save.Services == nil {
-				save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
-			}
-			save.Services[name] = nil
-			continue
-		}
-		if sharedSave := saveSharedAlphaOnlyFields(svc, includeOriginSplits); sharedSave != nil {
-			if save.Services == nil {
-				save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
-			}
-			save.Services[name] = sharedSave
-		}
-	}
-}
-
 func dgdAlphaSpecSaveIsZero(save *DynamoGraphDeploymentSpec) bool {
 	return save == nil ||
 		len(save.PVCs) == 0 &&
@@ -361,62 +350,12 @@ func dgdAlphaStatusSaveIsZero(save *DynamoGraphDeploymentStatus) bool {
 	return save == nil || len(save.Services) == 0
 }
 
-func saveDGDHubOnlySpec(src *v1beta1.DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx dgdConversionContext) {
-	if src == nil || save == nil {
-		return
-	}
-	for i := range src.Components {
-		comp := &src.Components[i]
-		var compSave v1beta1.DynamoComponentDeploymentSharedSpec
-		compSave.ComponentName = comp.ComponentName
-		if dgdFrontendSidecarNeedsPreservationInContext(ctx, comp) {
-			compSave.FrontendSidecar = ptr.To(*comp.FrontendSidecar)
-		}
-		if comp.PodTemplate != nil && !dgdGeneratedPodTemplateUnmodifiedInContext(ctx, comp.ComponentName) {
-			compSave.PodTemplate = comp.PodTemplate.DeepCopy()
-		}
-		if experimentalIsHubOnlyShape(comp.Experimental) {
-			compSave.Experimental = comp.Experimental.DeepCopy()
-		}
-		if !dgdHubComponentSaveIsZero(&compSave) {
-			save.Components = append(save.Components, compSave)
-		}
-	}
-}
-
-func dgdFrontendSidecarNeedsPreservationInContext(ctx dgdConversionContext, comp *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	if comp == nil || comp.FrontendSidecar == nil {
-		return false
-	}
-	carrier := ctx.originalCarrier(comp.ComponentName)
-	if carrier == nil {
-		return *comp.FrontendSidecar != defaultFrontendSidecarContainerName
-	}
-	_, hasV1Alpha1Origin := carrier.get(suffixFrontendSidecar)
-	return !hasV1Alpha1Origin || *comp.FrontendSidecar != defaultFrontendSidecarContainerName
-}
-
-func dgdGeneratedPodTemplateUnmodifiedInContext(ctx dgdConversionContext, componentName string) bool {
-	if !ctx.sourceUnmodified {
-		return false
-	}
-	carrier := ctx.originalCarrier(componentName)
-	if carrier == nil {
-		return false
-	}
-	v, ok := carrier.get(suffixPodTemplateOrig)
-	return ok && v == annotationPodTemplateGenerated
-}
-
 func dgdHubSpecSaveIsZero(save *v1beta1.DynamoGraphDeploymentSpec) bool {
 	return save == nil || len(save.Components) == 0
 }
 
 func dgdHubComponentSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return save == nil ||
-		save.FrontendSidecar == nil &&
-			save.PodTemplate == nil &&
-			save.Experimental == nil
+	return sharedHubSpecSaveIsZero(save)
 }
 
 func serviceStatusComponentNameNeedsPreservation(src *ServiceReplicaStatus) bool {
@@ -565,7 +504,20 @@ func convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeployment
 			if restored != nil && restored.Services != nil {
 				preservedShared = restored.Services[compSrc.ComponentName]
 			}
-			if err := convertSharedSpecFrom(compSrc, compDst, carrier, preservedShared); err != nil {
+			var compSave *v1beta1.DynamoComponentDeploymentSharedSpec
+			if save != nil {
+				compSave = &v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: compSrc.ComponentName,
+				}
+			}
+			sharedCtx := sharedSpecConversionContext{
+				carrier:          carrier,
+				sourceUnmodified: ctx.sourceUnmodified,
+			}
+			if ctx.sourceCarrier != nil {
+				sharedCtx.sourceCarrier = ctx.sourceCarrier(compSrc.ComponentName)
+			}
+			if err := convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec(compSrc, compDst, preservedShared, compSave, sharedCtx); err != nil {
 				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
 			}
 			// In v1alpha1 the services-map key is the canonical name; the
@@ -580,12 +532,12 @@ func convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeployment
 				compDst.ServiceName = ""
 			}
 			dst.Services[compSrc.ComponentName] = compDst
+			if save != nil && !dgdHubComponentSaveIsZero(compSave) {
+				save.Components = append(save.Components, *compSave)
+			}
 		}
 	}
 
-	if save != nil {
-		saveDGDHubOnlySpec(src, save, ctx)
-	}
 	return nil
 }
 

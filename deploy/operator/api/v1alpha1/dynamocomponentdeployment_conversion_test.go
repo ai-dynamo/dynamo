@@ -106,6 +106,46 @@ func TestDCD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	}
 }
 
+func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "default-name", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			BackendFramework: backendFrameworkSGLang,
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				ComponentType: string(v1beta1.ComponentTypeWorker),
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if hub.Spec.ComponentName != "default-name" {
+		t.Fatalf("expected omitted serviceName to default to metadata.name, got %q", hub.Spec.ComponentName)
+	}
+	if v, ok := hub.Annotations[annDCDPrefix+suffixServiceName]; !ok || v != "" {
+		t.Fatalf("expected empty service-name origin annotation, got %v", hub.Annotations)
+	}
+
+	roundTripped := &DynamoComponentDeployment{}
+	if err := roundTripped.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if roundTripped.Spec.ServiceName != "" {
+		t.Fatalf("expected omitted serviceName to round-trip as empty, got %q", roundTripped.Spec.ServiceName)
+	}
+
+	hub.Spec.ComponentName = "live-edit"
+	edited := &DynamoComponentDeployment{}
+	if err := edited.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom edited hub: %v", err)
+	}
+	if edited.Spec.ServiceName != "live-edit" {
+		t.Fatalf("expected live hub name edit to win over stale origin marker, got %q", edited.Spec.ServiceName)
+	}
+}
+
 func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
 	src := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
@@ -544,8 +584,9 @@ func TestDCD_FromV1alpha1_AnnotationPreservedFields(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	// Suffix list deliberately excludes "service-name" (DGD-only suffix:
-	// for standalone DCDs ServiceName flows directly into ComponentName)
+	// Suffix list deliberately excludes "service-name" (only emitted for the
+	// standalone DCD case where v1alpha1 omitted ServiceName and v1beta1 used
+	// ObjectMeta.Name as the required ComponentName fallback)
 	// and "shared-memory-origin" (only emitted for the empty-struct edge
 	// case; SharedMemorySpec{Disabled:true} is canonically encoded as
 	// SharedMemorySize=0 without an annotation).
