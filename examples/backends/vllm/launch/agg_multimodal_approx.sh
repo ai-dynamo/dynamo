@@ -23,6 +23,18 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 
+# Frontend image decode + NIXL hand-off. Default ON: the Rust frontend
+# decodes the image and ships pre-decoded bytes via NIXL/SHM instead of
+# forwarding the full chat-completion JSON (1 MB+ for datauri) over TCP.
+# Disables itself with FRONTEND_DECODING=false if NIXL isn't available.
+FRONTEND_DECODING="${FRONTEND_DECODING:-true}"
+
+# Pass-through extra args for `python -m dynamo.vllm` (word-split intentionally).
+VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
+if [[ "${FRONTEND_DECODING}" == "true" ]]; then
+    VLLM_EXTRA_ARGS="--frontend-decoding ${VLLM_EXTRA_ARGS}"
+fi
+
 echo "=== Native MM Approx Routing Launch ==="
 echo "MODEL=${MODEL}, NUM_WORKERS=${NUM_WORKERS}, BLOCK_SIZE=${BLOCK_SIZE}"
 
@@ -62,7 +74,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --block-size "${BLOCK_SIZE}" \
         --enforce-eager \
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
-        --max-model-len "${MAX_MODEL_LEN}" &
+        --max-model-len "${MAX_MODEL_LEN}" \
+        ${VLLM_EXTRA_ARGS} &
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
