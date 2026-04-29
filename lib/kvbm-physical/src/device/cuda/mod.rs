@@ -285,8 +285,16 @@ impl dynamo_memory::PinnedAllocator for CudaPinnedAllocator {
 ///
 /// Uses `catch_unwind` because cudarc panics (instead of returning `Err`)
 /// when `libcuda.so` is not present on the system.
+///
+/// Temporarily suppresses the default panic hook to avoid noisy stderr output
+/// on XPU-only systems where libcuda.so is absent.
 pub fn is_available() -> bool {
-    std::panic::catch_unwind(|| cudarc::driver::CudaContext::new(0).is_ok()).unwrap_or(false)
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result =
+        std::panic::catch_unwind(|| cudarc::driver::CudaContext::new(0).is_ok()).unwrap_or(false);
+    std::panic::set_hook(prev_hook);
+    result
 }
 
 /// CUDA memory pool wrapper implementing DeviceMemPoolOps.
