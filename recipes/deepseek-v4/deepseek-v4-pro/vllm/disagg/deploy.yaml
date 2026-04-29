@@ -121,13 +121,8 @@ spec:
             - -c
           args:
             - |
-              # Park a TCP listener on :29500 so the operator's wait-for-leader-mp
-              # init container probe succeeds (vLLM hybrid-lb uses an OS-assigned port).
-              nohup python3 -u -c 'import socketserver
-              class H(socketserver.BaseRequestHandler):
-                  def handle(self): self.request.close()
-              socketserver.TCPServer.allow_reuse_address = True
-              socketserver.TCPServer(("0.0.0.0", 29500), H).serve_forever()' >/dev/null 2>&1 &
+              # Bind vLLM's DP coordinator on :29500 so the operator's wait-for-leader-mp
+              # init container's TCP probe is satisfied by the real RPC server.
               exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
@@ -137,6 +132,7 @@ spec:
                 --tensor-parallel-size 1 \
                 --pipeline-parallel-size 1 \
                 --data-parallel-size 8 \
+                --data-parallel-rpc-port 29500 \
                 --disaggregation-mode prefill \
                 --enable-expert-parallel \
                 --enforce-eager \
@@ -232,11 +228,7 @@ spec:
             - -c
           args:
             - |
-              nohup python3 -u -c 'import socketserver
-              class H(socketserver.BaseRequestHandler):
-                  def handle(self): self.request.close()
-              socketserver.TCPServer.allow_reuse_address = True
-              socketserver.TCPServer(("0.0.0.0", 29500), H).serve_forever()' >/dev/null 2>&1 &
+              # See VllmPrefillWorker for the :29500 / wait-for-leader-mp rationale.
               exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
@@ -246,6 +238,7 @@ spec:
                 --tensor-parallel-size 1 \
                 --pipeline-parallel-size 1 \
                 --data-parallel-size 8 \
+                --data-parallel-rpc-port 29500 \
                 --enable-expert-parallel \
                 --max-model-len 9280 \
                 --max-num-seqs 128 \
