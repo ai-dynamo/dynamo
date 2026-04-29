@@ -947,7 +947,15 @@ impl ModelDeploymentCard {
             "resolved model metadata files",
         );
 
-        self.update_dir(&slug_dir);
+        // Rewrite every populated slot's CheckedFile to point at the
+        // per-(slug, mdcsum) cache. We can't use `self.update_dir` here
+        // because its `is_custom` exclusion is meant for the legacy
+        // `hub::from_hf` fall-through (which doesn't fetch custom
+        // templates) — but we *did* fetch every slot above, including
+        // any custom template, so they all live in `slug_dir` now.
+        for cf in self.iter_metadata_files_mut() {
+            cf.update_dir(&slug_dir);
+        }
         Ok(())
     }
 
