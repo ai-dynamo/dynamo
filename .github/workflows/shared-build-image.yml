@@ -294,7 +294,7 @@ jobs:
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ${{ inputs.extra_build_args }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ inputs.target != 'dev' }} && ${{ inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -302,7 +302,7 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ inputs.target != 'dev' }} && ${{ inputs.target != 'frontend' }}
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
