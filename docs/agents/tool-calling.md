@@ -53,6 +53,7 @@ parser exists for this format.
 | `deepseek_v3_2` | DeepSeek V3.2+ | Dynamo-only | DSML tags (`<｜DSML｜function_calls>...`) |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4` |
 | `default` | *(fallback)* | Dynamo-only | Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use. |
+| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja` |
 | `glm47` | GLM-4.5, GLM-4.7 | Dynamo-only | XML `<arg_key>/<arg_value>` |
 | `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel format |
 | `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models) | `<tool_call>` JSON |
