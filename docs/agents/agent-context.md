@@ -51,26 +51,41 @@ the trace record as `request.x_request_id`.
 ## Enabling Trace Output
 
 Set `DYN_AGENT_TRACE_SINKS` before starting Dynamo. Use `jsonl` for local
-trace files, `stderr` for development logging, or both:
+trace files, `jsonl_gz` for rotating compressed trace segments, `stderr` for
+development logging, or a comma-separated list:
 
 ```bash
-export DYN_AGENT_TRACE_SINKS=jsonl,stderr
+export DYN_AGENT_TRACE_SINKS=jsonl_gz,stderr
 export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
 export DYN_AGENT_TRACE_CAPACITY=1024
 ```
 
+Minimum setup for rotating compressed traces:
+
+```bash
+export DYN_AGENT_TRACE_SINKS=jsonl_gz
+export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
+```
+
 | Environment Variable | Required | Default | Description |
 |----------------------|:--------:|---------|-------------|
-| `DYN_AGENT_TRACE_SINKS` | Yes | unset | Enables agent tracing and selects sinks. Supported values: `jsonl`, `stderr`, or a comma-separated list such as `jsonl,stderr`. |
-| `DYN_AGENT_TRACE_JSONL_PATH` | If `jsonl` is selected | unset | Local JSONL output path. |
+| `DYN_AGENT_TRACE_SINKS` | Yes | unset | Enables agent tracing and selects sinks. Supported values: `jsonl`, `jsonl_gz`, `stderr`, or a comma-separated list such as `jsonl_gz,stderr`. |
+| `DYN_AGENT_TRACE_JSONL_PATH` | If `jsonl` or `jsonl_gz` is selected | unset | Local JSONL output path or compressed segment prefix. |
 | `DYN_AGENT_TRACE_CAPACITY` | No | `1024` | In-process trace bus capacity. |
-| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES` | No | `1048576` | JSONL writer buffer size. |
-| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. |
+| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES` | No | `1048576` | JSONL writer buffer size. For `jsonl_gz`, this is the max uncompressed batch size before appending a complete gzip member. |
+| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member. |
+| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES` | No | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes. |
+| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES` | No | unset | Optional `jsonl_gz` segment roll threshold in records. |
 
-The JSONL sink writes one recorder JSON object per line:
-`{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The `stderr`
+The `jsonl` sink writes one recorder JSON object per line:
+`{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The
+`jsonl_gz` sink writes the same JSONL records into numbered compressed segments
+derived from `DYN_AGENT_TRACE_JSONL_PATH`, such as
+`/tmp/dynamo-agent-trace.000000.jsonl.gz` and
+`/tmp/dynamo-agent-trace.000001.jsonl.gz`. Each flush appends a complete gzip
+member, so standard gzip tools can read the concatenated stream. The `stderr`
 sink logs the normalized trace event as a structured `agent_trace` log record.
-Both sinks are best-effort telemetry for debugging and offline profiling. They
+All sinks are best-effort telemetry for debugging and offline profiling. They
 are not durable audit logs.
 
 ## Operator Notes
@@ -78,9 +93,11 @@ are not durable audit logs.
 - Agent request trace emission is currently wired for `/v1/chat/completions`.
 - `DYN_AGENT_TRACE_SINKS` is the enable switch. Setting
   `DYN_AGENT_TRACE_JSONL_PATH` alone does not enable tracing.
-- The JSONL sink appends to the configured path and does not rotate or enforce a
-  maximum file size. Enable it for bounded debug/profiling runs, not as a
+- The `jsonl` sink appends to the configured path and does not rotate or enforce
+  a maximum file size. Enable it for bounded debug/profiling runs, not as a
   long-running production sink.
+- The `jsonl_gz` sink rotates compressed segments and is the preferred local
+  file sink for long profiling or RL runs.
 
 ## Request-End Record
 
@@ -119,5 +136,5 @@ Nullable fields are omitted when the serving path did not record them.
 
 - `agent_context` is passive metadata.
 - Dynamo emits request-end trace records when agent tracing is enabled.
-- `jsonl` and `stderr` are local debug/profiling sinks.
+- `jsonl`, `jsonl_gz`, and `stderr` are local debug/profiling sinks.
 - Future scheduler/profiler consumers should read the normalized trace bus.

@@ -8,6 +8,7 @@ use dynamo_runtime::config::environment_names::llm::agent_trace as env_agent_tra
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
+const DEFAULT_JSONL_GZ_ROLL_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct AgentTracePolicy {
@@ -17,6 +18,8 @@ pub struct AgentTracePolicy {
     pub capacity: usize,
     pub jsonl_buffer_bytes: usize,
     pub jsonl_flush_interval_ms: u64,
+    pub jsonl_gz_roll_bytes: u64,
+    pub jsonl_gz_roll_lines: Option<u64>,
 }
 
 static POLICY: OnceLock<AgentTracePolicy> = OnceLock::new();
@@ -57,6 +60,15 @@ fn load_from_env() -> AgentTracePolicy {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(DEFAULT_JSONL_FLUSH_INTERVAL_MS);
+    let jsonl_gz_roll_bytes = std::env::var(env_agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_JSONL_GZ_ROLL_BYTES);
+    let jsonl_gz_roll_lines = std::env::var(env_agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0);
 
     AgentTracePolicy {
         enabled: !sinks.is_empty(),
@@ -65,6 +77,8 @@ fn load_from_env() -> AgentTracePolicy {
         capacity,
         jsonl_buffer_bytes,
         jsonl_flush_interval_ms,
+        jsonl_gz_roll_bytes,
+        jsonl_gz_roll_lines,
     }
 }
 
@@ -83,8 +97,12 @@ mod tests {
     #[test]
     fn parse_sink_names_trims_and_normalizes() {
         assert_eq!(
-            parse_sink_names(" jsonl, STDERR "),
-            vec!["jsonl".to_string(), "stderr".to_string()]
+            parse_sink_names(" jsonl, JSONL_GZ, STDERR "),
+            vec![
+                "jsonl".to_string(),
+                "jsonl_gz".to_string(),
+                "stderr".to_string()
+            ]
         );
     }
 
