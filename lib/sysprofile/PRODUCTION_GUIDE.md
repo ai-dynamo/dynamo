@@ -29,39 +29,237 @@ All output files persist on the PVC after the Job completes.
 
 ---
 
-## Step 1: Enable sysprofile on Dynamo components
+## DynamoGraphDeployment (DGD) Integration
 
-Set these environment variables on **all** Dynamo component pods
-(frontend, router, prefill engines, decode engines):
+This is the recommended way to enable sysprofile on a real Dynamo deployment.
+The DGD CRD supports `envs`, `pvcs`, and `volumeMounts` natively — no need
+to patch raw Deployments.
+
+### Complete DGD Manifest with sysprofile
 
 ```yaml
-env:
-  - name: DYN_SYSPROFILE_ENABLE
-    value: "1"
-  - name: DYN_SYSPROFILE_DIR
-    value: "/data/sysprofile"
-  - name: DYN_SYSPROFILE_SAMPLING
-    value: "0.10"            # 10% of requests traced (use "1.0" for benchmarks)
-  - name: DYN_SYSPROFILE_RUN_ID
-    value: "bench-001"       # or leave unset for auto-generated UUID
-  - name: DYN_SYSPROFILE_BACKENDS
-    value: "vllm"            # comma-separated: vllm,sglang,trtllm
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llm-serving-profiled
+  namespace: dynamo-system
+spec:
+  backendFramework: vllm
+
+  # ── Top-level PVC reference (shared by all services) ──
+  pvcs:
+    - name: profiling-output-gemma4     # existing PVC in dynamo-system
+    # To create a fresh PVC instead:
+    # - name: profiling-output-mymodel
+    #   create: true
+    #   storageClass: nfs-csi
+    #   size: 10Gi
+    #   volumeAccessMode: ReadWriteMany
+
+  # ── Global env vars (applied to ALL services) ──
+  envs:
+    - name: DYN_SYSPROFILE_ENABLE
+      value: "1"
+    - name: DYN_SYSPROFILE_DIR
+      value: "/data/sysprofile"
+    - name: DYN_SYSPROFILE_RUN_ID
+      value: "bench-001"
+    - name: DYN_SYSPROFILE_SAMPLING
+      value: "1.0"                       # 100% for benchmarks, 0.01-0.10 for production
+    - name: DYN_SYSPROFILE_BACKENDS
+      value: "vllm"
+
+  services:
+    # ── Frontend ──
+    frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: profiling-output-gemma4
+          mountPoint: /data/sysprofile
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+
+    # ── Router ──
+    router:
+      componentType: main
+      replicas: 1
+      volumeMounts:
+        - name: profiling-output-gemma4
+          mountPoint: /data/sysprofile
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+
+    # ── Prefill Engine ──
+    engine-prefill:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 2
+      resources:
+        limits:
+          gpu: "1"
+      volumeMounts:
+        - name: profiling-output-gemma4
+          mountPoint: /data/sysprofile
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          command: ["python3", "-m", "dynamo.vllm"]
+          args: ["--model", "google/gemma-3-4b-it", "--tensor-parallel-size", "1"]
+
+    # ── Decode Engine ──
+    engine-decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      volumeMounts:
+        - name: profiling-output-gemma4
+          mountPoint: /data/sysprofile
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          command: ["python3", "-m", "dynamo.vllm"]
+          args: ["--model", "google/gemma-3-4b-it", "--tensor-parallel-size", "1"]
 ```
 
-### Environment Variable Reference
+### How DGD Fields Map to sysprofile
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DYN_SYSPROFILE_ENABLE` | `0` | Master switch. When off, all hooks are no-ops with zero overhead. |
-| `DYN_SYSPROFILE_DIR` | `/data/sysprofile` | Base directory for trace output. Must be a shared volume (PVC). |
-| `DYN_SYSPROFILE_SAMPLING` | `0.10` | Fraction of requests to trace (0.0 to 1.0). Use `1.0` for short benchmarks. |
-| `DYN_SYSPROFILE_RUN_ID` | auto UUID | Groups all traces from one capture session. All pods must share the same value. |
-| `DYN_SYSPROFILE_BACKENDS` | `vllm` | Which engine backends to profile. |
-| `DYN_SYSPROFILE_FLUSH_TIMEOUT_S` | `900` | Max seconds to wait for trace flush on shutdown. |
+| DGD Field | Where | Purpose |
+|-----------|-------|---------|
+| `spec.pvcs[].name` | Top-level | References existing PVC or creates new one. Must be `nfs-csi` (RWX). |
+| `spec.pvcs[].create` | Top-level | Set `true` to have the operator create the PVC. |
+| `spec.envs[]` | Top-level | Global env vars injected into **all** service pods. |
+| `services.<name>.envs[]` | Per-service | Service-specific env overrides (take precedence over global). |
+| `services.<name>.volumeMounts[]` | Per-service | Mounts a PVC defined in `spec.pvcs`. Every service needs this. |
+| `services.<name>.envFromSecret` | Per-service | References a Secret for HF tokens etc. |
+
+### Enabling/Disabling per Service
+
+Use per-service `envs` to override the global setting. For example, to
+profile only engines and skip the frontend:
+
+```yaml
+spec:
+  envs:
+    - name: DYN_SYSPROFILE_ENABLE
+      value: "1"
+
+  services:
+    frontend:
+      envs:
+        - name: DYN_SYSPROFILE_ENABLE
+          value: "0"                      # disable on frontend
+      # ... rest of frontend config
+```
+
+### Quick Enable: Adding sysprofile to an Existing DGD
+
+If you already have a DGD running, add these three things:
+
+1. **PVC reference** in `spec.pvcs`:
+   ```yaml
+   pvcs:
+     - name: profiling-output-gemma4
+   ```
+
+2. **Global env vars** in `spec.envs`:
+   ```yaml
+   envs:
+     - name: DYN_SYSPROFILE_ENABLE
+       value: "1"
+     - name: DYN_SYSPROFILE_RUN_ID
+       value: "bench-001"
+   ```
+
+3. **Volume mount** on every service:
+   ```yaml
+   services:
+     frontend:
+       volumeMounts:
+         - name: profiling-output-gemma4
+           mountPoint: /data/sysprofile
+     router:
+       volumeMounts:
+         - name: profiling-output-gemma4
+           mountPoint: /data/sysprofile
+     # ... same for all engine services
+   ```
+
+Then `kubectl apply` the updated DGD. The operator will rolling-restart all
+pods with the new env vars and volume mounts.
+
+### Using a Secret for sysprofile Config
+
+For frequently changing values (run ID, sampling rate), you can use a Secret
+instead of hardcoding in the DGD:
+
+```bash
+kubectl create secret generic sysprofile-config -n dynamo-system \
+  --from-literal=DYN_SYSPROFILE_ENABLE=1 \
+  --from-literal=DYN_SYSPROFILE_RUN_ID=bench-$(date +%s) \
+  --from-literal=DYN_SYSPROFILE_SAMPLING=1.0 \
+  --from-literal=DYN_SYSPROFILE_BACKENDS=vllm
+```
+
+Then reference it in the DGD (applies to individual services):
+
+```yaml
+services:
+  engine-prefill:
+    envFromSecret: sysprofile-config
+    volumeMounts:
+      - name: profiling-output-gemma4
+        mountPoint: /data/sysprofile
+```
+
+To start a new capture, update the secret and restart:
+
+```bash
+kubectl create secret generic sysprofile-config -n dynamo-system \
+  --from-literal=DYN_SYSPROFILE_ENABLE=1 \
+  --from-literal=DYN_SYSPROFILE_RUN_ID=bench-002 \
+  --from-literal=DYN_SYSPROFILE_SAMPLING=1.0 \
+  --from-literal=DYN_SYSPROFILE_BACKENDS=vllm \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Trigger restart by changing the restart ID
+kubectl patch dgd llm-serving-profiled -n dynamo-system --type merge \
+  -p '{"spec":{"restart":{"id":"bench-002"}}}'
+```
 
 ---
 
-## Step 2: Shared PVC for trace data
+## Environment Variable Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_SYSPROFILE_ENABLE` | `0` | Master switch. Accepts `1`, `true`, `yes`, `on`. When off, all hooks are no-ops with zero overhead. |
+| `DYN_SYSPROFILE_DIR` | `/data/sysprofile` | Base directory for trace output. Must be a shared volume (PVC). |
+| `DYN_SYSPROFILE_SAMPLING` | `0.10` | Fraction of requests to trace (0.0 to 1.0). Clamped to [0, 1]. Deterministic per trace ID (same request always sampled or not). Use `1.0` for benchmarks, `0.01` for production. |
+| `DYN_SYSPROFILE_RUN_ID` | auto UUID | Groups all traces from one capture session. **All pods must share the same value.** |
+| `DYN_SYSPROFILE_BACKENDS` | `vllm` | Comma-separated list of engine backends to profile: `vllm`, `sglang`, `trtllm`. |
+| `DYN_SYSPROFILE_FLUSH_TIMEOUT_S` | `900` | Max seconds to wait for trace flush on graceful shutdown. |
+
+### Sampling Recommendations
+
+| Scenario | `DYN_SYSPROFILE_SAMPLING` | Notes |
+|----------|--------------------------|-------|
+| Short benchmark (<5min) | `1.0` | Capture everything |
+| Long benchmark (>30min) | `0.10` | 10% keeps trace files manageable |
+| Production canary | `0.01` | 1% — minimal overhead |
+| Production disabled | `0` or `DYN_SYSPROFILE_ENABLE=0` | Zero overhead, hooks compile to no-ops |
+
+---
+
+## Shared PVC for Trace Data
 
 Use the existing `profiling-output-gemma4` PVC (5Gi, `nfs-csi`, RWX) in
 `dynamo-system`. This is already provisioned and bound.
@@ -72,18 +270,6 @@ Existing PVCs in `dynamo-system`:
 | `dynamo-platform-nats-js-dynamo-platform-nats-0` | `nfs-csi` | 10Gi | NATS JetStream |
 | `model-cache` | `ibm-spectrum-scale` | 80Gi | Model weights |
 | `profiling-output-gemma4` | `nfs-csi` | 5Gi | **Profiling output (use this)** |
-
-Mount the profiling PVC in all Dynamo component pods:
-
-```yaml
-volumeMounts:
-  - name: profiling-output
-    mountPath: /data/sysprofile
-volumes:
-  - name: profiling-output
-    persistentVolumeClaim:
-      claimName: profiling-output-gemma4
-```
 
 If you need a fresh PVC for a different model/run, create one with `nfs-csi`:
 
@@ -101,9 +287,11 @@ spec:
       storage: 10Gi
 ```
 
+Or use `spec.pvcs[].create: true` in the DGD (see above).
+
 ---
 
-## Step 3: Build the profiler container image
+## Build the Profiler Container Image
 
 ```dockerfile
 # Dockerfile.sysprofile
@@ -135,7 +323,7 @@ docker push your-registry/dynamo-sysprofile:latest
 
 ---
 
-## Step 4: Deploy the report viewer (one-time)
+## Deploy the Report Viewer (one-time)
 
 A persistent Deployment + NodePort serves the latest report from the PVC.
 Deploy once — it auto-serves whichever report was last generated.
@@ -153,7 +341,7 @@ No restart needed after new reports are generated.
 
 ---
 
-## Step 5: Run the analyzer Job
+## Run the Analyzer Job
 
 After your benchmark completes and all components have flushed their traces:
 
@@ -271,3 +459,39 @@ directory. The analyzer correlates pub/sub events by `msg_id` across files.
 **High overhead**: Reduce `DYN_SYSPROFILE_SAMPLING` to `0.01` (1%) for
 production. At `0.0` or with `DYN_SYSPROFILE_ENABLE=0`, overhead is zero
 (all hooks compile to no-ops).
+
+---
+
+## End-to-End Workflow
+
+```bash
+# 1. Deploy viewer (one-time)
+kubectl apply -f deploy/sysprofile/viewer-deployment.yaml -n dynamo-system
+
+# 2. Apply DGD with sysprofile enabled (see DGD manifest above)
+kubectl apply -f my-dgd-with-profiling.yaml -n dynamo-system
+
+# 3. Wait for pods to come up
+kubectl get pods -n dynamo-system -l app.kubernetes.io/managed-by=dynamo-operator -w
+
+# 4. Run your benchmark / load test
+# ... (e.g. genai-perf, locust, custom benchmark)
+
+# 5. Wait for traces to flush (pods write on shutdown or after flush timeout)
+# Scale down to flush: kubectl scale dgd llm-serving-profiled -n dynamo-system --replicas=0
+
+# 6. Verify trace files exist
+kubectl exec -n dynamo-system deploy/sysprofile-viewer -- ls -la /data/sysprofile/bench-001/
+
+# 7. Run analyzer Job
+kubectl delete job sysprofile-analyze -n dynamo-system --ignore-not-found
+kubectl apply -f deploy/sysprofile/analyze-job.yaml -n dynamo-system
+kubectl logs -f -n dynamo-system job/sysprofile-analyze
+
+# 8. View report
+echo "Report: http://<any-node-ip>:30090/report.html"
+
+# 9. (Optional) Disable profiling for next run
+kubectl patch dgd llm-serving-profiled -n dynamo-system --type merge \
+  -p '{"spec":{"envs":[{"name":"DYN_SYSPROFILE_ENABLE","value":"0"}]}}'
+```
