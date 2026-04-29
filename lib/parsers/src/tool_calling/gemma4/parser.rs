@@ -80,11 +80,14 @@ pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
 /// Parse a Gemma 4 model response into structured tool calls + leftover text.
 ///
 /// Returns `(parsed_tool_calls, normal_text_content)`. Text outside the
-/// `<|tool_call>...<tool_call|>` markers is returned as `normal_text`; truly
-/// truncated calls (start marker present, end marker missing) are dropped from
-/// the call list and their raw bytes are NOT re-emitted as user-visible text
-/// (mirrors kimi_k2's behavior — surfacing half-parsed markers in user output
-/// is worse than dropping the truncated call).
+/// `<|tool_call>...<tool_call|>` markers is returned as `normal_text`. When a
+/// tool call is truncated (start marker present, end marker missing — typically
+/// because the model hit `max_tokens` mid-call), the parser cannot extract a
+/// structured call from it; instead it echoes the raw bytes back as
+/// `normal_text` so the caller can detect the truncation and surface it to the
+/// user. This matches upstream `vllm.tool_parsers.gemma4_tool_parser`'s
+/// behavior of returning the raw `model_output` as content when no complete
+/// tool call could be parsed.
 pub fn try_tool_call_parse_gemma4(
     message: &str,
     tools: Option<&[ToolDefinition]>,
@@ -102,8 +105,9 @@ pub fn try_tool_call_parse_gemma4(
         normal_parts.push(&message[cursor..abs_start]);
 
         let Some(end_rel) = message[abs_start..].find(TOOL_CALL_END) else {
-            // Truncated tool call — consume the rest of the buffer silently.
-            cursor = message.len();
+            // Truncated tool call — echo the raw bytes back as normal_text so
+            // the caller sees the truncation rather than silently losing it.
+            normal_parts.push(&message[abs_start..]);
             break;
         };
         let abs_end = abs_start + end_rel + TOOL_CALL_END.len();
@@ -167,10 +171,7 @@ fn parse_single_call(
     Ok(Some(ToolCallResponse {
         id: format!("call-{}", Uuid::new_v4()),
         tp: ToolCallType::Function,
-        function: CalledFunction {
-            name,
-            arguments,
-        },
+        function: CalledFunction { name, arguments },
     }))
 }
 
@@ -231,15 +232,6 @@ impl<'a> Cursor<'a> {
             false
         }
     }
-
-    fn consume_str(&mut self, s: &str) -> bool {
-        if self.rest().starts_with(s) {
-            self.pos += s.len();
-            true
-        } else {
-            false
-        }
-    }
 }
 
 pub(crate) fn parse_args_object(input: &str) -> anyhow::Result<Value> {
@@ -271,7 +263,15 @@ fn parse_object_body(cur: &mut Cursor) -> anyhow::Result<Value> {
             anyhow::bail!("expected ':' after key '{}' at offset {}", key, cur.pos);
         }
         cur.skip_whitespace();
-        let value = parse_value(cur)?;
+        // Empty value (`key:` followed by `,` / `}` / EOF) — upstream Gemma 4
+        // parser emits these as `{"key": ""}` rather than dropping the key, so
+        // we mirror that. Without this, the empty-value case fell through to
+        // `parse_value`'s number path and errored out, which then triggered
+        // the entire-args-object empty-fallback in `parse_single_call`.
+        let value = match cur.peek_byte() {
+            None | Some(b',') | Some(b'}') => Value::String(String::new()),
+            _ => parse_value(cur)?,
+        };
         map.insert(key, value);
         cur.skip_whitespace();
         if !cur.consume_byte(b',') {
@@ -298,21 +298,55 @@ fn parse_key(cur: &mut Cursor) -> anyhow::Result<String> {
     Ok(cur.src[start..cur.pos].to_string())
 }
 
+/// Try to consume `keyword` from `cur` ASCII-case-insensitively, only when the
+/// byte immediately after the keyword is NOT a word character (so `nullable`
+/// doesn't get matched as `null` + leftover `able`). Mirrors upstream's
+/// `value_str.lower() in ("null", ...)` after isolating the bare token.
+fn try_consume_keyword(cur: &mut Cursor, keyword: &str) -> bool {
+    let bytes = cur.src.as_bytes();
+    let kw = keyword.as_bytes();
+    let end = cur.pos + kw.len();
+    if end > bytes.len() {
+        return false;
+    }
+    if !bytes[cur.pos..end].eq_ignore_ascii_case(kw) {
+        return false;
+    }
+    if let Some(&next) = bytes.get(end)
+        && (next.is_ascii_alphanumeric() || next == b'_')
+    {
+        return false;
+    }
+    cur.pos = end;
+    true
+}
+
 fn parse_value(cur: &mut Cursor) -> anyhow::Result<Value> {
     cur.skip_whitespace();
 
     // Delimited string: <|"|>...<|"|>
+    //
+    // If the closing delimiter is missing (model hit `max_tokens` mid-string),
+    // upstream takes "everything after the opening delimiter" as the value.
+    // We mirror that — refusing to parse here would lose the entire args
+    // object via the outer empty-fallback, which is worse than echoing a
+    // truncated tail.
     if cur.rest().starts_with(STRING_DELIM) {
-        let open_at = cur.pos;
         cur.pos += STRING_DELIM.len();
         let body_start = cur.pos;
-        let Some(end_rel) = cur.src[body_start..].find(STRING_DELIM) else {
-            anyhow::bail!("unterminated <|\"|> string starting at offset {open_at}");
-        };
-        let body_end = body_start + end_rel;
-        let s = cur.src[body_start..body_end].to_string();
-        cur.pos = body_end + STRING_DELIM.len();
-        return Ok(Value::String(s));
+        match cur.src[body_start..].find(STRING_DELIM) {
+            Some(end_rel) => {
+                let body_end = body_start + end_rel;
+                let s = cur.src[body_start..body_end].to_string();
+                cur.pos = body_end + STRING_DELIM.len();
+                return Ok(Value::String(s));
+            }
+            None => {
+                let s = cur.src[body_start..].to_string();
+                cur.pos = cur.src.len();
+                return Ok(Value::String(s));
+            }
+        }
     }
 
     // Object
@@ -330,18 +364,20 @@ fn parse_value(cur: &mut Cursor) -> anyhow::Result<Value> {
         return parse_array(cur);
     }
 
-    // Booleans / nulls (case-sensitive match — Gemma 4 emits lowercase, but we
-    // accept the same null-aliases vLLM does for parity with offline parsing).
-    if cur.consume_str("true") {
+    // Booleans / nulls. Upstream `_parse_gemma4_value` lowercases the token
+    // before comparing, accepting any-case `null`/`none`/`nil`. We do the same
+    // by peeking the next 3–4 word bytes and matching case-insensitively.
+    if try_consume_keyword(cur, "true") {
         return Ok(Value::Bool(true));
     }
-    if cur.consume_str("false") {
+    if try_consume_keyword(cur, "false") {
         return Ok(Value::Bool(false));
     }
-    for null_token in ["null", "none", "nil", "None", "NULL", "Nil"] {
-        if cur.consume_str(null_token) {
-            return Ok(Value::Null);
-        }
+    if try_consume_keyword(cur, "null")
+        || try_consume_keyword(cur, "none")
+        || try_consume_keyword(cur, "nil")
+    {
+        return Ok(Value::Null);
     }
 
     // Number
@@ -428,7 +464,10 @@ mod tests {
         let text = "<|tool_call>call:f{}<tool_call|>more";
         let pos = find_tool_call_end_position_gemma4(text).unwrap();
         assert_eq!(&text[pos..], "more");
-        assert_eq!(find_tool_call_end_position_gemma4("<|tool_call>call:f{"), None);
+        assert_eq!(
+            find_tool_call_end_position_gemma4("<|tool_call>call:f{"),
+            None
+        );
     }
 
     #[test] // CASE.1 — single string argument
@@ -512,21 +551,28 @@ mod tests {
 
     #[test] // CASE.3 — no tool calls at all
     fn parse_no_tool_calls() {
-        let (calls, normal) =
-            try_tool_call_parse_gemma4("just plain prose here", None).unwrap();
+        let (calls, normal) = try_tool_call_parse_gemma4("just plain prose here", None).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some("just plain prose here".to_string()));
     }
 
-    #[test] // CASE.5, CASE.16 — truncated mid-args is dropped, complete prior calls survive
-    fn truncated_call_dropped_complete_prior_survives() {
+    #[test] // CASE.5, CASE.16 — complete prior calls survive; truncated tail is echoed
+    fn truncated_tail_echoed_complete_prior_survives() {
         let input = concat!(
             "<|tool_call>call:complete{x:1}<tool_call|>",
             "<|tool_call>call:partial{y:<|\"|>incomp", // no end marker
         );
-        let (calls, _normal) = try_tool_call_parse_gemma4(input, None).unwrap();
+        let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "complete");
+        // Truncated bytes are surfaced rather than silently dropped — matches
+        // upstream `vllm.tool_parsers.gemma4_tool_parser.extract_tool_calls`
+        // when no complete tool call could be parsed past the start marker.
+        let normal = normal.unwrap();
+        assert!(
+            normal.contains("<|tool_call>call:partial"),
+            "expected truncated bytes echoed in normal_text, got: {normal:?}"
+        );
     }
 
     #[test] // CASE.4 — malformed args body falls back to empty object, call still emitted
@@ -542,9 +588,18 @@ mod tests {
     #[test] // CASE.21 — function names with hyphens, dots, underscores
     fn parse_function_names_with_special_chars() {
         for (input, expected_name) in [
-            ("<|tool_call>call:list-tasklists{}<tool_call|>", "list-tasklists"),
-            ("<|tool_call>call:mcp__portal__search-doc{}<tool_call|>", "mcp__portal__search-doc"),
-            ("<|tool_call>call:my.namespaced.fn{}<tool_call|>", "my.namespaced.fn"),
+            (
+                "<|tool_call>call:list-tasklists{}<tool_call|>",
+                "list-tasklists",
+            ),
+            (
+                "<|tool_call>call:mcp__portal__search-doc{}<tool_call|>",
+                "mcp__portal__search-doc",
+            ),
+            (
+                "<|tool_call>call:my.namespaced.fn{}<tool_call|>",
+                "my.namespaced.fn",
+            ),
         ] {
             let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
             assert_eq!(calls.len(), 1, "input: {input}");
@@ -635,8 +690,64 @@ mod tests {
     }
 
     #[test]
-    fn args_grammar_unterminated_string_errors() {
-        let err = parse_args_object(r#"x:<|"|>oops"#).unwrap_err();
-        assert!(err.to_string().contains("unterminated"));
+    fn args_grammar_unterminated_string_takes_remainder() {
+        // Upstream Gemma 4 parser: when the closing <|"|> is missing,
+        // everything after the opening delimiter becomes the value. We mirror
+        // that so a truncated trailing arg doesn't lose all earlier args via
+        // the entire-args-object error fallback.
+        let v = parse_args_object(r#"x:<|"|>oops"#).unwrap();
+        assert_eq!(v["x"], "oops");
+    }
+
+    #[test] // upstream test_empty_value
+    fn args_grammar_empty_value_yields_empty_string() {
+        let v = parse_args_object("x:,y:1").unwrap();
+        assert_eq!(v["x"], "");
+        assert_eq!(v["y"], 1);
+    }
+
+    #[test] // upstream test_empty_value at end-of-args
+    fn args_grammar_trailing_empty_value() {
+        let v = parse_args_object("x:1,y:").unwrap();
+        assert_eq!(v["x"], 1);
+        assert_eq!(v["y"], "");
+    }
+
+    #[test] // case-insensitive null aliases (upstream `value_str.lower() in (...)`)
+    fn args_grammar_null_aliases_case_insensitive() {
+        for variant in [
+            "null", "NULL", "Null", "none", "NONE", "None", "nil", "NIL", "Nil",
+        ] {
+            let body = format!("x:{variant}");
+            let v = parse_args_object(&body).unwrap();
+            assert_eq!(v["x"], Value::Null, "variant: {variant}");
+        }
+    }
+
+    #[test] // ensure `nullable` (or other word-suffixed identifiers) doesn't
+    // get mis-matched as the keyword `null` plus leftovers.
+    fn args_grammar_keyword_prefix_not_consumed() {
+        // `nullable` starts with "null" but is not the null keyword. Without
+        // the trailing-word-char guard, `null` would match and `able` would
+        // leak into the next-token parse. The recursive-descent argument
+        // grammar treats this as a number-parse error → empty-fallback at the
+        // entry, but inside an array we want the nested parser to fail
+        // cleanly, not silently produce Null.
+        let err = parse_args_object("x:nullable").unwrap_err();
+        // Bare identifiers after a `:` are not valid Gemma 4 values, so we
+        // expect a parse error rather than a Null match.
+        let _ = err; // exact message not asserted, only that it errors
+    }
+
+    #[test] // upstream test_incomplete_tool_call equivalent
+    fn incomplete_tool_call_echoes_raw_bytes() {
+        let input = "<|tool_call>call:foo{x:1";
+        let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
+        assert_eq!(calls.len(), 0);
+        let normal = normal.unwrap();
+        assert!(
+            normal.contains("<|tool_call>call:foo"),
+            "expected raw bytes echoed; got: {normal:?}"
+        );
     }
 }

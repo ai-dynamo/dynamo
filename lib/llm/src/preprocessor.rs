@@ -1230,6 +1230,11 @@ impl OpenAIPreprocessor {
     /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
     ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
     ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
+    /// For gemma4: disabled when chat_template_args contains "enable_thinking": false.
+    ///   Gemma 4's chat template injects `<|think|>` only when `enable_thinking is
+    ///   defined and enable_thinking` (truthy), so when callers explicitly set the
+    ///   flag false the model emits no `<|channel>` markers and the parser would
+    ///   only ever fall through.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -1269,6 +1274,14 @@ impl OpenAIPreprocessor {
                     && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
                 {
                     return mode == "chat";
+                }
+                false
+            }
+            Some("gemma4") | Some("gemma-4") => {
+                if let Some(args) = chat_template_args
+                    && let Some(enable_thinking) = args.get("enable_thinking")
+                {
+                    return enable_thinking == &serde_json::Value::Bool(false);
                 }
                 false
             }
@@ -1888,6 +1901,30 @@ mod tests {
                 Some(&enable_thinking_true),
                 false,
                 "deepseek_v4 + enable_thinking=true → enabled (vLLM alias)",
+            ),
+            (
+                Some("gemma4"),
+                Some(&enable_thinking_false),
+                true,
+                "gemma4 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("gemma4"),
+                Some(&enable_thinking_true),
+                false,
+                "gemma4 + enable_thinking=true → enabled",
+            ),
+            (
+                Some("gemma4"),
+                None,
+                false,
+                "gemma4 + no args → enabled (parser still runs but is a no-op when no markers arrive)",
+            ),
+            (
+                Some("gemma-4"),
+                Some(&enable_thinking_false),
+                true,
+                "gemma-4 (hyphen alias) + enable_thinking=false → disabled",
             ),
         ];
 

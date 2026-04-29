@@ -222,9 +222,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
             ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
-            ParserConfig::Gemma4 => vec![
-                crate::tool_calling::gemma4::TOOL_CALL_START.to_string(),
-            ],
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
         }
     }
 
@@ -240,9 +238,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
-            ParserConfig::Gemma4 => vec![
-                crate::tool_calling::gemma4::TOOL_CALL_END.to_string(),
-            ],
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_END.to_string()],
         }
     }
 }

@@ -125,29 +125,50 @@ impl ReasoningParser for Gemma4ReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
         // Non-streaming path: we have the complete text, so we can use plain
         // string operations.
-        let Some(start_idx) = text.find(START_TOKEN) else {
-            // No reasoning markers visible at all (either model didn't emit
-            // them, or skip_special_tokens stripped them). Pass through.
-            return ParserResult {
-                normal_text: text.to_string(),
-                reasoning_text: String::new(),
-            };
-        };
-        let pre = &text[..start_idx];
-        let rest = &text[start_idx + START_TOKEN.len()..];
-
-        let (reasoning_raw, post) = match rest.find(END_TOKEN) {
-            Some(end_rel) => (&rest[..end_rel], &rest[end_rel + END_TOKEN.len()..]),
-            None => (rest, ""),
-        };
-        let reasoning = strip_thought_prefix(reasoning_raw).to_string();
-        let mut normal = String::new();
-        normal.push_str(pre);
-        normal.push_str(post);
-
-        ParserResult {
-            normal_text: normal,
-            reasoning_text: reasoning,
+        let start_idx = text.find(START_TOKEN);
+        let end_idx = text.find(END_TOKEN);
+        match (start_idx, end_idx) {
+            (None, None) => {
+                // No reasoning markers visible at all (either model didn't
+                // emit them, or skip_special_tokens stripped them).
+                ParserResult {
+                    normal_text: text.to_string(),
+                    reasoning_text: String::new(),
+                }
+            }
+            (Some(s), end_opt) => {
+                let pre = &text[..s];
+                let rest = &text[s + START_TOKEN.len()..];
+                let (reasoning_raw, post) = match end_opt
+                    .filter(|e| *e > s + START_TOKEN.len())
+                    .map(|e| e - (s + START_TOKEN.len()))
+                {
+                    Some(end_rel) => (&rest[..end_rel], &rest[end_rel + END_TOKEN.len()..]),
+                    None => (rest, ""),
+                };
+                let reasoning = strip_thought_prefix(reasoning_raw).to_string();
+                let mut normal = String::with_capacity(pre.len() + post.len());
+                normal.push_str(pre);
+                normal.push_str(post);
+                ParserResult {
+                    normal_text: normal,
+                    reasoning_text: reasoning,
+                }
+            }
+            (None, Some(e)) => {
+                // Dangling end marker without start marker — upstream's
+                // offline parser still treats text-before as reasoning. Mirror
+                // that so model emissions where the start tag was stripped
+                // (e.g. tokenizer with skip_special_tokens) don't lose the
+                // reasoning content entirely.
+                let reasoning_raw = &text[..e];
+                let post = &text[e + END_TOKEN.len()..];
+                let reasoning = strip_thought_prefix(reasoning_raw).to_string();
+                ParserResult {
+                    normal_text: post.to_string(),
+                    reasoning_text: reasoning,
+                }
+            }
         }
     }
 
@@ -277,6 +298,22 @@ mod tests {
         );
         assert_eq!(r.reasoning_text, "rumination");
         assert_eq!(r.normal_text, "Hello.  Goodbye.");
+    }
+
+    #[test] // upstream INVALID_SIMPLE — `<channel|>` present, `<|channel>` absent
+    fn detect_dangling_end_marker_extracts_prefix_as_reasoning() {
+        let mut p = Gemma4ReasoningParser::new();
+        let r = p.detect_and_parse_reasoning("some thinking<channel|>final answer", &[]);
+        assert_eq!(r.reasoning_text, "some thinking");
+        assert_eq!(r.normal_text, "final answer");
+    }
+
+    #[test] // upstream INVALID_COMPLETE — dangling end with `thought\n` prefix on the head
+    fn detect_dangling_end_marker_strips_thought_prefix() {
+        let mut p = Gemma4ReasoningParser::new();
+        let r = p.detect_and_parse_reasoning("thought\nrumination<channel|>final answer", &[]);
+        assert_eq!(r.reasoning_text, "rumination");
+        assert_eq!(r.normal_text, "final answer");
     }
 
     #[test] // CASE.20 — `thought\n` prefix absent (some tokens drop it): pass through unchanged
