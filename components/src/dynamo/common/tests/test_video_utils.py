@@ -8,6 +8,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 def make_frames(n=3, h=8, w=8) -> np.ndarray:
     """Return a small uint8 frame array (n, h, w, 3)."""
