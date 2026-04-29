@@ -71,6 +71,27 @@ impl Component {
         ];
         self.writer.write_instant(ts, name_iid, &anns);
     }
+
+    fn named_track(&self, name: &str) -> u64 {
+        self.writer.create_named_track(name)
+    }
+
+    fn gpu_kernel(&self, track: u64, ts: u64, dur: u64, name_iid: u64, stage: &str) {
+        let anns = vec![perfetto::build_debug_annotation_str("stage", stage)];
+        self.writer.write_slice_begin_on_track(track, ts, name_iid, &anns);
+        self.writer.write_slice_end_on_track(track, ts + dur);
+    }
+
+    fn nccl_op(&self, track: u64, ts: u64, dur: u64, name_iid: u64, bytes: u64) {
+        let anns = vec![perfetto::build_debug_annotation_str("bytes", &bytes.to_string())];
+        self.writer.write_slice_begin_on_track(track, ts, name_iid, &anns);
+        self.writer.write_slice_end_on_track(track, ts + dur);
+    }
+
+    fn nats_event(&self, track: u64, ts: u64, name_iid: u64, msg_id: &str) {
+        let anns = vec![perfetto::build_debug_annotation_str("msg_id", msg_id)];
+        self.writer.write_instant_on_track(track, ts, name_iid, &anns);
+    }
 }
 
 fn main() {
@@ -111,6 +132,45 @@ fn main() {
     let iid_decode_compute = decode.intern("dynamo.decode.compute");
     let iid_decode_first = decode.intern("dynamo.decode.first_token");
     let iid_decode_send = decode.intern("dynamo.decode.detok_send");
+
+    // GPU kernel names
+    let iid_gemm = prefill0.intern("gemm_fp16_kernel");
+    let iid_attn = prefill0.intern("flash_attn_fwd");
+    let iid_lnorm = prefill0.intern("layer_norm_kernel");
+    let iid_softmax = prefill0.intern("softmax_kernel");
+    let iid_gemm1 = prefill1.intern("gemm_fp16_kernel");
+    let iid_attn1 = prefill1.intern("flash_attn_fwd");
+    let iid_lnorm1 = prefill1.intern("layer_norm_kernel");
+    let iid_softmax1 = prefill1.intern("softmax_kernel");
+    let iid_dec_gemm = decode.intern("gemm_fp16_kernel");
+    let iid_dec_attn = decode.intern("flash_attn_fwd");
+
+    // NCCL operation names
+    let iid_allreduce0 = prefill0.intern("nccl_AllReduce");
+    let iid_allgather0 = prefill0.intern("nccl_AllGather");
+    let iid_allreduce1 = prefill1.intern("nccl_AllReduce");
+    let iid_allgather1 = prefill1.intern("nccl_AllGather");
+
+    // NATS event names
+    let iid_nats_pub = router.intern("nats_publish");
+    let iid_nats_sub0 = prefill0.intern("nats_subscribe");
+    let iid_nats_sub1 = prefill1.intern("nats_subscribe");
+    let iid_nats_sub_dec = decode.intern("nats_subscribe");
+
+    // Create named tracks
+    let gpu0_pf0 = prefill0.named_track("GPU 0 Compute");
+    let gpu1_pf0 = prefill0.named_track("GPU 1 Compute");
+    let gpu0_pf1 = prefill1.named_track("GPU 0 Compute");
+    let gpu1_pf1 = prefill1.named_track("GPU 1 Compute");
+    let gpu0_dec = decode.named_track("GPU 0 Compute");
+
+    let nccl_pf0 = prefill0.named_track("NCCL AllReduce");
+    let nccl_pf1 = prefill1.named_track("NCCL AllReduce");
+
+    let nats_router = router.named_track("NATS Communication");
+    let nats_pf0 = prefill0.named_track("NATS Communication");
+    let nats_pf1 = prefill1.named_track("NATS Communication");
+    let nats_dec = decode.named_track("NATS Communication");
 
     let num_requests = 40u32;
 
@@ -166,6 +226,10 @@ fn main() {
         let t_route_end = t_route_start + route_dur;
         router.end(t_route_end);
 
+        // == NATS: router publishes request ==
+        let msg_id = format!("msg-{req:04}");
+        router.nats_event(nats_router, t_route_end + 10 * US, iid_nats_pub, &msg_id);
+
         // == Transport: send (router side) ==
         let t_send = t_route_end + 30 * US;
         router.begin(t_send, iid_transport_send, &tp);
@@ -180,6 +244,14 @@ fn main() {
         prefill.begin(t_prefill_recv, iid_transport_recv, &tp);
         prefill.end(t_prefill_recv + 80 * US);
 
+        // == NATS: engine subscribes to request ==
+        let (nats_engine, iid_nats_sub_engine) = if use_prefill1 {
+            (nats_pf1, iid_nats_sub1)
+        } else {
+            (nats_pf0, iid_nats_sub0)
+        };
+        prefill.nats_event(nats_engine, t_prefill_recv + 10 * US, iid_nats_sub_engine, &msg_id);
+
         // == Prefill: compute ==
         let t_compute = t_prefill_recv + 120 * US;
         prefill.begin(t_compute, iid_prefill_compute, &tp);
@@ -188,6 +260,56 @@ fn main() {
         let t_compute_end = t_compute + prefill_dur;
         prefill.end(t_compute_end);
 
+        // == GPU kernels during prefill compute ==
+        {
+            let (gpu0, gpu1) = if use_prefill1 { (gpu0_pf1, gpu1_pf1) } else { (gpu0_pf0, gpu1_pf0) };
+            let (k_gemm, k_attn, k_lnorm, k_softmax) = if use_prefill1 {
+                (iid_gemm1, iid_attn1, iid_lnorm1, iid_softmax1)
+            } else {
+                (iid_gemm, iid_attn, iid_lnorm, iid_softmax)
+            };
+            let nccl_track = if use_prefill1 { nccl_pf1 } else { nccl_pf0 };
+            let (k_ar, k_ag) = if use_prefill1 { (iid_allreduce1, iid_allgather1) } else { (iid_allreduce0, iid_allgather0) };
+
+            // TP imbalance: prefill-1 kernels are ~10% slower
+            let tp_slow = if use_prefill1 { 110 } else { 100 };
+
+            let mut t_gpu = t_compute + 20 * US;
+            let num_layers = 2 + (prompt_factor as u32 % 3);
+
+            for layer in 0..num_layers {
+                // Attention kernel on GPU 0
+                let attn_dur = (400 + layer as u64 * 50 + prompt_factor * 30) * US * tp_slow / 100;
+                prefill.gpu_kernel(gpu0, t_gpu, attn_dur, k_attn, "prefill");
+
+                // Softmax on GPU 1
+                let sm_dur = (100 + prompt_factor * 15) * US * tp_slow / 100;
+                prefill.gpu_kernel(gpu1, t_gpu + 50 * US, sm_dur, k_softmax, "prefill");
+
+                t_gpu += attn_dur + 30 * US;
+
+                // GEMM on GPU 0
+                let gemm_dur = (600 + prompt_factor * 80) * US * tp_slow / 100;
+                prefill.gpu_kernel(gpu0, t_gpu, gemm_dur, k_gemm, "prefill");
+
+                // LayerNorm on GPU 1
+                let ln_dur = (80 + prompt_factor * 10) * US * tp_slow / 100;
+                prefill.gpu_kernel(gpu1, t_gpu + 100 * US, ln_dur, k_lnorm, "prefill");
+
+                t_gpu += gemm_dur + 20 * US;
+
+                // NCCL AllReduce between layers
+                let ar_dur = (200 + (layer as u64) * 40) * US;
+                let ar_bytes = 16 * 1024 * 1024; // 16 MB
+                prefill.nccl_op(nccl_track, t_gpu, ar_dur, k_ar, ar_bytes);
+                t_gpu += ar_dur + 10 * US;
+            }
+
+            // Final NCCL AllGather
+            let ag_dur = 300 * US;
+            prefill.nccl_op(nccl_track, t_gpu, ag_dur, k_ag, 8 * 1024 * 1024);
+        }
+
         // == Prefill: KV transfer to decode ==
         let t_transfer = t_compute_end + 60 * US;
         prefill.begin(t_transfer, iid_kv_transfer, &tp);
@@ -195,6 +317,11 @@ fn main() {
         let transfer_dur = MS + (req as u64 % 4) * 500 * US;
         let t_transfer_end = t_transfer + transfer_dur;
         prefill.end(t_transfer_end);
+
+        // == NATS: decode subscribes ==
+        let dec_msg = format!("dec-{req:04}");
+        prefill.nats_event(nats_engine, t_transfer + 10 * US, iid_nats_sub_engine, &dec_msg);
+        decode.nats_event(nats_dec, t_transfer_end + 30 * US, iid_nats_sub_dec, &dec_msg);
 
         // == Decode: recv ==
         let t_decode_recv = t_transfer_end + 100 * US;
@@ -214,6 +341,13 @@ fn main() {
             // Each decode step: 0.8ms - 1.5ms
             let step_dur = 800 * US + (tok as u64 * 70 * US) + (req as u64 % 5) * 50 * US;
             decode.end(step_start + step_dur);
+
+            // GPU kernels during decode step
+            let dec_gemm_dur = (300 + tok as u64 * 20) * US;
+            decode.gpu_kernel(gpu0_dec, step_start + 30 * US, dec_gemm_dur, iid_dec_gemm, "decode");
+            let dec_attn_dur = (200 + tok as u64 * 15) * US;
+            decode.gpu_kernel(gpu0_dec, step_start + 30 * US + dec_gemm_dur + 10 * US, dec_attn_dur, iid_dec_attn, "decode");
+
             t_tok = step_start + step_dur;
         }
 

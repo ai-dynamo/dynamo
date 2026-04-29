@@ -54,32 +54,38 @@ def classify_track(name: str) -> Optional[str]:
     return None
 
 
-def analyze(merged_trace: str) -> dict:
-    log.info("Loading %s", merged_trace)
+def analyze(merged_trace: str | list[str]) -> dict:
+    if isinstance(merged_trace, str):
+        merged_trace = [merged_trace]
+
     tracks: dict[int, proto_reader.TrackInfo] = {}
     open_slices: dict[int, list] = defaultdict(list)
+    interned_names: dict = {}
     completed_slices: list = []
     instant_events: list = []
 
-    for raw in proto_reader.iter_packets(merged_trace):
-        event, track = proto_reader.parse_packet(raw)
-        if track is not None:
-            tracks[track.uuid] = track
-        elif event is not None:
-            if event.event_type == 1:
-                open_slices[event.track_uuid].append(event)
-            elif event.event_type == 2:
-                if open_slices[event.track_uuid]:
-                    begin = open_slices[event.track_uuid].pop()
-                    completed_slices.append({
-                        "start_ns": begin.timestamp_ns,
-                        "end_ns": event.timestamp_ns,
-                        "name": begin.name,
-                        "annotations": {**begin.annotations, **event.annotations},
-                        "track_uuid": begin.track_uuid,
-                    })
-            elif event.event_type == 3:
-                instant_events.append(event)
+    for trace_file in merged_trace:
+        log.info("Loading %s", trace_file)
+        open_slices.clear()
+        for raw in proto_reader.iter_packets(trace_file):
+            event, track = proto_reader.parse_packet(raw, interned_names)
+            if track is not None:
+                tracks[track.uuid] = track
+            elif event is not None:
+                if event.event_type == 1:
+                    open_slices[event.track_uuid].append(event)
+                elif event.event_type == 2:
+                    if open_slices[event.track_uuid]:
+                        begin = open_slices[event.track_uuid].pop()
+                        completed_slices.append({
+                            "start_ns": begin.timestamp_ns,
+                            "end_ns": event.timestamp_ns,
+                            "name": begin.name,
+                            "annotations": {**begin.annotations, **event.annotations},
+                            "track_uuid": begin.track_uuid,
+                        })
+                elif event.event_type == 3:
+                    instant_events.append(event)
 
     for t in tracks.values():
         if t.parent_uuid and t.parent_uuid in tracks:
@@ -124,6 +130,7 @@ def analyze(merged_trace: str) -> dict:
         stat.per_host[t.process_name if t else "unknown"] += dur
 
     nats_pubs: dict[str, tuple[str, int]] = {}
+    nats_subs: list[tuple[str, str, int]] = []
     nats_pairs: list[NatsPair] = []
 
     for ev in instant_events:
@@ -139,15 +146,19 @@ def analyze(merged_trace: str) -> dict:
         if "pub" in lo or "send" in lo:
             nats_pubs[msg_id] = (host, ev.timestamp_ns)
         elif "sub" in lo or "recv" in lo or "receive" in lo:
-            if msg_id in nats_pubs:
-                pub_host, pub_ts = nats_pubs[msg_id]
-                if pub_host != host:
-                    nats_pairs.append(NatsPair(
-                        msg_id=msg_id, pub_host=pub_host, pub_ts=pub_ts,
-                        sub_host=host, sub_ts=ev.timestamp_ns,
-                        lag_ns=ev.timestamp_ns - pub_ts,
-                    ))
+            nats_subs.append((msg_id, host, ev.timestamp_ns))
 
+    for msg_id, host, sub_ts in nats_subs:
+        if msg_id in nats_pubs:
+            pub_host, pub_ts = nats_pubs[msg_id]
+            if pub_host != host:
+                nats_pairs.append(NatsPair(
+                    msg_id=msg_id, pub_host=pub_host, pub_ts=pub_ts,
+                    sub_host=host, sub_ts=sub_ts,
+                    lag_ns=sub_ts - pub_ts,
+                ))
+
+    slice_nats_subs: list[tuple[str, str, int]] = []
     for sl in completed_slices:
         cat = comm_tracks.get(sl["track_uuid"]) or classify_track(sl["name"])
         if cat != "nats":
@@ -161,14 +172,17 @@ def analyze(merged_trace: str) -> dict:
         if "pub" in lo or "send" in lo:
             nats_pubs[msg_id] = (host, sl["start_ns"])
         elif "sub" in lo or "recv" in lo:
-            if msg_id in nats_pubs:
-                pub_host, pub_ts = nats_pubs[msg_id]
-                if pub_host != host:
-                    nats_pairs.append(NatsPair(
-                        msg_id=msg_id, pub_host=pub_host, pub_ts=pub_ts,
-                        sub_host=host, sub_ts=sl["start_ns"],
-                        lag_ns=sl["start_ns"] - pub_ts,
-                    ))
+            slice_nats_subs.append((msg_id, host, sl["start_ns"]))
+
+    for msg_id, host, sub_ts in slice_nats_subs:
+        if msg_id in nats_pubs:
+            pub_host, pub_ts = nats_pubs[msg_id]
+            if pub_host != host:
+                nats_pairs.append(NatsPair(
+                    msg_id=msg_id, pub_host=pub_host, pub_ts=pub_ts,
+                    sub_host=host, sub_ts=sub_ts,
+                    lag_ns=sub_ts - pub_ts,
+                ))
 
     per_category = {}
     for cat in ("nccl", "nixl", "nats"):

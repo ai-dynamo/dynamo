@@ -200,8 +200,15 @@ def _parse_track_event(buf, timestamp_ns: int) -> Event:
     return event
 
 
-def parse_packet(raw: bytes) -> tuple[Optional[Event], Optional[TrackInfo]]:
-    """Parse a single TracePacket. Returns (event, track_info)."""
+def parse_packet(
+    raw: bytes,
+    interned_names: dict | None = None,
+) -> tuple[Optional[Event], Optional[TrackInfo]]:
+    """Parse a single TracePacket. Returns (event, track_info).
+
+    Pass a mutable dict as *interned_names* to accumulate interned event
+    names across packets and auto-resolve ``name_iid`` → ``event.name``.
+    """
     buf = memoryview(raw)
     off = 0
     timestamp_ns = None
@@ -231,11 +238,16 @@ def parse_packet(raw: bytes) -> tuple[Optional[Event], Optional[TrackInfo]]:
         else:
             off = skip_field(buf, off, wire_type)
 
+    if interned_data_bytes is not None and interned_names is not None:
+        _parse_interned_data(interned_data_bytes, seq_id, interned_names)
+
     if track_descriptor_bytes is not None:
         track = _parse_track_descriptor(track_descriptor_bytes)
         return None, track
     if track_event_bytes is not None and timestamp_ns is not None:
         event = _parse_track_event(track_event_bytes, timestamp_ns)
+        if interned_names is not None and event.name_iid and not event.name:
+            event.name = interned_names.get((seq_id, event.name_iid), "")
         return event, None
     return None, None
 

@@ -28,6 +28,7 @@ struct WriterInner {
     next_iid: u64,
     next_track_uuid: u64,
     thread_tracks: HashMap<u64, u64>,
+    named_tracks: HashMap<String, u64>,
     packets_written: u64,
 }
 
@@ -80,6 +81,7 @@ impl TraceWriter {
                 next_iid: 1,
                 next_track_uuid: process_track_uuid + 1,
                 thread_tracks: HashMap::new(),
+                named_tracks: HashMap::new(),
                 packets_written: 2,
             }),
         })
@@ -170,6 +172,86 @@ impl TraceWriter {
         let tid = current_thread_id();
         let track_uuid = self.ensure_thread_track(&mut inner, tid);
 
+        let te = perfetto::build_track_event(
+            track_uuid,
+            perfetto::track_event::TYPE_INSTANT,
+            name_iid,
+            annotations,
+        );
+        let pkt = perfetto::build_trace_packet_event(timestamp_ns, inner.seq_id, &te);
+        let trace_bytes = perfetto::wrap_as_trace_packet(&pkt);
+        let _ = inner.encoder.write_all(&trace_bytes);
+        inner.packets_written += 1;
+    }
+
+    pub fn create_named_track(&self, name: &str) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(&uuid) = inner.named_tracks.get(name) {
+            return uuid;
+        }
+        let uuid = inner.next_track_uuid;
+        inner.next_track_uuid += 1;
+        inner.named_tracks.insert(name.to_string(), uuid);
+
+        let mut td = Vec::new();
+        perfetto::encode_varint_field(&mut td, perfetto::track_descriptor::UUID, uuid);
+        perfetto::encode_varint_field(
+            &mut td,
+            perfetto::track_descriptor::PARENT_UUID,
+            inner.process_track_uuid,
+        );
+        perfetto::encode_string_field(&mut td, perfetto::track_descriptor::NAME, name);
+
+        let pkt = perfetto::build_trace_packet_descriptor(inner.seq_id, &td);
+        let trace_bytes = perfetto::wrap_as_trace_packet(&pkt);
+        let _ = inner.encoder.write_all(&trace_bytes);
+        inner.packets_written += 1;
+
+        uuid
+    }
+
+    pub fn write_slice_begin_on_track(
+        &self,
+        track_uuid: u64,
+        timestamp_ns: u64,
+        name_iid: u64,
+        annotations: &[Vec<u8>],
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let te = perfetto::build_track_event(
+            track_uuid,
+            perfetto::track_event::TYPE_SLICE_BEGIN,
+            name_iid,
+            annotations,
+        );
+        let pkt = perfetto::build_trace_packet_event(timestamp_ns, inner.seq_id, &te);
+        let trace_bytes = perfetto::wrap_as_trace_packet(&pkt);
+        let _ = inner.encoder.write_all(&trace_bytes);
+        inner.packets_written += 1;
+    }
+
+    pub fn write_slice_end_on_track(&self, track_uuid: u64, timestamp_ns: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let te = perfetto::build_track_event(
+            track_uuid,
+            perfetto::track_event::TYPE_SLICE_END,
+            0,
+            &[],
+        );
+        let pkt = perfetto::build_trace_packet_event(timestamp_ns, inner.seq_id, &te);
+        let trace_bytes = perfetto::wrap_as_trace_packet(&pkt);
+        let _ = inner.encoder.write_all(&trace_bytes);
+        inner.packets_written += 1;
+    }
+
+    pub fn write_instant_on_track(
+        &self,
+        track_uuid: u64,
+        timestamp_ns: u64,
+        name_iid: u64,
+        annotations: &[Vec<u8>],
+    ) {
+        let mut inner = self.inner.lock().unwrap();
         let te = perfetto::build_track_event(
             track_uuid,
             perfetto::track_event::TYPE_INSTANT,

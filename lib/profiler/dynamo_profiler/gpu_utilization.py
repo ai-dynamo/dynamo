@@ -46,35 +46,41 @@ class GpuTrackReport:
     suspicious_gaps_ns: int = 0
 
 
-def analyze(merged_trace: str) -> dict:
-    log.info("Loading %s", merged_trace)
+def analyze(merged_trace: str | list[str]) -> dict:
+    if isinstance(merged_trace, str):
+        merged_trace = [merged_trace]
+
     tracks: dict[int, proto_reader.TrackInfo] = {}
     slices_by_track: dict[int, list] = defaultdict(list)
     open_slices: dict[int, list] = defaultdict(list)
+    interned_names: dict = {}
 
     overall_min_ts = None
     overall_max_ts = None
 
-    for raw in proto_reader.iter_packets(merged_trace):
-        event, track = proto_reader.parse_packet(raw)
-        if track is not None:
-            tracks[track.uuid] = track
-        elif event is not None:
-            if overall_min_ts is None or event.timestamp_ns < overall_min_ts:
-                overall_min_ts = event.timestamp_ns
-            if overall_max_ts is None or event.timestamp_ns > overall_max_ts:
-                overall_max_ts = event.timestamp_ns
-            if event.event_type == 1:
-                open_slices[event.track_uuid].append(event)
-            elif event.event_type == 2:
-                if open_slices[event.track_uuid]:
-                    begin = open_slices[event.track_uuid].pop()
-                    slices_by_track[event.track_uuid].append({
-                        "start_ns": begin.timestamp_ns,
-                        "end_ns": event.timestamp_ns,
-                        "name": begin.name,
-                        "annotations": begin.annotations,
-                    })
+    for trace_file in merged_trace:
+        log.info("Loading %s", trace_file)
+        open_slices.clear()
+        for raw in proto_reader.iter_packets(trace_file):
+            event, track = proto_reader.parse_packet(raw, interned_names)
+            if track is not None:
+                tracks[track.uuid] = track
+            elif event is not None:
+                if overall_min_ts is None or event.timestamp_ns < overall_min_ts:
+                    overall_min_ts = event.timestamp_ns
+                if overall_max_ts is None or event.timestamp_ns > overall_max_ts:
+                    overall_max_ts = event.timestamp_ns
+                if event.event_type == 1:
+                    open_slices[event.track_uuid].append(event)
+                elif event.event_type == 2:
+                    if open_slices[event.track_uuid]:
+                        begin = open_slices[event.track_uuid].pop()
+                        slices_by_track[event.track_uuid].append({
+                            "start_ns": begin.timestamp_ns,
+                            "end_ns": event.timestamp_ns,
+                            "name": begin.name,
+                            "annotations": begin.annotations,
+                        })
 
     for t in tracks.values():
         if t.parent_uuid and t.parent_uuid in tracks:

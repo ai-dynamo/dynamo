@@ -21,10 +21,13 @@ from . import proto_reader
 log = logging.getLogger("kernel_hotlist")
 
 
-def analyze(merged_trace: str, top_n: int = 20) -> dict:
-    log.info("Loading %s", merged_trace)
+def analyze(merged_trace: str | list[str], top_n: int = 20) -> dict:
+    if isinstance(merged_trace, str):
+        merged_trace = [merged_trace]
+
     tracks: dict[int, proto_reader.TrackInfo] = {}
     open_slices: dict[int, list] = defaultdict(list)
+    interned_names: dict = {}
     by_kernel = defaultdict(lambda: {
         "total_ns": 0, "count": 0,
         "stages": defaultdict(int),
@@ -33,37 +36,40 @@ def analyze(merged_trace: str, top_n: int = 20) -> dict:
     })
 
     n_kernels = 0
-    for raw in proto_reader.iter_packets(merged_trace):
-        event, track = proto_reader.parse_packet(raw)
-        if track is not None:
-            tracks[track.uuid] = track
-        elif event is not None:
-            if event.event_type == 1:
-                open_slices[event.track_uuid].append(event)
-            elif event.event_type == 2:
-                if open_slices[event.track_uuid]:
-                    begin = open_slices[event.track_uuid].pop()
-                    track_info = tracks.get(event.track_uuid)
-                    if track_info and " Compute" in track_info.name:
-                        duration_ns = event.timestamp_ns - begin.timestamp_ns
-                        if duration_ns <= 0:
-                            continue
-                        kname = begin.name
-                        stage = begin.annotations.get("stage", "<no_stage>")
-                        process_name = ""
-                        if track_info.parent_uuid and track_info.parent_uuid in tracks:
-                            process_name = tracks[track_info.parent_uuid].process_name
-                        shard_id = f"{process_name}/{track_info.name}"
+    for trace_file in merged_trace:
+        log.info("Loading %s", trace_file)
+        open_slices.clear()
+        for raw in proto_reader.iter_packets(trace_file):
+            event, track = proto_reader.parse_packet(raw, interned_names)
+            if track is not None:
+                tracks[track.uuid] = track
+            elif event is not None:
+                if event.event_type == 1:
+                    open_slices[event.track_uuid].append(event)
+                elif event.event_type == 2:
+                    if open_slices[event.track_uuid]:
+                        begin = open_slices[event.track_uuid].pop()
+                        track_info = tracks.get(event.track_uuid)
+                        if track_info and " Compute" in track_info.name:
+                            duration_ns = event.timestamp_ns - begin.timestamp_ns
+                            if duration_ns <= 0:
+                                continue
+                            kname = begin.name
+                            stage = begin.annotations.get("stage", "<no_stage>")
+                            process_name = ""
+                            if track_info.parent_uuid and track_info.parent_uuid in tracks:
+                                process_name = tracks[track_info.parent_uuid].process_name
+                            shard_id = f"{process_name}/{track_info.name}"
 
-                        agg = by_kernel[kname]
-                        agg["total_ns"] += duration_ns
-                        agg["count"] += 1
-                        agg["stages"][stage] += duration_ns
-                        agg["by_shard"][shard_id]["total_ns"] += duration_ns
-                        agg["by_shard"][shard_id]["count"] += 1
-                        agg["min_dur_ns"] = min(agg["min_dur_ns"], duration_ns)
-                        agg["max_dur_ns"] = max(agg["max_dur_ns"], duration_ns)
-                        n_kernels += 1
+                            agg = by_kernel[kname]
+                            agg["total_ns"] += duration_ns
+                            agg["count"] += 1
+                            agg["stages"][stage] += duration_ns
+                            agg["by_shard"][shard_id]["total_ns"] += duration_ns
+                            agg["by_shard"][shard_id]["count"] += 1
+                            agg["min_dur_ns"] = min(agg["min_dur_ns"], duration_ns)
+                            agg["max_dur_ns"] = max(agg["max_dur_ns"], duration_ns)
+                            n_kernels += 1
 
     log.info("Aggregated %d kernel invocations across %d unique kernels",
              n_kernels, len(by_kernel))
