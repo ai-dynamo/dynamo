@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import logging
 from typing import Any, Protocol, Tuple
+from uuid import uuid4
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
@@ -512,7 +513,7 @@ class BaseConfigModifier:
         cfg = Config.model_validate(config)
 
         # Set metadata
-        cfg.metadata.name = f"{cls.BACKEND}-{mode}"
+        cfg.metadata.name = f"{cls.BACKEND}-{mode}-{uuid4().hex[:8]}"
         if namespace and hasattr(cfg.metadata, "namespace"):
             cfg.metadata.namespace = namespace
 
