@@ -588,7 +588,7 @@ mod tests {
         // Add staged blocks with remaining = 0
         let block = BlockInfo {
             block_id: 42,
-            sequence_hash: crate::SequenceHash::new(1, None, 100, 16),
+            sequence_hash: crate::SequenceHash::new(1, None, 100),
             layout_handle: kvbm_physical::manager::LayoutHandle::new(0, 1),
         };
         tx.add_staged_blocks(vec![block], 0, None);

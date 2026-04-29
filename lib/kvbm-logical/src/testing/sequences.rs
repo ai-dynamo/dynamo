@@ -32,10 +32,7 @@ enum BuilderMode<T: BlockMetadata> {
     /// Build individual blocks with custom configuration
     Individual { blocks: Vec<TestBlockBuilder<T>> },
     /// Build from a token sequence (more realistic)
-    TokenSequence {
-        tokens: Vec<u32>,
-        salt: Option<dynamo_tokens::SaltHash>,
-    },
+    TokenSequence { tokens: Vec<u32>, salt: Option<u64> },
 }
 
 impl<T: BlockMetadata + std::fmt::Debug> BlockSequenceBuilder<T> {
@@ -68,7 +65,7 @@ impl<T: BlockMetadata + std::fmt::Debug> BlockSequenceBuilder<T> {
     }
 
     /// Set salt for token sequence mode.
-    pub(crate) fn with_salt(mut self, salt: dynamo_tokens::SaltHash) -> Self {
+    pub(crate) fn with_salt(mut self, salt: u64) -> Self {
         if let BuilderMode::TokenSequence { tokens, .. } = self.mode {
             self.mode = BuilderMode::TokenSequence {
                 tokens,
@@ -121,7 +118,7 @@ impl<T: BlockMetadata + std::fmt::Debug> BlockSequenceBuilder<T> {
 
     fn build_from_token_sequence_static(
         tokens: Vec<u32>,
-        salt: Option<dynamo_tokens::SaltHash>,
+        salt: Option<u64>,
         registry: Arc<BlockRegistry>,
         block_size: usize,
     ) -> Vec<(Block<T, Registered>, SequenceHash)> {

@@ -118,7 +118,7 @@ fn test_block_sequence_from_tokens() {
     let tokens = vec![100, 101, 102, 103, 104, 105, 106, 107]; // 2 blocks of size 4
     let blocks = BlockSequenceBuilder::from_tokens(tokens)
         .with_block_size(4)
-        .with_salt(dynamo_tokens::SaltHash(42))
+        .with_salt(42)
         .build();
 
     assert_eq!(blocks.len(), 2);

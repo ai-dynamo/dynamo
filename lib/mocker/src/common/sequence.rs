@@ -4,7 +4,7 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, PositionalLineageHash, SaltHash, TokenBlockSequence, Tokens};
+use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
@@ -14,9 +14,9 @@ fn create_sequence_cache(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> (Vec<UniqueBlock>, Vec<BlockHash>, Vec<PositionalLineageHash>) {
+) -> (Vec<UniqueBlock>, Vec<u64>, Vec<PositionalLineageHash>) {
     let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
-    let mut block_hashes: Vec<BlockHash> = Vec::with_capacity(tokens.blocks().len());
+    let mut block_hashes = Vec::with_capacity(tokens.blocks().len());
     let mut plhs = Vec::with_capacity(tokens.blocks().len());
 
     for (pos, block) in tokens.blocks().iter().enumerate() {
@@ -25,23 +25,11 @@ fn create_sequence_cache(
             unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
             plhs.push(block.positional_lineage_hash());
         } else {
-            // TODO(prefix-caching=false): replace synthetic_unique with no-op
-            // registration. Cross-request prefix sharing is already disabled
-            // here (the random mint guarantees no `match_blocks` hit), but we
-            // still pay the registration cost to keep the *same-sequence*
-            // preempt-retry path working — see
-            // `test_random_plh_stable_across_preempt_retry` in
-            // `kvbm_backend.rs`. The future shape is to thread
-            // `enable_prefix_caching` through `MoveBlock::{Use,Promote}` so
-            // the backend can skip `match_blocks` / `register_block` entirely
-            // and have `ActiveSequence` hold its own block handles across
-            // preempt instead of looking them up by PLH. That removes the
-            // only legitimate need for a non-canonical PLH mint, and
-            // `PositionalLineageHash::synthetic_unique` can then go away.
             unique_blocks.push(UniqueBlock::FullBlock(random::<u64>()));
-            plhs.push(PositionalLineageHash::synthetic_unique(
-                pos as u32,
-                block_size as u32,
+            plhs.push(PositionalLineageHash::new(
+                random::<u64>(),
+                None,
+                pos as u64,
             ));
         }
     }
@@ -58,7 +46,7 @@ fn create_sequence_cache(
 #[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
-    block_hashes: Vec<BlockHash>,
+    block_hashes: Vec<u64>,
     plhs: Vec<PositionalLineageHash>,
 
     tokens: TokenBlockSequence,
@@ -98,7 +86,7 @@ impl ActiveSequence {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
-        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(SaltHash(1337)));
+        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
         let (unique_blocks, block_hashes, plhs) =
             create_sequence_cache(&tokens, block_size, enable_prefix_caching);
 
@@ -241,18 +229,10 @@ impl ActiveSequence {
             // two identical prompts must not share blocks, so the PLH we promote
             // with must also be unique — otherwise `process_promote`'s
             // `match_blocks(&[plh])` lookup would reuse another request's block.
-            //
-            // TODO(prefix-caching=false): see the matching TODO in
-            // `create_sequence_cache`. The durable answer is to skip
-            // `register_block` / `match_blocks` entirely on this path and
-            // delete `PositionalLineageHash::synthetic_unique`.
             let last_plh = if self.enable_prefix_caching {
                 last_complete.positional_lineage_hash()
             } else {
-                PositionalLineageHash::synthetic_unique(
-                    self.block_hashes.len() as u32,
-                    self.block_size as u32,
-                )
+                PositionalLineageHash::new(random::<u64>(), None, self.block_hashes.len() as u64)
             };
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())
@@ -386,7 +366,7 @@ impl ActiveSequence {
 mod tests {
     use super::*;
 
-    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<BlockHash> {
+    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<u64> {
         seq.tokens
             .blocks()
             .iter()
@@ -410,7 +390,7 @@ mod tests {
     fn assert_use_signal(
         signal: &MoveBlock,
         expected_blocks: &[UniqueBlock],
-        expected_hashes: &[BlockHash],
+        expected_hashes: &[u64],
     ) {
         match signal {
             MoveBlock::Use(blocks, hashes, ..) => {

@@ -32,7 +32,7 @@ impl UniversalBlock {
     /// Block index in the sequence (zero-based).
     #[inline]
     pub fn position(&self) -> u32 {
-        self.plh.position()
+        self.plh.position_u32()
     }
 
     /// Parent-chained sequence hash for this block (full u64).

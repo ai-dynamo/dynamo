@@ -319,7 +319,7 @@ fn cross_block_size_does_not_collide() {
         .chain(bh_64.iter())
         .collect();
     let mut sorted = combined.clone();
-    sorted.sort_by_key(|b| b.0);
+    sorted.sort_by_key(|b| **b);
     sorted.dedup();
     assert_eq!(
         sorted.len(),

@@ -8,12 +8,12 @@
 //! be replaced with re-exports from `kvbm_logical::testing`.
 
 use crate::SequenceHash;
-use kvbm_common::tokens::{SaltHash, TokenBlock, TokenBlockSequence, compute_salt_hash_from_bytes};
+use kvbm_common::tokens::{TokenBlock, TokenBlockSequence, compute_hash_v2};
 use kvbm_logical::KvbmSequenceHashProvider;
 
 /// Compute the default salt hash for requests with no salt and no lora.
-pub fn default_request_salt_hash() -> SaltHash {
-    compute_salt_hash_from_bytes(b"{}")
+pub fn default_request_salt_hash() -> u64 {
+    compute_hash_v2(b"{}", 0)
 }
 
 /// Create a token block from a slice of tokens.

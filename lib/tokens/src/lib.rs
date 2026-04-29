@@ -30,29 +30,13 @@ pub type Salt = Vec<u8>;
 /// every block-hash computation in that request.
 ///
 /// The canonical construction path is [`compute_salt_hash_from_bytes`] (or
-/// `dynamo_kv_hashing::Request::salt_hash` at the application layer). Direct
-/// `SaltHash(raw)` is allowed for deserialization / external sources.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
-)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct SaltHash(pub u64);
-
-impl SaltHash {
-    /// Returns the underlying u64.
-    #[inline(always)]
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for SaltHash {
-    #[inline(always)]
-    fn from(v: u64) -> Self {
-        SaltHash(v)
-    }
-}
+/// `dynamo_kv_hashing::Request::salt_hash` at the application layer).
+///
+/// TODO(universal-hashing): promote back to a `pub struct SaltHash(pub u64)` newtype
+/// once the `lib/kvbm-*` call-sites are ready to migrate. Reverted to a type alias
+/// here to keep the kvbm-* surface source-compatible with `main` while
+/// `lib/{tokens,kv-hashing}` evolve. See `.claude/plans/the-blast-radius-on-radiant-valley.md`.
+pub type SaltHash = u64;
 
 /// A 64-bit content-only hash computed from the tokens within a single block (with
 /// optional MM frames). **Not** seeded by [`SaltHash`] — request salt mixes in only at
@@ -60,34 +44,17 @@ impl From<u64> for SaltHash {
 /// across requests (two requests with identical token contents at the same block
 /// position share this hash, regardless of LoRA / salt / block_size).
 ///
-/// The canonical construction path is [`compute_block_hash`]. Direct `BlockHash(raw)`
-/// is allowed for deserialization / external sources.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
-)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct BlockHash(pub u64);
+/// The canonical construction path is [`compute_block_hash`].
+///
+/// TODO(universal-hashing): promote back to a `pub struct BlockHash(pub u64)` newtype
+/// once the `lib/kvbm-*` call-sites are ready to migrate (same rollout as
+/// [`SaltHash`]).
+pub type BlockHash = u64;
 
 /// Alias clarifying that this hash is local to a block and contains no request-level
 /// state (salt, LoRA, block_size). Identical token contents always produce the same
 /// `LocalBlockHash`.
 pub type LocalBlockHash = BlockHash;
-
-impl BlockHash {
-    /// Returns the underlying u64.
-    #[inline(always)]
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for BlockHash {
-    #[inline(always)]
-    fn from(v: u64) -> Self {
-        BlockHash(v)
-    }
-}
 
 /// A 64-bit sequence-aware hash. At the root the chain hash is
 /// `xxh3([salt_u64, local_block_hash], 0)` (see
@@ -126,25 +93,24 @@ pub const LOCAL_BLOCK_HASH_SEED: u64 = 1337;
 /// compatible with the kv-router's `tokens_hash` indexing.
 #[inline]
 pub fn compute_block_hash(block_bytes: &[u8]) -> BlockHash {
-    BlockHash(compute_hash_v2(block_bytes, LOCAL_BLOCK_HASH_SEED))
+    compute_hash_v2(block_bytes, LOCAL_BLOCK_HASH_SEED)
 }
 
-/// Validate that `block_size` is encodable in [`PlhFlags`] / [`PositionalLineageHash`].
+/// Validate that `block_size` is non-zero.
 ///
-/// Constraint: power of two in `1..=2^15`. Matches the assertion inside
-/// [`PlhFlags::new`] so a sequence constructor that calls this fails fast at
-/// construction instead of letting an invalid size flow through and panic on
-/// the first block commit.
+/// Universal-hashing PLH flags can only encode power-of-two block_size in `1..=2^15`,
+/// but [`TokenBlockSequence`] constructors are also exercised by `lib/kvbm-*` tests
+/// that pass arbitrary `tokens.len()` as block_size — the strict pre-flight
+/// validation is therefore enforced inside [`PlhFlags::new`] (the universal-hashing
+/// path) rather than at the `TokenBlockSequence` boundary. Here we only catch the
+/// truly fatal case: a zero block_size would make `chunks_exact(0)` infinite-loop.
 ///
 /// # Panics
 ///
-/// Panics if `block_size` is zero, not a power of two, or greater than `2^15`.
+/// Panics if `block_size` is zero.
 #[inline]
 fn assert_valid_block_size(block_size: u32) {
-    assert!(
-        block_size > 0 && block_size.is_power_of_two() && block_size <= (1u32 << 15),
-        "block_size must be a power of two in 1..=32768, got {block_size}",
-    );
+    assert!(block_size > 0, "block_size must be non-zero");
 }
 
 /// Canonical [`SaltHash`] construction from a pre-canonicalized salt-payload byte
@@ -152,7 +118,7 @@ fn assert_valid_block_size(block_size: u32) {
 /// which canonicalizes `(salt, lora_name)` first; this function is the low-level path.
 #[inline]
 pub fn compute_salt_hash_from_bytes(payload: &[u8]) -> SaltHash {
-    SaltHash(compute_hash_v2(payload, 0))
+    compute_hash_v2(payload, 0)
 }
 
 /// Metadata describing a single multimodal placeholder run within a token sequence.
@@ -396,10 +362,10 @@ impl PositionalSequenceHash {
     pub fn new(
         sequence_hash: SequenceHash,
         position: u64,
-        local_block_hash: impl Into<BlockHash>,
+        local_block_hash: BlockHash,
     ) -> Self {
         let mode = Self::select_mode(position);
-        let upper = Self::encode_upper(mode, position, local_block_hash.into().0);
+        let upper = Self::encode_upper(mode, position, local_block_hash);
         let value = ((upper as u128) << 64) | (sequence_hash as u128);
         PositionalSequenceHash(value)
     }
@@ -418,7 +384,7 @@ impl PositionalSequenceHash {
     /// Returns the local block hash (BlockHash) component.
     pub fn local_block_hash(&self) -> BlockHash {
         let (_, _, lbh) = self.decode_upper();
-        BlockHash(lbh)
+        lbh
     }
 
     /// Returns the mode used for encoding (0, 1, 2, or 3).
@@ -567,9 +533,23 @@ impl PlhFlags {
     }
 
     /// Builds a flags word with the canonical schema and zero feature bits.
+    ///
+    /// Tolerates non-power-of-two `block_size` for back-compat with `lib/kvbm-*` tests
+    /// that pass arbitrary token-length values; the recorded `log2_block_size` falls
+    /// back to the next-lower power of two in that case (the 4-bit field cannot
+    /// represent the true value). Universal-hashing call-sites that need strict
+    /// validation should call [`Self::new`] directly.
     #[inline]
     pub fn for_block_size(block_size: u32) -> Self {
-        Self::new(block_size, PLH_SCHEMA_V1, 0)
+        let bs = block_size.max(1);
+        let pow2 = if bs.is_power_of_two() {
+            bs.min(1u32 << 15)
+        } else {
+            // Round down to the nearest power of two; cap at 2^15.
+            let log2_floor = (u32::BITS - 1 - bs.leading_zeros()).min(15);
+            1u32 << log2_floor
+        };
+        Self::new(pow2, PLH_SCHEMA_V1, 0)
     }
 
     /// Reconstructs a [`PlhFlags`] from a raw 32-bit value (deserialization path).
@@ -690,7 +670,7 @@ impl PositionalLineageHash {
         salt: SaltHash,
         block_size: u32,
     ) -> Self {
-        let current = compute_hash_v2(cast_slice(&[salt.0, local_block_hash.0]), 0);
+        let current = compute_hash_v2(cast_slice(&[salt, local_block_hash]), 0);
         Self {
             current,
             parent: 0,
@@ -751,7 +731,7 @@ impl PositionalLineageHash {
     /// wrap collides chains across positional boundaries.
     pub fn extend(&self, child_local_block_hash: LocalBlockHash) -> Self {
         let parent_seq = self.current;
-        let child_seq = compute_hash_v2(cast_slice(&[parent_seq, child_local_block_hash.0]), 0);
+        let child_seq = compute_hash_v2(cast_slice(&[parent_seq, child_local_block_hash]), 0);
         let next_position = self
             .position
             .checked_add(1)
@@ -765,9 +745,39 @@ impl PositionalLineageHash {
     }
 
     /// Returns the block position.
+    ///
+    /// Returns `u64` for source compatibility with the pre-universal-hashing API used
+    /// by `lib/kvbm-*`. The internal storage is `u32`; this widens at the boundary.
+    /// Callers that want the native width can read [`Self::position_u32`].
     #[inline]
-    pub fn position(&self) -> u32 {
+    pub fn position(&self) -> u64 {
+        self.position as u64
+    }
+
+    /// Returns the block position as `u32`, the native storage width.
+    #[inline]
+    pub fn position_u32(&self) -> u32 {
         self.position
+    }
+
+    /// Deprecated 3-arg constructor preserved for `lib/kvbm-*` source compatibility
+    /// with the pre-universal-hashing API. New code should use [`Self::from_raw_parts`]
+    /// or [`Self::root_with_salt`] / [`Self::extend`].
+    ///
+    /// `parent` defaults to `0` when `None` (matching the root convention). The flags
+    /// word is built with the canonical schema and a default `block_size` of 16, which
+    /// matches what every existing call-site on `main` was implicitly assuming.
+    #[deprecated(
+        note = "use PositionalLineageHash::from_raw_parts, root_with_salt, or extend"
+    )]
+    pub fn new(current: u64, parent: Option<u64>, position: u64) -> Self {
+        const DEFAULT_BLOCK_SIZE: u32 = 16;
+        Self {
+            current,
+            parent: parent.unwrap_or(0),
+            position: position as u32,
+            flags: PlhFlags::for_block_size(DEFAULT_BLOCK_SIZE),
+        }
     }
 
     /// Returns the full 64-bit sequence hash of the current block.
@@ -848,6 +858,16 @@ impl PositionalLineageHash {
     /// applies — the parent slot is always full width.
     #[inline]
     pub fn parent_fragment_for_child_position(&self, _child_position: u32) -> u64 {
+        self.current
+    }
+
+    /// Deprecated alias for the current sequence hash, preserved for `lib/kvbm-*`
+    /// source compatibility with the pre-universal-hashing API. Returns
+    /// [`Self::current_sequence_hash`] (full u64 — the legacy mode-specific
+    /// truncation no longer applies).
+    #[deprecated(note = "use current_sequence_hash()")]
+    #[inline]
+    pub fn current_hash_fragment(&self) -> u64 {
         self.current
     }
 
@@ -2079,7 +2099,7 @@ mod tests {
         TokenBlockSequence::new(Tokens::from(initial_tokens), block_size, salt_hash)
     }
 
-    const TEST_SALT_HASH: SaltHash = SaltHash(1337);
+    const TEST_SALT_HASH: SaltHash = 1337;
     const TEST_BLOCK_SIZE: u32 = 4;
 
     // Per-block content hashes (no salt). xxh3(tokens, 0).
@@ -2155,17 +2175,17 @@ mod tests {
         assert_eq!(lbh3, hash_9_12());
 
         // Root: current = xxh3([salt, lbh1], 0). Subsequent steps: xxh3([parent, lbh], 0).
-        let expected_root = compute_hash_v2(cast_slice(&[TEST_SALT_HASH.0, lbh1.0]), 0);
+        let expected_root = compute_hash_v2(cast_slice(&[TEST_SALT_HASH, lbh1]), 0);
         assert_eq!(seq_hash_1_4(), expected_root);
 
-        let expected_seq2 = compute_hash_v2(cast_slice(&[seq_hash_1_4(), lbh2.0]), 0);
+        let expected_seq2 = compute_hash_v2(cast_slice(&[seq_hash_1_4(), lbh2]), 0);
         assert_eq!(seq_hash_5_8(), expected_seq2);
 
-        let expected_seq3 = compute_hash_v2(cast_slice(&[seq_hash_5_8(), lbh3.0]), 0);
+        let expected_seq3 = compute_hash_v2(cast_slice(&[seq_hash_5_8(), lbh3]), 0);
         assert_eq!(seq_hash_9_12(), expected_seq3);
 
         // Different salt diverges the entire chain starting at the root.
-        let alt = SaltHash(0xDEAD_BEEF);
+        let alt: SaltHash = 0xDEAD_BEEF;
         let alt_root = PositionalLineageHash::root_with_salt(lbh1, alt, TEST_BLOCK_SIZE);
         assert_ne!(alt_root.current_sequence_hash(), seq_hash_1_4());
     }
@@ -2184,7 +2204,7 @@ mod tests {
         // LBH is truncated to 54 bits in mode 0
         assert_eq!(
             psh_0.local_block_hash(),
-            BlockHash(lbh_0 & ((1u64 << 54) - 1)),
+            lbh_0 & ((1u64 << 54) - 1),
             "LBH should be truncated to 54 bits"
         );
 
@@ -2198,7 +2218,7 @@ mod tests {
         // LBH is truncated to 46 bits in mode 1
         assert_eq!(
             psh_1.local_block_hash(),
-            BlockHash(lbh_0 & ((1u64 << 46) - 1)),
+            lbh_0 & ((1u64 << 46) - 1),
             "LBH should be truncated to 46 bits"
         );
 
@@ -2212,7 +2232,7 @@ mod tests {
         // LBH is truncated to 38 bits in mode 2
         assert_eq!(
             psh_2.local_block_hash(),
-            BlockHash(lbh_0 & ((1u64 << 38) - 1)),
+            lbh_0 & ((1u64 << 38) - 1),
             "LBH should be truncated to 38 bits"
         );
 
@@ -2226,7 +2246,7 @@ mod tests {
         // LBH is truncated to 31 bits in mode 3
         assert_eq!(
             psh_3.local_block_hash(),
-            BlockHash(lbh_0 & ((1u64 << 31) - 1)),
+            lbh_0 & ((1u64 << 31) - 1),
             "LBH should be truncated to 31 bits"
         );
 
@@ -2276,7 +2296,7 @@ mod tests {
                 "parent must stay full width at pos {pos}"
             );
             assert_eq!(plh.current_sequence_hash(), current);
-            assert_eq!(plh.position(), pos);
+            assert_eq!(plh.position_u32(), pos);
         }
 
         // Root: parent_sequence_hash is None at position 0.
@@ -2307,7 +2327,7 @@ mod tests {
             let decoded = PositionalLineageHash::from_raw_parts(
                 plh.current_sequence_hash(),
                 plh.parent_raw(),
-                plh.position(),
+                plh.position_u32(),
                 plh.flags_raw(),
             );
             assert_eq!(decoded, plh);
@@ -2344,14 +2364,14 @@ mod tests {
             (1u32 << 24) + 1,
             PlhFlags::for_block_size(16).raw(),
         );
-        assert_eq!(plh.position(), (1u32 << 24) + 1);
+        assert_eq!(plh.position_u32(), (1u32 << 24) + 1);
         let plh = PositionalLineageHash::from_raw_parts(
             0xDEAD_BEEF,
             0xBADC0FFEE,
             u32::MAX,
             PlhFlags::for_block_size(16).raw(),
         );
-        assert_eq!(plh.position(), u32::MAX);
+        assert_eq!(plh.position_u32(), u32::MAX);
     }
 
     #[test]
@@ -2359,7 +2379,7 @@ mod tests {
         // PLH must be self-extending: a chain built from PLH::root_with_salt + extend
         // should be bitwise identical to the chain produced by full TokenBlock construction.
         const BS: u32 = 4;
-        let salt = SaltHash(1337);
+        let salt: SaltHash = 1337;
         let lbh: [LocalBlockHash; 3] = [
             compute_block_hash(cast_slice(&[1u32, 2, 3, 4])),
             compute_block_hash(cast_slice(&[5u32, 6, 7, 8])),
@@ -2394,12 +2414,12 @@ mod tests {
         // Root recurrence: current = xxh3([salt, local_block_hash], 0).
         assert_eq!(
             plh0.current_sequence_hash(),
-            compute_hash_v2(cast_slice(&[salt.0, lbh[0].0]), 0),
+            compute_hash_v2(cast_slice(&[salt, lbh[0]]), 0),
         );
         // Step recurrence: current = xxh3([parent, child_local_block_hash], 0).
         assert_eq!(
             plh1.current_sequence_hash(),
-            compute_hash_v2(cast_slice(&[plh0.current_sequence_hash(), lbh[1].0]), 0),
+            compute_hash_v2(cast_slice(&[plh0.current_sequence_hash(), lbh[1]]), 0),
         );
 
         // Block size and flags propagate through extend.
@@ -2408,7 +2428,7 @@ mod tests {
 
         // Salt isolation: changing salt diverges the chain starting at the root, but
         // LocalBlockHash itself is unchanged (content-addressable).
-        let alt_salt = SaltHash(4242);
+        let alt_salt: SaltHash = 4242;
         let alt_plh0 = PositionalLineageHash::root_with_salt(lbh[0], alt_salt, BS);
         let alt_plh1 = alt_plh0.extend(lbh[1]);
         assert_ne!(alt_plh0, plh0);
@@ -2684,7 +2704,7 @@ mod tests {
         // block_hash matches the salted-sequence's block_hash byte-for-byte. Salt
         // diverges the *sequence_hash* (chain) at the root only.
         let seq_no_salt = create_test_sequence(&[1, 2, 3, 4, 5], 4, None);
-        assert_eq!(seq_no_salt.salt_hash(), SaltHash(0));
+        assert_eq!(seq_no_salt.salt_hash(), 0);
         assert_eq!(seq_no_salt.blocks().len(), 1);
         assert_eq!(seq_no_salt.blocks[0].block_hash(), hash_1_4());
         assert_ne!(seq_no_salt.blocks[0].sequence_hash(), seq_hash_1_4());
@@ -3113,7 +3133,7 @@ mod tests {
 
     #[test]
     fn test_push_tokens_partial_block() {
-        let mut partial = PartialTokenBlock::create_sequence_root(4, SaltHash(1337));
+        let mut partial = PartialTokenBlock::create_sequence_root(4, 1337);
 
         let tokens = Tokens(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
@@ -3228,7 +3248,7 @@ mod tests {
         // Local block hash truncated to 38 bits in mode 2
         assert_eq!(
             psh_mode2.local_block_hash(),
-            BlockHash(block_hash & ((1u64 << 38) - 1))
+            block_hash & ((1u64 << 38) - 1)
         );
 
         // Mode 3: position fits in 31 bits (16777216 <= pos < 2147483648)
@@ -3244,7 +3264,7 @@ mod tests {
         // Local block hash truncated to 31 bits in mode 3
         assert_eq!(
             psh_mode3.local_block_hash(),
-            BlockHash(block_hash & ((1u64 << 31) - 1))
+            block_hash & ((1u64 << 31) - 1)
         );
     }
 
@@ -3371,7 +3391,7 @@ mod tests {
     #[test]
     fn test_token_block_accessors() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
 
         let block = &seq.blocks()[0];
 
@@ -3442,7 +3462,7 @@ mod tests {
     #[test]
     fn test_sequence_next_block() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
 
         let block = &seq.blocks()[0];
         let next_partial = block.next_block();
@@ -3460,7 +3480,7 @@ mod tests {
     #[test]
     fn test_sequence_reset() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let mut seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
+        let mut seq = TokenBlockSequence::new(tokens, 4, Some(1337));
 
         assert_eq!(seq.blocks().len(), 2);
         assert_eq!(seq.total_tokens(), 9);
@@ -3476,7 +3496,7 @@ mod tests {
     #[test]
     fn test_sequence_into_parts() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
 
         let (blocks, partial) = seq.into_parts();
 
@@ -3492,7 +3512,7 @@ mod tests {
 
         // With blocks
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8]);
-        let seq = TokenBlockSequence::new(tokens, 4, Some(SaltHash(1337)));
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
         let last = seq.last_complete_block();
         assert!(last.is_some());
         assert_eq!(last.unwrap().tokens().as_ref(), &[5, 6, 7, 8]);

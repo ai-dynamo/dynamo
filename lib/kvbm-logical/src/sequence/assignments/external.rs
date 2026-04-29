@@ -289,11 +289,11 @@ impl ExternalBlockAssignments {
             let hash = block.kvbm_sequence_hash();
 
             let actual_pos = hash.position();
-            if actual_pos as usize != seq_pos {
+            if actual_pos != seq_pos as u64 {
                 let block_id = self.store.get_unassigned(i).map(|(&id, _)| id).unwrap();
                 return Err(BlockSequenceError::PositionMismatch {
                     expected: seq_pos,
-                    actual: actual_pos as u64,
+                    actual: actual_pos,
                     block_id,
                 });
             }

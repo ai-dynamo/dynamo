@@ -423,14 +423,13 @@ mod lifecycle_tests {
             let snap = m.snapshot();
             assert_eq!(snap.reset_pool_size, 8);
 
-            // Note: create_token_block uses 2 tokens but block_size is 4,
+            // Note: create_token_block uses 3 tokens but block_size is 4,
             // so complete() returns Err(BlockSizeMismatch) for all blocks.
-            // (2 is a power of two — required by PLH encoding.)
             let _complete_blocks: Vec<_> = mutable_blocks
                 .into_iter()
                 .enumerate()
                 .map(|(i, block)| {
-                    let tokens = vec![400 + i as u32, 401 + i as u32];
+                    let tokens = vec![400 + i as u32, 401 + i as u32, 402 + i as u32];
                     let token_block = create_token_block(&tokens);
                     block.complete(&token_block)
                 })
@@ -1553,11 +1552,7 @@ mod integration_tests {
 
         // Create token blocks from sequence
         let token_blocks = {
-            let token_seq = dynamo_tokens::TokenBlockSequence::from_slice(
-                &tokens,
-                4,
-                Some(dynamo_tokens::SaltHash(42)),
-            );
+            let token_seq = dynamo_tokens::TokenBlockSequence::from_slice(&tokens, 4, Some(42));
             token_seq.blocks().to_vec()
         };
 

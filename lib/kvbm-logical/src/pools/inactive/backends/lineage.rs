@@ -56,11 +56,11 @@ impl<T: BlockMetadata> LineageNode<T> {
 /// A backend that manages blocks using a lineage graph and evicts from the leaves.
 pub struct LineageBackend<T: BlockMetadata> {
     /// Map from (position, fragment) to Node.
-    nodes: HashMap<u32, HashMap<u64, LineageNode<T>>>,
+    nodes: HashMap<u64, HashMap<u64, LineageNode<T>>>,
 
     /// Sorted queue of leaf nodes, keyed by (last_used, position, fragment).
     /// Smallest key (oldest tick) is popped first.
-    leaf_queue: BTreeMap<(u64, u32, u64), ()>,
+    leaf_queue: BTreeMap<(u64, u64, u64), ()>,
 
     /// Total number of blocks currently stored (excluding ghost nodes).
     count: usize,
@@ -91,11 +91,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     pub fn insert(&mut self, block: Block<T, Registered>) {
         let lineage_hash = block.sequence_hash();
         let position = lineage_hash.position();
-        // Key this node by the same fragment width its children will store as their
-        // `parent_hash_fragment`, so child→parent lookups match exactly. PLH carries
-        // the full u64 current sequence hash; we truncate here to the child mode's
-        // parent-fragment width (54/46/38 bits depending on `position + 1`).
-        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
+        let fragment = lineage_hash.current_hash_fragment();
         let full_hash = lineage_hash.as_u128();
         let parent_fragment = if position > 0 {
             Some(lineage_hash.parent_hash_fragment())
@@ -213,7 +209,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     /// Removes a specific block by its lineage hash (for cache hits).
     pub fn remove(&mut self, lineage_hash: &PositionalLineageHash) -> Option<Block<T, Registered>> {
         let position = lineage_hash.position();
-        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
+        let fragment = lineage_hash.current_hash_fragment();
 
         let node_data = self
             .nodes
@@ -236,7 +232,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     /// Internal method to remove a block from the graph.
     /// Returns the block if one existed at that node.
     /// Handles ghost cleanup iteratively.
-    fn remove_block(&mut self, position: u32, fragment: u64) -> Option<Block<T, Registered>> {
+    fn remove_block(&mut self, position: u64, fragment: u64) -> Option<Block<T, Registered>> {
         let node_block = {
             let level = self.nodes.get_mut(&position)?;
             let node = level.get_mut(&fragment)?;
@@ -387,7 +383,7 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LineageBackend<T> {
 
     fn has_block(&self, seq_hash: PositionalLineageHash) -> bool {
         let position = seq_hash.position();
-        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
+        let fragment = seq_hash.current_hash_fragment();
 
         self.nodes
             .get(&position)

@@ -155,7 +155,7 @@ mod tests {
 
     /// Helper to create a test SequenceHash with unique values.
     fn test_hash(id: u64) -> SequenceHash {
-        SequenceHash::new(id, Some(0), id as u32, 16)
+        SequenceHash::new(id, Some(0), id)
     }
 
     #[test]
