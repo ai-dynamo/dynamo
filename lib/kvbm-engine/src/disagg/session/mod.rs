@@ -249,6 +249,14 @@ pub trait SessionFactory: Send + Sync {
 //   - `testing.rs` (feature `testing`) — `MockSession` + factory
 // ============================================================================
 
+pub mod velo;
+pub use velo::{SESSION_STREAM_SCHEMA, VeloSession, VeloSessionFactory};
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub use testing::{MockSession, MockSessionFactory};
+
 #[cfg(test)]
 mod tests {
     use super::*;
