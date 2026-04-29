@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from args import parse_args
 from generate_images import (
+    compute_image_uuid,
     generate_image_pool_base64,
     generate_image_pool_http,
     sample_slots,
@@ -64,8 +65,14 @@ def run_single_turn(
             user_text = generate_filler(py_rng, args.user_text_tokens)
             start = i * images_per_request
             images = slot_refs[start : start + images_per_request]
+            image_uuids = [compute_image_uuid(ref) for ref in images]
             line = json.dumps(
-                {"text": user_text, "images": images}, separators=(",", ":")
+                {
+                    "text": user_text,
+                    "images": images,
+                    "image_uuids": image_uuids,
+                },
+                separators=(",", ":"),
             )
             f.write(line + "\n")
 
@@ -107,6 +114,7 @@ def run_sliding_window(
                     "session_id": f"user_{user_idx}",
                     "text": generate_filler(py_rng, args.user_text_tokens),
                     "images": window,
+                    "image_uuids": [compute_image_uuid(ref) for ref in window],
                 }
                 f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 

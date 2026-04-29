@@ -3,12 +3,24 @@
 
 """Utilities for generating and sampling image pools."""
 
+import hashlib
 import json
 import random
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+
+def compute_image_uuid(ref: str) -> str:
+    """Stable UUID for an image reference (path or URL).
+
+    Used for vLLM cached-multimodal-input UUIDs (the `uuid` per content part
+    in the OpenAI chat-completions extension). Same `ref` → same UUID across
+    runs, so the server's processor cache survives benchmark restarts.
+    """
+    digest = hashlib.sha256(ref.encode("utf-8")).hexdigest()
+    return f"img-{digest[:16]}"
 
 
 def generate_image_pool_base64(
