@@ -146,7 +146,11 @@ impl MockOffloadEngine {
     pub async fn new(config: KvbmOffloadConfig) -> Result<Self> {
         let messenger = create_local_messenger().await?;
         let registry = Arc::new(build_registry());
-        let g2_manager = Arc::new(build_g2_block_manager(config.num_g2_blocks, &registry));
+        let g2_manager = Arc::new(build_g2_block_manager(
+            config.num_g2_blocks,
+            config.block_size_tokens,
+            &registry,
+        ));
 
         let worker = Arc::new(MockWorker::new(
             config.block_size_bytes.unwrap_or(0),
@@ -645,14 +649,16 @@ fn build_registry() -> BlockRegistry {
         .build()
 }
 
-/// `block_size(1)` because `MockWorker` never reads or writes real memory;
-/// the LRU backend keeps the bookkeeping cheap.
-fn build_g2_block_manager(block_count: usize, registry: &BlockRegistry) -> BlockManager<G2> {
+fn build_g2_block_manager(
+    block_count: usize,
+    block_size_tokens: usize,
+    registry: &BlockRegistry,
+) -> BlockManager<G2> {
     BlockManager::<G2>::builder()
         .block_count(block_count)
-        .block_size(1)
+        .block_size(block_size_tokens)
         .registry(registry.clone())
-        .with_lru_backend()
+        .with_lineage_backend()
         .build()
         .expect("BlockManager<G2> should build with valid config")
 }
@@ -745,7 +751,9 @@ mod tests {
             .allocate_blocks_with_evictions(1)
             .expect("G2 allocate");
         let mutable: MutableBlock<G2> = alloc.pop().unwrap();
-        let complete = mutable.stage(plh, 1).expect("G2 stage");
+        let complete = mutable
+            .stage(plh, engine.g2_manager.block_size())
+            .expect("G2 stage");
         drop(engine.g2_manager.register_block(complete));
 
         let handle = engine

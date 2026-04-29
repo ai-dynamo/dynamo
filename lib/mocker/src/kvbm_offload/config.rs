@@ -15,6 +15,10 @@ pub struct KvbmOffloadConfig {
     /// `BlockManager<G2>` owned by the engine.
     pub num_g2_blocks: usize,
 
+    /// Tokens per logical KV block. Used as the kvbm-logical block size for
+    /// G2 so its block identity matches the engine/G1 block geometry.
+    pub block_size_tokens: usize,
+
     /// Batch size for the G1→G2 pipeline. Offloads are grouped into
     /// batches of this size before being handed to the worker.
     pub offload_batch_size: usize,
@@ -38,6 +42,7 @@ impl Default for KvbmOffloadConfig {
     fn default() -> Self {
         Self {
             num_g2_blocks: 100_000,
+            block_size_tokens: 64,
             offload_batch_size: 32,
             block_size_bytes: None,
             bandwidth_g1_to_g2_gbps: 14.0,
@@ -60,6 +65,7 @@ impl KvbmOffloadConfig {
         let defaults = Self::default();
         Some(Self {
             num_g2_blocks,
+            block_size_tokens: args.block_size,
             offload_batch_size: args
                 .offload_batch_size
                 .unwrap_or(defaults.offload_batch_size),
@@ -117,6 +123,7 @@ mod tests {
         assert_eq!(cfg.block_size_bytes, Some(64 * 131_072));
         // Defaults preserved.
         assert_eq!(cfg.num_g2_blocks, 10_000);
+        assert_eq!(cfg.block_size_tokens, 64);
         assert_eq!(cfg.offload_batch_size, 32);
         assert_eq!(cfg.bandwidth_g1_to_g2_gbps, 14.0);
         assert_eq!(cfg.bandwidth_g2_to_g1_gbps, 14.0);
@@ -137,6 +144,7 @@ mod tests {
             .unwrap();
         let cfg = KvbmOffloadConfig::from_args(&args).expect("bpt set");
         assert_eq!(cfg.num_g2_blocks, 10_000);
+        assert_eq!(cfg.block_size_tokens, 64);
         assert_eq!(cfg.offload_batch_size, 16);
         assert_eq!(cfg.bandwidth_g1_to_g2_gbps, 8.0);
         assert_eq!(cfg.bandwidth_g2_to_g1_gbps, 12.0);

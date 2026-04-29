@@ -1312,7 +1312,7 @@ mod offload {
         for plh in plhs {
             let (mut alloc, _evicted) = g2.allocate_blocks_with_evictions(1).expect("G2 allocate");
             let mutable = alloc.pop().unwrap();
-            let staged = mutable.stage(*plh, 1).expect("G2 stage");
+            let staged = mutable.stage(*plh, g2.block_size()).expect("G2 stage");
             drop(g2.register_block(staged));
         }
     }
@@ -1367,6 +1367,7 @@ mod offload {
             .unwrap();
         let mut core = VllmCore::new(args);
         let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
             block_size_bytes: Some(1_000_000),
             bandwidth_g2_to_g1_gbps: 1.0,
             ..Default::default()
@@ -1440,6 +1441,7 @@ mod offload {
             .unwrap();
         let mut core = VllmCore::new(args);
         let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
             block_size_bytes: Some(1_000_000),
             bandwidth_g2_to_g1_gbps: 1.0,
             ..Default::default()
@@ -1515,6 +1517,7 @@ mod offload {
             .unwrap();
         let mut core = VllmCore::new(args);
         let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
             block_size_bytes: Some(1_000_000),
             bandwidth_g2_to_g1_gbps: 2.0,
             ..Default::default()
@@ -1618,6 +1621,7 @@ mod offload {
         // probes at t=0.0 (parked), t=0.5 (still in flight), t=2.0
         // (completed and admitted in the same pass).
         let config = KvbmOffloadConfig {
+            block_size_tokens: block_size,
             block_size_bytes: Some(250_000),
             bandwidth_g2_to_g1_gbps: 1.0,
             ..Default::default()
@@ -1753,6 +1757,7 @@ mod offload {
             // work. Under PS with N=4 on a 4 GB/s link (effective
             // 1 GB/s per transfer), each completes at t=1.0 ms.
             let config = KvbmOffloadConfig {
+                block_size_tokens: BLOCK_SIZE,
                 block_size_bytes: Some(250_000),
                 bandwidth_g2_to_g1_gbps: 4.0,
                 ..Default::default()

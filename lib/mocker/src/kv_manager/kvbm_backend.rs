@@ -1919,6 +1919,7 @@ mod tests {
         fn g1_eviction_offload_holds_source_slot_until_complete() {
             let mut mgr = make_mgr(1, 4);
             let config = KvbmOffloadConfig {
+                block_size_tokens: 4,
                 block_size_bytes: Some(1_000_000),
                 bandwidth_g1_to_g2_gbps: 1.0,
                 ..Default::default()
