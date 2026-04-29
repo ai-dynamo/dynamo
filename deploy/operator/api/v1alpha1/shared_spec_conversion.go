@@ -1134,7 +1134,7 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 
 	// Pick out the main container; leave everything else as podSpec sidecars.
 	var main *corev1.Container
-	other := make([]corev1.Container, 0, len(podTpl.Spec.Containers))
+	var other []corev1.Container
 	for i := range podTpl.Spec.Containers {
 		if podTpl.Spec.Containers[i].Name == mainContainerName && main == nil {
 			m := podTpl.Spec.Containers[i].DeepCopy()
@@ -1340,6 +1340,8 @@ func frontendSidecarSpecFromContainer(ctr corev1.Container, origin *FrontendSide
 	out.Envs = slices.Clone(ctr.Env)
 	if secretName, ok := frontendSidecarEnvFromSecret(ctr.EnvFrom); ok {
 		out.EnvFromSecret = ptr.To(secretName)
+	} else if origin != nil && origin.EnvFromSecret != nil && *origin.EnvFromSecret == "" {
+		out.EnvFromSecret = origin.EnvFromSecret
 	} else {
 		out.EnvFromSecret = nil
 	}
@@ -1540,6 +1542,9 @@ func envFromSecretMatches(envFrom []corev1.EnvFromSource, name string) bool {
 // `specific`, de-duplicated by Name with `specific` winning on collision.
 // Duplicated here to avoid an api -> internal cycle.
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+	if len(common) == 0 && len(specific) == 0 {
+		return nil
+	}
 	out := make([]corev1.EnvVar, 0, len(common)+len(specific))
 	seen := map[string]int{}
 	for _, e := range common {

@@ -18,29 +18,32 @@ object currently represents the field with a non-zero value. If a field can be
 expressed natively by the source version, the source-version field is
 authoritative, including its zero, nil, or empty value.
 
-The conversion shape should be:
+The semantic conversion shape is:
 
 ```text
-semantic = convert(live fields)
-preserved = decode annotation, if present
+dst = convert(live fields)
+restore = decode target-version annotation, if present
 
 for each known unrepresentable field:
   find the matching live subobject
-  copy only that unrepresentable field from preserved into semantic
+  copy only that unrepresentable field from restore into dst
 
-return semantic
+save source-version fields that the target version cannot represent
+
+return dst and save
 ```
 
 This is a semantic description, not a required top-level control flow.
 Recursive helpers may express the same invariant directly, for example:
 
 ```text
-convertFooFrom(&src.Foo, &dst.Foo, &preserved.Foo)
+convertFoo(&src.Foo, &dst.Foo, &restore.Foo, &save.Foo)
 ```
 
 Such helpers must still treat `src.Foo` as authoritative for every field
-representable by the source version, and use `preserved.Foo` only for fields
-that the source version cannot represent.
+representable by the source version, use `restore.Foo` only for target fields
+that the source version cannot represent, and write `save.Foo` only for source
+fields that the target version cannot represent.
 
 The conversion shape must not be:
 
@@ -49,6 +52,63 @@ return overlay(preserved, semantic)
 return overlay(semantic, preserved)
 return preserved if annotation exists
 ```
+
+## Conversion Helper Pattern
+
+Conversion helper names should follow the converted type names and direction.
+The shape mirrors `conversion-gen` naming, but uses private helper names:
+
+```go
+func convert_v1beta1_DynamoGraphDeployment_To_v1alpha1_DynamoGraphDeployment(
+    src *v1beta1.DynamoGraphDeployment,
+    dst *v1alpha1.DynamoGraphDeployment,
+    restore *v1alpha1.DynamoGraphDeployment,
+    save *v1beta1.DynamoGraphDeployment,
+) error
+```
+
+The parameters have fixed meaning:
+
+- `src` is the live source-version object and is authoritative for every field
+  that the source version can represent.
+- `dst` is the converted target-version object.
+- `restore` is typed target-version data decoded from preservation annotations.
+  It may restore only target fields that `src` cannot represent.
+- `save` is typed source-version data that will be encoded into preservation
+  annotations. It may save only source fields that `dst` cannot represent.
+
+Root conversion functions should own annotation mechanics:
+
+- Decode existing preservation annotations into typed `restore` objects.
+- Allocate typed `save` objects.
+- Call typed conversion helpers.
+- Scrub stale internal annotations.
+- Encode `save` back into annotations only when it contains meaningful
+  unrepresentable data.
+
+Nested conversion helpers should not know annotation names. They should receive
+the corresponding `restore` and `save` subobjects from their caller.
+
+Each helper should keep the representability decisions visible in three
+sections:
+
+```go
+// Convert representable fields from src to dst.
+dst.Spec.Foo = src.Spec.Foo
+
+// Restore target-only fields that src cannot represent.
+if restore != nil {
+    dst.Spec.LegacyOnly = restore.Spec.LegacyOnly
+}
+
+// Save source-only fields that dst cannot represent.
+save.Spec.HubOnly = src.Spec.HubOnly
+```
+
+Avoid hiding these decisions in broad `restoreFoo` or `preserveFoo` helpers.
+Small helpers are appropriate for repeated mechanics such as decoding
+annotations, allocating keyed child objects, checking whether `save` is empty,
+or converting low-level Kubernetes field shapes.
 
 ## Preservation Annotations
 

@@ -117,6 +117,15 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 			m.Annotations = scrubReservedAnnotations(m.Annotations)
 			m.ManagedFields = nil
 		},
+		// v1alpha1 DCD status has a non-omitempty conditions list. JSON
+		// normalization preserves an empty list there, so avoid generating
+		// that shape in the parent fuzzer.
+		func(s *v1alpha1.DynamoComponentDeploymentStatus, c randfill.Continue) {
+			c.FillNoCustom(s)
+			if len(s.Conditions) == 0 {
+				s.Conditions = nil
+			}
+		},
 		// RawExtension: emit a small valid JSON object so paths that stash
 		// the value through annotations or JSON marshalling are stable
 		// across a round-trip.
@@ -215,13 +224,13 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 	case 3:
 		return fmt.Sprintf("s%d", c.Uint32()%1024)
 	case 4:
-		out := make([]any, int(c.Uint32()%3))
+		out := make([]any, 1+int(c.Uint32()%2))
 		for i := range out {
 			out[i] = fuzzJSONValue(c, depth+1)
 		}
 		return out
 	case 5:
-		n := int(c.Uint32() % 3)
+		n := 1 + int(c.Uint32()%2)
 		out := make(map[string]any, n)
 		for i := 0; i < n; i++ {
 			out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
@@ -233,10 +242,23 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 }
 
 func fuzzJSONObject(c randfill.Continue, depth int) map[string]any {
-	n := int(c.Uint32() % 3)
+	n := 1 + int(c.Uint32()%2)
 	out := make(map[string]any, n)
 	for i := 0; i < n; i++ {
 		out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
+	}
+	return out
+}
+
+func normalizeAfterFuzzing[T any](t *testing.T, v T, newValue func() T) T {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("normalize after fuzzing: marshal: %v", err)
+	}
+	out := newValue()
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("normalize after fuzzing: unmarshal: %v", err)
 	}
 	return out
 }
@@ -278,6 +300,7 @@ func fuzzHubSpokeHub[
 	for i := 0; i < *fuzzIters; i++ {
 		in := newHub()
 		f.Fill(in)
+		in = normalizeAfterFuzzing(t, in, newHub)
 		inBeforeYAML := toYAML(t, in)
 		spoke := PS(new(S))
 		if err := spoke.ConvertFrom(in); err != nil {
@@ -312,6 +335,7 @@ func fuzzSpokeHubSpoke[
 	for i := 0; i < *fuzzIters; i++ {
 		in := PS(new(S))
 		f.Fill(in)
+		in = normalizeAfterFuzzing(t, in, func() PS { return PS(new(S)) })
 		inBeforeYAML := toYAML(t, in)
 		hub := newHub()
 		if err := in.ConvertTo(hub); err != nil {
