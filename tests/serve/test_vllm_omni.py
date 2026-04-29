@@ -138,7 +138,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
         model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
