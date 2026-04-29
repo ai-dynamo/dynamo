@@ -46,9 +46,11 @@ mod kv_indexer;
 mod local;
 mod lower_tier;
 mod metrics;
+mod prefix_sharded;
 mod thread_pool;
 mod traits;
 mod types;
+mod virtual_shard_sharded;
 
 pub mod concurrent_radix_tree;
 pub mod concurrent_radix_tree_compressed;
@@ -65,9 +67,11 @@ pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use metrics::*;
+pub use prefix_sharded::*;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;
+pub use virtual_shard_sharded::*;
 
 // Re-export RadixTree (was `pub use crate::radix_tree::RadixTree` in old indexer.rs)
 pub use radix_tree::RadixTree;

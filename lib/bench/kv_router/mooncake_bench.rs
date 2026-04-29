@@ -66,6 +66,41 @@ enum IndexerArgs {
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
     },
+
+    /// Prefix-sharded CRTC: deterministic direct routing by hashed prefix -> physical shard.
+    PrefixShardedCrtc {
+        /// Number of independent physical CRTC shards.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of OS event-worker threads per shard.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Number of prefix blocks hashed for routing.
+        #[clap(long, default_value = "2")]
+        prefix_depth: usize,
+    },
+
+    /// Virtual-shard-sharded CRTC: deterministic branch_key -> virtual_shard
+    /// with a shared virtual_shard -> physical_shard ownership table.
+    VirtualShardShardedCrtc {
+        /// Number of physical CRTC shards.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of logical virtual shards.
+        #[clap(long, default_value = "8")]
+        num_virtual_shards: usize,
+
+        /// Number of OS event-worker threads per physical shard.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Number of prefix blocks hashed to identify a branch.
+        #[clap(long, default_value = "2")]
+        prefix_depth: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -91,6 +126,26 @@ impl IndexerArgs {
                 *num_event_workers_per_shard,
                 *prefix_depth,
             ),
+            IndexerArgs::PrefixShardedCrtc {
+                num_shards,
+                num_event_workers_per_shard,
+                prefix_depth,
+            } => MooncakeIndexerConfig::prefix_sharded_crtc(
+                *num_shards,
+                *num_event_workers_per_shard,
+                *prefix_depth,
+            ),
+            IndexerArgs::VirtualShardShardedCrtc {
+                num_shards,
+                num_virtual_shards,
+                num_event_workers_per_shard,
+                prefix_depth,
+            } => MooncakeIndexerConfig::virtual_shard_sharded_crtc(
+                *num_shards,
+                *num_virtual_shards,
+                *num_event_workers_per_shard,
+                *prefix_depth,
+            ),
         }
     }
 }
@@ -108,13 +163,14 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed.
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
+    /// prefix-sharded-crtc, virtual-shard-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
     /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed).
+    /// concurrent-radix-tree-compressed, and sharded CRTC variants).
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,

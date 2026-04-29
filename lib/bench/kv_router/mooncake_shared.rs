@@ -11,7 +11,7 @@ use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics}
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
     BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
-    ThreadPoolIndexer,
+    PrefixShardedIndexer, ThreadPoolIndexer, VirtualShardShardedIndexer,
 };
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -29,6 +29,8 @@ pub enum MooncakeIndexerKind {
     ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
+    PrefixShardedCrtc,
+    VirtualShardShardedCrtc,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +39,7 @@ pub struct MooncakeIndexerConfig {
     pub jump_size: usize,
     pub num_event_workers: usize,
     pub num_shards: usize,
+    pub num_virtual_shards: usize,
     pub num_event_workers_per_shard: usize,
     pub prefix_depth: usize,
 }
@@ -49,6 +52,7 @@ impl MooncakeIndexerConfig {
             jump_size: 8,
             num_event_workers: 16,
             num_shards: 2,
+            num_virtual_shards: 8,
             num_event_workers_per_shard: 4,
             prefix_depth: 2,
         }
@@ -93,6 +97,36 @@ impl MooncakeIndexerConfig {
         }
     }
 
+    pub fn prefix_sharded_crtc(
+        num_shards: usize,
+        num_event_workers_per_shard: usize,
+        prefix_depth: usize,
+    ) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::PrefixShardedCrtc,
+            num_shards,
+            num_event_workers_per_shard,
+            prefix_depth,
+            ..Self::radix_tree()
+        }
+    }
+
+    pub fn virtual_shard_sharded_crtc(
+        num_shards: usize,
+        num_virtual_shards: usize,
+        num_event_workers_per_shard: usize,
+        prefix_depth: usize,
+    ) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::VirtualShardShardedCrtc,
+            num_shards,
+            num_virtual_shards,
+            num_event_workers_per_shard,
+            prefix_depth,
+            ..Self::radix_tree()
+        }
+    }
+
     pub fn short_name(&self) -> &'static str {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
@@ -102,6 +136,8 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
+            MooncakeIndexerKind::PrefixShardedCrtc => "prefix-sharded-crtc",
+            MooncakeIndexerKind::VirtualShardShardedCrtc => "virtual-shard-sharded-crtc",
         }
     }
 
@@ -112,6 +148,8 @@ impl MooncakeIndexerConfig {
                 | MooncakeIndexerKind::ConcurrentRadixTree
                 | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
                 | MooncakeIndexerKind::BranchShardedCrtc
+                | MooncakeIndexerKind::PrefixShardedCrtc
+                | MooncakeIndexerKind::VirtualShardShardedCrtc
         )
     }
 
@@ -128,8 +166,12 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
+            "prefix-sharded-crtc" => Self::prefix_sharded_crtc(2, num_event_workers, 2),
+            "virtual-shard-sharded-crtc" => {
+                Self::virtual_shard_sharded_crtc(2, 8, num_event_workers, 2)
+            }
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc, prefix-sharded-crtc, virtual-shard-sharded-crtc",
                 name
             ),
         };
@@ -185,6 +227,49 @@ impl MooncakeIndexerConfig {
                     self.prefix_depth,
                     block_size,
                 ))
+            }
+            MooncakeIndexerKind::PrefixShardedCrtc => {
+                let shards = (0..self.num_shards)
+                    .map(|_| {
+                        ThreadPoolIndexer::new_with_metrics(
+                            ConcurrentRadixTreeCompressed::new(),
+                            self.num_event_workers_per_shard,
+                            block_size,
+                            Some(Arc::clone(&metrics)),
+                        )
+                    })
+                    .collect();
+                Arc::new(PrefixShardedIndexer::new_with_options(
+                    shards,
+                    self.prefix_depth,
+                    block_size,
+                    true,
+                ))
+            }
+            MooncakeIndexerKind::VirtualShardShardedCrtc => {
+                let shards = (0..self.num_shards)
+                    .map(|_| {
+                        ThreadPoolIndexer::new_with_metrics(
+                            ConcurrentRadixTreeCompressed::new(),
+                            self.num_event_workers_per_shard,
+                            block_size,
+                            Some(Arc::clone(&metrics)),
+                        )
+                    })
+                    .collect();
+                let indexer = Arc::new(VirtualShardShardedIndexer::new_with_options(
+                    shards,
+                    self.num_virtual_shards,
+                    self.prefix_depth,
+                    block_size,
+                    true,
+                ));
+                let _handle = Arc::clone(&indexer).start_rebalancer(
+                    Duration::from_secs(2),
+                    1.4,
+                    Duration::from_secs(1),
+                );
+                indexer
             }
         }
     }
