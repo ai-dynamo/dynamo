@@ -78,7 +78,7 @@ Wire formats that carry only PLH (e.g., a slimmed-down `KvCacheEvent`) are now s
 - `TokenBlockSequence::new_with_mm` and `split_tokens_with_mm` (new constructors).
 - `TokenBlockSequence::push_token` / `push_mm_run` / `extend_with_mm` (new streaming API).
 - Internal `commit_current` that routes per-block hash computation through the MM-aware byte path when `mm_runs` is non-empty.
-- `compute_block_bytes_with_mm` and `validate_and_sort_mm_info` (new public helpers).
+- `validate_and_sort_mm_info` (new public helper). The MM byte-encoding routine itself stays `pub(crate)` — consumers chain through `PositionalLineageHash::root_with_salt` / `extend(local_block_hash)` and never hand-roll the byte buffer.
 
 **Existing zero-MM constructors are unchanged.** All pre-existing tests pass unchanged, and `tokens_mm_zero_mm_equivalence` proves field-for-field equality between the MM-empty `new_with_mm` path and the existing `new` path. `cross_check_tokens_zero_mm` proves the same gate at the kv-hashing level.
 
@@ -121,4 +121,4 @@ let blocks = request.into_blocks(16)?;         // Vec<UniversalBlock>
 let plhs   = request.positional_lineage_hashes(16)?;  // transport-friendly
 ```
 
-Public surface re-exports the underlying `dynamo_tokens` primitives (`PositionalLineageHash`, `compute_hash_v2`, `compute_block_bytes_with_mm`, etc.) so consumers can depend on this crate alone.
+Public surface re-exports the underlying `dynamo_tokens` primitives (`PositionalLineageHash`, `compute_hash_v2`, `compute_salt_hash_from_bytes`, etc.) so consumers can depend on this crate alone.

@@ -27,8 +27,13 @@ pub use error::KvHashingError;
 pub use request::{Request, RequestBuilder, RequestMmObjectInfo};
 
 // Re-export the underlying primitives so consumers can depend solely on this crate.
+//
+// Intentionally minimal. Only types/constants reachable through the [`Request`] API are
+// re-exported. Low-level construction helpers (`compute_hash_v2`,
+// `compute_salt_hash_from_bytes`, `validate_and_sort_mm_info`) are deliberately *not*
+// re-exported — orchestrator-layer consumers should use the typed `Request → into_blocks`
+// path. Direct access to those helpers requires an explicit dependency on `dynamo-tokens`.
 pub use dynamo_tokens::{
-    BlockHash, MM_SLOT_TAG_PLACEHOLDER, MM_SLOT_TAG_TOKEN, MmInfoError, PositionalLineageHash,
-    SaltHash, SequenceHash, Token, TokenBlockMmInfo, compute_block_bytes_with_mm,
-    compute_block_hash, compute_hash_v2, compute_salt_hash_from_bytes, validate_and_sort_mm_info,
+    BlockHash, LocalBlockHash, MM_SLOT_TAG_PLACEHOLDER, MmInfoError, PositionalLineageHash,
+    SaltHash, SequenceHash, Token, TokenBlockMmInfo, compute_block_hash,
 };

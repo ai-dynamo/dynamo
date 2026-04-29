@@ -10,21 +10,9 @@ use derive_getters::Dissolve;
 use std::ops::Range;
 
 pub mod blocks;
-mod radix;
-pub use radix::PositionalRadixTree;
-
-/// Trait for hashes that include position information.
-pub trait PositionalHash {
-    /// Returns the position associated with the hash.
-    fn position(&self) -> u64;
-}
 
 /// A token is represented as a 32-bit unsigned integer.
 pub type Token = u32;
-
-/// A salt used for hashing, represented as a vector of bytes.
-/// This might encode model architecture, weights, PEFT info, etc.
-pub type Salt = Vec<u8>;
 
 /// A 64-bit hash of the salt. Computed once per request and used as the seed for
 /// every block-hash computation in that request.
@@ -140,7 +128,7 @@ pub struct TokenBlockMmInfo {
 
 /// Slot-tag byte distinguishing real-token slots from multimodal placeholder slots in
 /// the per-block byte buffer. See [`compute_block_bytes_with_mm`].
-pub const MM_SLOT_TAG_TOKEN: u8 = 0x00;
+pub(crate) const MM_SLOT_TAG_TOKEN: u8 = 0x00;
 /// Slot-tag byte for multimodal placeholder slots. See [`compute_block_bytes_with_mm`].
 pub const MM_SLOT_TAG_PLACEHOLDER: u8 = 0x01;
 
@@ -287,7 +275,7 @@ fn block_has_mm(block_offset: usize, len: usize, mm_runs: &[TokenBlockMmInfo]) -
 ///
 /// `mm_runs` must be validated and sorted (typically the output of
 /// [`validate_and_sort_mm_info`]).
-pub fn compute_block_bytes_with_mm(
+pub(crate) fn compute_block_bytes_with_mm(
     tokens: &[Token],
     block_offset: usize,
     mm_runs: &[TokenBlockMmInfo],
@@ -340,151 +328,13 @@ pub fn compute_block_bytes_with_mm(
     out
 }
 
-/// A 128-bit positional sequence hash combining traditional sequence hash with positional information.
-///
-/// Layout:
-/// - Lower 64 bits: Traditional SequenceHash
-/// - Upper 64 bits: 2-bit mode + position + LocalBlockHash (BlockHash)
-///
-/// Modes (automatically selected based on position):
-/// - Mode 00: 8-bit position (max 255) + 54-bit LBH
-/// - Mode 01: 16-bit position (max 65,535) + 46-bit LBH
-/// - Mode 10: 24-bit position (max 16,777,215) + 38-bit LBH
-/// - Mode 11: 31-bit position (max 2,147,483,647) + 31-bit LBH
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
-pub struct PositionalSequenceHash(u128);
-
-impl PositionalSequenceHash {
-    /// Creates a new PositionalSequenceHash from components.
-    ///
-    /// The mode is automatically selected based on the position value to use the minimal
-    /// representation that can fit the position.
-    pub fn new(sequence_hash: SequenceHash, position: u64, local_block_hash: BlockHash) -> Self {
-        let mode = Self::select_mode(position);
-        let upper = Self::encode_upper(mode, position, local_block_hash);
-        let value = ((upper as u128) << 64) | (sequence_hash as u128);
-        PositionalSequenceHash(value)
-    }
-
-    /// Returns the sequence hash component (lower 64 bits).
-    pub fn sequence_hash(&self) -> SequenceHash {
-        (self.0 & 0xFFFF_FFFF_FFFF_FFFF) as u64
-    }
-
-    /// Returns the block position.
-    pub fn position(&self) -> u64 {
-        let (_, position, _) = self.decode_upper();
-        position
-    }
-
-    /// Returns the local block hash (BlockHash) component.
-    pub fn local_block_hash(&self) -> BlockHash {
-        let (_, _, lbh) = self.decode_upper();
-        lbh
-    }
-
-    /// Returns the mode used for encoding (0, 1, 2, or 3).
-    pub fn mode(&self) -> u8 {
-        let (mode, _, _) = self.decode_upper();
-        mode
-    }
-
-    /// Returns the inner 128-bit value.
-    #[inline(always)]
-    pub fn as_u128(&self) -> u128 {
-        self.0
-    }
-
-    /// Selects the minimal mode that can represent the given position.
-    fn select_mode(position: u64) -> u8 {
-        if position < (1u64 << 8) {
-            0 // Mode 00: 8-bit position
-        } else if position < (1u64 << 16) {
-            1 // Mode 01: 16-bit position
-        } else if position < (1u64 << 24) {
-            2 // Mode 10: 24-bit position
-        } else if position < (1u64 << 31) {
-            3 // Mode 11: 31-bit position
-        } else {
-            panic!(
-                "Position {} exceeds maximum supported value (2^31 - 1)",
-                position
-            );
-        }
-    }
-
-    /// Encodes the upper 64 bits from mode, position, and local block hash.
-    fn encode_upper(mode: u8, position: u64, local_block_hash: u64) -> u64 {
-        let (position_bits, lbh_bits) = match mode {
-            0 => (8, 54),  // 2 + 8 + 54 = 64
-            1 => (16, 46), // 2 + 16 + 46 = 64
-            2 => (24, 38), // 2 + 24 + 38 = 64
-            3 => (31, 31), // 2 + 31 + 31 = 64
-            _ => unreachable!(
-                "Invalid mode {} when encoding PositionalSequenceHash; mode must be 0, 1, 2, or 3",
-                mode
-            ),
-        };
-
-        // Create masks for extracting the relevant bits
-        let position_mask = (1u64 << position_bits) - 1;
-        let lbh_mask = (1u64 << lbh_bits) - 1;
-
-        // Extract and position components
-        let position_part = position & position_mask;
-        let lbh_part = local_block_hash & lbh_mask;
-
-        // Combine: [mode (2 bits)][position (X bits)][lbh (R bits)]
-        ((mode as u64) << 62) | (position_part << lbh_bits) | lbh_part
-    }
-
-    /// Decodes the upper 64 bits into (mode, position, local_block_hash).
-    fn decode_upper(&self) -> (u8, u64, u64) {
-        let upper = (self.0 >> 64) as u64;
-
-        // Extract mode from top 2 bits
-        let mode = (upper >> 62) as u8;
-
-        let (position_bits, lbh_bits) = match mode {
-            0 => (8, 54),
-            1 => (16, 46),
-            2 => (24, 38),
-            3 => (31, 31),
-            _ => unreachable!(
-                "Invalid mode {} in PositionalSequenceHash - value may be corrupted",
-                mode
-            ),
-        };
-
-        // Create masks
-        let lbh_mask = (1u64 << lbh_bits) - 1;
-        let position_mask = (1u64 << position_bits) - 1;
-
-        // Extract components
-        let lbh = upper & lbh_mask;
-        let position = (upper >> lbh_bits) & position_mask;
-
-        (mode, position, lbh)
-    }
-}
-
-impl std::fmt::Debug for PositionalSequenceHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PositionalSequenceHash")
-            .field("sequence_hash", &self.sequence_hash())
-            .field("local_block_hash", &self.local_block_hash())
-            .field("position", &self.position())
-            .finish()
-    }
-}
-
 /// Schema/version tag stamped into every canonically-constructed [`PositionalLineageHash`]
 /// (one whose `current` is reachable from `root_with_salt` followed by zero or more `extend`
 /// calls).
 ///
 /// `0x00` is reserved as a "zeroed/uninitialized" sentinel so a default-constructed
 /// PLH is detectably invalid; current canonical layout uses `0x01`.
-pub const PLH_SCHEMA_V1: u8 = 0x01;
+pub(crate) const PLH_SCHEMA_V1: u8 = 0x01;
 
 /// Schema tag stamped into [`PositionalLineageHash`]es minted via
 /// [`PositionalLineageHash::synthetic_unique`]. Distinct from [`PLH_SCHEMA_V1`] so a
@@ -492,7 +342,7 @@ pub const PLH_SCHEMA_V1: u8 = 0x01;
 /// a real chain — useful for invariants ("no synthetic PLH should reach component X")
 /// and diagnostics. The high bit (`0x80`) is set so the value is also visually
 /// distinct from the V1 tag at a glance.
-pub const PLH_SCHEMA_SYNTHETIC: u8 = 0x80;
+pub(crate) const PLH_SCHEMA_SYNTHETIC: u8 = 0x80;
 
 /// Typed view of [`PositionalLineageHash`]'s 32-bit `flags` slot.
 ///
@@ -507,7 +357,7 @@ pub const PLH_SCHEMA_SYNTHETIC: u8 = 0x80;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]
-pub struct PlhFlags(u32);
+pub(crate) struct PlhFlags(u32);
 
 impl PlhFlags {
     /// Builds a flags word from a power-of-two `block_size` (≤ `2^15`), a `schema`
@@ -517,7 +367,7 @@ impl PlhFlags {
     ///
     /// Panics if `block_size` is zero, not a power of two, or greater than `2^15`.
     #[inline]
-    pub fn new(block_size: u32, schema: u8, feature_flags: u32) -> Self {
+    pub(crate) fn new(block_size: u32, schema: u8, feature_flags: u32) -> Self {
         assert!(
             block_size > 0 && block_size.is_power_of_two() && block_size <= (1u32 << 15),
             "block_size must be a power of two in 1..=32768, got {block_size}",
@@ -536,7 +386,7 @@ impl PlhFlags {
     /// represent the true value). Universal-hashing call-sites that need strict
     /// validation should call [`Self::new`] directly.
     #[inline]
-    pub fn for_block_size(block_size: u32) -> Self {
+    pub(crate) fn for_block_size(block_size: u32) -> Self {
         let bs = block_size.max(1);
         let pow2 = if bs.is_power_of_two() {
             bs.min(1u32 << 15)
@@ -551,37 +401,38 @@ impl PlhFlags {
     /// Reconstructs a [`PlhFlags`] from a raw 32-bit value (deserialization path).
     /// No validation; callers are responsible for ensuring the bits are meaningful.
     #[inline]
-    pub fn from_raw(raw: u32) -> Self {
+    pub(crate) fn from_raw(raw: u32) -> Self {
         Self(raw)
     }
 
     /// Returns the encoded `block_size` decoded from the 4-bit `log2_block_size`.
     #[inline]
-    pub fn block_size(self) -> u32 {
+    pub(crate) fn block_size(self) -> u32 {
         1u32 << (self.0 & 0xF)
     }
 
     /// Returns the schema/version byte.
     #[inline]
-    pub fn schema(self) -> u8 {
+    pub(crate) fn schema(self) -> u8 {
         ((self.0 >> 4) & 0xFF) as u8
     }
 
     /// Returns the 20-bit reserved feature-flags region (right-shifted to bits 0..=19).
     #[inline]
-    pub fn feature_flags(self) -> u32 {
+    #[allow(dead_code)]
+    pub(crate) fn feature_flags(self) -> u32 {
         self.0 >> 12
     }
 
     /// Returns the raw 32-bit value.
     #[inline]
-    pub fn raw(self) -> u32 {
+    pub(crate) fn raw(self) -> u32 {
         self.0
     }
 
     /// Returns `true` if the schema field matches the canonical [`PLH_SCHEMA_V1`].
     #[inline]
-    pub fn is_canonical_schema(self) -> bool {
+    pub(crate) fn is_canonical_schema(self) -> bool {
         self.schema() == PLH_SCHEMA_V1
     }
 }
@@ -636,7 +487,7 @@ impl PositionalLineageHash {
     /// Intended for deserialization paths and tests that need to inject specific bit
     /// patterns. Callers are responsible for ensuring the resulting struct is meaningful.
     #[inline]
-    pub fn from_raw_parts(current: u64, parent: u64, position: u32, flags: u32) -> Self {
+    pub(crate) fn from_raw_parts(current: u64, parent: u64, position: u32, flags: u32) -> Self {
         Self {
             current,
             parent,
@@ -694,7 +545,8 @@ impl PositionalLineageHash {
     /// constructor goes away. See the TODOs in
     /// `lib/mocker/src/common/sequence.rs` and
     /// `lib/mocker/src/kv_manager/kvbm_backend.rs`.
-    pub fn synthetic_unique(position: u32, block_size: u32) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn synthetic_unique(position: u32, block_size: u32) -> Self {
         // Use thread-local RNG via `rand::random` to keep this dep-free of a
         // direct `rand::Rng` import.
         let current: u64 = rand::random();
@@ -709,7 +561,8 @@ impl PositionalLineageHash {
     /// Returns `true` when this PLH was minted via [`Self::synthetic_unique`]
     /// (its flags carry the [`PLH_SCHEMA_SYNTHETIC`] tag).
     #[inline]
-    pub fn is_synthetic(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_synthetic(&self) -> bool {
         self.schema() == PLH_SCHEMA_SYNTHETIC
     }
 
@@ -792,43 +645,50 @@ impl PositionalLineageHash {
 
     /// Returns the raw parent slot (0 at the root).
     #[inline]
-    pub fn parent_raw(&self) -> u64 {
+    #[allow(dead_code)]
+    pub(crate) fn parent_raw(&self) -> u64 {
         self.parent
     }
 
     /// Returns the typed flags word.
     #[inline]
-    pub fn flags(&self) -> PlhFlags {
+    #[allow(dead_code)]
+    pub(crate) fn flags(&self) -> PlhFlags {
         self.flags
     }
 
     /// Returns the block size encoded in `flags` (decoded from the 4-bit `log2_block_size`).
     #[inline]
-    pub fn block_size(&self) -> u32 {
+    #[allow(dead_code)]
+    pub(crate) fn block_size(&self) -> u32 {
         self.flags.block_size()
     }
 
     /// Returns the schema/version tag encoded in `flags`.
     #[inline]
-    pub fn schema(&self) -> u8 {
+    #[allow(dead_code)]
+    pub(crate) fn schema(&self) -> u8 {
         self.flags.schema()
     }
 
     /// Returns the reserved 20-bit feature-flags region of `flags`.
     #[inline]
-    pub fn feature_flags(&self) -> u32 {
+    #[allow(dead_code)]
+    pub(crate) fn feature_flags(&self) -> u32 {
         self.flags.feature_flags()
     }
 
     /// Returns the raw 32-bit `flags` word.
     #[inline]
-    pub fn flags_raw(&self) -> u32 {
+    #[allow(dead_code)]
+    pub(crate) fn flags_raw(&self) -> u32 {
         self.flags.raw()
     }
 
     /// Returns `true` if the schema field matches the canonical [`PLH_SCHEMA_V1`].
     #[inline]
-    pub fn is_canonical_schema(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_canonical_schema(&self) -> bool {
         self.flags.is_canonical_schema()
     }
 
@@ -851,7 +711,8 @@ impl PositionalLineageHash {
     /// position" semantics (truncating to a child-mode-specific width) no longer
     /// applies — the parent slot is always full width.
     #[inline]
-    pub fn parent_fragment_for_child_position(&self, _child_position: u32) -> u64 {
+    #[allow(dead_code)]
+    pub(crate) fn parent_fragment_for_child_position(&self, _child_position: u32) -> u64 {
         self.current
     }
 
@@ -1378,18 +1239,6 @@ impl TokenBlock {
     /// Returns the position of this block in the sequence.
     pub fn position(&self) -> u64 {
         self.plh.position() as u64
-    }
-}
-
-impl PositionalHash for PositionalSequenceHash {
-    fn position(&self) -> u64 {
-        self.position()
-    }
-}
-
-impl PositionalHash for PositionalLineageHash {
-    fn position(&self) -> u64 {
-        self.position() as u64
     }
 }
 
@@ -2184,77 +2033,6 @@ mod tests {
         assert_ne!(alt_root.current_sequence_hash(), seq_hash_1_4());
     }
 
-    #[test]
-    fn test_positional_sequence_hash_encoding_decoding() {
-        // Test Mode 0: position fits in 8 bits (< 256)
-        let seq_hash_0 = 0x1234567890ABCDEF;
-        let position_0 = 100;
-        let lbh_0 = 0xFEDCBA9876543210;
-        let psh_0 = PositionalSequenceHash::new(seq_hash_0, position_0, lbh_0);
-
-        assert_eq!(psh_0.mode(), 0, "Position 100 should use mode 0");
-        assert_eq!(psh_0.sequence_hash(), seq_hash_0);
-        assert_eq!(psh_0.position(), position_0);
-        // LBH is truncated to 54 bits in mode 0
-        assert_eq!(
-            psh_0.local_block_hash(),
-            lbh_0 & ((1u64 << 54) - 1),
-            "LBH should be truncated to 54 bits"
-        );
-
-        // Test Mode 1: position fits in 16 bits (256 <= pos < 65536)
-        let position_1 = 1000;
-        let psh_1 = PositionalSequenceHash::new(seq_hash_0, position_1, lbh_0);
-
-        assert_eq!(psh_1.mode(), 1, "Position 1000 should use mode 1");
-        assert_eq!(psh_1.sequence_hash(), seq_hash_0);
-        assert_eq!(psh_1.position(), position_1);
-        // LBH is truncated to 46 bits in mode 1
-        assert_eq!(
-            psh_1.local_block_hash(),
-            lbh_0 & ((1u64 << 46) - 1),
-            "LBH should be truncated to 46 bits"
-        );
-
-        // Test Mode 2: position fits in 24 bits (65536 <= pos < 16777216)
-        let position_2 = 100_000;
-        let psh_2 = PositionalSequenceHash::new(seq_hash_0, position_2, lbh_0);
-
-        assert_eq!(psh_2.mode(), 2, "Position 100,000 should use mode 2");
-        assert_eq!(psh_2.sequence_hash(), seq_hash_0);
-        assert_eq!(psh_2.position(), position_2);
-        // LBH is truncated to 38 bits in mode 2
-        assert_eq!(
-            psh_2.local_block_hash(),
-            lbh_0 & ((1u64 << 38) - 1),
-            "LBH should be truncated to 38 bits"
-        );
-
-        // Test Mode 3: position fits in 31 bits (16777216 <= pos < 2^31)
-        let position_3 = 20_000_000;
-        let psh_3 = PositionalSequenceHash::new(seq_hash_0, position_3, lbh_0);
-
-        assert_eq!(psh_3.mode(), 3, "Position 20,000,000 should use mode 3");
-        assert_eq!(psh_3.sequence_hash(), seq_hash_0);
-        assert_eq!(psh_3.position(), position_3);
-        // LBH is truncated to 31 bits in mode 3
-        assert_eq!(
-            psh_3.local_block_hash(),
-            lbh_0 & ((1u64 << 31) - 1),
-            "LBH should be truncated to 31 bits"
-        );
-
-        // Test edge case: position at boundary
-        let position_255 = 255;
-        let psh_255 = PositionalSequenceHash::new(seq_hash_0, position_255, lbh_0);
-        assert_eq!(psh_255.mode(), 0, "Position 255 should use mode 0");
-        assert_eq!(psh_255.position(), position_255);
-
-        let position_256 = 256;
-        let psh_256 = PositionalSequenceHash::new(seq_hash_0, position_256, lbh_0);
-        assert_eq!(psh_256.mode(), 1, "Position 256 should use mode 1");
-        assert_eq!(psh_256.position(), position_256);
-    }
 
     #[test]
     fn test_positional_lineage_hash_flat_layout() {
@@ -3136,157 +2914,6 @@ mod tests {
         assert_eq!(remaining.len(), 6);
     }
 
-    // ========== Additional tests for coverage improvement ==========
-
-    // === PositionalRadixTree Tests ===
-
-    #[test]
-    fn test_positional_radix_tree_basic_operations() {
-        use crate::PositionalRadixTree;
-
-        // Test new() and is_empty()
-        let tree: PositionalRadixTree<String> = PositionalRadixTree::new();
-        assert!(tree.is_empty());
-        assert_eq!(tree.len(), 0);
-
-        // Test default()
-        let tree2: PositionalRadixTree<i32> = PositionalRadixTree::default();
-        assert!(tree2.is_empty());
-
-        // Test prefix() and insertion
-        let psh1 = PositionalSequenceHash::new(0x1234, 0, 0xABCD);
-        let psh2 = PositionalSequenceHash::new(0x5678, 0, 0xEF01);
-        let psh3 = PositionalSequenceHash::new(0x9ABC, 1, 0x2345);
-
-        tree.prefix(&psh1).insert(psh1, "value1".to_string());
-        assert!(!tree.is_empty());
-        assert_eq!(tree.len(), 1);
-
-        tree.prefix(&psh2).insert(psh2, "value2".to_string());
-        assert_eq!(tree.len(), 2);
-
-        tree.prefix(&psh3).insert(psh3, "value3".to_string());
-        assert_eq!(tree.len(), 3);
-
-        // Test retrieval
-        assert_eq!(
-            tree.prefix(&psh1).get(&psh1).map(|v| v.clone()),
-            Some("value1".to_string())
-        );
-    }
-
-    #[test]
-    fn test_positional_radix_tree_with_lineage_hash() {
-        use crate::PositionalRadixTree;
-
-        // Test generic usage with PositionalLineageHash
-        let tree: PositionalRadixTree<u32, PositionalLineageHash> = PositionalRadixTree::new();
-        assert!(tree.is_empty());
-
-        let plh1 =
-            PositionalLineageHash::from_raw_parts(0x1234, 0, 0, PlhFlags::for_block_size(16).raw());
-        let plh2 = PositionalLineageHash::from_raw_parts(
-            0x5678,
-            0x1234,
-            1,
-            PlhFlags::for_block_size(16).raw(),
-        );
-
-        tree.prefix(&plh1).insert(plh1, 100);
-        tree.prefix(&plh2).insert(plh2, 200);
-
-        assert_eq!(tree.len(), 2);
-        assert_eq!(tree.prefix(&plh1).get(&plh1).map(|v| *v), Some(100));
-        assert_eq!(tree.prefix(&plh2).get(&plh2).map(|v| *v), Some(200));
-    }
-
-    #[test]
-    fn test_positional_radix_tree_position_lookup() {
-        use crate::PositionalRadixTree;
-
-        let tree: PositionalRadixTree<String> = PositionalRadixTree::new();
-
-        // Insert at different positions
-        let psh0 = PositionalSequenceHash::new(0x1111, 0, 0xAAAA);
-        let psh1 = PositionalSequenceHash::new(0x2222, 1, 0xBBBB);
-        let psh2 = PositionalSequenceHash::new(0x3333, 2, 0xCCCC);
-
-        tree.prefix(&psh0).insert(psh0, "pos0".to_string());
-        tree.prefix(&psh1).insert(psh1, "pos1".to_string());
-        tree.prefix(&psh2).insert(psh2, "pos2".to_string());
-
-        // Test position() method
-        assert!(tree.position(0).is_some());
-        assert!(tree.position(1).is_some());
-        assert!(tree.position(2).is_some());
-        assert!(tree.position(3).is_none()); // No entries at position 3
-
-        // Verify position lookup returns correct submap
-        let pos0_map = tree.position(0).unwrap();
-        assert_eq!(pos0_map.len(), 1);
-    }
-
-    // === PositionalSequenceHash Additional Tests ===
-
-    #[test]
-    fn test_positional_sequence_hash_mode_2_and_3() {
-        // Mode 2: position fits in 24 bits (65536 <= pos < 16777216)
-        let position_mode2 = 100_000u64;
-        let seq_hash = 0x1234567890ABCDEF;
-        let block_hash = 0xFEDCBA9876543210;
-
-        let psh_mode2 = PositionalSequenceHash::new(seq_hash, position_mode2, block_hash);
-        assert_eq!(psh_mode2.mode(), 2, "Position 100,000 should use mode 2");
-        assert_eq!(psh_mode2.position(), position_mode2);
-        assert_eq!(psh_mode2.sequence_hash(), seq_hash);
-        // Local block hash truncated to 38 bits in mode 2
-        assert_eq!(
-            psh_mode2.local_block_hash(),
-            block_hash & ((1u64 << 38) - 1)
-        );
-
-        // Mode 3: position fits in 31 bits (16777216 <= pos < 2147483648)
-        let position_mode3 = 100_000_000u64;
-        let psh_mode3 = PositionalSequenceHash::new(seq_hash, position_mode3, block_hash);
-        assert_eq!(
-            psh_mode3.mode(),
-            3,
-            "Position 100,000,000 should use mode 3"
-        );
-        assert_eq!(psh_mode3.position(), position_mode3);
-        assert_eq!(psh_mode3.sequence_hash(), seq_hash);
-        // Local block hash truncated to 31 bits in mode 3
-        assert_eq!(
-            psh_mode3.local_block_hash(),
-            block_hash & ((1u64 << 31) - 1)
-        );
-    }
-
-    #[test]
-    fn test_positional_sequence_hash_as_u128() {
-        let psh = PositionalSequenceHash::new(0x1234, 100, 0xABCD);
-        let raw = psh.as_u128();
-
-        // Verify we can reconstruct from raw value
-        assert_eq!(raw & 0xFFFF_FFFF_FFFF_FFFF, 0x1234);
-        assert!(raw > 0); // Non-zero
-
-        // Create another and compare
-        let psh2 = PositionalSequenceHash::new(0x1234, 100, 0xABCD);
-        assert_eq!(psh.as_u128(), psh2.as_u128());
-    }
-
-    #[test]
-    fn test_positional_sequence_hash_debug() {
-        let psh = PositionalSequenceHash::new(0x1234567890ABCDEF, 42, 0xFEDCBA98);
-        let debug_str = format!("{:?}", psh);
-
-        // Debug should contain field names and values
-        assert!(debug_str.contains("PositionalSequenceHash"));
-        assert!(debug_str.contains("sequence_hash"));
-        assert!(debug_str.contains("local_block_hash"));
-        assert!(debug_str.contains("position"));
-    }
 
     // === PositionalLineageHash Additional Tests ===
 
@@ -3395,24 +3022,6 @@ mod tests {
         assert_eq!(plh.position(), 0);
         assert_eq!(plh.parent_sequence_hash(), None); // Root has no parent
         assert_eq!(plh.block_size(), 4);
-    }
-
-    #[test]
-    fn test_positional_hash_trait_impls() {
-        use crate::PositionalHash;
-
-        // Test PositionalHash for PositionalSequenceHash
-        let psh = PositionalSequenceHash::new(0x1234, 42, 0xABCD);
-        assert_eq!(PositionalHash::position(&psh), 42);
-
-        // Test PositionalHash for PositionalLineageHash
-        let plh = PositionalLineageHash::from_raw_parts(
-            0x1234,
-            0,
-            99,
-            PlhFlags::for_block_size(16).raw(),
-        );
-        assert_eq!(PositionalHash::position(&plh), 99);
     }
 
     // === TokenBlockSequence Edge Cases ===

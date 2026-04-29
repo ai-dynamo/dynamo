@@ -5,7 +5,7 @@
 //!
 //! The [`BlockRegistry`] is the central coordination point for block deduplication in the
 //! KVBM system. It maps sequence hashes to registration handles using a
-//! [`dynamo_tokens::PositionalRadixTree`], enabling efficient prefix-based lookups.
+//! `radix::PositionalRadixTree`, enabling efficient prefix-based lookups.
 //!
 //! # Architecture
 //!
@@ -30,6 +30,7 @@
 
 mod attachments;
 mod handle;
+mod radix;
 mod registration;
 
 #[cfg(test)]
@@ -49,7 +50,7 @@ use handle::BlockRegistrationHandleInner;
 
 pub(crate) use crate::blocks::RegisteredReturnFn;
 
-pub(crate) type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;
+pub(crate) type PositionalRadixTree<V> = radix::PositionalRadixTree<V, SequenceHash>;
 
 /// Builder for [`BlockRegistry`].
 ///
