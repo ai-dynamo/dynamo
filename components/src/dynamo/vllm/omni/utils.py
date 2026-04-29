@@ -21,6 +21,24 @@ DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
 
 
+def _endpoint_stage_name(stage_config: Any, stage_id: int) -> str:
+    """Dynamo endpoint name for a stage.
+
+    For PD stages, appends ``_prefill`` / ``_decode`` so that both workers
+    get unique endpoints even though they share ``model_stage=thinker``.
+    """
+    model_stage = getattr(
+        getattr(stage_config, "engine_args", None),
+        "model_stage",
+        f"stage{stage_id}",
+    )
+    if getattr(stage_config, "is_prefill_only", False):
+        return f"{model_stage}_prefill"
+    if getattr(stage_config, "is_decode_only", False):
+        return f"{model_stage}_decode"
+    return model_stage
+
+
 def shm_deserialize(shm_meta: dict) -> Any:
     """Read and deserialize an OmniRequestOutput from shared memory."""
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))

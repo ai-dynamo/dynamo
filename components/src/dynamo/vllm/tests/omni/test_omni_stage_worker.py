@@ -12,8 +12,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
-    from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
-    from dynamo.vllm.omni.utils import _build_sampling_params
+    from dynamo.vllm.omni.stage_worker import (
+        OmniStageWorker,
+        _apply_decode_sampling_params,
+        _apply_prefill_sampling_params,
+        _extract_kv_transfer_params,
+        _Proxy,
+    )
+    from dynamo.vllm.omni.utils import _build_sampling_params, _endpoint_stage_name
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -407,3 +413,126 @@ async def test_sampling_params_propagate_in_stage_output():
         "height": 480,
         "width": 832,
     }
+
+
+# ── PD disaggregation helpers ────────────────────────────────
+
+
+class TestEndpointStageName:
+    def test_regular_stage_uses_model_stage(self):
+        cfg = SimpleNamespace(engine_args=SimpleNamespace(model_stage="thinker"))
+        assert _endpoint_stage_name(cfg, 0) == "thinker"
+
+    def test_prefill_stage_appends_suffix(self):
+        cfg = SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="thinker"),
+            is_prefill_only=True,
+            is_decode_only=False,
+        )
+        assert _endpoint_stage_name(cfg, 0) == "thinker_prefill"
+
+    def test_decode_stage_appends_suffix(self):
+        cfg = SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="thinker"),
+            is_prefill_only=False,
+            is_decode_only=True,
+        )
+        assert _endpoint_stage_name(cfg, 1) == "thinker_decode"
+
+    def test_no_engine_args_falls_back_to_stage_id(self):
+        cfg = SimpleNamespace()
+        assert _endpoint_stage_name(cfg, 3) == "stage3"
+
+    def test_no_model_stage_falls_back_to_stage_id(self):
+        cfg = SimpleNamespace(engine_args=SimpleNamespace())
+        assert _endpoint_stage_name(cfg, 2) == "stage2"
+
+
+class TestApplyPrefillSamplingParams:
+    def test_sets_max_tokens_one_and_kv_transfer(self):
+        from vllm.sampling_params import SamplingParams
+
+        sp = SamplingParams(max_tokens=100, stop=["<|end|>"])
+        result = _apply_prefill_sampling_params([sp], "req-1")
+        assert len(result) == 1
+        assert result[0].max_tokens == 1
+        assert result[0].stop == []
+        assert result[0].stop_token_ids == []
+        assert result[0].extra_args["kv_transfer_params"]["do_remote_decode"] is True
+        assert result[0].extra_args["kv_transfer_params"]["do_remote_prefill"] is False
+
+    def test_non_sampling_params_passed_through(self):
+        """Non-SamplingParams (e.g. diffusion params) are passed through unchanged."""
+        diffusion_sp = SimpleNamespace(height=512, width=512)
+        result = _apply_prefill_sampling_params([diffusion_sp], "req-2")
+        assert result[0] is diffusion_sp
+
+
+class TestApplyDecodeSamplingParams:
+    def test_injects_kv_transfer_params(self):
+        from vllm.sampling_params import SamplingParams
+
+        sp = SamplingParams(max_tokens=100)
+        kv_params = {"remote_block_ids": [1, 2], "remote_host": "10.0.0.1"}
+        result = _apply_decode_sampling_params([sp], kv_params)
+        assert len(result) == 1
+        extra = result[0].extra_args["kv_transfer_params"]
+        assert extra["do_remote_prefill"] is True
+        assert extra["do_remote_decode"] is False
+        assert extra["remote_block_ids"] == [1, 2]
+        assert extra["remote_host"] == "10.0.0.1"
+
+    def test_non_sampling_params_passed_through(self):
+        diffusion_sp = SimpleNamespace(height=512)
+        result = _apply_decode_sampling_params([diffusion_sp], {"host": "10.0.0.1"})
+        assert result[0] is diffusion_sp
+
+
+class TestExtractKvTransferParams:
+    def test_extracts_from_object_with_dict_attr(self):
+        output = SimpleNamespace(kv_transfer_params={"host": "10.0.0.1", "port": 5555})
+        result = _extract_kv_transfer_params(output)
+        assert result == {"host": "10.0.0.1", "port": 5555}
+
+    def test_extracts_from_list(self):
+        output = [
+            SimpleNamespace(kv_transfer_params=None),
+            SimpleNamespace(kv_transfer_params={"host": "10.0.0.2"}),
+        ]
+        result = _extract_kv_transfer_params(output)
+        assert result == {"host": "10.0.0.2"}
+
+    def test_returns_none_when_missing(self):
+        output = SimpleNamespace()
+        assert _extract_kv_transfer_params(output) is None
+
+    def test_returns_none_for_all_none_list(self):
+        output = [SimpleNamespace(kv_transfer_params=None)]
+        assert _extract_kv_transfer_params(output) is None
+
+
+@pytest.mark.asyncio
+async def test_prefill_worker_yields_kv_transfer_params():
+    """Prefill-only worker yields kv_transfer_params instead of connector output."""
+    kv_params = {"remote_block_ids": [10, 20], "remote_host": "gpu0"}
+    engine_output = SimpleNamespace(kv_transfer_params=kv_params)
+    engine = _MockEngine(output=engine_output)
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(
+            is_prefill_only=True,
+            is_decode_only=False,
+            default_sampling_params={"max_tokens": 100},
+        ),
+        connectors={},
+        stage_id=0,
+        output_modalities=["text"],
+    )
+    request = {"request_id": "req-pf", "prompt": "hello"}
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(chunks) == 1
+    assert chunks[0]["kv_transfer_params"] == kv_params
+    assert chunks[0]["finished"] is True

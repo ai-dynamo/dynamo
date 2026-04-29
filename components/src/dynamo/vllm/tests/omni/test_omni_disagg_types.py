@@ -86,6 +86,31 @@ class TestStageOutput:
         assert req["stage_connector_refs"] == {"0": {"ref": "abc"}}
         assert req["request_id"] == "req-3"
 
+    def test_kv_transfer_params_accepted_and_not_dropped(self):
+        """kv_transfer_params is a known field — must not be dropped."""
+        out = StageOutput.model_validate(
+            {"kv_transfer_params": {"remote_host": "10.0.0.1", "port": 5555}}
+        )
+        assert out.kv_transfer_params == {"remote_host": "10.0.0.1", "port": 5555}
+
+    def test_to_next_stage_request_includes_kv_transfer_params(self):
+        """kv_transfer_params should be forwarded to the next stage."""
+        out = StageOutput.model_validate(
+            {
+                "kv_transfer_params": {"remote_host": "10.0.0.1"},
+                "original_prompt": {"prompt": "hi"},
+            }
+        )
+        req = out.to_next_stage_request("req-kv")
+        assert req["kv_transfer_params"] == {"remote_host": "10.0.0.1"}
+        assert req["request_id"] == "req-kv"
+
+    def test_to_next_stage_request_excludes_none_kv_transfer_params(self):
+        """None kv_transfer_params should not appear in next-stage request."""
+        out = StageOutput.model_validate({"original_prompt": {"prompt": "hi"}})
+        req = out.to_next_stage_request("req-no-kv")
+        assert "kv_transfer_params" not in req
+
 
 # ── OmniInterStageRequest ──────────────────────────────────
 

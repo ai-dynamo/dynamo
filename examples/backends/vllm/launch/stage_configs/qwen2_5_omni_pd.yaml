@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PD disaggregated stage config for Qwen2.5-Omni-7B.
+# Splits the thinker into prefill (stage 0) and decode (stage 1).
+# KV cache transfers via NixlConnector.
+#
+# GPU layout (2x A6000):
+#   GPU 0: thinker_prefill
+#   GPU 1: thinker_decode, talker, code2wav
+#
+# Env vars required per stage:
+#   prefill: VLLM_NIXL_SIDE_CHANNEL_PORT=5600 (default)
+#   decode:  VLLM_NIXL_SIDE_CHANNEL_PORT=5610
+
+stage_args:
+  # Stage 0: thinker prefill (GPU 0) — processes prompt, exports KV
+  - stage_id: 0
+    stage_type: llm
+    is_prefill_only: true
+    runtime:
+      process: true
+      devices: "0"
+    engine_args:
+      model_stage: thinker
+      max_num_seqs: 1
+      model_arch: Qwen2_5OmniForConditionalGeneration
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      gpu_memory_utilization: 0.8
+      enforce_eager: true
+      trust_remote_code: true
+      engine_output_type: latent
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+      mm_processor_cache_gb: 0
+      kv_transfer_config:
+        kv_connector: "NixlConnector"
+        kv_role: "kv_producer"
+        kv_rank: 0
+        kv_parallel_size: 2
+    is_comprehension: true
+    final_output: false
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 2048
+      seed: 42
+      detokenize: True
+      repetition_penalty: 1.1
+
+  # Stage 1: thinker decode (GPU 1) — resumes from prefill KV, generates tokens
+  # Note: decode + talker + code2wav share GPU 1.
+  # Memory budget: decode 0.5 + talker 0.25 + code2wav 0.15 = 0.9
+  - stage_id: 1
+    stage_type: llm
+    is_decode_only: true
+    runtime:
+      process: true
+      devices: "1"
+    engine_args:
+      model_stage: thinker
+      max_num_seqs: 1
+      model_arch: Qwen2_5OmniForConditionalGeneration
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      trust_remote_code: true
+      engine_output_type: latent
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+      kv_transfer_config:
+        kv_connector: "NixlConnector"
+        kv_role: "kv_consumer"
+        kv_rank: 1
+        kv_parallel_size: 2
+    engine_input_source: [0]
+    is_comprehension: true
+    final_output: true
+    final_output_type: text
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 2048
+      seed: 42
+      detokenize: True
+      repetition_penalty: 1.1
+
+  # Stage 2: talker (GPU 1)
+  - stage_id: 2
+    stage_type: llm
+    runtime:
+      process: true
+      devices: "1"
+    engine_args:
+      model_stage: talker
+      max_num_seqs: 1
+      model_arch: Qwen2_5OmniForConditionalGeneration
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      gpu_memory_utilization: 0.25
+      enforce_eager: true
+      trust_remote_code: true
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+      engine_output_type: latent
+    engine_input_source: [1]
+    custom_process_input_func: vllm_omni.model_executor.stage_input_processors.qwen2_5_omni.thinker2talker
+    default_sampling_params:
+      temperature: 0.9
+      top_p: 0.8
+      top_k: 40
+      max_tokens: 2048
+      seed: 42
+      detokenize: True
+      repetition_penalty: 1.05
+      stop_token_ids: [8294]
+
+  # Stage 3: code2wav (GPU 1)
+  - stage_id: 3
+    stage_type: llm
+    runtime:
+      process: true
+      devices: "1"
+    engine_args:
+      model_stage: code2wav
+      max_num_seqs: 1
+      model_arch: Qwen2_5OmniForConditionalGeneration
+      worker_type: generation
+      scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
+      gpu_memory_utilization: 0.15
+      enforce_eager: true
+      trust_remote_code: true
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+      async_scheduling: false
+      engine_output_type: audio
+    engine_input_source: [2]
+    final_output: true
+    final_output_type: audio
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 2048
+      seed: 42
+      detokenize: True
+      repetition_penalty: 1.1
+
+runtime:
+  enabled: true
+  defaults:
+    window_size: -1
+    max_inflight: 1
+  edges:
+    # Note: no omni connector for 0→1 (KV transfers via NixlConnector)
+    - from: 0
+      to: 1
+      window_size: -1
+    - from: 1
+      to: 2
+      window_size: -1
+    - from: 2
+      to: 3
+      window_size: -1

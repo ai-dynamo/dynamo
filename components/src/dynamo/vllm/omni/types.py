@@ -54,6 +54,7 @@ class StageOutput(BaseModel):
                 "original_prompt",
                 "stage_connector_refs",
                 "sampling_params_list",
+                "kv_transfer_params",
                 "finished",
                 "error",
             }
@@ -78,6 +79,7 @@ class StageOutput(BaseModel):
     # Keys arrive as strings from JSON; workers normalize them to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
+    kv_transfer_params: dict | None = None
     finished: bool | None = None
     error: str | None = None
 
@@ -87,7 +89,12 @@ class StageOutput(BaseModel):
         shm_meta is intentionally excluded — it is final-stage → router only.
         """
         fields = self.model_dump(
-            include={"original_prompt", "stage_connector_refs", "sampling_params_list"},
+            include={
+                "original_prompt",
+                "stage_connector_refs",
+                "sampling_params_list",
+                "kv_transfer_params",
+            },
             exclude_none=True,
         )
         fields["request_id"] = request_id
@@ -112,6 +119,7 @@ class StageRequest(BaseModel):
     # StageOutput.stage_connector_refs). Callers normalize string keys to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
+    kv_transfer_params: dict | None = None
 
 
 def _int_keyed(d: dict | None) -> dict[int, Any]:
