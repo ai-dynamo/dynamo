@@ -208,8 +208,8 @@ impl OpenAIPreprocessor {
         // Resolve the model's image-placeholder token ID for approx MM
         // routing. We try a small list of well-known placeholder strings
         // covering the common VLM families; the first one present in the
-        // vocab wins. If none match, approx MM routing falls back to the
-        // spread-evenly heuristic.
+        // vocab wins. If none match, approx MM routing is disabled for
+        // this model and the router falls back to pure text-prefix routing.
         const KNOWN_IMAGE_PLACEHOLDERS: &[&str] = &[
             "<|image_pad|>",     // Qwen2-VL / Qwen3-VL
             "<image>",           // LLaVA / LLaVA-NeXT / Idefics2/3 / Mllama
@@ -230,9 +230,9 @@ impl OpenAIPreprocessor {
                 Some(id)
             }
             None => {
-                tracing::debug!(
-                    "[mm-approx] no known image-placeholder token found in tokenizer; \
-                     approx MM routing will fall back to spread-evenly heuristic"
+                tracing::warn!(
+                    "[mm-approx] cannot find the image token in the tokenizer; \
+                     MM-aware approx routing disabled for this model"
                 );
                 None
             }
@@ -676,42 +676,45 @@ impl OpenAIPreprocessor {
         // wins), and different images only differ in the block(s) that
         // contain their placeholder.
         //
-        // We discover image placeholder positions by scanning
-        // `routing_token_ids` for the model's image-placeholder token ID
-        // (resolved at startup). If we can't find the token (no known
-        // placeholder, or it was somehow stripped from routing_token_ids),
-        // fall back to the previous "spread evenly" heuristic.
+        // If the placeholder token wasn't resolved at startup, or the
+        // count of detected placeholder positions doesn't match the image
+        // count, we skip MM routing info entirely. The router still works
+        // — it just falls back to pure text-prefix routing for this
+        // request rather than risk placing image hashes on wrong blocks
+        // (which would actively break text-prefix sharing).
         let n_images = mm_hashes.len();
-        let mut mm_objects = Vec::with_capacity(n_images);
 
-        let image_positions: Vec<usize> = if let Some(token_id) = self.image_token_id {
-            routing_token_ids
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &t)| (t == token_id).then_some(i))
-                .collect()
-        } else {
-            Vec::new()
+        let Some(token_id) = self.image_token_id else {
+            tracing::warn!(
+                n_images,
+                "[mm-approx] image-placeholder token not resolved at startup; \
+                 skipping MM routing info (router will use text-prefix only)"
+            );
+            return Ok(());
         };
 
-        let use_actual_positions = image_positions.len() == n_images;
-        if !use_actual_positions {
-            tracing::debug!(
+        let image_positions: Vec<usize> = routing_token_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &t)| (t == token_id).then_some(i))
+            .collect();
+
+        if image_positions.len() != n_images {
+            tracing::warn!(
                 n_images,
                 detected_positions = image_positions.len(),
-                "[mm-approx] image placeholder count mismatch; falling back to spread-evenly"
+                "[mm-approx] image placeholder count in tokenized prompt does not \
+                 match image count; skipping MM routing info (router will use \
+                 text-prefix only)"
             );
+            return Ok(());
         }
 
+        let mut mm_objects = Vec::with_capacity(n_images);
         for (i, mm_hash) in mm_hashes.iter().copied().enumerate() {
-            let block_idx = if use_actual_positions {
-                // Path 2: use the placeholder's actual position in the
-                // tokenized prompt. Clamp to valid full-block range.
-                (image_positions[i] / block_size).min(num_full_blocks - 1)
-            } else {
-                // Fallback: legacy spread-evenly across full blocks.
-                (i * num_full_blocks / n_images).min(num_full_blocks - 1)
-            };
+            // Use the placeholder's actual position in the tokenized
+            // prompt. Clamp to valid full-block range.
+            let block_idx = (image_positions[i] / block_size).min(num_full_blocks - 1);
             // Represent each image as a single-token offset so
             // RequestExtraInfo::to_block_level maps it to exactly one block.
             let token_offset = block_idx * block_size;
