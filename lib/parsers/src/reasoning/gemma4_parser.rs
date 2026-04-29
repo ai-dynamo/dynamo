@@ -16,13 +16,11 @@
 //! analogous to the `user\n` label in `<|turn>user\n...`. Downstream consumers
 //! expect the reasoning content without that label, so this parser strips it.
 //!
-//! Both the start and end markers are special tokens. They will be visible in
-//! the decoded text only when the inference engine is configured with
-//! `skip_special_tokens=False`. The Dynamo frontend should set that flag
-//! whenever the Gemma 4 reasoning parser is selected, mirroring the vLLM PR's
-//! `adjust_request` hook. If the markers are stripped before the parser sees
-//! them, this parser falls back to passing the text through as `normal_text`
-//! (no reasoning extracted) — same fail-safe behaviour as the basic parser.
+//! Both the start and end markers are special tokens. They are visible in the
+//! decoded text only when the inference engine is configured with
+//! `skip_special_tokens=False`. If the markers are stripped before the parser
+//! sees them, the parser falls back to passing the text through as
+//! `normal_text` (no reasoning extracted).
 
 use crate::ParserResult;
 use crate::ReasoningParser;

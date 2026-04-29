@@ -1,19 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Reference implementation (upstream merged 2026-04-02 via vLLM PR #38826,
-// follow-up #39027):
+// Reference implementation:
 // https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/gemma4_tool_parser.py
 //
-// Gemma 4 uses a custom non-JSON serialization format for tool calls:
+// Gemma 4 tool-call grammar (custom, non-JSON):
 //
 //     <|tool_call>call:func_name{key:<|"|>value<|"|>,num:42}<tool_call|>
 //
-// Strings are delimited by `<|"|>`, keys are bare (unquoted), nested objects
-// and arrays are supported, and multiple tool calls are concatenated without
-// separators. The parser converts this grammar into JSON-shaped arguments so
-// downstream callers see the same `serde_json::Value` shape as every other
-// parser family.
+// `<|"|>`-delimited strings, bare unquoted keys, nested objects/arrays,
+// multiple calls concatenated without separators.
 
 use std::sync::OnceLock;
 
@@ -63,65 +59,88 @@ pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
     false
 }
 
-/// Returns the position immediately after the *last* `<tool_call|>` end marker
-/// in `chunk`, or `None` if no end marker has arrived yet (caller should keep
-/// accumulating). Mirrors the kimi_k2 / dsml convention so the streaming jail
-/// behaves consistently across parser families.
+/// Returns the position immediately after the last *complete* tool-call match
+/// in `chunk`, or `None` if no complete call has arrived yet (caller should
+/// keep accumulating). The regex requires `}<tool_call|>` adjacency, so a bare
+/// `<tool_call|>` literal embedded inside a `<|"|>` string value does not
+/// false-trigger a "section complete" signal here — matches upstream.
 pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
-    let mut last_end: Option<usize> = None;
-    let mut search_from = 0;
-    while let Some(pos) = chunk[search_from..].find(TOOL_CALL_END) {
-        let abs = search_from + pos + TOOL_CALL_END.len();
-        last_end = Some(abs);
-        search_from = abs;
-    }
-    last_end
+    tool_call_regex().find_iter(chunk).last().map(|m| m.end())
 }
 
 /// Parse a Gemma 4 model response into structured tool calls + leftover text.
 ///
-/// Returns `(parsed_tool_calls, normal_text_content)`. Text outside the
-/// `<|tool_call>...<tool_call|>` markers is returned as `normal_text`. When a
-/// tool call is truncated (start marker present, end marker missing — typically
-/// because the model hit `max_tokens` mid-call), the parser cannot extract a
-/// structured call from it; instead it echoes the raw bytes back as
-/// `normal_text` so the caller can detect the truncation and surface it to the
-/// user. This matches upstream `vllm.tool_parsers.gemma4_tool_parser`'s
-/// behavior of returning the raw `model_output` as content when no complete
-/// tool call could be parsed.
+/// Returns `(parsed_tool_calls, normal_text_content)`. Text outside any
+/// `<|tool_call>call:NAME{...}<tool_call|>` match is returned as `normal_text`.
+/// When a tool call is truncated (start marker present but no `}<tool_call|>`
+/// terminator — typically because the model hit `max_tokens` mid-call), the
+/// regex finds no match and the raw bytes after the start marker are echoed
+/// back as `normal_text` so the caller can detect the truncation and surface
+/// it to the user.
+///
+/// Mirrors upstream's `extract_tool_calls` in `vllm/tool_parsers/
+/// gemma4_tool_parser.py`, which uses `tool_call_regex.findall(model_output)`
+/// directly. The `}<tool_call|>` adjacency requirement in the regex means
+/// embedded `<tool_call|>` literals inside string-typed args (e.g. a
+/// `description` field documenting the tool-call format) don't truncate the
+/// match prematurely.
 pub fn try_tool_call_parse_gemma4(
     message: &str,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    let regex = tool_call_regex();
     let mut calls = Vec::new();
     let mut normal_parts = Vec::new();
     let mut cursor = 0;
 
-    while cursor < message.len() {
-        let Some(start_rel) = message[cursor..].find(TOOL_CALL_START) else {
-            normal_parts.push(&message[cursor..]);
-            break;
-        };
-        let abs_start = cursor + start_rel;
-        normal_parts.push(&message[cursor..abs_start]);
+    for caps in regex.captures_iter(message) {
+        let whole = caps.get(0).expect("capture 0 always present");
+        normal_parts.push(&message[cursor..whole.start()]);
+        cursor = whole.end();
 
-        // First `<tool_call|>` wins; we don't scan inside `<|"|>` strings,
-        // so an embedded literal will truncate the call. Matches upstream.
-        let Some(end_rel) = message[abs_start..].find(TOOL_CALL_END) else {
-            // Truncated tool call — echo the raw bytes back as normal_text so
-            // the caller sees the truncation rather than silently losing it.
-            normal_parts.push(&message[abs_start..]);
-            break;
-        };
-        let abs_end = abs_start + end_rel + TOOL_CALL_END.len();
-        let block = &message[abs_start..abs_end];
+        let name = caps
+            .name("name")
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let args_raw = caps.name("args").map(|m| m.as_str()).unwrap_or("");
 
-        if let Some(call) = parse_single_call(block, tools)? {
-            calls.push(call);
+        if let Some(tools) = tools
+            && !tools.iter().any(|t| t.name == name)
+        {
+            tracing::warn!(
+                "Tool '{}' is not defined in the tools list (Gemma 4 parser).",
+                name
+            );
         }
 
-        cursor = abs_end;
+        let args_value = match parse_args_object(args_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse Gemma 4 args for '{}': {}. Falling back to empty object.",
+                    name,
+                    e
+                );
+                Value::Object(Map::new())
+            }
+        };
+        let arguments = serde_json::to_string(&args_value)?;
+
+        calls.push(ToolCallResponse {
+            id: format!("call-{}", Uuid::new_v4()),
+            tp: ToolCallType::Function,
+            function: CalledFunction { name, arguments },
+        });
     }
+
+    // Anything after the last complete match — including a truncated
+    // `<|tool_call>call:...` with no closing `}<tool_call|>` — is returned to
+    // the caller as `normal_text` so model truncation is visible rather than
+    // silently swallowed.
+    normal_parts.push(&message[cursor..]);
 
     let normal_text = normal_parts.join("").trim().to_string();
     let normal_content = if normal_text.is_empty() {
@@ -131,51 +150,6 @@ pub fn try_tool_call_parse_gemma4(
     };
 
     Ok((calls, normal_content))
-}
-
-fn parse_single_call(
-    block: &str,
-    tools: Option<&[ToolDefinition]>,
-) -> anyhow::Result<Option<ToolCallResponse>> {
-    let Some(caps) = tool_call_regex().captures(block) else {
-        return Ok(None);
-    };
-    let name = caps
-        .name("name")
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
-    if name.is_empty() {
-        return Ok(None);
-    }
-    let args_raw = caps.name("args").map(|m| m.as_str()).unwrap_or("");
-
-    if let Some(tools) = tools
-        && !tools.iter().any(|t| t.name == name)
-    {
-        tracing::warn!(
-            "Tool '{}' is not defined in the tools list (Gemma 4 parser).",
-            name
-        );
-    }
-
-    let args_value = match parse_args_object(args_raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to parse Gemma 4 args for '{}': {}. Falling back to empty object.",
-                name,
-                e
-            );
-            Value::Object(Map::new())
-        }
-    };
-    let arguments = serde_json::to_string(&args_value)?;
-
-    Ok(Some(ToolCallResponse {
-        id: format!("call-{}", Uuid::new_v4()),
-        tp: ToolCallType::Function,
-        function: CalledFunction { name, arguments },
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -266,11 +240,7 @@ fn parse_object_body(cur: &mut Cursor) -> anyhow::Result<Value> {
             anyhow::bail!("expected ':' after key '{}' at offset {}", key, cur.pos);
         }
         cur.skip_whitespace();
-        // Empty value (`key:` followed by `,` / `}` / EOF) — upstream Gemma 4
-        // parser emits these as `{"key": ""}` rather than dropping the key, so
-        // we mirror that. Without this, the empty-value case fell through to
-        // `parse_value`'s number path and errored out, which then triggered
-        // the entire-args-object empty-fallback in `parse_single_call`.
+        // `key:` with no value emits `{"key": ""}` (matches upstream).
         let value = match cur.peek_byte() {
             None | Some(b',') | Some(b'}') => Value::String(String::new()),
             _ => parse_value(cur)?,
@@ -301,10 +271,8 @@ fn parse_key(cur: &mut Cursor) -> anyhow::Result<String> {
     Ok(cur.src[start..cur.pos].to_string())
 }
 
-/// Try to consume `keyword` from `cur` ASCII-case-insensitively, only when the
-/// byte immediately after the keyword is NOT a word character (so `nullable`
-/// doesn't get matched as `null` + leftover `able`). Mirrors upstream's
-/// `value_str.lower() in ("null", ...)` after isolating the bare token.
+/// Consume `keyword` ASCII-case-insensitively, only when the next byte is not
+/// a word character (so `nullable` doesn't match `null` + leftover `able`).
 fn try_consume_keyword(cur: &mut Cursor, keyword: &str) -> bool {
     let bytes = cur.src.as_bytes();
     let kw = keyword.as_bytes();
@@ -327,13 +295,8 @@ fn try_consume_keyword(cur: &mut Cursor, keyword: &str) -> bool {
 fn parse_value(cur: &mut Cursor) -> anyhow::Result<Value> {
     cur.skip_whitespace();
 
-    // Delimited string: <|"|>...<|"|>
-    //
-    // If the closing delimiter is missing (model hit `max_tokens` mid-string),
-    // upstream takes "everything after the opening delimiter" as the value.
-    // We mirror that — refusing to parse here would lose the entire args
-    // object via the outer empty-fallback, which is worse than echoing a
-    // truncated tail.
+    // Delimited string `<|"|>...<|"|>`. If the closing delimiter is missing
+    // (model truncation), take everything after the opener as the value.
     if cur.rest().starts_with(STRING_DELIM) {
         cur.pos += STRING_DELIM.len();
         let body_start = cur.pos;
@@ -367,9 +330,7 @@ fn parse_value(cur: &mut Cursor) -> anyhow::Result<Value> {
         return parse_array(cur);
     }
 
-    // Booleans / nulls. Upstream `_parse_gemma4_value` lowercases the token
-    // before comparing, accepting any-case `null`/`none`/`nil`. We do the same
-    // by peeking the next 3–4 word bytes and matching case-insensitively.
+    // Booleans + null aliases (case-insensitive).
     if try_consume_keyword(cur, "true") {
         return Ok(Value::Bool(true));
     }
@@ -729,16 +690,8 @@ mod tests {
 
     #[test] // CASE.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
     fn args_grammar_keyword_prefix_not_consumed() {
-        // `nullable` starts with "null" but is not the null keyword. Without
-        // the trailing-word-char guard, `null` would match and `able` would
-        // leak into the next-token parse. The recursive-descent argument
-        // grammar treats this as a number-parse error → empty-fallback at the
-        // entry, but inside an array we want the nested parser to fail
-        // cleanly, not silently produce Null.
-        let err = parse_args_object("x:nullable").unwrap_err();
-        // Bare identifiers after a `:` are not valid Gemma 4 values, so we
-        // expect a parse error rather than a Null match.
-        let _ = err; // exact message not asserted, only that it errors
+        // `nullable` must not be parsed as `null` + leftover `able`.
+        let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
     #[test] // CASE.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
@@ -751,5 +704,25 @@ mod tests {
             normal.contains("<|tool_call>call:foo"),
             "expected raw bytes echoed; got: {normal:?}"
         );
+    }
+
+    #[test] // CASE.7 — `<tool_call|>` literal inside a string-typed argument
+    // must not truncate the call. The extraction regex requires
+    // `}<tool_call|>` adjacency, so a bare embedded marker is safe.
+    fn embedded_tool_call_marker_in_string_value() {
+        let input = r#"<|tool_call>call:render{html:<|"|><tool_call|> example<|"|>}<tool_call|>"#;
+        let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "render");
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["html"], "<tool_call|> example");
+    }
+
+    #[test] // CASE.20 — find_tool_call_end_position must respect the regex's
+    // `}<tool_call|>` adjacency, not just bare `<tool_call|>` occurrences.
+    fn find_end_position_skips_embedded_marker() {
+        let input = r#"<|tool_call>call:render{html:<|"|><tool_call|>x<|"|>}<tool_call|> trailing"#;
+        let pos = find_tool_call_end_position_gemma4(input).unwrap();
+        assert_eq!(&input[pos..], " trailing");
     }
 }
