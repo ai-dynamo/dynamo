@@ -60,6 +60,8 @@
 //	  (*corev1.ResourceRequirements)             Spec.Containers[0].Resources
 //	ProfilingConfig.Tolerations                Overrides.ProfilingJob.Template.
 //	  ([]corev1.Toleration)                      Spec.Tolerations
+//	ProfilingConfig.NodeSelector               Overrides.ProfilingJob.Template.
+//	  (map[string]string)                        Spec.NodeSelector
 //
 // Annotation-only (no v1beta1 equivalent; round-tripped via ObjectMeta annotations):
 //
@@ -309,6 +311,7 @@ type dgdrHubStatusFingerprint struct {
 	ObservedGeneration int64                         `json:"observedGeneration,omitempty"`
 	Conditions         []metav1.Condition            `json:"conditions,omitempty"`
 	DeploymentInfo     *v1beta1.DeploymentInfoStatus `json:"deploymentInfo,omitempty"`
+	SelectedConfig     *runtime.RawExtension         `json:"selectedConfig,omitempty"`
 }
 
 func preserveDGDRSpokeHubStatus(dst *v1beta1.DynamoGraphDeploymentRequest) {
@@ -319,7 +322,7 @@ func preserveDGDRSpokeHubStatus(dst *v1beta1.DynamoGraphDeploymentRequest) {
 }
 
 func fingerprintDGDRHubStatus(status *v1beta1.DynamoGraphDeploymentRequestStatus) dgdrHubStatusFingerprint {
-	return dgdrHubStatusFingerprint{
+	out := dgdrHubStatusFingerprint{
 		Phase:              status.Phase,
 		ProfilingPhase:     status.ProfilingPhase,
 		DGDName:            status.DGDName,
@@ -328,6 +331,10 @@ func fingerprintDGDRHubStatus(status *v1beta1.DynamoGraphDeploymentRequestStatus
 		Conditions:         status.Conditions,
 		DeploymentInfo:     status.DeploymentInfo,
 	}
+	if status.ProfilingResults != nil {
+		out.SelectedConfig = status.ProfilingResults.SelectedConfig
+	}
+	return out
 }
 
 func preserveDGDRHub(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequest) {
@@ -687,10 +694,10 @@ func applyModelCacheFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGra
 	dst.ModelCache = mc
 }
 
-// convertProfilingResourcesToOverrides maps ProfilingConfig Resources and Tolerations
-// into the v1beta1 Overrides.ProfilingJob pod spec.
+// convertProfilingResourcesToOverrides maps ProfilingConfig pod fields into
+// the v1beta1 Overrides.ProfilingJob pod spec.
 func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if src.Resources == nil && len(src.Tolerations) == 0 {
+	if src.Resources == nil && len(src.Tolerations) == 0 && len(src.NodeSelector) == 0 {
 		return
 	}
 	if dst.Overrides == nil {
@@ -713,6 +720,9 @@ func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1
 	}
 	if len(src.Tolerations) > 0 {
 		podSpec.Tolerations = src.Tolerations
+	}
+	if len(src.NodeSelector) > 0 {
+		podSpec.NodeSelector = maps.Clone(src.NodeSelector)
 	}
 }
 
@@ -808,14 +818,17 @@ func overlayRepresentedProfilingJobFields(dst, semantic *batchv1.JobSpec) {
 	podSpec := &dst.Template.Spec
 	if semantic == nil {
 		podSpec.Tolerations = nil
+		podSpec.NodeSelector = nil
 		if len(podSpec.Containers) > 0 {
 			podSpec.Containers[0].Resources.Requests = nil
 			podSpec.Containers[0].Resources.Limits = nil
+			podSpec.Containers[0].Resources.Claims = nil
 		}
 		return
 	}
 	semanticPodSpec := &semantic.Template.Spec
 	podSpec.Tolerations = semanticPodSpec.Tolerations
+	podSpec.NodeSelector = maps.Clone(semanticPodSpec.NodeSelector)
 	if len(semanticPodSpec.Containers) > 0 {
 		if len(podSpec.Containers) == 0 {
 			podSpec.Containers = []corev1.Container{{}}
@@ -859,9 +872,12 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 	blobFromAnnotation := false
 	if srcObj.Annotations != nil {
 		if rawBlob, ok := srcObj.Annotations[annDGDRProfilingConfig]; ok && rawBlob != "" {
-			dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(rawBlob)}
-			_ = json.Unmarshal([]byte(rawBlob), &blob) // best-effort
-			blobFromAnnotation = true
+			if err := json.Unmarshal([]byte(rawBlob), &blob); err != nil || blob == nil {
+				dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(rawBlob)}
+			} else {
+				pruneKnownProfilingBlobFields(src, blob)
+				blobFromAnnotation = true
+			}
 		}
 	}
 	if src.SLA != nil || src.Workload != nil {
@@ -883,7 +899,9 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		mergePlannerIntoBlob(src.Features.Planner, blob)
 	}
 	if blob != nil {
-		if data, err := json.Marshal(blob); err == nil {
+		if len(blob) == 0 {
+			dst.ProfilingConfig.Config = nil
+		} else if data, err := json.Marshal(blob); err == nil {
 			dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: data}
 		}
 	}
@@ -898,6 +916,52 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 	restoreAnnotationFields(srcObj, dst)
 	restoreProfilingJobResources(src, dst)
 	fillDGDRSpokeSpecFromPreserved(dst, preserved, preservedSourceUnmodified)
+}
+
+func pruneKnownProfilingBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
+	pruneSLAWorkloadBlobFields(src, blob)
+	pruneModelCacheBlobFields(src, blob)
+	if src.Features == nil || src.Features.Planner == nil || len(src.Features.Planner.Raw) == 0 {
+		delete(blob, "planner")
+	}
+}
+
+func pruneSLAWorkloadBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
+	slaMap, ok := blob["sla"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if src.SLA == nil || src.SLA.TTFT == nil {
+		delete(slaMap, "ttft")
+	}
+	if src.SLA == nil || src.SLA.ITL == nil {
+		delete(slaMap, "itl")
+	}
+	if src.Workload == nil || src.Workload.ISL == nil {
+		delete(slaMap, "isl")
+	}
+	if src.Workload == nil || src.Workload.OSL == nil {
+		delete(slaMap, "osl")
+	}
+	if len(slaMap) == 0 {
+		delete(blob, "sla")
+	}
+}
+
+func pruneModelCacheBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
+	deployMap, ok := blob["deployment"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if src.ModelCache == nil ||
+		(src.ModelCache.PVCName == "" &&
+			src.ModelCache.PVCModelPath == "" &&
+			src.ModelCache.PVCMountPath == "") {
+		delete(deployMap, "modelCache")
+	}
+	if len(deployMap) == 0 {
+		delete(blob, "deployment")
+	}
 }
 
 // mergeSLAWorkloadIntoBlob writes SLA and Workload structured fields back into the JSON blob,
@@ -1023,7 +1087,7 @@ func restoreAnnotationFields(srcObj *v1beta1.DynamoGraphDeploymentRequest, dst *
 	}
 }
 
-// restoreProfilingJobResources restores Resources and Tolerations from
+// restoreProfilingJobResources restores representable profiling pod fields from
 // v1beta1 Overrides.ProfilingJob back into v1alpha1 ProfilingConfig.
 func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec) {
 	if src.Overrides == nil || src.Overrides.ProfilingJob == nil {
@@ -1038,6 +1102,9 @@ func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec,
 	}
 	if len(podSpec.Tolerations) > 0 {
 		dst.ProfilingConfig.Tolerations = podSpec.Tolerations
+	}
+	if len(podSpec.NodeSelector) > 0 {
+		dst.ProfilingConfig.NodeSelector = maps.Clone(podSpec.NodeSelector)
 	}
 }
 

@@ -25,6 +25,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -592,6 +594,164 @@ func TestDGDR_IntermediateSpokeProfilingConfigModelCacheEditWins(t *testing.T) {
 	}
 	if got := restoredHub.Spec.ModelCache.PVCMountPath; got != "/edited" {
 		t.Fatalf("ModelCache.PVCMountPath = %q, want /edited", got)
+	}
+}
+
+func TestDGDR_ProfilingNodeSelectorRoundTrip(t *testing.T) {
+	original := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-selector"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			Overrides: &v1beta1.OverridesSpec{
+				ProfilingJob: &batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers:   []corev1.Container{},
+							NodeSelector: map[string]string{"kubernetes.io/arch": "arm64"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if diff := cmp.Diff(original.Spec.Overrides.ProfilingJob.Template.Spec.NodeSelector, spoke.Spec.ProfilingConfig.NodeSelector); diff != "" {
+		t.Fatalf("nodeSelector mismatch after ConvertFrom (-want +got):\n%s", diff)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDR_StaleProfilingConfigAnnotationDoesNotRestoreClearedHubFields(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "stale-blob",
+			Annotations: map[string]string{
+				annDGDRProfilingConfig: `{"sla":{"ttft":500,"isl":2048},"planner":{"enabled":true},"deployment":{"modelCache":{"pvcName":"old-pvc"}},"extra":"preserved"}`,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Spec.ProfilingConfig.Config == nil {
+		t.Fatalf("ProfilingConfig.Config is nil, want unknown blob data preserved")
+	}
+	var blob map[string]interface{}
+	if err := json.Unmarshal(spoke.Spec.ProfilingConfig.Config.Raw, &blob); err != nil {
+		t.Fatalf("unmarshal profiling config: %v", err)
+	}
+	if _, ok := blob["sla"]; ok {
+		t.Fatalf("stale sla key survived in profiling config: %v", blob["sla"])
+	}
+	if _, ok := blob["planner"]; ok {
+		t.Fatalf("stale planner key survived in profiling config: %v", blob["planner"])
+	}
+	deployMap, _ := blob["deployment"].(map[string]interface{})
+	if _, ok := deployMap["modelCache"]; ok {
+		t.Fatalf("stale modelCache key survived in profiling config: %v", deployMap["modelCache"])
+	}
+	if blob["extra"] != "preserved" {
+		t.Fatalf("extra key = %v, want preserved", blob["extra"])
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.SLA != nil {
+		t.Fatalf("SLA = %#v, want nil", restored.Spec.SLA)
+	}
+	if restored.Spec.Workload != nil {
+		t.Fatalf("Workload = %#v, want nil", restored.Spec.Workload)
+	}
+	if restored.Spec.ModelCache != nil {
+		t.Fatalf("ModelCache = %#v, want nil", restored.Spec.ModelCache)
+	}
+	if restored.Spec.Features != nil && restored.Spec.Features.Planner != nil {
+		t.Fatalf("Planner = %#v, want nil", restored.Spec.Features.Planner)
+	}
+}
+
+func TestDGDR_ProfilingResourcesClaimsOnlyRoundTrip(t *testing.T) {
+	original := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "claims-only"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			Overrides: &v1beta1.OverridesSpec{
+				ProfilingJob: &batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name: "profiler",
+								Resources: corev1.ResourceRequirements{
+									Claims: []corev1.ResourceClaim{{
+										Name:    "gpu-claim",
+										Request: "gpu",
+									}},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Spec.ProfilingConfig.Resources == nil {
+		t.Fatalf("ProfilingConfig.Resources is nil")
+	}
+	if diff := cmp.Diff(original.Spec.Overrides.ProfilingJob.Template.Spec.Containers[0].Resources.Claims, spoke.Spec.ProfilingConfig.Resources.Claims); diff != "" {
+		t.Fatalf("claims mismatch after ConvertFrom (-want +got):\n%s", diff)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDR_ClearedSelectedConfigDoesNotRestorePreservedGeneratedDeployment(t *testing.T) {
+	original := newV1alpha1DGDR()
+	original.Status.GeneratedDeployment = &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment"}`)}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	hub.Status.ProfilingResults = nil
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if restored.Status.GeneratedDeployment != nil {
+		t.Fatalf("GeneratedDeployment = %#v, want nil after hub selectedConfig clear", restored.Status.GeneratedDeployment)
 	}
 }
 
