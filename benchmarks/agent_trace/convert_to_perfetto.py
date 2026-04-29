@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import glob
+import heapq
 import json
 import sys
 from pathlib import Path
@@ -149,23 +150,51 @@ def _flatten_args(
 class TrackTable:
     def __init__(self) -> None:
         self._workflow_pids: dict[str, int] = {}
-        self._program_tids: dict[tuple[str, str], int] = {}
+        self._track_tids: dict[tuple[str, str, int], int] = {}
+        self._active_lanes: dict[tuple[str, str], list[tuple[int, int]]] = {}
+        self._next_lane: dict[tuple[str, str], int] = {}
+        self._max_lanes: dict[tuple[str, str], int] = {}
 
-    def track_for(self, workflow_id: str, program_id: str) -> tuple[int, int]:
+    def track_for(
+        self,
+        workflow_id: str,
+        program_id: str,
+        *,
+        start_us: int,
+        end_us: int,
+    ) -> tuple[int, int]:
         if workflow_id not in self._workflow_pids:
             self._workflow_pids[workflow_id] = len(self._workflow_pids) + 1
         pid = self._workflow_pids[workflow_id]
 
-        key = (workflow_id, program_id)
-        if key not in self._program_tids:
-            self._program_tids[key] = len(
-                [1 for existing in self._program_tids if existing[0] == workflow_id]
+        program_key = (workflow_id, program_id)
+        active = self._active_lanes.setdefault(program_key, [])
+        while active and active[0][0] <= start_us:
+            heapq.heappop(active)
+
+        active_lanes = {lane for _, lane in active}
+        lane = 0
+        while lane in active_lanes:
+            lane += 1
+        if lane >= self._next_lane.get(program_key, 0):
+            self._next_lane[program_key] = lane + 1
+        self._max_lanes[program_key] = max(
+            self._max_lanes.get(program_key, 0), lane + 1
+        )
+        heapq.heappush(active, (end_us, lane))
+
+        track_key = (workflow_id, program_id, lane)
+        if track_key not in self._track_tids:
+            self._track_tids[track_key] = len(
+                [1 for existing in self._track_tids if existing[0] == workflow_id]
             ) + 1
-        return pid, self._program_tids[key]
+        return pid, self._track_tids[track_key]
 
     def metadata_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for workflow_id, pid in sorted(self._workflow_pids.items(), key=lambda item: item[1]):
+        for workflow_id, pid in sorted(
+            self._workflow_pids.items(), key=lambda item: item[1]
+        ):
             events.append(
                 {
                     "name": "process_name",
@@ -174,18 +203,22 @@ class TrackTable:
                     "args": {"name": f"workflow: {workflow_id}"},
                 }
             )
-        for (workflow_id, program_id), tid in sorted(
-            self._program_tids.items(),
+        for (workflow_id, program_id, lane), tid in sorted(
+            self._track_tids.items(),
             key=lambda item: (self._workflow_pids[item[0][0]], item[1]),
         ):
             pid = self._workflow_pids[workflow_id]
+            lane_count = self._max_lanes.get((workflow_id, program_id), 1)
+            track_name = program_id
+            if lane_count > 1:
+                track_name = f"{program_id} [lane {lane + 1}]"
             events.append(
                 {
                     "name": "thread_name",
                     "ph": "M",
                     "pid": pid,
                     "tid": tid,
-                    "args": {"name": program_id},
+                    "args": {"name": track_name},
                 }
             )
         return events
@@ -238,10 +271,9 @@ def convert_records(
     records: Iterable[dict[str, Any]],
     *,
     include_stages: bool,
+    include_markers: bool,
 ) -> tuple[dict[str, Any], int]:
-    tracks = TrackTable()
-    trace_events: list[dict[str, Any]] = []
-    converted = 0
+    prepared: list[dict[str, Any]] = []
 
     for record in records:
         event = _event_from_record(record)
@@ -262,15 +294,43 @@ def convert_records(
         if ts_us is None or dur_us is None:
             continue
 
-        workflow_id = _safe_label(agent_context.get("workflow_id"), "unknown-workflow")
-        program_id = _safe_label(agent_context.get("program_id"), "unknown-program")
-        pid, tid = tracks.track_for(workflow_id, program_id)
+        prepared.append(
+            {
+                "request": request,
+                "args": _flatten_args(event, agent_context, request),
+                "ts_us": ts_us,
+                "dur_us": max(1, dur_us),
+                "workflow_id": _safe_label(
+                    agent_context.get("workflow_id"), "unknown-workflow"
+                ),
+                "program_id": _safe_label(
+                    agent_context.get("program_id"), "unknown-program"
+                ),
+            }
+        )
 
-        args = _flatten_args(event, agent_context, request)
-        model = _safe_label(request.get("model"), "unknown-model")
+    tracks = TrackTable()
+    trace_events: list[dict[str, Any]] = []
+    converted = 0
+
+    for item in sorted(prepared, key=lambda item: item["ts_us"]):
+        request = item["request"]
+        args = item["args"]
+        ts_us = item["ts_us"]
+        dur_us = item["dur_us"]
+        pid, tid = tracks.track_for(
+            item["workflow_id"],
+            item["program_id"],
+            start_us=ts_us,
+            end_us=ts_us + dur_us,
+        )
+
         trace_events.append(
             _make_complete_event(
-                name=f"LLM request: {model}",
+                name=(
+                    "LLM request: "
+                    f"{_safe_label(request.get('model'), 'unknown-model')}"
+                ),
                 category="dynamo.llm",
                 pid=pid,
                 tid=tid,
@@ -282,7 +342,7 @@ def convert_records(
         converted += 1
 
         ttft_us = _ms_to_trace_us(request.get("ttft_ms"))
-        if ttft_us is not None:
+        if include_markers and ttft_us is not None:
             trace_events.append(
                 _make_instant_event(
                     name="first token",
@@ -297,6 +357,11 @@ def convert_records(
         if include_stages:
             wait_us = _ms_to_trace_us(request.get("prefill_wait_time_ms"))
             prefill_us = _ms_to_trace_us(request.get("prefill_time_ms"))
+            common_stage_args = {
+                "request_id": request.get("request_id"),
+                "x_request_id": request.get("x_request_id"),
+                "model": request.get("model"),
+            }
             if wait_us is not None and wait_us > 0:
                 trace_events.append(
                     _make_complete_event(
@@ -306,7 +371,12 @@ def convert_records(
                         tid=tid,
                         ts_us=ts_us,
                         dur_us=wait_us,
-                        args={"prefill_wait_time_ms": request.get("prefill_wait_time_ms")},
+                        args={
+                            **common_stage_args,
+                            "prefill_wait_time_ms": request.get(
+                                "prefill_wait_time_ms"
+                            ),
+                        },
                     )
                 )
             if wait_us is not None and prefill_us is not None and prefill_us > 0:
@@ -318,7 +388,10 @@ def convert_records(
                         tid=tid,
                         ts_us=ts_us + wait_us,
                         dur_us=prefill_us,
-                        args={"prefill_time_ms": request.get("prefill_time_ms")},
+                        args={
+                            **common_stage_args,
+                            "prefill_time_ms": request.get("prefill_time_ms"),
+                        },
                     )
                 )
             if ttft_us is not None and dur_us > ttft_us:
@@ -331,6 +404,7 @@ def convert_records(
                         ts_us=ts_us + ttft_us,
                         dur_us=dur_us - ttft_us,
                         args={
+                            **common_stage_args,
                             "output_tokens": request.get("output_tokens"),
                             "avg_itl_ms": request.get("avg_itl_ms"),
                         },
@@ -368,6 +442,11 @@ def parse_args() -> argparse.Namespace:
         help="Also emit prefill wait, prefill, and decode stage slices.",
     )
     parser.add_argument(
+        "--include-markers",
+        action="store_true",
+        help="Also emit first-token instant markers. Disabled by default to reduce clutter.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print output JSON. Defaults to compact JSON.",
@@ -389,6 +468,7 @@ def main() -> int:
     trace, converted = convert_records(
         _iter_records(input_paths),
         include_stages=args.include_stages,
+        include_markers=args.include_markers,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

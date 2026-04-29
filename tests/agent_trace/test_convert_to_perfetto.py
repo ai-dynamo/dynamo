@@ -45,6 +45,7 @@ def test_convert_records_emits_request_stages_and_metadata():
             }
         ],
         include_stages=True,
+        include_markers=True,
     )
 
     assert converted == 1
@@ -76,3 +77,53 @@ def test_convert_records_emits_request_stages_and_metadata():
     assert markers[0]["name"] == "first token"
     assert markers[0]["ts"] == 1_012_000
 
+
+def test_convert_records_splits_overlapping_program_requests_into_lanes():
+    def record(request_id: str, start_ms: int, total_ms: int):
+        return {
+            "event": {
+                "schema": "dynamo.agent.trace.v1",
+                "event_type": "request_end",
+                "event_time_unix_ms": start_ms + total_ms,
+                "agent_context": {
+                    "workflow_type_id": "ms_agent",
+                    "workflow_id": "workflow-1",
+                    "program_id": "workflow-1:searcher",
+                },
+                "request": {
+                    "request_id": request_id,
+                    "model": "test-model",
+                    "request_received_ms": start_ms,
+                    "ttft_ms": 10,
+                    "total_time_ms": total_ms,
+                },
+            }
+        }
+
+    trace, converted = convert_records(
+        [record("req-1", 1000, 100), record("req-2", 1050, 100)],
+        include_stages=False,
+        include_markers=False,
+    )
+
+    assert converted == 2
+    assert not [
+        event for event in trace["traceEvents"] if event.get("cat") == "dynamo.llm.marker"
+    ]
+
+    thread_names = [
+        event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event.get("name") == "thread_name"
+    ]
+    assert thread_names == [
+        "workflow-1:searcher [lane 1]",
+        "workflow-1:searcher [lane 2]",
+    ]
+
+    request_tids = {
+        event["args"]["request_id"]: event["tid"]
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.llm"
+    }
+    assert request_tids["req-1"] != request_tids["req-2"]

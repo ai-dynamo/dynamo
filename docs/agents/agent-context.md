@@ -146,7 +146,8 @@ Open `/tmp/dynamo-agent-trace.perfetto.json` in
 slice grouped by workflow and program. The slice args include request IDs,
 model, token counts, cache metrics, TTFT, average ITL, queue depth, and worker
 IDs. With `--include-stages`, the converter also emits prefill wait, prefill,
-and decode slices when those timings are present.
+and decode slices when those timings are present. Add `--include-markers` to
+emit first-token instant markers.
 
 ## Operator Notes
 

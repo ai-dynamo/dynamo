@@ -21,4 +21,4 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 - one program per Perfetto thread
 - one LLM request slice per Dynamo `request_end`
 - optional prefill wait, prefill, and decode stage slices
-
+- optional first-token markers with `--include-markers`
