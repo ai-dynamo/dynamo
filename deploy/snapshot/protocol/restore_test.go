@@ -328,9 +328,10 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{Path: "/livez"},
 		},
-		PeriodSeconds:    5,
-		TimeoutSeconds:   4,
-		FailureThreshold: 2,
+		InitialDelaySeconds: 9,
+		PeriodSeconds:       5,
+		TimeoutSeconds:      4,
+		FailureThreshold:    2,
 	}
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
@@ -355,12 +356,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 	assertRestoreStartupGate(t, container.StartupProbe)
 	if container.StartupProbe.HTTPGet == nil || container.StartupProbe.HTTPGet.Path != "/livez" {
 		t.Fatalf("expected synthesized startup probe to inherit liveness HTTPGet handler, got %#v", container.StartupProbe)
-	}
-	if got := container.StartupProbe.PeriodSeconds; got != livenessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from liveness), got %d", livenessProbe.PeriodSeconds, got)
-	}
-	if got := container.StartupProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
-		t.Fatalf("expected startup TimeoutSeconds %d (from liveness), got %d", livenessProbe.TimeoutSeconds, got)
 	}
 }
 
@@ -401,9 +396,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		container.StartupProbe.Exec.Command[0] != "cat" || container.StartupProbe.Exec.Command[1] != "/tmp/ready" {
 		t.Fatalf("expected synthesized startup probe to inherit readiness Exec command, got %#v", container.StartupProbe)
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from readiness), got %d", readinessProbe.PeriodSeconds, got)
-	}
 }
 
 func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
@@ -436,22 +428,28 @@ func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
 			t.Fatalf("fallback startup probe command = %#v, want %#v", container.StartupProbe.Exec.Command, want)
 		}
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != 1 {
-		t.Fatalf("expected fallback startup PeriodSeconds=1, got %d", got)
-	}
 }
 
-// assertRestoreStartupGate verifies the threshold invariants every restore
-// StartupProbe must satisfy: FailureThreshold=MaxInt32 (effectively infinite
-// retries during CRIU restore) and SuccessThreshold=1. The handler shape is
-// not checked here because ensureRestoreStartupProbe synthesizes the probe
-// from whatever Startup/Liveness/Readiness handler the workload defined; only
-// when no user probe is present does it fall back to the sentinel-cat exec
-// probe (covered by assertSentinelRestoreStartupGate).
+// assertRestoreStartupGate verifies the invariants every restore StartupProbe
+// must satisfy: no initial delay, the minimum kubelet probe cadence, effectively
+// infinite retries during CRIU restore, and SuccessThreshold=1. The handler
+// shape is not checked here because ensureRestoreStartupProbe synthesizes the
+// probe from whatever Startup/Liveness/Readiness handler the workload defined;
+// only when no user probe is present does it fall back to the sentinel-cat exec
+// probe.
 func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
 	t.Helper()
 	if probe == nil {
 		t.Fatalf("expected non-nil startup probe")
+	}
+	if got := probe.InitialDelaySeconds; got != 0 {
+		t.Fatalf("expected startup initial delay 0, got %d", got)
+	}
+	if got := probe.PeriodSeconds; got != 1 {
+		t.Fatalf("expected startup period 1, got %d", got)
+	}
+	if got := probe.TimeoutSeconds; got != 1 {
+		t.Fatalf("expected startup timeout 1, got %d", got)
 	}
 	if got := probe.FailureThreshold; got != math.MaxInt32 {
 		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
