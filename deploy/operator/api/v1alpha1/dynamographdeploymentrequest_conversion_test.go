@@ -44,7 +44,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 		},
 		"deployment": map[string]interface{}{
 			"modelCache": map[string]interface{}{
-				"pvcName":        "model-pvc",
+				"pvcName":        testModelPVCName,
 				"modelPathInPvc": "llama-3",
 				"pvcMountPath":   "/data/model",
 			},
@@ -208,8 +208,8 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	if dst.Spec.ModelCache == nil {
 		t.Fatal("ModelCache is nil")
 	}
-	if dst.Spec.ModelCache.PVCName != "model-pvc" {
-		t.Errorf("ModelCache.PVCName: got %q, want %q", dst.Spec.ModelCache.PVCName, "model-pvc")
+	if dst.Spec.ModelCache.PVCName != testModelPVCName {
+		t.Errorf("ModelCache.PVCName: got %q, want %q", dst.Spec.ModelCache.PVCName, testModelPVCName)
 	}
 	if dst.Spec.ModelCache.PVCModelPath != "llama-3" {
 		t.Errorf("ModelCache.PVCModelPath: got %q, want %q", dst.Spec.ModelCache.PVCModelPath, "llama-3")
@@ -737,6 +737,132 @@ func TestDGDR_ProfilingResourcesClaimsOnlyRoundTrip(t *testing.T) {
 	}
 	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
 		t.Fatalf("spec mismatch after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDR_ProfilingJobHubOnlyFieldsRoundTrip(t *testing.T) {
+	parallelism := int32(2)
+	original := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "profiling-job-hub-only"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			Overrides: &v1beta1.OverridesSpec{
+				ProfilingJob: &batchv1.JobSpec{
+					Parallelism: &parallelism,
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"job": "profiling"},
+						},
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyNever,
+							Containers: []corev1.Container{
+								{
+									Name:  "profiler",
+									Image: "profiler:v1",
+									Resources: corev1.ResourceRequirements{
+										Claims: []corev1.ResourceClaim{{
+											Name:    "gpu-claim",
+											Request: "gpu",
+										}},
+									},
+								},
+								{
+									Name:  "helper",
+									Image: "helper:v1",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDR_LiveProfilingFieldsOverridePreservedJob(t *testing.T) {
+	original := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "profiling-job-live-wins"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			Overrides: &v1beta1.OverridesSpec{
+				ProfilingJob: &batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							NodeSelector: map[string]string{"old": "selector"},
+							Tolerations: []corev1.Toleration{{
+								Key:      "old",
+								Operator: corev1.TolerationOpExists,
+							}},
+							Containers: []corev1.Container{{
+								Name:  "profiler",
+								Image: "profiler:v1",
+								Resources: corev1.ResourceRequirements{
+									Claims: []corev1.ResourceClaim{{
+										Name:    "old-claim",
+										Request: "gpu",
+									}},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	spoke.Spec.ProfilingConfig.NodeSelector = map[string]string{"new": "selector"}
+	spoke.Spec.ProfilingConfig.Tolerations = []corev1.Toleration{{
+		Key:      "new",
+		Operator: corev1.TolerationOpExists,
+	}}
+	spoke.Spec.ProfilingConfig.Resources = &corev1.ResourceRequirements{
+		Claims: []corev1.ResourceClaim{{
+			Name:    "new-claim",
+			Request: "gpu",
+		}},
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	gotJob := restored.Spec.Overrides.ProfilingJob
+	if gotJob == nil || len(gotJob.Template.Spec.Containers) == 0 {
+		t.Fatalf("ProfilingJob container missing after ConvertTo")
+	}
+	if got := gotJob.Template.Spec.Containers[0].Name; got != "profiler" {
+		t.Fatalf("container name = %q, want profiler", got)
+	}
+	if got := gotJob.Template.Spec.Containers[0].Image; got != "profiler:v1" {
+		t.Fatalf("container image = %q, want profiler:v1", got)
+	}
+	if diff := cmp.Diff(spoke.Spec.ProfilingConfig.Resources, &gotJob.Template.Spec.Containers[0].Resources); diff != "" {
+		t.Fatalf("resources mismatch after live edit (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(spoke.Spec.ProfilingConfig.NodeSelector, gotJob.Template.Spec.NodeSelector); diff != "" {
+		t.Fatalf("nodeSelector mismatch after live edit (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(spoke.Spec.ProfilingConfig.Tolerations, gotJob.Template.Spec.Tolerations); diff != "" {
+		t.Fatalf("tolerations mismatch after live edit (-want +got):\n%s", diff)
 	}
 }
 

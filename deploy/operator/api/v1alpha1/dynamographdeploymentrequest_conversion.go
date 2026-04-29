@@ -811,42 +811,131 @@ func fillDGDRHubSpecFromPreserved(dst *v1beta1.DynamoGraphDeploymentRequestSpec,
 		dst.Overrides.DGD = preserved.Overrides.DGD
 	}
 	if preserved.Overrides.ProfilingJob != nil {
-		semanticJob := dst.Overrides.ProfilingJob
-		dst.Overrides.ProfilingJob = preserved.Overrides.ProfilingJob.DeepCopy()
-		overlayRepresentedProfilingJobFields(dst.Overrides.ProfilingJob, semanticJob)
+		dst.Overrides.ProfilingJob = restoreProfilingJobHubOnlyFields(dst.Overrides.ProfilingJob, preserved.Overrides.ProfilingJob)
 	}
 }
 
-func overlayRepresentedProfilingJobFields(dst, semantic *batchv1.JobSpec) {
-	if dst == nil {
-		return
-	}
-	podSpec := &dst.Template.Spec
-	if semantic == nil {
-		podSpec.Tolerations = nil
-		podSpec.NodeSelector = nil
-		if len(podSpec.Containers) > 0 {
-			podSpec.Containers[0].Resources.Requests = nil
-			podSpec.Containers[0].Resources.Limits = nil
-			podSpec.Containers[0].Resources.Claims = nil
+// restoreProfilingJobHubOnlyFields starts from the live v1alpha1 projection and
+// copies only v1beta1-only profiling JobSpec leaves from the preserved hub spec.
+func restoreProfilingJobHubOnlyFields(semantic, preserved *batchv1.JobSpec) *batchv1.JobSpec {
+	if preserved == nil {
+		if semantic == nil {
+			return nil
 		}
-		return
+		return semantic.DeepCopy()
 	}
-	semanticPodSpec := &semantic.Template.Spec
-	podSpec.Tolerations = semanticPodSpec.Tolerations
-	podSpec.NodeSelector = maps.Clone(semanticPodSpec.NodeSelector)
-	if len(semanticPodSpec.Containers) > 0 {
-		if len(podSpec.Containers) == 0 {
-			podSpec.Containers = []corev1.Container{{}}
+	if semantic == nil && !profilingJobHasHubOnlyFields(preserved) {
+		return nil
+	}
+
+	out := &batchv1.JobSpec{}
+	if semantic != nil {
+		out = semantic.DeepCopy()
+	}
+
+	p := preserved.DeepCopy()
+	copyStructFieldsExcept(out, p, "Template")
+	out.Template.ObjectMeta = *p.Template.ObjectMeta.DeepCopy()
+	restoreProfilingPodSpecHubOnlyFields(&out.Template.Spec, &p.Template.Spec)
+	return out
+}
+
+func restoreProfilingPodSpecHubOnlyFields(dst, preserved *corev1.PodSpec) {
+	p := preserved.DeepCopy()
+	copyStructFieldsExcept(dst, p, "Containers", "NodeSelector", "Tolerations")
+	dst.Containers = restoreProfilingContainersHubOnlyFields(dst.Containers, p.Containers)
+}
+
+func restoreProfilingContainersHubOnlyFields(semantic, preserved []corev1.Container) []corev1.Container {
+	if len(preserved) == 0 {
+		if len(semantic) == 0 && preserved != nil {
+			return []corev1.Container{}
 		}
-		podSpec.Containers[0].Resources.Requests = semanticPodSpec.Containers[0].Resources.Requests
-		podSpec.Containers[0].Resources.Limits = semanticPodSpec.Containers[0].Resources.Limits
-		podSpec.Containers[0].Resources.Claims = semanticPodSpec.Containers[0].Resources.Claims
-	} else if len(podSpec.Containers) > 0 {
-		podSpec.Containers[0].Resources.Requests = nil
-		podSpec.Containers[0].Resources.Limits = nil
-		podSpec.Containers[0].Resources.Claims = nil
+		return slices.Clone(semantic)
 	}
+
+	var firstSemantic *corev1.Container
+	if len(semantic) > 0 {
+		firstSemantic = &semantic[0]
+	}
+
+	out := make([]corev1.Container, 0, len(preserved))
+	first := restoreProfilingFirstContainerHubOnlyFields(firstSemantic, &preserved[0])
+	if firstSemantic != nil || profilingFirstContainerHasHubOnlyFields(&preserved[0]) || len(preserved) > 1 {
+		out = append(out, first)
+	}
+	for i := 1; i < len(preserved); i++ {
+		out = append(out, *preserved[i].DeepCopy())
+	}
+	return out
+}
+
+func restoreProfilingFirstContainerHubOnlyFields(semantic, preserved *corev1.Container) corev1.Container {
+	out := corev1.Container{}
+	if semantic != nil {
+		out = *semantic.DeepCopy()
+	}
+	// The first container's Resources is represented by v1alpha1
+	// ProfilingConfig.Resources; every other container field is hub-only here.
+	p := preserved.DeepCopy()
+	copyStructFieldsExcept(&out, p, "Resources")
+	return out
+}
+
+func copyStructFieldsExcept(dst, src any, except ...string) {
+	dstValue := reflect.ValueOf(dst)
+	srcValue := reflect.ValueOf(src)
+	if dstValue.Kind() != reflect.Ptr || srcValue.Kind() != reflect.Ptr ||
+		dstValue.IsNil() || srcValue.IsNil() {
+		panic("copyStructFieldsExcept expects non-nil pointers")
+	}
+
+	dstStruct := dstValue.Elem()
+	srcStruct := srcValue.Elem()
+	if dstStruct.Kind() != reflect.Struct || srcStruct.Kind() != reflect.Struct ||
+		dstStruct.Type() != srcStruct.Type() {
+		panic("copyStructFieldsExcept expects pointers to the same struct type")
+	}
+
+	skip := map[string]struct{}{}
+	for _, name := range except {
+		skip[name] = struct{}{}
+	}
+	for i := 0; i < dstStruct.NumField(); i++ {
+		field := dstStruct.Type().Field(i)
+		if _, ok := skip[field.Name]; ok {
+			continue
+		}
+		if dstStruct.Field(i).CanSet() {
+			dstStruct.Field(i).Set(srcStruct.Field(i))
+		}
+	}
+}
+
+func profilingJobHasHubOnlyFields(job *batchv1.JobSpec) bool {
+	if job == nil {
+		return false
+	}
+	cp := job.DeepCopy()
+	podSpec := &cp.Template.Spec
+	podSpec.NodeSelector = nil
+	podSpec.Tolerations = nil
+	if len(podSpec.Containers) > 0 {
+		podSpec.Containers[0].Resources = corev1.ResourceRequirements{}
+		if len(podSpec.Containers) == 1 && reflect.DeepEqual(podSpec.Containers[0], corev1.Container{}) {
+			podSpec.Containers = nil
+		}
+	}
+	return !reflect.DeepEqual(*cp, batchv1.JobSpec{})
+}
+
+func profilingFirstContainerHasHubOnlyFields(container *corev1.Container) bool {
+	if container == nil {
+		return false
+	}
+	cp := container.DeepCopy()
+	cp.Resources = corev1.ResourceRequirements{}
+	return !reflect.DeepEqual(*cp, corev1.Container{})
 }
 
 // convertDGDRSpecFrom converts the v1beta1 Spec back into the v1alpha1 Spec.
@@ -1330,6 +1419,9 @@ func dgdrNeedsHubPreservation(src *v1beta1.DynamoGraphDeploymentRequest) bool {
 		return true
 	}
 	if src.Spec.Overrides != nil && src.Spec.Overrides.DGD != nil {
+		return true
+	}
+	if src.Spec.Overrides != nil && profilingJobHasHubOnlyFields(src.Spec.Overrides.ProfilingJob) {
 		return true
 	}
 	if src.Status.ProfilingPhase != "" || src.Status.ProfilingJobName != "" || src.Status.DeploymentInfo != nil {

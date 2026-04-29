@@ -70,7 +70,8 @@ const (
 	// Resources.{Requests,Limits}.GPU without specifying GPUType.
 	defaultGPUResourceName = corev1.ResourceName("nvidia.com/gpu")
 
-	annotationTrue = "true"
+	annotationTrue                 = "true"
+	annotationPodTemplateGenerated = "generated"
 
 	// DGD-scoped (DGD spec-level + per-component) annotation keys.
 	annDGDPVCs       = "nvidia.com/dgd-pvcs"
@@ -985,7 +986,7 @@ func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.D
 	applyFrontendSidecarToPodTemplate(src, dst, podTpl, c)
 
 	if !podTemplateOrigin {
-		c.set(suffixPodTemplateOrig, "generated")
+		c.set(suffixPodTemplateOrig, annotationPodTemplateGenerated)
 	}
 	dst.PodTemplate = podTpl
 	return nil
@@ -1102,56 +1103,15 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 // decomposePodTemplate inverts buildPodTemplateTo.
 func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
 	if src.PodTemplate == nil {
-		if v, ok := c.get(suffixPodMetadataOrig); ok {
-			var meta ExtraPodMetadata
-			if err := json.Unmarshal([]byte(v), &meta); err == nil {
-				dst.ExtraPodMetadata = &meta
-			}
-			c.del(suffixPodMetadataOrig)
-		}
-		// Restore FrontendSidecar from origin annotation even if there is no
-		// podTemplate (uncommon but possible for manual edits).
-		if v, ok := c.get(suffixFrontendSidecar); ok {
-			var fs FrontendSidecarSpec
-			if err := json.Unmarshal([]byte(v), &fs); err == nil {
-				dst.FrontendSidecar = &fs
-			}
-			c.del(suffixFrontendSidecar)
-		}
-		if src.FrontendSidecar != nil {
-			c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
-		}
+		decomposeMissingPodTemplate(src, dst, c)
 		return nil
 	}
 
 	podTpl := src.PodTemplate.DeepCopy()
-	if v, ok := c.get(suffixPodTemplateOrig); ok {
-		c.del(suffixPodTemplateOrig)
-		if v != "generated" {
-			c.set(suffixPodTemplateOrig, annotationTrue)
-		}
-	} else {
-		c.set(suffixPodTemplateOrig, annotationTrue)
-	}
+	markPodTemplateOrigin(c)
 
 	// ExtraPodMetadata from podTemplate.metadata.
-	if v, ok := c.get(suffixPodMetadataOrig); ok {
-		var meta ExtraPodMetadata
-		if err := json.Unmarshal([]byte(v), &meta); err == nil && len(podTpl.Annotations) == 0 && len(podTpl.Labels) == 0 {
-			dst.ExtraPodMetadata = &meta
-		} else if len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0 {
-			dst.ExtraPodMetadata = &ExtraPodMetadata{
-				Annotations: maps.Clone(podTpl.Annotations),
-				Labels:      maps.Clone(podTpl.Labels),
-			}
-		}
-		c.del(suffixPodMetadataOrig)
-	} else if len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0 {
-		dst.ExtraPodMetadata = &ExtraPodMetadata{
-			Annotations: maps.Clone(podTpl.Annotations),
-			Labels:      maps.Clone(podTpl.Labels),
-		}
-	}
+	restoreExtraPodMetadataFromPodTemplate(podTpl, dst, c)
 
 	// Pick out the main container; leave everything else as podSpec sidecars.
 	var main *corev1.Container
@@ -1178,30 +1138,7 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	//      extraPodSpec.containers and stash the name under a reserved
 	//      annotation so that ConvertTo can reassemble the v1beta1 pointer
 	//      without duplicating the container.
-	if src.FrontendSidecar != nil {
-		if v, ok := c.get(suffixFrontendSidecar); ok {
-			c.del(suffixFrontendSidecar)
-			var fs FrontendSidecarSpec
-			if err := json.Unmarshal([]byte(v), &fs); err == nil && *src.FrontendSidecar == defaultFrontendSidecarContainerName {
-				if ctr, ok := findContainerByName(other, *src.FrontendSidecar); ok {
-					dst.FrontendSidecar = frontendSidecarSpecFromContainer(ctr, &fs)
-					filtered := other[:0]
-					for _, candidate := range other {
-						if candidate.Name != *src.FrontendSidecar {
-							filtered = append(filtered, candidate)
-						}
-					}
-					other = filtered
-				} else {
-					c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
-				}
-			} else {
-				c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
-			}
-		} else {
-			c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
-		}
-	}
+	other = restoreFrontendSidecarFromPodTemplate(src, dst, c, other)
 
 	restoreEnvFromSecretFromMain(main, dst, c)
 	restoreDedicatedFieldsFromMain(main, dst, c)
@@ -1237,6 +1174,91 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	}
 
 	return nil
+}
+
+func decomposeMissingPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	if v, ok := c.get(suffixPodMetadataOrig); ok {
+		var meta ExtraPodMetadata
+		if err := json.Unmarshal([]byte(v), &meta); err == nil {
+			dst.ExtraPodMetadata = &meta
+		}
+		c.del(suffixPodMetadataOrig)
+	}
+	// Restore FrontendSidecar from origin annotation even if there is no
+	// podTemplate (uncommon but possible for manual edits).
+	if v, ok := c.get(suffixFrontendSidecar); ok {
+		var fs FrontendSidecarSpec
+		if err := json.Unmarshal([]byte(v), &fs); err == nil {
+			dst.FrontendSidecar = &fs
+		}
+		c.del(suffixFrontendSidecar)
+	}
+	if src.FrontendSidecar != nil {
+		c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
+	}
+}
+
+func markPodTemplateOrigin(c *annCarrier) {
+	if v, ok := c.get(suffixPodTemplateOrig); ok {
+		c.del(suffixPodTemplateOrig)
+		if v != annotationPodTemplateGenerated {
+			c.set(suffixPodTemplateOrig, annotationTrue)
+		}
+		return
+	}
+	c.set(suffixPodTemplateOrig, annotationTrue)
+}
+
+func restoreExtraPodMetadataFromPodTemplate(podTpl *corev1.PodTemplateSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+	hasMetadata := len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0
+	if v, ok := c.get(suffixPodMetadataOrig); ok {
+		var meta ExtraPodMetadata
+		if err := json.Unmarshal([]byte(v), &meta); err == nil && !hasMetadata {
+			dst.ExtraPodMetadata = &meta
+		} else if hasMetadata {
+			dst.ExtraPodMetadata = extraPodMetadataFromPodTemplate(podTpl)
+		}
+		c.del(suffixPodMetadataOrig)
+		return
+	}
+	if hasMetadata {
+		dst.ExtraPodMetadata = extraPodMetadataFromPodTemplate(podTpl)
+	}
+}
+
+func extraPodMetadataFromPodTemplate(podTpl *corev1.PodTemplateSpec) *ExtraPodMetadata {
+	return &ExtraPodMetadata{
+		Annotations: maps.Clone(podTpl.Annotations),
+		Labels:      maps.Clone(podTpl.Labels),
+	}
+}
+
+func restoreFrontendSidecarFromPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier, other []corev1.Container) []corev1.Container {
+	if src.FrontendSidecar == nil {
+		return other
+	}
+	sidecarName := *src.FrontendSidecar
+	v, ok := c.get(suffixFrontendSidecar)
+	if !ok {
+		c.set(suffixFrontendSidecarRef, sidecarName)
+		return other
+	}
+	c.del(suffixFrontendSidecar)
+
+	var fs FrontendSidecarSpec
+	if err := json.Unmarshal([]byte(v), &fs); err != nil || sidecarName != defaultFrontendSidecarContainerName {
+		c.set(suffixFrontendSidecarRef, sidecarName)
+		return other
+	}
+	ctr, ok := findContainerByName(other, sidecarName)
+	if !ok {
+		c.set(suffixFrontendSidecarRef, sidecarName)
+		return other
+	}
+	dst.FrontendSidecar = frontendSidecarSpecFromContainer(ctr, &fs)
+	return slices.DeleteFunc(other, func(candidate corev1.Container) bool {
+		return candidate.Name == sidecarName
+	})
 }
 
 func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec, src *DynamoComponentDeploymentSharedSpec) {

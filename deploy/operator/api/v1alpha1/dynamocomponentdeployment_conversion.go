@@ -198,7 +198,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		}
 	}
 	spokeHubUnmodified := dcdSpokeHubUnmodified(src)
-	generatedPodTemplate := spokeHubUnmodified && src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
+	generatedPodTemplate := spokeHubUnmodified && src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == annotationPodTemplateGenerated
 	carrier := newDCDCarrier(&dst.ObjectMeta)
 	var preservedShared *DynamoComponentDeploymentSharedSpec
 	if preservedSpokeSpec != nil {

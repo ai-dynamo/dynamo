@@ -31,6 +31,8 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
+const testModelPVCName = "model-pvc"
+
 func dcdRoundTripFromV1beta1(t *testing.T, src *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeployment {
 	t.Helper()
 	a := &DynamoComponentDeployment{}
@@ -304,7 +306,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{{
-								Name:      "model-pvc",
+								Name:      testModelPVCName,
 								MountPath: "/old-models",
 								ReadOnly:  true,
 								SubPath:   "weights",
@@ -332,7 +334,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 			Exec: &corev1.ExecAction{Command: []string{"new"}},
 		},
 	}
-	spoke.Spec.VolumeMounts = []VolumeMount{{Name: "model-pvc", MountPoint: "/new-models"}}
+	spoke.Spec.VolumeMounts = []VolumeMount{{Name: testModelPVCName, MountPoint: "/new-models"}}
 
 	got := &v1beta1.DynamoComponentDeployment{}
 	if err := spoke.ConvertTo(got); err != nil {
@@ -370,7 +372,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	if len(main.VolumeMounts) != 1 {
 		t.Fatalf("expected one main volume mount, got %#v", main.VolumeMounts)
 	}
-	if main.VolumeMounts[0].Name != "model-pvc" || main.VolumeMounts[0].MountPath != "/new-models" {
+	if main.VolumeMounts[0].Name != testModelPVCName || main.VolumeMounts[0].MountPath != "/new-models" {
 		t.Fatalf("expected v1alpha1 volume mount name/path to win, got %#v", main.VolumeMounts[0])
 	}
 	if !main.VolumeMounts[0].ReadOnly || main.VolumeMounts[0].SubPath != "weights" {
@@ -653,7 +655,7 @@ func TestDCD_FromV1alpha1_PodTemplateDedicatedFields(t *testing.T) {
 				Resources: &Resources{
 					Requests: &ResourceItem{CPU: "2", Memory: "4Gi", GPU: "1"},
 				},
-				VolumeMounts: []VolumeMount{{Name: "model-pvc", MountPoint: "/models"}},
+				VolumeMounts: []VolumeMount{{Name: testModelPVCName, MountPoint: "/models"}},
 			},
 		},
 	}

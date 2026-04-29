@@ -506,7 +506,7 @@ func dgdGeneratedPodTemplateUnmodified(src *v1beta1.DynamoGraphDeployment, compo
 		return false
 	}
 	v, ok := newDGDComponentCarrier(&src.ObjectMeta, componentName).get(suffixPodTemplateOrig)
-	return ok && v == "generated"
+	return ok && v == annotationPodTemplateGenerated
 }
 
 func hasDGDInternalAnnotations(annotations map[string]string) bool {

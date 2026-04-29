@@ -305,7 +305,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 									},
 								},
 								VolumeMounts: []corev1.VolumeMount{{
-									Name:      "model-pvc",
+									Name:      testModelPVCName,
 									MountPath: "/old-models",
 									ReadOnly:  true,
 									SubPath:   "weights",
@@ -334,7 +334,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 			Exec: &corev1.ExecAction{Command: []string{"new"}},
 		},
 	}
-	spoke.Spec.Services["worker"].VolumeMounts = []VolumeMount{{Name: "model-pvc", MountPoint: "/new-models"}}
+	spoke.Spec.Services["worker"].VolumeMounts = []VolumeMount{{Name: testModelPVCName, MountPoint: "/new-models"}}
 
 	got := &v1beta1.DynamoGraphDeployment{}
 	if err := spoke.ConvertTo(got); err != nil {
@@ -372,7 +372,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	if len(main.VolumeMounts) != 1 {
 		t.Fatalf("expected one main volume mount, got %#v", main.VolumeMounts)
 	}
-	if main.VolumeMounts[0].Name != "model-pvc" || main.VolumeMounts[0].MountPath != "/new-models" {
+	if main.VolumeMounts[0].Name != testModelPVCName || main.VolumeMounts[0].MountPath != "/new-models" {
 		t.Fatalf("expected v1alpha1 volume mount name/path to win, got %#v", main.VolumeMounts[0])
 	}
 	if !main.VolumeMounts[0].ReadOnly || main.VolumeMounts[0].SubPath != "weights" {
@@ -533,7 +533,7 @@ func TestDGD_RoundTrip_ScalingAdapter(t *testing.T) {
 // a v1alpha1 -> v1beta1 -> v1alpha1 round-trip via the origin annotation.
 func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 	createTrue := true
-	name := "model-pvc"
+	name := testModelPVCName
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pvc", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{
