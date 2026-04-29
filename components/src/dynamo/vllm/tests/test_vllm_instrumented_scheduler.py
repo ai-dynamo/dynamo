@@ -33,6 +33,10 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+STRUCTURED_OUTPUT_WAITING_STATUS = getattr(
+    RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None
+) or getattr(RequestStatus, "WAITING_FOR_FSM")
+
 
 def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
     """Build a minimal stand-in for ``vllm.v1.request.Request``.
@@ -129,13 +133,13 @@ def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     assert q.sum_decode_kv_tokens == 1500
 
 
-def test_skipped_waiting_for_fsm_counts_as_queued_prefill():
-    """Structured-output FSM compile wait has no KV computed yet; prefill."""
+def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
+    """Structured-output grammar compile wait has no KV computed yet; prefill."""
 
     q = _run_compute_queued(
         waiting=[],
         skipped_waiting=[
-            _make_request(RequestStatus.WAITING_FOR_FSM, num_tokens=128),
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
         ],
     )
     assert q.num_prefill_requests == 1
@@ -207,7 +211,7 @@ def test_mixed_prefill_engine_snapshot():
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
         skipped_waiting=[
-            _make_request(RequestStatus.WAITING_FOR_FSM, num_tokens=300),
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
     assert q.num_prefill_requests == 3
@@ -240,7 +244,7 @@ def test_variance_spans_both_queues():
             _make_request(RequestStatus.WAITING, num_tokens=100),
         ],
         skipped_waiting=[
-            _make_request(RequestStatus.WAITING_FOR_FSM, num_tokens=300),
+            _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
     assert q.num_prefill_requests == 2

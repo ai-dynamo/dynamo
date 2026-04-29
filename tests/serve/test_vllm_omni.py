@@ -138,7 +138,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
         model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
@@ -171,6 +171,10 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason="vLLM-Omni audio release/v0.19.0rc1 uses the pre-vLLM 0.20 "
+                "GPUModelRunner._bookkeeping_sync signature"
+            ),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         request_payloads=[

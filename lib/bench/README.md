@@ -119,3 +119,7 @@ cargo bench --package dynamo-bench --bench offline_replay_bench -- \
 
 Use `--speedup-ratio` and `--decode-speedup-ratio` if you want a simple scaling
 knob while keeping the same internal polynomial model.
+
+## KV router / sharded indexer benchmarks
+
+See [lib/kv-router/BENCH_SETUP.md](../kv-router/BENCH_SETUP.md) for trace acquisition, benchmark commands, and results for the `mooncake_bench` suite (`concurrent-radix-tree-compressed` baseline vs `branch-sharded-crtc`).
