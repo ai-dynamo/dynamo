@@ -75,10 +75,10 @@ impl JsonlTraceSink {
     }
 
     async fn from_policy(policy: &AgentTracePolicy) -> anyhow::Result<Self> {
-        let path = policy.jsonl_path.clone().ok_or_else(|| {
+        let path = policy.output_path.clone().ok_or_else(|| {
             anyhow!(
                 "{} must be set when {} includes jsonl",
-                dynamo_runtime::config::environment_names::llm::agent_trace::DYN_AGENT_TRACE_JSONL_PATH,
+                dynamo_runtime::config::environment_names::llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
                 dynamo_runtime::config::environment_names::llm::agent_trace::DYN_AGENT_TRACE_SINKS
             )
         })?;
@@ -245,10 +245,10 @@ impl JsonlGzipTraceSink {
     }
 
     async fn from_policy(policy: &AgentTracePolicy) -> anyhow::Result<Self> {
-        let path = policy.jsonl_path.clone().ok_or_else(|| {
+        let path = policy.output_path.clone().ok_or_else(|| {
             anyhow!(
                 "{} must be set when {} includes jsonl_gz",
-                dynamo_runtime::config::environment_names::llm::agent_trace::DYN_AGENT_TRACE_JSONL_PATH,
+                dynamo_runtime::config::environment_names::llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
                 dynamo_runtime::config::environment_names::llm::agent_trace::DYN_AGENT_TRACE_SINKS
             )
         })?;
@@ -560,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn jsonl_gz_trace_sink_appends_gzip_members() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("agent_trace.jsonl.gz");
+        let path = dir.path().join("agent_trace");
         let sink = JsonlGzipTraceSink::new(
             path.display().to_string(),
             JsonlGzipSinkOptions {
@@ -595,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn jsonl_gz_trace_sink_rolls_segments() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("agent_trace.jsonl.gz");
+        let path = dir.path().join("agent_trace");
         let sink = JsonlGzipTraceSink::new(
             path.display().to_string(),
             JsonlGzipSinkOptions {

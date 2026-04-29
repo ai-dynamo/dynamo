@@ -318,8 +318,11 @@ pub mod llm {
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
         pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
 
-        /// Local JSONL sink path for normalized agent trace records.
-        pub const DYN_AGENT_TRACE_JSONL_PATH: &str = "DYN_AGENT_TRACE_JSONL_PATH";
+        /// Local output path for normalized agent trace records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
+        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
 
         /// In-process trace bus capacity.
         pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
@@ -548,7 +551,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_PATH,
+            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,

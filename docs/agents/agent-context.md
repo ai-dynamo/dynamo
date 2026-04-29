@@ -56,7 +56,7 @@ development logging, or a comma-separated list:
 
 ```bash
 export DYN_AGENT_TRACE_SINKS=jsonl_gz,stderr
-export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
+export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
 export DYN_AGENT_TRACE_CAPACITY=1024
 ```
 
@@ -64,13 +64,13 @@ Minimum setup for rotating compressed traces:
 
 ```bash
 export DYN_AGENT_TRACE_SINKS=jsonl_gz
-export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
+export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
 ```
 
 | Environment Variable | Required | Default | Description |
 |----------------------|:--------:|---------|-------------|
 | `DYN_AGENT_TRACE_SINKS` | Yes | unset | Enables agent tracing and selects sinks. Supported values: `jsonl`, `jsonl_gz`, `stderr`, or a comma-separated list such as `jsonl_gz,stderr`. |
-| `DYN_AGENT_TRACE_JSONL_PATH` | If `jsonl` or `jsonl_gz` is selected | unset | Local JSONL output path or compressed segment prefix. |
+| `DYN_AGENT_TRACE_OUTPUT_PATH` | If `jsonl` or `jsonl_gz` is selected | unset | Local trace output path. For `jsonl`, this is the literal `.jsonl` file path. For `jsonl_gz`, this is the segment prefix used to derive `.jsonl.gz` files. |
 | `DYN_AGENT_TRACE_CAPACITY` | No | `1024` | In-process trace bus capacity. |
 | `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES` | No | `1048576` | JSONL writer buffer size. For `jsonl_gz`, this is the max uncompressed batch size before appending a complete gzip member. |
 | `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member. |
@@ -80,7 +80,7 @@ export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
 The `jsonl` sink writes one recorder JSON object per line:
 `{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The
 `jsonl_gz` sink writes the same JSONL records into numbered compressed segments
-derived from `DYN_AGENT_TRACE_JSONL_PATH`, such as
+derived from `DYN_AGENT_TRACE_OUTPUT_PATH`, such as
 `/tmp/dynamo-agent-trace.000000.jsonl.gz` and
 `/tmp/dynamo-agent-trace.000001.jsonl.gz`. Each flush appends a complete gzip
 member, so standard gzip tools can read the concatenated stream. The `stderr`
@@ -92,7 +92,7 @@ are not durable audit logs.
 
 - Agent request trace emission is currently wired for `/v1/chat/completions`.
 - `DYN_AGENT_TRACE_SINKS` is the enable switch. Setting
-  `DYN_AGENT_TRACE_JSONL_PATH` alone does not enable tracing.
+  `DYN_AGENT_TRACE_OUTPUT_PATH` alone does not enable tracing.
 - The `jsonl` sink appends to the configured path and does not rotate or enforce
   a maximum file size. Enable it for bounded debug/profiling runs, not as a
   long-running production sink.

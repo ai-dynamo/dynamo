@@ -14,7 +14,7 @@ const DEFAULT_JSONL_GZ_ROLL_BYTES: u64 = 256 * 1024 * 1024;
 pub struct AgentTracePolicy {
     pub enabled: bool,
     pub sinks: Vec<String>,
-    pub jsonl_path: Option<String>,
+    pub output_path: Option<String>,
     pub capacity: usize,
     pub jsonl_buffer_bytes: usize,
     pub jsonl_flush_interval_ms: u64,
@@ -43,7 +43,7 @@ fn load_from_env() -> AgentTracePolicy {
         .ok()
         .map(|value| parse_sink_names(&value))
         .unwrap_or_default();
-    let jsonl_path = std::env::var(env_agent_trace::DYN_AGENT_TRACE_JSONL_PATH)
+    let output_path = std::env::var(env_agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -73,7 +73,7 @@ fn load_from_env() -> AgentTracePolicy {
     AgentTracePolicy {
         enabled: !sinks.is_empty(),
         sinks,
-        jsonl_path,
+        output_path,
         capacity,
         jsonl_buffer_bytes,
         jsonl_flush_interval_ms,
