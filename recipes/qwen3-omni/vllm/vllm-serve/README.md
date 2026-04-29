@@ -13,14 +13,14 @@ reference point the Dynamo agg + disagg topologies are compared against.
 
 1. Pre-existing `model-cache` PVC.
 2. `hf-token-secret` Secret in the target namespace.
-3. `gitlab-imagepullsecret` Secret to pull `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64`
-   (the nightly Dynamo runtime; already includes `vllm-omni` on `$PATH`):
+3. `nvcr-imagepullsecret` Secret to pull `nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-<YYYYMMDD>-<sha>`
+   (nightly Dynamo runtime; includes `vllm-omni` on `$PATH`):
 
    ```bash
-   kubectl create secret docker-registry gitlab-imagepullsecret \
-     --docker-server=gitlab-master.nvidia.com:5005 \
-     --docker-username="$GITLAB_USERNAME" \
-     --docker-password="$GITLAB_PAT" \
+   kubectl create secret docker-registry nvcr-imagepullsecret \
+     --docker-server=nvcr.io \
+     --docker-username='$oauthtoken' \
+     --docker-password="$NGC_API_KEY" \
      -n ${NAMESPACE}
    ```
 

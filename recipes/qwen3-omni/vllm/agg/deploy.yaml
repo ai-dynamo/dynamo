@@ -22,9 +22,9 @@ spec:
           value: /home/dynamo/.cache/huggingface
       extraPodSpec:
         imagePullSecrets:
-          - name: gitlab-imagepullsecret
+          - name: nvcr-imagepullsecret
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
           workingDir: /workspace
           command:
             - python3
@@ -43,7 +43,7 @@ spec:
         useAsCompilationCache: true
       extraPodSpec:
         imagePullSecrets:
-          - name: gitlab-imagepullsecret
+          - name: nvcr-imagepullsecret
         mainContainer:
           args:
           - --model
@@ -57,7 +57,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm.omni
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"

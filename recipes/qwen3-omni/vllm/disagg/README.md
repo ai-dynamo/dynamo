@@ -39,14 +39,13 @@ spawn one Pod per service entry, breaking SHM.
    but the cluster's PVCs/secrets do).
 2. Pre-existing `model-cache` and `compilation-cache` PVCs.
 3. `hf-token-secret` Secret in the target namespace.
-4. `gitlab-imagepullsecret` Secret to pull `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo`
-   (nightly Dynamo image, tag `latest-vllm-amd64`):
+4. `nvcr-imagepullsecret` Secret to pull `nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-<YYYYMMDD>-<sha>`:
 
    ```bash
-   kubectl create secret docker-registry gitlab-imagepullsecret \
-     --docker-server=gitlab-master.nvidia.com:5005 \
-     --docker-username="$GITLAB_USERNAME" \
-     --docker-password="$GITLAB_PAT" \
+   kubectl create secret docker-registry nvcr-imagepullsecret \
+     --docker-server=nvcr.io \
+     --docker-username='$oauthtoken' \
+     --docker-password="$NGC_API_KEY" \
      -n ${NAMESPACE}
    ```
 

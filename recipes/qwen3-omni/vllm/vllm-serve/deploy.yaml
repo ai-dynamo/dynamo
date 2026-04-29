@@ -32,17 +32,19 @@ spec:
         app: vllm-serve-qwen3-omni
     spec:
       imagePullSecrets:
-        - name: gitlab-imagepullsecret
+        - name: nvcr-imagepullsecret
       containers:
         - name: vllm-omni
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
           command: ["bash", "-lc"]
+          # NB: vllm-omni serve auto-discovers the model's modality stages from
+          # the checkpoint and does NOT take --output-modalities (that flag is
+          # dynamo.vllm.omni-only).
           args:
             - >-
               vllm-omni serve
               Qwen/Qwen3-Omni-30B-A3B-Instruct
               --port 8000
-              --output-modalities text,audio
               --trust-remote-code
           env:
             - name: HF_HOME

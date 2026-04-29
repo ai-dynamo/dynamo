@@ -201,10 +201,10 @@ spec:
         app: disagg-qwen3-omni
     spec:
       imagePullSecrets:
-        - name: gitlab-imagepullsecret
+        - name: nvcr-imagepullsecret
       containers:
         - name: omni-disagg
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm-amd64
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-20260429-5ab60a5
           command: ["bash", "/etc/dynamo/launcher/launch.sh"]
           ports:
             - containerPort: 8000

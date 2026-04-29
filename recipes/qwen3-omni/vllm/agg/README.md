@@ -19,8 +19,10 @@ HTTP endpoint.
 1. Dynamo Platform installed — see [Kubernetes Deployment Guide](../../../../docs/kubernetes/README.md).
 2. Pre-existing `model-cache` and `compilation-cache` PVCs.
 3. `hf-token-secret` Secret in the target namespace.
-4. `gitlab-imagepullsecret` Secret to pull from `gitlab-master.nvidia.com:5005`
-   (the nightly Dynamo image — `dl/ai-dynamo/dynamo:latest-vllm-amd64`).
+4. `nvcr-imagepullsecret` Secret to pull from `nvcr.io/nvstaging` (the nightly
+   Dynamo runtime — `nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-<YYYYMMDD>-<sha>`).
+   The cluster cannot reach `gitlab-master.nvidia.com` (NVIDIA-internal DNS), so
+   we rely on the NGC nvstaging mirror that the team's release pipeline pushes.
 
 ```bash
 export NAMESPACE=your-namespace
@@ -29,11 +31,11 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="$HF_TOKEN" \
   -n ${NAMESPACE}
 
-# GITLAB_PAT must have read_registry scope on dl/ai-dynamo/dynamo.
-kubectl create secret docker-registry gitlab-imagepullsecret \
-  --docker-server=gitlab-master.nvidia.com:5005 \
-  --docker-username="$GITLAB_USERNAME" \
-  --docker-password="$GITLAB_PAT" \
+# NGC API key (https://org.ngc.nvidia.com/setup/api-key) — username is literally `$oauthtoken`.
+kubectl create secret docker-registry nvcr-imagepullsecret \
+  --docker-server=nvcr.io \
+  --docker-username='$oauthtoken' \
+  --docker-password="$NGC_API_KEY" \
   -n ${NAMESPACE}
 ```
 
