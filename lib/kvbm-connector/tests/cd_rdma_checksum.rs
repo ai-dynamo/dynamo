@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// Stage 4: rewrite against the symmetric `Session` API. Gated
+// out for Stage 3 — uses the old `PrefillSessionFactory` /
+// `SessionBlocks` / `RemotePrefillStatus::Attached` surface.
+#![cfg(any())]
+
 use std::sync::Arc;
 use std::time::Duration;
 
