@@ -105,7 +105,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		}
 		setAnnOnObj(&dst.ObjectMeta, annDGDPVCs, string(data))
 	}
-	preserveSpoke := !hubOrigin || dgdHasAlphaOnlyFields(&src.Spec)
+	preserveSpoke := !hubOrigin ||
+		dgdHasAlphaOnlyFields(&src.Spec) ||
+		dgdStatusHasAlphaOnlyFields(&src.Status)
 
 	// Components: v1alpha1 map -> v1beta1 list. Sort by name for a deterministic
 	// emission order; the unordered map cannot faithfully represent the
@@ -238,6 +240,17 @@ func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *Dy
 		if len(dstSpec.PVCs) == 0 {
 			dstSpec.PVCs = slices.Clone(preservedSpec.PVCs)
 		}
+		for name, preservedComp := range preservedSpec.Services {
+			if preservedComp != nil {
+				continue
+			}
+			if dstSpec.Services == nil {
+				dstSpec.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+			}
+			if _, ok := dstSpec.Services[name]; !ok {
+				dstSpec.Services[name] = nil
+			}
+		}
 		for name, dstComp := range dstSpec.Services {
 			if dstComp == nil || preservedSpec.Services == nil {
 				continue
@@ -251,7 +264,7 @@ func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *Dy
 			if !ok {
 				continue
 			}
-			if dstSvc.ComponentName == "" {
+			if shouldRestorePreservedComponentName(&dstSvc, &preservedSvc) {
 				dstSvc.ComponentName = preservedSvc.ComponentName
 			}
 			dstStatus.Services[name] = dstSvc
@@ -267,11 +280,42 @@ func dgdHasAlphaOnlyFields(src *DynamoGraphDeploymentSpec) bool {
 		return true
 	}
 	for _, svc := range src.Services {
+		if svc == nil {
+			return true
+		}
 		if hasSharedAlphaOnlyFields(svc) {
 			return true
 		}
 	}
 	return false
+}
+
+func dgdStatusHasAlphaOnlyFields(src *DynamoGraphDeploymentStatus) bool {
+	if src == nil {
+		return false
+	}
+	for _, svc := range src.Services {
+		if serviceStatusComponentNameNeedsPreservation(&svc) {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceStatusComponentNameNeedsPreservation(src *ServiceReplicaStatus) bool {
+	if src == nil {
+		return false
+	}
+	if len(src.ComponentNames) == 0 {
+		return src.ComponentName != ""
+	}
+	return src.ComponentNames[len(src.ComponentNames)-1] != src.ComponentName
+}
+
+func shouldRestorePreservedComponentName(dst, preserved *ServiceReplicaStatus) bool {
+	return serviceStatusComponentNameNeedsPreservation(preserved) &&
+		dst != nil &&
+		dst.ComponentName != preserved.ComponentName
 }
 
 func decodeDGDSpokePreserved(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus) {

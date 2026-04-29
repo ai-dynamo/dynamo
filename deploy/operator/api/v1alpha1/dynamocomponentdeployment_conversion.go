@@ -83,7 +83,9 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		dst.Spec = semantic
 	}
 
-	preserveSpoke := !hubOrigin || hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec)
+	preserveSpoke := !hubOrigin ||
+		hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec) ||
+		dcdStatusHasAlphaOnlyFields(&src.Status)
 	if hubOrigin {
 		scrubDCDAnnotations(&dst.ObjectMeta)
 	}
@@ -131,9 +133,15 @@ func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus
 	if preservedSpec != nil {
 		fillSharedAlphaOnlyFromPreserved(&dstSpec.DynamoComponentDeploymentSharedSpec, &preservedSpec.DynamoComponentDeploymentSharedSpec)
 	}
-	if preservedStatus != nil && dstStatus.Service != nil && preservedStatus.Service != nil && dstStatus.Service.ComponentName == "" {
+	if preservedStatus != nil && shouldRestorePreservedComponentName(dstStatus.Service, preservedStatus.Service) {
 		dstStatus.Service.ComponentName = preservedStatus.Service.ComponentName
 	}
+}
+
+func dcdStatusHasAlphaOnlyFields(src *DynamoComponentDeploymentStatus) bool {
+	return src != nil &&
+		src.Service != nil &&
+		serviceStatusComponentNameNeedsPreservation(src.Service)
 }
 
 type preservedDCDHubSnapshot struct {
@@ -200,7 +208,8 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 	// Fast path only: the fingerprint covers the hub spec/status snapshot, so
 	// matching means no hub fields changed. Metadata was copied above and rides along.
-	if preservedSpokeSpec != nil && dcdSpokeHubUnmodified(src) {
+	spokeHubUnmodified := dcdSpokeHubUnmodified(src)
+	if preservedSpokeSpec != nil && spokeHubUnmodified {
 		dst.Spec = *preservedSpokeSpec.DeepCopy()
 		if preservedSpokeStatus != nil {
 			dst.Status = *preservedSpokeStatus.DeepCopy()
@@ -212,7 +221,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		return nil
 	}
 
-	generatedPodTemplate := src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
+	generatedPodTemplate := spokeHubUnmodified && src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
 	carrier := newDCDCarrier(&dst.ObjectMeta)
 	if err := convertSharedSpecFrom(&src.Spec.DynamoComponentDeploymentSharedSpec,
 		&dst.Spec.DynamoComponentDeploymentSharedSpec, carrier); err != nil {

@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -359,6 +360,7 @@ func comparableRoundTripObject(obj runtime.Object) runtime.Object {
 		panic(fmt.Sprintf("%T does not implement metav1.Object", out))
 	}
 	meta.SetAnnotations(scrubReservedAnnotations(maps.Clone(meta.GetAnnotations())))
+	normalizeComparableRoundTripValue(reflect.ValueOf(out))
 	return out
 }
 
@@ -395,6 +397,12 @@ func sparseMergeValue(dst, patch reflect.Value) {
 			dst.Set(deepCopyValue(patch))
 		}
 	case reflect.Struct:
+		if isAtomicSparseMergeType(dst.Type()) {
+			if dst.CanSet() && !patch.IsZero() {
+				dst.Set(deepCopyValue(patch))
+			}
+			return
+		}
 		if hasUnexportedFields(dst.Type()) {
 			if dst.CanSet() && !patch.IsZero() {
 				dst.Set(patch)
@@ -515,6 +523,52 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 		out.Set(v)
 	}
 	return out
+}
+
+func isAtomicSparseMergeType(t reflect.Type) bool {
+	return t == reflect.TypeOf(intstr.IntOrString{})
+}
+
+func normalizeComparableRoundTripValue(v reflect.Value) {
+	if !v.IsValid() {
+		return
+	}
+	if v.Type() == reflect.TypeOf(intstr.IntOrString{}) {
+		if !v.CanSet() {
+			return
+		}
+		ios := v.Interface().(intstr.IntOrString)
+		if ios.Type == intstr.String {
+			ios.IntVal = 0
+		} else {
+			ios.StrVal = ""
+		}
+		v.Set(reflect.ValueOf(ios))
+		return
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			normalizeComparableRoundTripValue(v.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Field(i)
+			if field.CanSet() || field.Kind() == reflect.Pointer || field.Kind() == reflect.Interface {
+				normalizeComparableRoundTripValue(field)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			normalizeComparableRoundTripValue(v.Index(i))
+		}
+	case reflect.Map:
+		for _, key := range v.MapKeys() {
+			value := deepCopyValue(v.MapIndex(key))
+			normalizeComparableRoundTripValue(value)
+			v.SetMapIndex(key, value)
+		}
+	}
 }
 
 func hasUnexportedFields(t reflect.Type) bool {
