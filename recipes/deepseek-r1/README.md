@@ -8,7 +8,8 @@ Production-ready deployments for **DeepSeek-R1** (671B MoE) across multiple back
 |--------------|------|---------|------|-------------|
 | [**sglang/disagg-8gpu**](sglang/disagg-8gpu/) | 16x H200 | SGLang | Disaggregated WideEP | TP=8 per worker, single-node |
 | [**sglang/disagg-16gpu**](sglang/disagg-16gpu/) | 32x H200 | SGLang | Disaggregated WideEP | TP=16 per worker, multi-node |
-| [**trtllm/disagg/wide_ep/gb200**](trtllm/disagg/wide_ep/gb200/) | 36x GB200 | TensorRT-LLM | Disaggregated WideEP | 8 decode + 1 prefill nodes |
+| [**trtllm/agg/b200**](trtllm/agg/b200/) | 8x B200 | TensorRT-LLM | Aggregated | TP=8 EP=8 ADP, single node, NVFP4, no spec, tuned for 1K/1K |
+| [**trtllm/disagg/wide_ep/gb200**](trtllm/disagg/wide_ep/gb200/) | 40x GB200 | TensorRT-LLM | Disaggregated WideEP | 2 prefill (DEP4) + 1 decode (DEP32 WideEP) nodes, NVFP4, MTP/1, EPLB, tuned for 8K/1K |
 | [**vllm/disagg**](vllm/disagg/) | 32x H200 | vLLM | Disaggregated DEP16 | Multi-node, data-expert parallel |
 
 ## Prerequisites
@@ -79,7 +80,8 @@ DeepSeek-R1 is a very large model requiring significant GPU memory:
 |--------------|----------------|-------------|
 | 16x H200 (SGLang TP=8) | 1.1TB total | H200 SXM (141GB each) |
 | 32x H200 (SGLang TP=16, vLLM) | 2.2TB total | H200 SXM (141GB each) |
-| 36x GB200 (TRT-LLM) | ~2.5TB total | GB200 NVL72 |
+| 8x B200 (TRT-LLM agg) | ~720GB total | B200 SXM (180GB each) |
+| 40x GB200 (TRT-LLM disagg) | ~2.8TB total | GB200 NVL72 |
 
 ## Notes
 

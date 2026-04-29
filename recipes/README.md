@@ -42,8 +42,10 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
-| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/agg/b200/)** | TensorRT-LLM | Aggregated (B200) | 8x B200 | ✅ | ✅ | Single-node TP8 EP8 ADP, NVFP4, no spec, tuned for 1K/1K | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 40x GB200 | ✅ | ✅ | Multi-node: 2 prefill (DEP4) + 1 decode (DEP32 WideEP), MTP/1, EPLB, tuned for 8K/1K | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
+| **[Kimi-K2.5](kimi-k2.5/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 40x GB200 | ✅ | ✅ | Multi-node: 2 prefill (DEP4) + 1 decode (DEP32 WideEP), CUTEDSL MoE, tuned for 8K/1K | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
@@ -247,7 +249,7 @@ kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 
 ### DeepSeek-R1 on GB200 (Multi-node)
 
-See [deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml](deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml) for the complete multi-node WideEP configuration.
+See [deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml](deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml) for the complete multi-node WideEP configuration (40x GB200, 8K/1K, MTP/1, EPLB).
 
 ## Customization
 

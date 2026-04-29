@@ -9,9 +9,10 @@ There are two model weight variants, each with its own model download and deploy
 | Variant | Model | Status | Modality | Deploy Configs | Notes |
 |---------|-------|--------|----------|---------------|-------|
 | **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
-| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml) and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | All configs are compatible with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional |
+| **nvidia (agg)** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml) and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | All configs are compatible with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional. The standard `deploy.yaml` uses CUTEDSL MoE, TP8 EP8 ADP, 1x8 B200 node. |
+| **nvidia (disagg WideEP)** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`disagg/wide_ep/gb200/deploy.yaml`](trtllm/disagg/wide_ep/gb200/deploy.yaml) | 10x GB200 nodes (2 prefill DEP4 + 1 decode DEP32 WideEP), tuned for 8K/1K. |
 
-All configurations use TP8, EP8, aggregated mode with KV-aware routing.
+The aggregated configurations use TP8, EP8 with KV-aware routing. The disaggregated WideEP configuration uses TP4 EP4 prefill workers and a single TP32 EP32 WideEP decode worker.
 
 ## Prerequisites
 
@@ -25,6 +26,7 @@ All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 |--------------|------|
 | Aggregated | 8x B200 |
 | Aggregated Speculative Decoding | 8x4 GB200 (4 workers, each worker spanning 2 nodes) |
+| Disaggregated WideEP | 10x4 GB200 (2 prefill DEP4 nodes + 1 decode DEP32 worker spanning 8 nodes) |
 
 ---
 

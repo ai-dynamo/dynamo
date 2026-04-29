@@ -23,14 +23,26 @@ This directory contains two aggregated deployment configurations for the `nvidia
 
 ## Standard Aggregated Deployment
 
-Uses [`deploy.yaml`](deploy.yaml). This is the simpler configuration -- aggregated serving with KV-aware routing, no CPU-offloaded KV cache.
+Uses [`deploy.yaml`](deploy.yaml). This is the simpler configuration — aggregated serving with KV-aware routing, no CPU-offloaded KV cache.
+
+Reference configuration for `(kimi-k2.5, B200, ISL/OSL=1024/1024, AGG)`:
+
+| Field          | Value                                       |
+|----------------|---------------------------------------------|
+| Hardware       | 1 node, 8x B200                             |
+| Parallelism    | TP=8, EP=8, attention DP enabled            |
+| Spec decoding  | None (use the EAGLE recipe below for spec)  |
+| MoE backend    | CUTEDSL                                     |
+| KV cache dtype | FP8                                         |
+| Max batch size | 8192                                        |
+| Concurrency    | 4096                                        |
 
 ```bash
 kubectl apply -f deploy.yaml -n ${NAMESPACE}
 ```
 
 This creates:
-- A **ConfigMap** (`llm-config`) with TRT-LLM engine parameters (TP=8, EP=8, FP8 KV-cache).
+- A **ConfigMap** (`llm-config`) with TRT-LLM engine parameters (TP=8, EP=8, FP8 KV-cache, CUTEDSL MoE).
 - A **DynamoGraphDeployment** (`kimi-k25-agg`) with a Frontend (KV-router mode) and a TrtllmWorker serving `nvidia/Kimi-K2.5-NVFP4`.
 
 ---

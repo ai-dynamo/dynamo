@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: deepseek-r1-bench
+  name: dsr1-agg-b200-bench
 spec:
   backoffLimit: 1
   completions: 1
@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        app: deepseek-r1-bench
+        app: dsr1-agg-b200-bench
     spec:
       tolerations: []
       affinity:
@@ -22,7 +22,7 @@ spec:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: In
                     values:
-                      - trtllm-disagg-multinode
+                      - dsr1-agg-b200
               topologyKey: kubernetes.io/hostname
       containers:
       - command:
@@ -30,21 +30,18 @@ spec:
         - -c
         - |
           apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          pip install aiperf==0.6.0;
-          echo "aiperf installation completed";
+          pip install aiperf==0.6.0
+          echo "aiperf installation completed"
           sysctl -w net.ipv4.ip_local_port_range="1024 65000"
-          cat /proc/sys/net/ipv4/ip_local_port_range
           export COLUMNS=200
           EPOCH=$(date +%s)
-          ## utility functions -- can be moved to a bash script / configmap
           wait_for_model_ready() {
             echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every 5s)..."
             while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
                 echo "[$(date '+%H:%M:%S')] Model not ready yet, sleeping 5s before checking again http://$ENDPOINT/v1/models"
                 sleep 5
             done
-            echo "✅ Model '$TARGET_MODEL' is now available!"
-            echo "Model '$TARGET_MODEL' is now available!"
+            echo "Model '$TARGET_MODEL' is now available"
             curl -s "http://$ENDPOINT/v1/models" | jq .
           }
           run_perf() {
@@ -57,8 +54,8 @@ spec:
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"
             aiperf profile --artifact-dir $ARTIFACT_DIR \
                 --model $TARGET_MODEL \
-                --tokenizer /model-cache/deepseek-r1-fp4  \
-                --endpoint-type chat  \
+                --tokenizer /model-cache/deepseek-r1-fp4 \
+                --endpoint-type chat \
                 --endpoint /v1/chat/completions \
                 --streaming \
                 --url http://$ENDPOINT \
@@ -79,19 +76,16 @@ spec:
                 --random-seed 100 \
                 --workers-max 252 \
                 -H 'Authorization: Bearer NOT USED' \
-                -H 'Accept: text/event-stream'\
+                -H 'Accept: text/event-stream' \
                 --record-processors 32 \
                 --ui simple
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"
             ls -la $ARTIFACT_DIR
           }
-          #### Actual execution ####
           wait_for_model_ready
           mkdir -p "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
-          # Calculate total concurrency based on per-GPU concurrency and GPU count
           TOTAL_CONCURRENCY=$((CONCURRENCY_PER_GPU * DEPLOYMENT_GPU_COUNT))
           echo "Calculated total concurrency: $TOTAL_CONCURRENCY (${CONCURRENCY_PER_GPU} per GPU × ${DEPLOYMENT_GPU_COUNT} GPUs)"
-          # Write input_config.json
           cat > "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/input_config.json" <<EOF
           {
             "gpu_count": $DEPLOYMENT_GPU_COUNT,
@@ -104,25 +98,23 @@ spec:
             "model endpoint": "$TARGET_MODEL"
           }
           EOF
-
-          # Run perf with calculated total concurrency
           run_perf $TOTAL_CONCURRENCY $ISL $OSL
           echo "done with concurrency $TOTAL_CONCURRENCY"
         env:
         - name: TARGET_MODEL
           value: deepseek-ai/DeepSeek-R1
         - name: ENDPOINT
-          value: trtllm-disagg-multinode-frontend:8000
+          value: dsr1-agg-b200-frontend:8000
         - name: CONCURRENCY_PER_GPU
-          value: "205"
+          value: "512"
         - name: DEPLOYMENT_GPU_COUNT
-          value: "40"
+          value: "8"
         - name: ISL
-          value: "8192"
+          value: "1024"
         - name: OSL
           value: "1024"
         - name: DEPLOYMENT_MODE
-          value: disagg
+          value: agg
         - name: AIPERF_HTTP_CONNECTION_LIMIT
           value: "252"
         - name: JOB_NAME
