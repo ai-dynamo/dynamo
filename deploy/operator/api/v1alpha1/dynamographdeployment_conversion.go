@@ -127,8 +127,8 @@ func convertDGDSpecToHub(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGrap
 	}
 
 	// Convert fields represented by both versions from the live source.
-	dst.Annotations = maps.Clone(src.Annotations)
-	dst.Labels = maps.Clone(src.Labels)
+	dst.Annotations = src.Annotations
+	dst.Labels = src.Labels
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
@@ -460,8 +460,8 @@ func convertDGDSpecFromHub(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGr
 	}
 
 	// Convert fields represented by both versions from the live source.
-	dst.Annotations = maps.Clone(src.Annotations)
-	dst.Labels = maps.Clone(src.Labels)
+	dst.Annotations = src.Annotations
+	dst.Labels = src.Labels
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
