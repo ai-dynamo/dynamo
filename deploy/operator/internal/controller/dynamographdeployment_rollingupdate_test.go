@@ -2807,9 +2807,10 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedNew: map[string]int32{"worker": 0}, // can't surge yet, need to wait for old replicas to be terminated
 		},
 		{
-			name: "old actual is greater than spec - should surge 1",
+			name: "surge budget uses spec not actual",
 			// desired=10, maxSurge=0, maxUnavailable=2
 			// old: spec=8, available=8, actual=9 | new: spec=0, available=0, actual=0
+			// Surge budget = 10+0-oldSpec(8)-newSpec(0) = 2 (actual is irrelevant for surge)
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: consts.ComponentTypeWorker,
@@ -2826,8 +2827,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				}
 			},
 			newDCDs:     func(_ string) []runtime.Object { return nil },
-			expectedOld: map[string]int32{"worker": 8}, // total available is 8
-			expectedNew: map[string]int32{"worker": 1}, // only surge 1 as old actual is 9
+			expectedOld: map[string]int32{"worker": 8},
+			expectedNew: map[string]int32{"worker": 2}, // budget from Spec: 10+0-8-0=2
 		},
 		{
 			name: "old fleet degraded - should protect healthy old pods",
@@ -2873,10 +2874,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedNew: map[string]int32{"worker": 3},
 		},
 		{
-			name: "terminating pods throttle new scale-up",
+			name: "terminating pods - surge uses spec, scheduler enforces resources",
 			// desired=10, maxSurge=3, maxUnavailable=2
 			// old: spec=5, available=5, actual=8 (3 Terminating, still holding GPUs)
 			// new: spec=5, available=5, actual=5
+			// Surge budget uses Spec: 10+3-5-5=3, newTarget=min(10,5+3)=8
+			// Scheduler prevents new pods from scheduling until GPUs are freed.
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: consts.ComponentTypeWorker,
@@ -2894,7 +2897,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				}
 			},
 			expectedOld: map[string]int32{"worker": 3},
-			expectedNew: map[string]int32{"worker": 5},
+			expectedNew: map[string]int32{"worker": 8},
 		},
 		{
 			name: "multi-service independence - prefill done, decode mid-rollout",

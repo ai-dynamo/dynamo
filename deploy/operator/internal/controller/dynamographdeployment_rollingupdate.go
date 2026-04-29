@@ -407,21 +407,21 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 
 // dcdServiceState holds replica signals extracted from a DCD's Spec and Status.
 type dcdServiceState struct {
-	spec      int32 // Spec.Replicas (requested)
-	available int32 // Status.Service.AvailableReplicas (serving traffic)
-	actual    int32 // Status.Service.Replicas (actual pods, includes Terminating)
+	Spec      int32 `json:"spec"`      // DCD Spec.Replicas (declared intent)
+	Available int32 `json:"available"` // Status.Service.AvailableReplicas (serving traffic)
+	Actual    int32 `json:"actual"`    // Status.Service.Replicas (non-terminated pods, excludes Terminating)
 }
 
 // dcdServiceStateFromDCD extracts replica signals from a single DCD.
 func dcdServiceStateFromDCD(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) dcdServiceState {
 	s := dcdServiceState{}
 	if dcd.Spec.Replicas != nil {
-		s.spec = *dcd.Spec.Replicas
+		s.Spec = *dcd.Spec.Replicas
 	}
 	if dcd.Status.Service != nil {
-		s.actual = dcd.Status.Service.Replicas
+		s.Actual = dcd.Status.Service.Replicas
 		if dcd.Status.Service.AvailableReplicas != nil {
-			s.available = *dcd.Status.Service.AvailableReplicas
+			s.Available = *dcd.Status.Service.AvailableReplicas
 		}
 	}
 	return s
@@ -546,9 +546,9 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerServiceStates(
 	for i := range oldDCDs {
 		s := dcdServiceStateFromDCD(&oldDCDs[i])
 		agg := states[oldDCDs[i].Spec.ServiceName]
-		agg.spec += s.spec
-		agg.available += s.available
-		agg.actual += s.actual
+		agg.Spec += s.Spec
+		agg.Available += s.Available
+		agg.Actual += s.Actual
 		states[oldDCDs[i].Spec.ServiceName] = agg
 	}
 
@@ -840,17 +840,17 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 
 		oldState := oldStates[serviceName]
 
-		newUnavailable := max(int32(0), newState.spec-newState.available)
+		newUnavailable := max(int32(0), newState.Spec-newState.Available)
 		// maxScaledDown is the maximum number of old replicas that can be scaled down
-		maxScaledDown := max(int32(0), (oldState.spec+newState.spec)-minAvailable-newUnavailable)
-		oldUnhealthy := max(int32(0), oldState.spec-oldState.available)
+		maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
+		oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
 		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-		availableSurplus := max(int32(0), (oldState.available+newState.available)-minAvailable)
-		oldTarget := max(int32(0), oldState.spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+		availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+		oldTarget := max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
 
-		// scaleUpBudget is how many extra replicas we can scale up, based on actual pod counts
-		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.actual-newState.actual)
-		newTarget := min(desired, newState.spec+scaleUpBudget)
+		// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
+		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
+		newTarget := min(desired, newState.Spec+scaleUpBudget)
 
 		oldWorkerReplicas[serviceName] = oldTarget
 		newWorkerReplicas[serviceName] = newTarget
