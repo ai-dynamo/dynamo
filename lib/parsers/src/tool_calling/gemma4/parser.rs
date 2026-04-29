@@ -105,6 +105,8 @@ pub fn try_tool_call_parse_gemma4(
         let abs_start = cursor + start_rel;
         normal_parts.push(&message[cursor..abs_start]);
 
+        // First `<tool_call|>` wins; we don't scan inside `<|"|>` strings,
+        // so an embedded literal will truncate the call. Matches upstream.
         let Some(end_rel) = message[abs_start..].find(TOOL_CALL_END) else {
             // Truncated tool call — echo the raw bytes back as normal_text so
             // the caller sees the truncation rather than silently losing it.

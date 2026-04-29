@@ -1278,10 +1278,10 @@ impl OpenAIPreprocessor {
                 false
             }
             Some("gemma4") | Some("gemma-4") => {
-                if let Some(args) = chat_template_args
-                    && let Some(enable_thinking) = args.get("enable_thinking")
+                if let Some(enabled) =
+                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
                 {
-                    return enable_thinking == &serde_json::Value::Bool(false);
+                    return !enabled;
                 }
                 false
             }
