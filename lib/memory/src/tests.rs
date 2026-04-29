@@ -6,14 +6,21 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Test-only DeviceAllocator — CUDA backend
+// Test-only DeviceAllocator — dispatches to CUDA or SYCL based on feature
 // ---------------------------------------------------------------------------
 
-/// Create a test DeviceAllocator for CUDA.
+/// Create a test DeviceAllocator for the active backend.
 #[cfg(feature = "testing-cuda")]
 fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
     std::sync::Arc::new(
         TestCudaAllocator::new(0).expect("CUDA device 0 required for tests"),
+    )
+}
+
+#[cfg(all(feature = "testing-sycl", not(feature = "testing-cuda")))]
+fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
+    std::sync::Arc::new(
+        TestSyclAllocator::new(0).expect("XPU device 0 required for tests"),
     )
 }
 
@@ -63,6 +70,56 @@ impl DeviceAllocator for TestCudaAllocator {
 
     fn free_pinned(&self, ptr: u64) -> Result<()> {
         unsafe { cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void) }
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+}
+
+// ---- SYCL/XPU test allocator ----
+
+#[cfg(feature = "testing-sycl")]
+#[derive(Debug)]
+struct TestSyclAllocator {
+    queue: std::sync::Arc<oneapi_rs::safe::SyclQueue>,
+    device_id: u32,
+}
+
+#[cfg(feature = "testing-sycl")]
+impl TestSyclAllocator {
+    fn new(device_id: u32) -> anyhow::Result<Self> {
+        let queue = oneapi_rs::safe::SyclQueue::new_for_device_ordinal(device_id as usize)?;
+        Ok(Self { queue, device_id })
+    }
+}
+
+#[cfg(feature = "testing-sycl")]
+impl DeviceAllocator for TestSyclAllocator {
+    fn allocate_device(&self, size: usize) -> Result<u64> {
+        self.queue
+            .malloc_device(size)
+            .map(|ptr| ptr as u64)
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_device(&self, ptr: u64) -> Result<()> {
+        self.queue
+            .free_raw(ptr as *mut std::ffi::c_void)
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn allocate_pinned(&self, size: usize) -> Result<u64> {
+        self.queue
+            .malloc_host(size)
+            .map(|ptr| ptr as u64)
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_pinned(&self, ptr: u64) -> Result<()> {
+        self.queue
+            .free_raw(ptr as *mut std::ffi::c_void)
             .map_err(|e| StorageError::OperationFailed(e.to_string()))
     }
 
@@ -353,7 +410,7 @@ fn test_disk_storage_unregistered_no_nixl_descriptor() {
     assert!(storage.nixl_descriptor().is_none());
 }
 
-#[cfg(feature = "testing-cuda")]
+#[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
 mod device_tests {
     use super::*;
 
@@ -556,7 +613,7 @@ mod nixl_tests {
         assert_eq!(desc.size, buffer.size());
     }
 
-    #[cfg(feature = "testing-cuda")]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
     #[test]
     fn test_type_erasure_pinned_storage() {
         let storage = PinnedStorage::new(2048, test_device_ctx()).unwrap();
@@ -569,7 +626,7 @@ mod nixl_tests {
         assert_eq!(buffer.storage_kind(), StorageKind::Pinned);
     }
 
-    #[cfg(feature = "testing-cuda")]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
     #[test]
     fn test_type_erasure_device_storage() {
         let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
@@ -721,7 +778,7 @@ mod arena_nixl_tests {
         assert_eq!(desc2.size, PAGE_SIZE * 5);
     }
 
-    #[cfg(feature = "testing-cuda")]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
     mod device_arena_tests {
         use super::*;
 
