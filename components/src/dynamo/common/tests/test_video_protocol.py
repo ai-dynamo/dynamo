@@ -13,6 +13,12 @@ from dynamo.common.protocols.video_protocol import (
     VideoNvExt,
 )
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 # ---------------------------------------------------------------------------
 # NvCreateVideoRequest
 # ---------------------------------------------------------------------------
