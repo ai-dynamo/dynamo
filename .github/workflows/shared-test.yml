@@ -170,6 +170,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           framework: ${{ inputs.test_suite_name }}
+          enable_coverage: ${{ inputs.enable_coverage }}
       - name: Run GPU tests (sequential) from /workspace
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
@@ -182,5 +183,7 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.test_suite_name }}
+          enable_coverage: ${{ inputs.enable_coverage }}
+          parallel_mode: 'none'
           gpu_tests: 'true'
           seed_model_names: ${{ inputs.seed_model_names }}

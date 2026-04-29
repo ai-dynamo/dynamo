@@ -24,6 +24,11 @@ inputs:
   hf_token:
     description: 'Hugging Face access token passed through as HF_TOKEN for model downloads.'
     required: false
+  enable_coverage:
+    description: 'Enable coverage collection (true/false)'
+    required: false
+    type: string
+    default: 'false'
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
     required: false
@@ -137,6 +142,9 @@ runs:
         # that reads HOME (git, getpass.getuser) gets a writable path.
         export HOME="${GITHUB_WORKSPACE}"
 
+        export HF_XET_HIGH_PERFORMANCE=1
+        echo "HF_XET_HIGH_PERFORMANCE=${HF_XET_HIGH_PERFORMANCE}" >> $GITHUB_ENV
+
         # HF cache → NVMe when available (model weight reads are the largest I/O)
         export HF_HOME="${NVME_ROOT}/.cache/huggingface"
         mkdir -p "${HF_HOME}"
@@ -165,6 +173,15 @@ runs:
         fi
         echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
+        COVERAGE_FLAGS=""
+        if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+          echo "📊 Coverage collection enabled"
+          export COVERAGE_FILE="${TEST_RESULTS_DIR}/.coverage"
+          export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
+          echo "COVERAGE_FILE=${COVERAGE_FILE}" >> $GITHUB_ENV
+          COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
+        fi
+
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
@@ -186,7 +203,7 @@ runs:
           esac
 
           PREDOWNLOAD_CMD="pytest tests/test_predownload_models.py --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --log-cli-level=INFO -m \"${{ inputs.pytest_marks }}\""
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 --ignore=tests/test_predownload_models.py -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=${NVME_ROOT}/pytest_temp -o cache_dir=${NVME_ROOT}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} --ignore=tests/test_predownload_models.py -m \"${{ inputs.pytest_marks }}\""
         fi
 
         umask 0022
@@ -252,6 +269,15 @@ runs:
       with:
         name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Coverage Data
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always() && inputs.enable_coverage == 'true'
+      with:
+        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/
+        include-hidden-files: true
         retention-days: 7
 
     - name: Upload Allure Results
