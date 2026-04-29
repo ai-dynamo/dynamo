@@ -116,9 +116,8 @@ runs:
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
           BASE_CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
-          CACHE_TAG_PREFIX="${{ inputs.cache_tag_prefix }}"
-          if [ -n "$CACHE_TAG_PREFIX" ]; then
-            PRIMARY_CACHE_TAG="${CACHE_TAG_PREFIX}-${BASE_CACHE_TAG}"
+          if [ -n "${{ inputs.cache_tag_prefix }}" ]; then
+            PRIMARY_CACHE_TAG="${{ inputs.cache_tag_prefix }}-${BASE_CACHE_TAG}"
             # Read the prefixed (e.g. test-specific) cache first, then fall back to
             # the base image cache so layers shared with the normal build are reused.
             CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PRIMARY_CACHE_TAG} "
