@@ -55,6 +55,10 @@ inputs:
     description: 'Docker build target stage (passed as --target); empty = build to last stage'
     required: false
     default: ''
+  cache_tag_prefix:
+    description: 'Prefix for the registry cache tag (e.g. "test"). When set, the primary cache slot becomes "{prefix}-{framework}-cuda{N}-{arch}-cache" and the unprefixed base-image cache is also read so shared layers are reused.'
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -105,14 +109,28 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
-          if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            # Release branches also use release cache
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "
-          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
+          BASE_CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
+          CACHE_TAG_PREFIX="${{ inputs.cache_tag_prefix }}"
+          if [ -n "$CACHE_TAG_PREFIX" ]; then
+            PRIMARY_CACHE_TAG="${CACHE_TAG_PREFIX}-${BASE_CACHE_TAG}"
+            # Read the prefixed (e.g. test-specific) cache first, then fall back to
+            # the base image cache so layers shared with the normal build are reused.
+            CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PRIMARY_CACHE_TAG} "
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${BASE_CACHE_TAG} "
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${BASE_CACHE_TAG} "
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PRIMARY_CACHE_TAG},mode=max "
+            fi
+          else
+            CACHE_TAG="$BASE_CACHE_TAG"
+            CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
+            if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+              # Release branches also use release cache
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "
+            elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
+            fi
           fi
         else
           CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"

@@ -303,41 +303,24 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }}
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
-          PLATFORM_SAFE=$(echo "${{ inputs.platform }}" | sed 's|linux/||g; s/,/-/g')
-          CUDA_MAJOR="${{ matrix.cuda_version }}"
-          CUDA_MAJOR="${CUDA_MAJOR%%.*}"
-          PLAIN_TAG="${PLAIN_TAG}${CUDA_MAJOR:+-cuda${CUDA_MAJOR}}-${PLATFORM_SAFE}"
-          TEST_CACHE_TAG="test-${PLAIN_TAG}-cache"
-
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${TEST_CACHE_TAG}"
-          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${PLAIN_TAG}-cache"
-          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${PLAIN_TAG}-cache"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${TEST_CACHE_TAG},mode=max"
-          fi
-
-          PUSH_ARGS=""
-          if [ "${{ inputs.push_image }}" == "true" ]; then
-            PUSH_ARGS="--push"
-          elif [ "${{ inputs.no_load }}" == "false" ]; then
-            PUSH_ARGS="--load"
-          fi
-
-          NO_CACHE_ARG=""
-          if [ "${{ inputs.no_cache }}" == "true" ]; then
-            NO_CACHE_ARG="--no-cache"
-          fi
-
-          docker buildx build \
-            --progress=plain ${PUSH_ARGS} ${NO_CACHE_ARG} ${CACHE_ARGS} \
-            --platform ${{ inputs.platform }} \
-            -f container/rendered.Dockerfile --target ${{ inputs.target }}_test \
-            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
+        uses: ./.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
+          framework: ${{ inputs.framework }}
+          target: ${{ inputs.target }}
+          build_target: ${{ inputs.target }}_test
+          cache_tag_prefix: test
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          no_cache: ${{ inputs.no_cache }}
+          push_image: ${{ inputs.push_image }}
+          no_load: ${{ inputs.no_load }}
+          extra_build_args: |
+            DYNAMO_COMMIT_SHA=${{ github.sha }}
+            ${{ inputs.extra_build_args }}
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
