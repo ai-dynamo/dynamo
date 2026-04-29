@@ -88,6 +88,48 @@ sink logs the normalized trace event as a structured `agent_trace` log record.
 All sinks are best-effort telemetry for debugging and offline profiling. They
 are not durable audit logs.
 
+## ms-agent End-to-End Smoke
+
+Until Dynamo trace hooks land upstream in ms-agent, install a Dynamo-compatible
+ms-agent branch that injects `nvext.agent_context` and `x-request-id` on LLM
+requests:
+
+```bash
+uv pip install -e "git+ssh://git@github.com/ishandhanani/ms-agent.git@idhanani/dynamo-agent-trace#egg=ms-agent"
+```
+
+Start Dynamo with a local compressed trace sink:
+
+```bash
+export DYN_AGENT_TRACE_SINKS=jsonl_gz
+export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
+
+# Launch any Dynamo OpenAI-compatible backend on :8000.
+```
+
+Run ms-agent against Dynamo and set stable workflow metadata:
+
+```bash
+export DYNAMO_AGENT_WORKFLOW_TYPE_ID=ms_agent_smoke
+export DYNAMO_AGENT_WORKFLOW_ID=ms-agent-smoke-$(date +%Y%m%d-%H%M%S)
+
+ms-agent run \
+  --config /path/to/agent.yaml \
+  --query "What is 2 + 2? Answer with just the number." \
+  --trust_remote_code true
+```
+
+Read the resulting compressed trace records:
+
+```bash
+gzip -cd /tmp/dynamo-agent-trace.*.jsonl.gz | jq .
+```
+
+Expected records should contain `event.event_type = "request_end"`,
+`event.agent_context.workflow_id` matching `DYNAMO_AGENT_WORKFLOW_ID`, the
+caller `x_request_id`, token counts, TTFT, average ITL, cache metrics, queue
+depth, and worker IDs when available.
+
 ## Operator Notes
 
 - Agent request trace emission is currently wired for `/v1/chat/completions`.
