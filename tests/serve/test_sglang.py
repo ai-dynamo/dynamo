@@ -361,7 +361,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(13.3),  # same as multimodal_e_pd_qwen
             pytest.mark.timeout(360),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-7B-Instruct",
         script_args=[
