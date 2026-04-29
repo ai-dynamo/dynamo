@@ -1820,6 +1820,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
+| `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
 | `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
 
 
@@ -1875,6 +1876,28 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `uri` _string_ | URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix). |  |  |
 | `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy credentials secret name. |  |  |
+
+
+#### CheckpointSeccompConfiguration
+
+
+
+CheckpointSeccompConfiguration controls the localhost seccomp profile applied
+to checkpoint and restore pods. The profile blocks io_uring syscalls (which
+CRIU cannot dump). Default behavior (zero-value substruct, or absent
+substruct) applies DefaultSeccompProfile. Set Disabled=true on OpenShift
+(custom localhost profiles require privileged SCC) or when using a CRIU
+build with io_uring support. Set Profile to override the default path.
+
+
+
+_Appears in:_
+- [CheckpointConfiguration](#checkpointconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `disabled` _boolean_ | Disabled, when true, suppresses seccomp profile injection entirely.<br />Use this for clusters where custom localhost profiles are not allowed<br />(e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle<br />io_uring natively. |  |  |
+| `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  |  |
 
 
 #### CheckpointStorageConfiguration
