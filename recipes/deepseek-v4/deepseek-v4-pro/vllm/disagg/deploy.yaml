@@ -42,6 +42,8 @@ spec:
       volumeMounts:
         - name: model-cache
           mountPoint: /opt/models
+      sharedMemory:
+        size: 40Gi
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -102,6 +104,8 @@ spec:
               value: "1"
             - name: NCCL_P2P_LEVEL
               value: NVL
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
             # UCX transport settings required by NixlConnector for cross-pod KV transfer
             - name: UCX_MEMTYPE_CACHE
               value: "n"
@@ -200,6 +204,8 @@ spec:
               value: "1"
             - name: NCCL_P2P_LEVEL
               value: NVL
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
             # UCX transport settings required by NixlConnector for cross-pod KV transfer
             - name: UCX_MEMTYPE_CACHE
               value: "n"
