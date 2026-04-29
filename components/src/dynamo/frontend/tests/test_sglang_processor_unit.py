@@ -1416,6 +1416,32 @@ class TestFastPlainTextPath:
         assert choice["index"] == 0
         assert choice["logprobs"] is None
 
+    def test_fast_path_includes_logprobs(self, tokenizer):
+        """Fast path maps engine log_probs/top_logprobs into OpenAI chat logprobs."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+        token_ids = tokenizer.encode("Hello")
+        choice = post.process_output(
+            {
+                "token_ids": token_ids,
+                "log_probs": [-0.1] * len(token_ids),
+                "top_logprobs": [
+                    [{"token": tokenizer.decode([tid]), "logprob": -0.1}]
+                    for tid in token_ids
+                ],
+                "finish_reason": None,
+            }
+        )
+
+        assert choice is not None
+        assert choice["logprobs"] is not None
+        content = choice["logprobs"]["content"]
+        assert len(content) == len(token_ids)
+        assert content[0]["logprob"] == -0.1
+        assert "top_logprobs" in content[0]
+        assert "bytes" in content[0]
+
 
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: reasoning parsing

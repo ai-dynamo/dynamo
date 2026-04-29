@@ -511,6 +511,69 @@ def _try_parse_json_array(text: str) -> list | None:
     return None
 
 
+def _decode_single_token(tokenizer, token_id: int) -> str | None:
+    try:
+        return tokenizer.decode([token_id], skip_special_tokens=False)
+    except Exception as exc:
+        logger.exception(
+            "Failed to decode token for chat logprobs: token_id=%s tokenizer=%s",
+            token_id,
+            type(tokenizer).__name__,
+        )
+        raise RuntimeError(
+            f"Failed to decode token_id={token_id} with tokenizer={type(tokenizer).__name__}"
+        ) from exc
+
+
+def _build_chat_logprobs(
+    *,
+    tokenizer,
+    token_ids: list[int],
+    log_probs: list[float] | None,
+    top_logprobs: list[list[dict[str, Any]]] | None,
+) -> dict[str, Any] | None:
+    if not log_probs:
+        return None
+
+    content: list[dict[str, Any]] = []
+    for idx, logprob in enumerate(log_probs):
+        if idx >= len(token_ids):
+            break
+
+        token_id = token_ids[idx]
+        token_text = _decode_single_token(tokenizer, token_id)
+        token_top_logprobs = []
+        if top_logprobs and idx < len(top_logprobs):
+            for item in top_logprobs[idx]:
+                token_text_alt = item.get("token")
+                if token_text_alt is None and item.get("token_id") is not None:
+                    token_text_alt = _decode_single_token(tokenizer, item["token_id"])
+                token_top_logprobs.append(
+                    {
+                        "token": token_text_alt,
+                        "logprob": item.get("logprob"),
+                        "bytes": (
+                            list(token_text_alt.encode("utf-8"))
+                            if token_text_alt is not None
+                            else None
+                        ),
+                    }
+                )
+
+        content.append(
+            {
+                "token": token_text,
+                "logprob": float(logprob),
+                "bytes": (
+                    list(token_text.encode("utf-8")) if token_text is not None else None
+                ),
+                "top_logprobs": token_top_logprobs,
+            }
+        )
+
+    return {"content": content}
+
+
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -621,6 +684,12 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        logprobs = _build_chat_logprobs(
+            tokenizer=self.tokenizer,
+            token_ids=token_ids,
+            log_probs=engine_response.get("log_probs"),
+            top_logprobs=engine_response.get("top_logprobs"),
+        )
 
         delta_text = self._incremental_decode(token_ids) if token_ids else ""
 
@@ -630,14 +699,14 @@ class SglangStreamingPostProcessor:
                     "index": 0,
                     "delta": {"role": "assistant", "content": delta_text},
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": logprobs,
                 }
             elif finish_reason:
                 return {
                     "index": 0,
                     "delta": {},
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": logprobs,
                 }
             return None
 
@@ -854,7 +923,7 @@ class SglangStreamingPostProcessor:
                 "index": 0,
                 "delta": delta if has_content else {},
                 "finish_reason": effective_finish,
-                "logprobs": None,
+                "logprobs": logprobs,
             }
 
         return None

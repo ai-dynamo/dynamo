@@ -225,63 +225,74 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return kwargs
 
     @staticmethod
+    def _format_top_logprobs(raw_top_logprobs: Any) -> list[dict[str, Any]]:
+        formatted: list[dict[str, Any]] = []
+        if not raw_top_logprobs:
+            return formatted
+
+        for rank, item in enumerate(raw_top_logprobs):
+            if not item:
+                continue
+
+            logprob = float(item[0]) if item[0] is not None else None
+            token_id = item[1] if len(item) > 1 else None
+            token = item[2] if len(item) > 2 else None
+            formatted.append(
+                {
+                    "rank": rank,
+                    "token_id": token_id,
+                    "token": token,
+                    "logprob": logprob,
+                    "bytes": list(token.encode("utf-8")) if token else None,
+                }
+            )
+
+        return formatted
+
+    @classmethod
     def _extract_logprobs(
-        meta_info: Dict[str, Any], num_output_logprobs_so_far: int
-    ) -> tuple:
-        """Extract logprobs from SGLang meta_info for new tokens.
+        cls, meta_info: Dict[str, Any], start_offset: int, num_new_tokens: int
+    ) -> tuple[list[float] | None, list[list[dict[str, Any]]] | None, int]:
+        """Extract logprobs from SGLang meta_info for newly emitted tokens."""
+        if num_new_tokens <= 0 or start_offset < 0:
+            return None, None, start_offset
 
-        While Dynamo forces stream_output=True (args.py) so that output_ids
-        are disjoint per chunk, SGLang's output_token_logprobs and
-        output_top_logprobs in meta_info are always cumulative. We track an
-        offset to slice out only the new entries each chunk.
+        output_token_logprobs = meta_info.get("output_token_logprobs") or []
+        if not output_token_logprobs or start_offset >= len(output_token_logprobs):
+            return None, None, start_offset
 
-        Args:
-            meta_info: SGLang response meta_info dict.
-            num_output_logprobs_so_far: Number of logprob entries already
-                processed in previous chunks.
+        end_offset = start_offset + num_new_tokens
+        selected_logprobs = output_token_logprobs[start_offset:end_offset]
 
-        Returns:
-            Tuple of (log_probs, top_logprobs, new_total):
-            - log_probs: List of floats (selected token logprob per position)
-            - top_logprobs: List of lists of dicts with rank/token_id/token/logprob
-            - new_total: Updated count of logprob entries processed so far
-        """
-        output_token_logprobs = meta_info.get("output_token_logprobs")
-        if not output_token_logprobs:
-            return None, None, num_output_logprobs_so_far
+        output_top_logprobs = meta_info.get("output_top_logprobs") or []
+        selected_top_logprobs = (
+            output_top_logprobs[start_offset:end_offset] if output_top_logprobs else []
+        )
 
-        new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
-        if not new_logprobs:
-            return None, None, num_output_logprobs_so_far
+        log_probs: list[float] = []
+        top_logprobs: list[list[dict[str, Any]]] = []
 
-        # Extract selected-token logprobs: each entry is (logprob, token_id, text_or_None)
-        log_probs = [float(entry[0]) for entry in new_logprobs]
+        for idx, token_logprob in enumerate(selected_logprobs):
+            if not token_logprob:
+                continue
 
-        # Extract top logprobs if available
-        top_logprobs: list[list[dict[str, Any]]] | None = None
-        output_top = meta_info.get("output_top_logprobs")
-        if output_top:
-            new_top = output_top[num_output_logprobs_so_far:]
-            if new_top:
-                top_logprobs = []
-                for position_entries in new_top:
-                    if position_entries is None:
-                        top_logprobs.append([])
-                        continue
-                    position_list = []
-                    for rank_idx, entry in enumerate(position_entries):
-                        position_list.append(
-                            {
-                                "rank": rank_idx + 1,
-                                "token_id": entry[1],
-                                "token": entry[2],
-                                "logprob": float(entry[0]),
-                            }
-                        )
-                    top_logprobs.append(position_list)
+            log_probs.append(float(token_logprob[0]))
+            if selected_top_logprobs:
+                raw_top = (
+                    selected_top_logprobs[idx]
+                    if idx < len(selected_top_logprobs)
+                    else None
+                )
+                top_logprobs.append(cls._format_top_logprobs(raw_top))
 
-        new_total = len(output_token_logprobs)
-        return log_probs, top_logprobs, new_total
+        if not log_probs:
+            return None, None, start_offset
+
+        return (
+            log_probs,
+            top_logprobs if selected_top_logprobs else None,
+            start_offset + len(selected_logprobs),
+        )
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -408,8 +419,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        # Logprob offset: output_ids are disjoint (stream_output=True) but
-        # meta_info logprobs are cumulative — track how many we've emitted.
+        # output_ids are disjoint per chunk, while SGLang logprob arrays are
+        # cumulative. Track the emitted-token offset so each chunk slices the
+        # matching cumulative window.
         num_output_logprobs_so_far = 0
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
@@ -443,18 +455,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
-
-                # Extract logprobs for new tokens if available
                 (
                     log_probs,
                     top_logprobs,
                     num_output_logprobs_so_far,
-                ) = self._extract_logprobs(res["meta_info"], num_output_logprobs_so_far)
+                ) = self._extract_logprobs(
+                    res.get("meta_info", {}),
+                    num_output_logprobs_so_far,
+                    len(output_ids),
+                )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
                 if top_logprobs is not None:
                     out["top_logprobs"] = top_logprobs
-
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
                     # Base64-encode tensor bytes to match sglang's output format.
