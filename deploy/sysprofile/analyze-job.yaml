@@ -1,0 +1,59 @@
+# Batch Job: merges traces, runs analyzers, generates report.
+# Output is written to the PVC — the sysprofile-viewer Deployment
+# automatically serves the latest report at NodePort 30090.
+#
+# Usage:
+#   kubectl apply -f analyze-job.yaml -n dynamo-system
+#   kubectl logs -f -n dynamo-system job/sysprofile-analyze
+#
+# To re-run, delete the old job first:
+#   kubectl delete job sysprofile-analyze -n dynamo-system --ignore-not-found
+#   kubectl apply -f analyze-job.yaml -n dynamo-system
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sysprofile-analyze
+  namespace: dynamo-system
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: sysprofile-analyze
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: analyze
+          image: your-registry/dynamo-sysprofile:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              RUN_DIR=/data/sysprofile/bench-001
+              echo "=== Merging traces ==="
+              dynamo-sysprofile-merge "$RUN_DIR"
+              echo "=== Running analyzers ==="
+              python3 -m dynamo_profiler analyze "$RUN_DIR"
+              echo "=== Generating report ==="
+              python3 -m dynamo_profiler report "$RUN_DIR" --title "Benchmark bench-001"
+              echo ""
+              echo "=== Done ==="
+              ls -lh "$RUN_DIR"/*.json "$RUN_DIR"/*.html
+              echo ""
+              echo "Report is now live at: http://<any-node-ip>:30090/report.html"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: profiling-output
+              mountPath: /data/sysprofile
+      volumes:
+        - name: profiling-output
+          persistentVolumeClaim:
+            claimName: profiling-output-gemma4

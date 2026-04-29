@@ -1,0 +1,111 @@
+# Long-running viewer that serves the latest sysprofile report.
+# Mounts the profiling PVC and serves via nginx on a fixed NodePort.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sysprofile-viewer
+  namespace: dynamo-system
+  labels:
+    app: sysprofile-viewer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sysprofile-viewer
+  template:
+    metadata:
+      labels:
+        app: sysprofile-viewer
+    spec:
+      containers:
+        - name: viewer
+          image: python:3.12-slim
+          command:
+            - python3
+            - -c
+            - |
+              import os, http.server, socketserver
+
+              PROFILE_ROOT = "/data/sysprofile"
+
+              class Handler(http.server.SimpleHTTPRequestHandler):
+                  def __init__(self, *a, **kw):
+                      # Find the most recently modified run directory
+                      run_dir = self._latest_run_dir()
+                      super().__init__(*a, directory=run_dir, **kw)
+
+                  def end_headers(self):
+                      self.send_header("Access-Control-Allow-Origin", "*")
+                      super().end_headers()
+
+                  @staticmethod
+                  def _latest_run_dir():
+                      root = PROFILE_ROOT
+                      if not os.path.isdir(root):
+                          return root
+                      # Check if report.html is directly in root
+                      if os.path.exists(os.path.join(root, "report.html")):
+                          return root
+                      # Otherwise find the newest subdirectory with report.html
+                      candidates = []
+                      for d in os.listdir(root):
+                          full = os.path.join(root, d)
+                          report = os.path.join(full, "report.html")
+                          if os.path.isdir(full) and os.path.exists(report):
+                              candidates.append((os.path.getmtime(report), full))
+                      if candidates:
+                          candidates.sort(reverse=True)
+                          return candidates[0][1]
+                      return root
+
+              port = 8080
+              print(f"Serving sysprofile reports from {PROFILE_ROOT} on :{port}")
+              with socketserver.TCPServer(("", port), Handler) as httpd:
+                  httpd.serve_forever()
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: profiling-output
+              mountPath: /data/sysprofile
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: profiling-output
+          persistentVolumeClaim:
+            claimName: profiling-output-gemma4
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sysprofile-viewer
+  namespace: dynamo-system
+  labels:
+    app: sysprofile-viewer
+spec:
+  type: NodePort
+  selector:
+    app: sysprofile-viewer
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30090
+      name: http
