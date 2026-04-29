@@ -2211,6 +2211,24 @@ _Appears in:_
 | `nodeCount` _integer_ | nodeCount is the number of nodes to deploy for the multinode component.<br />Total GPUs used is `nodeCount * container GPU request`. | 2 | Minimum: 2 <br />Optional: \{\} <br /> |
 
 
+#### OptimizationType
+
+_Underlying type:_ _string_
+
+OptimizationType defines the optimization target for SLA-based profiling.
+
+_Validation:_
+- Enum: [latency throughput]
+
+_Appears in:_
+- [SLASpec](#slaspec)
+
+| Field | Description |
+| --- | --- |
+| `latency` |  |
+| `throughput` |  |
+
+
 #### OverridesSpec
 
 
@@ -2432,6 +2450,7 @@ _Appears in:_
 | `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
 | `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
 | `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
+| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType is the optimization target for SLA profiling.<br />Valid values: latency, throughput. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
 
 
 #### ScalingAdapter
