@@ -216,6 +216,15 @@ pub async fn spawn_system_status_server(
             );
     }
 
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
+    app = app.route(
+        "/v1/metadata/{model_slug}/{*filename}",
+        get({
+            let state = Arc::clone(&server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
+
     let app = app
         .fallback(|| async {
             tracing::info!("[fallback handler] called");
@@ -472,6 +481,39 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
                     count: None,
                 }),
             )
+        }
+    }
+}
+
+/// `GET /v1/metadata/{model_slug}/{filename}` — 404 on miss,
+/// 500 on read error, raw bytes on hit. Consumer blake3-verifies.
+async fn metadata_file_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path((model_slug, filename)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = match state.drt().metadata_artifacts().get(&model_slug, &filename) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                model_slug,
+                filename,
+                "metadata artifact not registered for self-host"
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+        Err(err) => {
+            tracing::error!(
+                model_slug,
+                filename,
+                path = %path.display(),
+                %err,
+                "failed to read self-hosted metadata file"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
         }
     }
 }
