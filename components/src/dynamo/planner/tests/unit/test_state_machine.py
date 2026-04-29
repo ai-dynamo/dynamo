@@ -10,11 +10,14 @@ try:
 except ImportError:
     pytest.skip("msgspec required for FPM tests", allow_module_level=True)
 
-from dynamo.common.forward_pass_metrics import (
-    ForwardPassMetrics,
-    QueuedRequestMetrics,
-    ScheduledRequestMetrics,
-)
+try:
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        QueuedRequestMetrics,
+        ScheduledRequestMetrics,
+    )
+except ImportError:
+    pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
@@ -85,6 +88,7 @@ def _make_fpm(
 def _make_config(**overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
+        optimization_target="sla",
         ttft=500.0,
         itl=50.0,
         min_endpoint=1,
@@ -98,7 +102,6 @@ def _make_config(**overrides) -> PlannerConfig:
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_predictor="constant",
-        no_operation=True,
         backend="vllm",
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,
@@ -173,7 +176,10 @@ class TestInitialTick:
         tick = core.initial_tick(start_s=0.0)
         assert tick.at_s == 5.0
         assert tick.need_worker_fpm
-        assert not tick.need_traffic_metrics
+        # Load-only mode rides a kv-hit-rate scrape on the load tick so the
+        # planner can discount prefill work by recent prefix reuse.
+        assert tick.need_traffic_metrics
+        assert tick.traffic_metrics_duration_s == 5.0
 
     def test_throughput_only(self):
         core = _make_core(enable_load_scaling=False)
@@ -260,6 +266,9 @@ class TestPrefillLoadScaling:
         assert effects.scale_to is not None
         assert effects.scale_to.num_prefill is not None
         assert effects.scale_to.num_prefill > 1
+        assert effects.diagnostics.estimated_ttft_ms is not None
+        assert effects.diagnostics.estimated_ttft_ms > 0
+        assert effects.diagnostics.load_decision_reason == "scale_up"
 
     def test_no_scaling_when_insufficient_data(self):
         core = _make_core(mode="prefill")
@@ -273,6 +282,7 @@ class TestPrefillLoadScaling:
         )
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "insufficient_data"
 
     def test_no_scaling_when_load_disabled(self):
         core = _make_core(mode="prefill", enable_load_scaling=False)
@@ -291,6 +301,7 @@ class TestPrefillLoadScaling:
         )
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "disabled"
 
 
 # ── Load-based scaling (decode) ───────────────────────────────────────
@@ -317,6 +328,9 @@ class TestDecodeLoadScaling:
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode is not None
         assert effects.scale_to.num_decode > 1
+        assert effects.diagnostics.estimated_itl_ms is not None
+        assert effects.diagnostics.estimated_itl_ms > 0
+        assert effects.diagnostics.load_decision_reason == "scale_up"
 
 
 # ── Disagg load scaling ───────────────────────────────────────────────
@@ -378,6 +392,9 @@ class TestThroughputScaling:
         assert effects.scale_to is not None
         assert effects.scale_to.num_prefill is not None
         assert effects.scale_to.num_prefill >= 1
+        assert effects.diagnostics.predicted_num_req is not None
+        assert effects.diagnostics.engine_rps_prefill is not None
+        assert effects.diagnostics.throughput_decision_reason == "scale"
 
     def test_throughput_sets_lower_bound_when_load_enabled(self):
         core = _make_core(enable_load_scaling=True, enable_throughput_scaling=True)
@@ -398,6 +415,7 @@ class TestThroughputScaling:
         assert effects.scale_to is None
         assert core._throughput_lower_bound_p >= 1
         assert core._throughput_lower_bound_d >= 1
+        assert effects.diagnostics.throughput_decision_reason == "set_lower_bound"
 
     def test_next_tick_scheduled_after_traffic(self):
         core = _make_core(mode="prefill")
@@ -409,6 +427,221 @@ class TestThroughputScaling:
         assert effects.next_tick is not None
         assert effects.next_tick.need_traffic_metrics
         assert effects.next_tick.at_s == 120.0
+
+
+class TestKvHitRatePlumbing:
+    def test_load_only_observe_traffic_updates_last_kv_hit_rate(self):
+        core = _make_core(enable_throughput_scaling=False)
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=5, num_req=100, isl=1000, osl=150, kv_hit_rate=0.3
+            )
+        )
+        assert core._last_kv_hit_rate == 0.3
+
+    def test_load_only_skips_throughput_predictor_feeds(self):
+        """In load-only mode the throughput predictors have no consumer; we
+        must not pollute their buffers with placeholder zeros."""
+        core = _make_core(enable_throughput_scaling=False)
+        core._observe_traffic(
+            TrafficObservation(duration_s=5, num_req=0, isl=0, osl=0, kv_hit_rate=0.4)
+        )
+        assert core._num_req_predictor.data_buffer == []
+        assert core._isl_predictor.data_buffer == []
+        assert core._osl_predictor.data_buffer == []
+        # kv predictor also untouched in load-only mode (no prediction needed)
+        assert core._kv_hit_rate_predictor.data_buffer == []
+
+    def test_load_only_none_kv_hit_rate_leaves_last_value_unchanged(self):
+        core = _make_core(enable_throughput_scaling=False)
+        core._observe_traffic(
+            TrafficObservation(duration_s=5, num_req=0, isl=0, osl=0, kv_hit_rate=0.42)
+        )
+        # Subsequent observation without a hit rate (scrape failure / frontend
+        # source) must not clobber the sticky value -- the planner keeps
+        # using the most recent valid reading.
+        core._observe_traffic(
+            TrafficObservation(duration_s=5, num_req=0, isl=0, osl=0, kv_hit_rate=None)
+        )
+        assert core._last_kv_hit_rate == 0.42
+
+    def test_load_only_nan_kv_hit_rate_is_ignored(self):
+        core = _make_core(enable_throughput_scaling=False)
+        core._observe_traffic(
+            TrafficObservation(duration_s=5, num_req=0, isl=0, osl=0, kv_hit_rate=0.5)
+        )
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=5,
+                num_req=0,
+                isl=0,
+                osl=0,
+                kv_hit_rate=float("nan"),
+            )
+        )
+        assert core._last_kv_hit_rate == 0.5
+
+    def test_mixed_mode_observe_traffic_feeds_predictor_only(self):
+        """In mixed mode the raw observation feeds the predictor; the sticky
+        ``_last_kv_hit_rate`` is *not* updated until ``_advance_throughput``
+        promotes the predicted value to it."""
+        core = _make_core()  # both load + throughput scaling enabled
+        assert core._last_kv_hit_rate is None
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.3
+            )
+        )
+        # Predictor saw the observation
+        assert len(core._kv_hit_rate_predictor.data_buffer) == 1
+        # Sticky value is *not* set from the raw observation in mixed mode
+        assert core._last_kv_hit_rate is None
+
+    def test_mixed_mode_advance_throughput_promotes_predicted_value(self):
+        """After a throughput tick fires, ``_last_kv_hit_rate`` should hold
+        the predicted value (used by all subsequent load ticks until the
+        next throughput tick)."""
+        core = _make_core(
+            mode="prefill", enable_load_scaling=True, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core)
+        # ConstantPredictor returns the last observed value once min_data_points=1.
+        # Feed a known value and run a throughput tick.
+        traffic = TrafficObservation(
+            duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.6
+        )
+        tick_input = TickInput(
+            now_s=60.0,
+            traffic=traffic,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        core.on_tick(_tick_for(tick_input), tick_input)
+        # Constant predictor returns 0.6, which is then promoted to sticky
+        assert core._last_kv_hit_rate == pytest.approx(0.6)
+
+    def test_load_only_scheduler_sets_need_traffic_on_load_tick(self):
+        core = _make_core(
+            mode="prefill",
+            enable_load_scaling=True,
+            enable_throughput_scaling=False,
+            load_adjustment_interval=7,
+        )
+        tick = core.initial_tick(start_s=0.0)
+        # Load-only mode: the load tick should request a kv-hit-rate scrape
+        # over the load interval.
+        assert tick.run_load_scaling
+        assert not tick.run_throughput_scaling
+        assert tick.need_traffic_metrics
+        assert tick.traffic_metrics_duration_s == 7.0
+
+    def test_throughput_enabled_scheduler_skips_traffic_on_pure_load_tick(self):
+        core = _make_core(
+            mode="prefill",
+            enable_load_scaling=True,
+            enable_throughput_scaling=True,
+            load_adjustment_interval=5,
+            throughput_adjustment_interval=60,
+        )
+        tick = core.initial_tick(start_s=0.0)
+        # First tick is a pure load tick (5s < 60s); traffic scrape is reserved
+        # for the throughput tick when both modes are enabled.
+        assert tick.run_load_scaling
+        assert not tick.run_throughput_scaling
+        assert not tick.need_traffic_metrics
+
+    def test_load_only_load_tick_consumes_traffic(self):
+        core = _make_core(
+            mode="prefill",
+            enable_load_scaling=True,
+            enable_throughput_scaling=False,
+        )
+        tick_input = TickInput(
+            now_s=5.0,
+            traffic=TrafficObservation(
+                duration_s=5, num_req=0, isl=0, osl=0, kv_hit_rate=0.7
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        core.on_tick(_tick_for(tick_input), tick_input)
+        assert core._last_kv_hit_rate == 0.7
+
+    def test_warm_load_predictors_skips_kv_hit_rate(self):
+        """kv_hit_rate has no good offline-trace proxy, so it must not
+        receive warmup data (only live observations feed it)."""
+        core = _make_core()
+        observations = [
+            TrafficObservation(
+                duration_s=60, num_req=50 * i, isl=1000, osl=150, kv_hit_rate=0.1 * i
+            )
+            for i in range(1, 4)
+        ]
+        core.warm_load_predictors(observations)
+        # Other predictors accumulated their respective series
+        assert len(core._num_req_predictor.data_buffer) == 3
+        assert len(core._isl_predictor.data_buffer) == 3
+        assert len(core._osl_predictor.data_buffer) == 3
+        # kv_hit_rate predictor stayed cold
+        assert core._kv_hit_rate_predictor.data_buffer == []
+
+    def test_throughput_diagnostics_include_predicted_kv_hit_rate(self):
+        core = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core)
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.4
+            )
+        )
+        tick = TickInput(
+            now_s=60.0,
+            traffic=TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.4
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        # ConstantPredictor predicts the last value it saw
+        assert effects.diagnostics.predicted_kv_hit_rate == 0.4
+
+    def test_high_predicted_hit_rate_reduces_prefill_replicas(self):
+        """With the same demand + regression, a high predicted hit rate
+        should yield fewer (or at worst equal) prefill replicas than no
+        reuse."""
+        core_base = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core_base)
+        core_hit = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core_hit)
+
+        # Feed several observations so the (constant) predictor locks in.
+        traffic_base = TrafficObservation(
+            duration_s=60, num_req=500, isl=4000, osl=150, kv_hit_rate=0.0
+        )
+        traffic_hit = TrafficObservation(
+            duration_s=60, num_req=500, isl=4000, osl=150, kv_hit_rate=0.8
+        )
+        core_base._observe_traffic(traffic_base)
+        core_hit._observe_traffic(traffic_hit)
+
+        tick_base = TickInput(
+            now_s=60.0,
+            traffic=traffic_base,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        tick_hit = TickInput(
+            now_s=60.0,
+            traffic=traffic_hit,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects_base = core_base.on_tick(_tick_for(tick_base), tick_base)
+        effects_hit = core_hit.on_tick(_tick_for(tick_hit), tick_hit)
+        assert effects_base.scale_to is not None
+        assert effects_hit.scale_to is not None
+        assert effects_hit.scale_to.num_prefill <= effects_base.scale_to.num_prefill
 
 
 # ── FPM reconciliation ───────────────────────────────────────────────
@@ -443,6 +676,7 @@ class TestFpmReconciliation:
         effects = core.on_tick(_tick_for(tick), tick)
         # FPM reports 2 workers but ready count is 3 -> skip scaling
         assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "worker_count_mismatch"
 
 
 # ── Agg planner core ──────────────────────────────────────────────────
@@ -509,3 +743,84 @@ class TestAggPlannerStateMachine:
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode is not None
         assert effects.scale_to.num_decode >= 1
+
+
+# ── Diagnostics ──────────────────────────────────────────────────────
+
+
+class TestDiagnostics:
+    """Verify TickDiagnostics is populated correctly across tick types."""
+
+    def test_diagnostics_always_present(self):
+        core = _make_core(mode="prefill")
+        tick = TickInput(
+            now_s=5.0,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.diagnostics is not None
+
+    def test_diagnostics_reset_each_tick(self):
+        core = _make_core(mode="prefill", ttft=5.0)
+        _train_prefill_regression(core)
+
+        fpm = _make_fpm(
+            queued_prefill_tokens=10000,
+            sum_prefill_tokens=500,
+            num_prefill_requests=1,
+            wall_time=0.5,
+        )
+        tick1 = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill={("w1", 0): fpm}),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects1 = core.on_tick(_tick_for(tick1), tick1)
+        assert effects1.diagnostics.estimated_ttft_ms is not None
+
+        tick2 = TickInput(
+            now_s=10.0,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        st2 = ScheduledTick(
+            at_s=10.0,
+            run_load_scaling=False,
+            run_throughput_scaling=False,
+            need_worker_states=True,
+        )
+        effects2 = core.on_tick(st2, tick2)
+        assert effects2.diagnostics.estimated_ttft_ms is None
+        assert effects2.diagnostics.load_decision_reason is None
+
+    def test_no_fpm_data_reason(self):
+        core = _make_core(mode="prefill")
+        _train_prefill_regression(core)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill=None),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.diagnostics.load_decision_reason == "no_fpm_data"
+
+    def test_throughput_predicted_load_populated(self):
+        core = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core)
+        core._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150)
+        )
+
+        tick = TickInput(
+            now_s=60.0,
+            traffic=TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        diag = effects.diagnostics
+        assert diag.predicted_num_req is not None
+        assert diag.predicted_isl is not None
+        assert diag.predicted_osl is not None
+        assert diag.engine_rps_prefill is not None
+        assert diag.engine_rps_prefill > 0

@@ -32,6 +32,7 @@ class PrefillPlanner(NativePlannerBase):
                 worker_info=self.prefill_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.PREFILL,
+                aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(prefill_fpms=fpms)
         except Exception as e:
@@ -44,7 +45,7 @@ class PrefillPlanner(NativePlannerBase):
             return
         desired = effects.scale_to.num_prefill
         if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_p.set(desired)
+            self.prometheus_metrics.predicted_num_prefill_replicas.set(desired)
         await self._apply_scaling_targets(
             [
                 TargetReplica(
@@ -70,6 +71,7 @@ class DecodePlanner(NativePlannerBase):
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
+                aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(decode_fpms=fpms)
         except Exception as e:
@@ -82,7 +84,7 @@ class DecodePlanner(NativePlannerBase):
             return
         desired = effects.scale_to.num_decode
         if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_d.set(desired)
+            self.prometheus_metrics.predicted_num_decode_replicas.set(desired)
         await self._apply_scaling_targets(
             [
                 TargetReplica(
@@ -108,6 +110,7 @@ class AggPlanner(NativePlannerBase):
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
+                aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(agg_fpms=fpms)
         except Exception as e:
@@ -120,7 +123,7 @@ class AggPlanner(NativePlannerBase):
             return
         desired = effects.scale_to.num_decode
         if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_d.set(desired)
+            self.prometheus_metrics.predicted_num_decode_replicas.set(desired)
         await self._apply_scaling_targets(
             [
                 TargetReplica(
@@ -155,6 +158,7 @@ class DisaggPlanner(NativePlannerBase):
                     worker_info=worker_info,
                     profile_results_dir=self.config.profile_results_dir,
                     component_type=component,
+                    aic_spec=self.config.aic_interpolation,
                 )
                 self.state_machine.load_benchmark_fpms(**{kwarg: fpms})
             except Exception as e:
@@ -168,9 +172,13 @@ class DisaggPlanner(NativePlannerBase):
         decision = effects.scale_to
 
         if decision.num_prefill is not None and self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_p.set(decision.num_prefill)
+            self.prometheus_metrics.predicted_num_prefill_replicas.set(
+                decision.num_prefill
+            )
         if decision.num_decode is not None and self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_d.set(decision.num_decode)
+            self.prometheus_metrics.predicted_num_decode_replicas.set(
+                decision.num_decode
+            )
 
         targets = []
         if decision.num_prefill is not None:

@@ -16,6 +16,7 @@ readme = "README.md"
 # repo
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+kvbm-logical = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }

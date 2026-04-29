@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/frontend:1.0.2
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
@@ -75,7 +75,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/frontend:1.0.2
         args:
           - -m
           - dynamo.frontend
@@ -112,7 +112,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/backends/vllm
       replicas: 2
       resources:
@@ -130,7 +130,7 @@ spec:
       sharedMemory:
         size: 80Gi
       frontendSidecar:
-        image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/frontend:1.0.2
         args:
           - -m
           - dynamo.frontend
@@ -163,11 +163,11 @@ spec:
             - name: HF_HOME
               value: /opt/models
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{\"enable_kv_cache_events\":true}'"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --block-size 128"
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:

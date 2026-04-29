@@ -36,6 +36,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Check whether an error chain indicates the request was cancelled.
+pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
+    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const NON_CANCELLATION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
@@ -244,7 +251,9 @@ struct MetricsHandlerState {
 
 pub struct Metrics {
     request_counter: IntCounterVec,
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
     inflight_gauge: IntGaugeVec,
+    active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
     http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
@@ -266,6 +275,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
 }
@@ -366,6 +376,8 @@ pub enum ErrorType {
     Overload,
     /// Request cancelled by client or timeout
     Cancelled,
+    /// Backend accepted the request but stopped responding (response inactivity timeout)
+    ResponseTimeout,
     /// Internal server error (500 and other unexpected errors)
     Internal,
     /// Feature not implemented (501)
@@ -494,6 +506,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let active_requests_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ACTIVE_REQUESTS),
+                "Number of requests currently being handled by the frontend, from HTTP handler entry to response completion",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let client_disconnect_gauge = prometheus::IntGauge::new(
             frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
             "Number of disconnected clients",
@@ -511,7 +532,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 256.0, 10);
+            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -682,6 +703,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
+                "Total number of times migration was disabled by max_seq_len limit",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let model_cancellation_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
@@ -703,6 +733,7 @@ impl Metrics {
         Metrics {
             request_counter,
             inflight_gauge,
+            active_requests_gauge,
             client_disconnect_gauge,
             http_queue_gauge,
             request_duration,
@@ -720,6 +751,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
         }
@@ -779,11 +811,13 @@ impl Metrics {
     }
 
     fn inc_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).inc()
+        self.inflight_gauge.with_label_values(&[model]).inc();
+        self.active_requests_gauge.with_label_values(&[model]).inc();
     }
 
     fn dec_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).dec()
+        self.inflight_gauge.with_label_values(&[model]).dec();
+        self.active_requests_gauge.with_label_values(&[model]).dec();
     }
 
     /// Increment the gauge for client disconnections
@@ -807,6 +841,7 @@ impl Metrics {
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.active_requests_gauge.clone()))?;
         registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
         registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
@@ -826,6 +861,9 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(
+            self.model_migration_max_seq_len_exceeded_total.clone(),
+        ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
 
@@ -908,6 +946,20 @@ impl Metrics {
     pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the counter for migrations disabled by max_seq_len being exceeded
+    pub fn inc_migration_max_seq_len_exceeded(&self, model: &str) {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Get the current count of migrations disabled by max_seq_len being exceeded
+    pub fn get_migration_max_seq_len_exceeded_count(&self, model: &str) -> u64 {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
             .get()
     }
 
@@ -1090,6 +1142,7 @@ impl Drop for InflightGuard {
             Status::Error => {
                 let detail = match self.error_type {
                     ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
@@ -1188,6 +1241,7 @@ impl ErrorType {
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
@@ -1412,11 +1466,17 @@ impl Drop for ResponseMetricCollector {
                 .observe(avg_detokenize_latency_ms);
         }
 
-        // Publish final OSL when the collector is dropped
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
+        // Publish final OSL when the collector is dropped, but only for
+        // requests that actually produced output tokens. Recording zero for
+        // failed/cancelled requests would corrupt histogram averages (sum/count)
+        // and percentiles. Failures are already tracked by requests_total with
+        // status and error_type labels.
+        if self.osl > 0 {
+            self.metrics
+                .output_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(self.osl as f64);
+        }
 
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
@@ -1549,17 +1609,29 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let msgs = annotated
-                .comment
-                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-            return Err(axum::Error::new(msgs.join(" -- ")));
+            let error_message = if let Some(ref dynamo_err) = annotated.error
+                && !dynamo_err.message().is_empty()
+            {
+                dynamo_err.message().to_string()
+            } else if let Some(ref comments) = annotated.comment {
+                let joined = comments.join(" -- ");
+                if joined.trim().is_empty() {
+                    "unspecified error".to_string()
+                } else {
+                    joined
+                }
+            } else {
+                "unspecified error".to_string()
+            };
+            return Err(axum::Error::new(error_message));
         }
         event = event.event(msg);
     }
 
     if let Some(comments) = annotated.comment {
         for comment in comments {
-            event = event.comment(comment);
+            // Axum's Event::comment() panics on \n / \r
+            event = event.comment(comment.replace(['\n', '\r'], " "));
         }
     }
 
@@ -2215,6 +2287,7 @@ mod tests {
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
     }
@@ -2310,6 +2383,79 @@ mod tests {
     }
 
     #[test]
+    fn test_active_requests_tracks_inflight_guard() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model-active";
+
+        // Both gauges start at 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+
+        {
+            let _guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                true,
+                "req-1",
+            );
+
+            // Both gauges increment together
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+
+            {
+                let _guard2 = metrics.clone().create_inflight_guard(
+                    model,
+                    Endpoint::ChatCompletions,
+                    true,
+                    "req-2",
+                );
+                assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 2);
+                assert_eq!(
+                    metrics
+                        .active_requests_gauge
+                        .with_label_values(&[model])
+                        .get(),
+                    2
+                );
+            }
+            // guard2 dropped
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+        }
+        // guard dropped — both back to 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+    }
+
+    #[test]
     fn test_all_error_types_recorded_correctly() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -2324,6 +2470,7 @@ mod tests {
             ErrorType::NotFound,
             ErrorType::Overload,
             ErrorType::Cancelled,
+            ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
         ];
@@ -2431,5 +2578,76 @@ mod tests {
             ])
             .get();
         assert_eq!(success_count, 1);
+    }
+
+    fn run_event_converter(
+        annotated: crate::types::Annotated<String>,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    fn error_annotated(
+        error: Option<dynamo_runtime::error::DynamoError>,
+        comment: Option<Vec<String>>,
+    ) -> crate::types::Annotated<String> {
+        crate::types::Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment,
+            error,
+        }
+    }
+
+    #[test]
+    fn test_error_event_uses_dynamo_error_message() {
+        use dynamo_runtime::error::DynamoError;
+        let result = run_event_converter(error_annotated(
+            Some(DynamoError::msg("image load failed: 403 Forbidden")),
+            None,
+        ));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+    }
+
+    #[test]
+    fn test_error_event_falls_back_to_comment() {
+        let result =
+            run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_error_event_unspecified_when_no_message() {
+        let result = run_event_converter(error_annotated(None, None));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+    }
+
+    #[test]
+    fn test_error_event_empty_comment_falls_through() {
+        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+    }
+
+    #[test]
+    fn test_comment_newlines_sanitized() {
+        let annotated = crate::types::Annotated::<String> {
+            data: Some("test".to_string()),
+            id: None,
+            event: Some("metrics".to_string()),
+            comment: Some(vec!["line1\nline2\r\nline3".into()]),
+            error: None,
+        };
+        assert!(run_event_converter(annotated).is_ok());
     }
 }
