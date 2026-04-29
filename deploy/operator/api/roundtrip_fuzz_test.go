@@ -66,7 +66,7 @@ import (
 )
 
 var (
-	fuzzIters = flag.Int("roundtrip-fuzz-iters", 200, "iterations per direction per type for the fuzz round-trip tests")
+	fuzzIters = flag.Int("roundtrip-fuzz-iters", 1000, "iterations per direction per type for the fuzz round-trip tests")
 	fuzzSeed  = flag.Int64("roundtrip-fuzz-seed", 1, "rand seed for the fuzz round-trip tests; bump to randomize CI runs")
 )
 

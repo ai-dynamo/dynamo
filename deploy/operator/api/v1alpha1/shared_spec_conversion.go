@@ -344,7 +344,7 @@ func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, 
 			c.set(suffixLabels, string(data))
 		}
 	}
-	if src.ExtraPodMetadata != nil && len(src.ExtraPodMetadata.Annotations) == 0 && len(src.ExtraPodMetadata.Labels) == 0 {
+	if extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) {
 		if data, err := json.Marshal(src.ExtraPodMetadata); err == nil {
 			c.set(suffixPodMetadataOrig, string(data))
 		}
@@ -388,6 +388,12 @@ func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, 
 	if dst.EnvFromSecret == nil && preserved.EnvFromSecret != nil {
 		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
 	}
+	if shouldRestorePreservedSharedMemory(dst.SharedMemory, preserved.SharedMemory) {
+		dst.SharedMemory = preserved.SharedMemory.DeepCopy()
+	}
+	if dst.ExtraPodMetadata == nil && preserved.ExtraPodMetadata != nil {
+		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
+	}
 	if dst.ExtraPodSpec == nil && preserved.ExtraPodSpec != nil {
 		cp := *preserved.ExtraPodSpec.DeepCopy()
 		dst.ExtraPodSpec = &cp
@@ -396,6 +402,9 @@ func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, 
 		dst.ExtraPodSpec.MainContainer.Name == "" &&
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
 		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
+	}
+	if dst.ScalingAdapter == nil && preserved.ScalingAdapter != nil && !preserved.ScalingAdapter.Enabled {
+		dst.ScalingAdapter = preserved.ScalingAdapter.DeepCopy()
 	}
 }
 
@@ -410,9 +419,39 @@ func hasSharedAlphaOnlyFields(src *DynamoComponentDeploymentSharedSpec) bool {
 		len(src.Annotations) > 0 ||
 		len(src.Labels) > 0 ||
 		src.EnvFromSecret != nil ||
+		sharedMemoryNeedsPreservation(src.SharedMemory) ||
+		extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) ||
+		(src.ScalingAdapter != nil && !src.ScalingAdapter.Enabled) ||
 		(src.ExtraPodSpec != nil &&
 			src.ExtraPodSpec.MainContainer != nil &&
 			src.ExtraPodSpec.MainContainer.Name != "")
+}
+
+func sharedMemoryNeedsPreservation(src *SharedMemorySpec) bool {
+	if src == nil {
+		return false
+	}
+	if src.Disabled {
+		return !src.Size.IsZero()
+	}
+	return src.Size.IsZero()
+}
+
+func shouldRestorePreservedSharedMemory(dst, preserved *SharedMemorySpec) bool {
+	if !sharedMemoryNeedsPreservation(preserved) {
+		return false
+	}
+	if dst == nil {
+		return true
+	}
+	if preserved.Disabled {
+		return dst.Disabled && dst.Size.Sign() == 0
+	}
+	return false
+}
+
+func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
+	return src != nil && len(src.Annotations) == 0 && len(src.Labels) == 0
 }
 
 // convertSharedSpecFrom performs the inverse: v1beta1 -> v1alpha1.
@@ -1120,18 +1159,24 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	//      without duplicating the container.
 	if src.FrontendSidecar != nil {
 		if v, ok := c.get(suffixFrontendSidecar); ok {
-			var fs FrontendSidecarSpec
-			if err := json.Unmarshal([]byte(v), &fs); err == nil {
-				dst.FrontendSidecar = &fs
-			}
 			c.del(suffixFrontendSidecar)
-			filtered := other[:0]
-			for _, ctr := range other {
-				if ctr.Name != *src.FrontendSidecar {
-					filtered = append(filtered, ctr)
+			var fs FrontendSidecarSpec
+			if err := json.Unmarshal([]byte(v), &fs); err == nil && *src.FrontendSidecar == defaultFrontendSidecarContainerName {
+				if ctr, ok := findContainerByName(other, *src.FrontendSidecar); ok {
+					dst.FrontendSidecar = frontendSidecarSpecFromContainer(ctr, &fs)
+					filtered := other[:0]
+					for _, candidate := range other {
+						if candidate.Name != *src.FrontendSidecar {
+							filtered = append(filtered, candidate)
+						}
+					}
+					other = filtered
+				} else {
+					c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
 				}
+			} else {
+				c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
 			}
-			other = filtered
 		} else {
 			c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
 		}
@@ -1274,6 +1319,38 @@ func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSp
 		})
 	}
 	podTpl.Spec.Containers = append(podTpl.Spec.Containers, ctr)
+}
+
+func findContainerByName(containers []corev1.Container, name string) (corev1.Container, bool) {
+	for _, ctr := range containers {
+		if ctr.Name == name {
+			return *ctr.DeepCopy(), true
+		}
+	}
+	return corev1.Container{}, false
+}
+
+func frontendSidecarSpecFromContainer(ctr corev1.Container, origin *FrontendSidecarSpec) *FrontendSidecarSpec {
+	out := &FrontendSidecarSpec{}
+	if origin != nil {
+		out = origin.DeepCopy()
+	}
+	out.Image = ctr.Image
+	out.Args = slices.Clone(ctr.Args)
+	out.Envs = slices.Clone(ctr.Env)
+	if secretName, ok := frontendSidecarEnvFromSecret(ctr.EnvFrom); ok {
+		out.EnvFromSecret = ptr.To(secretName)
+	} else {
+		out.EnvFromSecret = nil
+	}
+	return out
+}
+
+func frontendSidecarEnvFromSecret(envFrom []corev1.EnvFromSource) (string, bool) {
+	if len(envFrom) != 1 || envFrom[0].Prefix != "" || envFrom[0].ConfigMapRef != nil || envFrom[0].SecretRef == nil {
+		return "", false
+	}
+	return envFrom[0].SecretRef.Name, true
 }
 
 // podSpecIsZero reports whether a PodSpec has no fields set. Uses the
