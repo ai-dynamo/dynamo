@@ -359,11 +359,7 @@ impl PositionalSequenceHash {
     ///
     /// The mode is automatically selected based on the position value to use the minimal
     /// representation that can fit the position.
-    pub fn new(
-        sequence_hash: SequenceHash,
-        position: u64,
-        local_block_hash: BlockHash,
-    ) -> Self {
+    pub fn new(sequence_hash: SequenceHash, position: u64, local_block_hash: BlockHash) -> Self {
         let mode = Self::select_mode(position);
         let upper = Self::encode_upper(mode, position, local_block_hash);
         let value = ((upper as u128) << 64) | (sequence_hash as u128);
@@ -767,9 +763,7 @@ impl PositionalLineageHash {
     /// `parent` defaults to `0` when `None` (matching the root convention). The flags
     /// word is built with the canonical schema and a default `block_size` of 16, which
     /// matches what every existing call-site on `main` was implicitly assuming.
-    #[deprecated(
-        note = "use PositionalLineageHash::from_raw_parts, root_with_salt, or extend"
-    )]
+    #[deprecated(note = "use PositionalLineageHash::from_raw_parts, root_with_salt, or extend")]
     pub fn new(current: u64, parent: Option<u64>, position: u64) -> Self {
         const DEFAULT_BLOCK_SIZE: u32 = 16;
         Self {
