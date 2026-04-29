@@ -32,6 +32,7 @@ from tests.utils.payload_builder import (
 )
 from tests.utils.payloads import (
     ImageGenerationPayload,
+    JsonSchemaChatPayload,
     LoraTestChatPayload,
     VideoGenerationPayload,
 )
@@ -87,6 +88,41 @@ sglang_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
+            JsonSchemaChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Return a JSON object with guided_marker set to "
+                                "DYN-2912."
+                            ),
+                        }
+                    ],
+                    "max_tokens": 32,
+                    "temperature": 0.0,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "dyn_2912_marker",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "guided_marker": {
+                                        "type": "string",
+                                        "enum": ["DYN-2912"],
+                                    }
+                                },
+                                "required": ["guided_marker"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                },
+                expected_response=[],
+                expected_log=[],
+                expected_json={"guided_marker": "DYN-2912"},
+            ),
             completion_payload_default(),
             responses_payload_default(),
             responses_stream_payload_default(),

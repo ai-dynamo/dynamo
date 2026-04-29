@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import json
 import logging
 import math
 import re
@@ -247,6 +248,28 @@ class ChatPayloadWithLogprobs(ChatPayload):
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
                 )
+
+
+class JsonSchemaChatPayload(ChatPayload):
+    """Chat payload that validates response content as an exact JSON object."""
+
+    def __init__(self, *args, expected_json: Dict[str, Any], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.expected_json = expected_json
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate that guided decoding produced the expected JSON content."""
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"Expected JSON response content, got {content!r}"
+            ) from exc
+
+        assert (
+            parsed == self.expected_json
+        ), f"Expected JSON content {self.expected_json!r}, got {parsed!r}"
+        logger.info("✓ JSON schema response validation passed: %s", parsed)
 
 
 @dataclass
