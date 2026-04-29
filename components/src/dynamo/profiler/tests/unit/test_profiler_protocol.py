@@ -9,21 +9,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-try:
-    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-except ImportError:
-    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
-from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
-    PickedParallelConfig,
-)
-from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
-from dynamo.profiler.utils.defaults import SearchStrategy
-from dynamo.profiler.utils.dgdr_v1beta1_types import (
-    DynamoGraphDeploymentRequestSpec,
-    OverridesSpec,
-)
-from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
-
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
@@ -31,6 +16,21 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
+
+try:
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+    from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
+        PickedParallelConfig,
+    )
+    from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
+    from dynamo.profiler.utils.defaults import SearchStrategy
+    from dynamo.profiler.utils.dgdr_v1beta1_types import (
+        DynamoGraphDeploymentRequestSpec,
+        OverridesSpec,
+    )
+    from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
+except ImportError:
+    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
 
 
 @pytest.fixture(autouse=True)

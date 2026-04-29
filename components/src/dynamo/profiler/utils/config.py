@@ -295,7 +295,11 @@ def _get_per_instance_gpus(worker_service: Service) -> int | None:
             "--dp",
         ) and index + 1 < len(args):
             saw_parallelism_flag = True
-        elif arg.startswith("--data-parallel-size=") or arg.startswith("--dp="):
+        elif (
+            arg.startswith("--data-parallel-size=")
+            or arg.startswith("--data-parallel-size-local=")
+            or arg.startswith("--dp=")
+        ):
             saw_parallelism_flag = True
 
     if not saw_parallelism_flag:
