@@ -93,6 +93,15 @@ fn strip_thought_prefix(text: &str) -> &str {
 /// Decide what slice of `raw_reasoning` to emit given the current
 /// prefix-stripping state. Returns `(emit, new_prefix_resolved)`.
 ///
+/// **Precondition:** `raw_reasoning` MUST be a suffix of `accum` — i.e. the
+/// caller has already pushed the new delta into the accumulator before
+/// calling this. We rely on that to compute `prev_len = accum.len() -
+/// raw_reasoning.len()` (the length of the accumulator *before* this delta).
+/// Violating the precondition would underflow `prev_len` and corrupt the
+/// emit-slice. The streaming driver in `parse_reasoning_streaming_incremental`
+/// upholds this invariant by always pushing `raw` into `self.reasoning_accum`
+/// immediately before the call.
+///
 /// Case 1: accumulated reasoning starts with `thought\n` — strip it from the
 ///   delta (or suppress entirely if the delta lies inside the prefix).
 /// Case 2: accumulated reasoning is a strict prefix of `thought\n` — suppress
@@ -100,6 +109,12 @@ fn strip_thought_prefix(text: &str) -> &str {
 /// Case 3: accumulated reasoning diverged from the prefix — emit the
 ///   buffered reasoning verbatim (data preservation).
 fn resolve_prefix<'a>(accum: &'a str, raw_reasoning: &'a str) -> (&'a str, bool) {
+    debug_assert!(
+        accum.ends_with(raw_reasoning),
+        "resolve_prefix precondition violated: raw_reasoning ({:?}) must be a suffix of accum ({:?})",
+        raw_reasoning,
+        accum,
+    );
     if accum.starts_with(THOUGHT_PREFIX) {
         let prev_len = accum.len() - raw_reasoning.len();
         if prev_len >= THOUGHT_PREFIX.len() {

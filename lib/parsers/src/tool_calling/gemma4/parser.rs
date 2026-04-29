@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Reference implementations:
-// https://github.com/vllm-project/vllm/pull/.../vllm/tool_parsers/gemma4_tool_parser.py
+// Reference implementation (upstream merged 2026-04-02 via vLLM PR #38826,
+// follow-up #39027):
+// https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/gemma4_tool_parser.py
 //
 // Gemma 4 uses a custom non-JSON serialization format for tool calls:
 //
