@@ -17,8 +17,11 @@ if not torch.cuda.is_available():
         "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
         allow_module_level=True,
     )
+from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
@@ -37,6 +40,8 @@ class MockSamplingParams:
     top_p: float = 1.0
     top_k: int = 50
     repetition_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
     seed: int | None = None
     ignore_eos: bool = False
     guided_decoding: object | None = None
@@ -595,3 +600,95 @@ class TestDisaggRequestId:
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+
+class TestHealthCheckPriority:
+    """Verify generate_locally forwards the correct priority to generate_async.
+
+    Health check requests (built by TrtllmHealthCheckPayload) must reach
+    the TRT-LLM engine at priority=1.0.  Regular inference requests
+    (built by the Rust frontend as PreprocessedRequest, which has no
+    priority field) must fall back to DEFAULT_REQUEST_PRIORITY (0.5).
+    """
+
+    def _make_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        handler = _ConcreteHandler(config)
+        handler.publisher = None
+        handler.multimodal_processor = None
+        handler.additional_metrics = None
+        handler.max_seq_len = None
+        handler.default_sampling_params = MockSamplingParams()
+        return handler
+
+    def _make_mock_generation_result(self):
+        """Mock GenerationResult that yields a single finished token."""
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = "stop"
+        output.stop_reason = None
+        output.request_perf_metrics = None
+
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = True
+
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def mock_aiter(self_mock):
+            yield res
+
+        generation_result.__aiter__ = mock_aiter
+        return generation_result
+
+    def _make_context(self):
+        """Mock Context whose cancellation never fires."""
+        context = MagicMock()
+        never_resolve = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = never_resolve
+        context.id.return_value = "test-priority"
+        return context
+
+    @pytest.mark.asyncio
+    async def test_health_check_gets_priority_1(self):
+        """TrtllmHealthCheckPayload → generate_locally → generate_async priority=1.0."""
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+
+        context = self._make_context()
+        chunks = [c async for c in handler.generate_locally(request, context)]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["priority"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_regular_request_gets_default_priority(self):
+        """Rust PreprocessedRequest shape (no priority key) → default 0.5."""
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        # Mirrors the Rust PreprocessedRequest struct — no priority field.
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+        }
+
+        context = self._make_context()
+        chunks = [c async for c in handler.generate_locally(request, context)]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
