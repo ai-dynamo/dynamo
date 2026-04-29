@@ -90,9 +90,9 @@ are not durable audit logs.
 
 ## ms-agent End-to-End Smoke
 
-Until Dynamo trace hooks land upstream in ms-agent, install a Dynamo-compatible
-ms-agent branch that injects `nvext.agent_context` and `x-request-id` on LLM
-requests:
+To see this in action, use a fork of the ModelScope ms-agent DeepResearch
+agent framework with Dynamo trace hooks. Until those hooks land upstream, this
+branch injects `nvext.agent_context` and `x-request-id` on LLM requests:
 
 ```bash
 uv pip install -e "git+ssh://git@github.com/ishandhanani/ms-agent.git@idhanani/dynamo-agent-trace#egg=ms-agent"
@@ -107,10 +107,10 @@ export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
 # Launch any Dynamo OpenAI-compatible backend on :8000.
 ```
 
-Run ms-agent against Dynamo and set stable workflow metadata:
+Run ms-agent against Dynamo. Set a stable workflow ID if you want to grep or
+query one smoke run:
 
 ```bash
-export DYNAMO_AGENT_WORKFLOW_TYPE_ID=ms_agent_smoke
 export DYNAMO_AGENT_WORKFLOW_ID=ms-agent-smoke-$(date +%Y%m%d-%H%M%S)
 
 ms-agent run \
