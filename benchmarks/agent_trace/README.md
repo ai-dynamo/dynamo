@@ -26,3 +26,6 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 Use `--no-stages` for a compact request-only view. Use
 `--separate-stage-tracks` to place stage slices on adjacent stage tracks when
 debugging Perfetto nesting or label rendering.
+
+Stage slice boundaries are normalized to avoid same-thread overlap caused by
+independent metric rounding. Raw timing fields remain available in event args.

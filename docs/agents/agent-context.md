@@ -148,7 +148,9 @@ IDs. By default, the converter stacks prefill wait, prefill, and decode slices
 under each request when those timings are present. Add `--include-markers` to
 emit first-token instant markers, `--no-stages` for a compact request-only
 view, or `--separate-stage-tracks` to place stages on adjacent tracks when
-debugging Perfetto nesting or label rendering.
+debugging Perfetto nesting or label rendering. Stage slice boundaries are
+normalized to avoid same-thread overlap caused by independent metric rounding;
+raw timing fields remain available in event args.
 
 ## Operator Notes
 
