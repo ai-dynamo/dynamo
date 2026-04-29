@@ -314,5 +314,5 @@ GOCACHE=/tmp/dynamo-go-cache go test ./api/v1alpha1 -count=1
 GOCACHE=/tmp/dynamo-go-cache go test ./api/... -count=1
 GOCACHE=/tmp/dynamo-go-cache go test ./api -run TestFuzzRoundTrip -roundtrip-fuzz-iters=3000 -count=1 -v
 git diff --check
-docker buildx build --platform linux/arm64 --target linter --progress=plain --build-context snapshot=../snapshot . 
+docker buildx build --platform linux/arm64 --target linter --progress=plain --build-context snapshot=../snapshot .
 ```
