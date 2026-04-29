@@ -25,7 +25,7 @@ impl Default for SysprofileConfig {
         Self {
             enabled: false,
             dir: PathBuf::from("/data/sysprofile"),
-            sampling: 0.05,
+            sampling: 0.10,
             backends: vec!["vllm".into()],
             run_id: String::new(),
             flush_timeout_s: 900,
@@ -46,7 +46,7 @@ impl SysprofileConfig {
         let sampling = std::env::var("DYN_SYSPROFILE_SAMPLING")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.05)
+            .unwrap_or(0.10)
             .clamp(0.0, 1.0);
 
         let backends = std::env::var("DYN_SYSPROFILE_BACKENDS")
@@ -129,7 +129,7 @@ mod tests {
     fn default_config() {
         let cfg = SysprofileConfig::default();
         assert!(!cfg.enabled);
-        assert!((cfg.sampling - 0.05).abs() < f64::EPSILON);
+        assert!((cfg.sampling - 0.10).abs() < f64::EPSILON);
     }
 
     #[test]

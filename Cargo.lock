@@ -2651,6 +2651,7 @@ dependencies = [
  "chrono",
  "cudarc",
  "flate2",
+ "libc",
  "petgraph 0.7.1",
  "rusqlite",
  "serde",
@@ -2658,6 +2659,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "urlencoding",
  "uuid",
 ]
 

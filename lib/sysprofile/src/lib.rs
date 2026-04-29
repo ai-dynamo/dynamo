@@ -25,10 +25,18 @@
 //! let _r = sysprofile::range_with("dynamo.prefill.compute", traceparent);
 //! ```
 
+pub mod adapter;
 pub mod config;
+pub mod lockfile;
+pub mod merger;
+pub mod nats_control;
 pub mod perfetto;
 pub mod range;
+pub mod reader;
+pub mod report;
 pub mod writer;
 
+pub use adapter::EngineProfilerAdapter;
 pub use config::SysprofileConfig;
+pub use lockfile::CaptureLock;
 pub use range::{RangeGuard, range, range_with};

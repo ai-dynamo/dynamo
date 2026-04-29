@@ -34,7 +34,9 @@ async-nats = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 flate2 = "1"
+libc = { workspace = true }
 petgraph = "0.7"
+urlencoding = "2"
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 # NVTX support (requires CUDA toolkit at runtime)

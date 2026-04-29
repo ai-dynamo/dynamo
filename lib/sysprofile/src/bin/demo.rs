@@ -32,6 +32,10 @@ fn make_traceparent(request_idx: u32) -> String {
     )
 }
 
+const RUN_ID: &str = "demo-bench-001";
+const MS: u64 = 1_000_000; // 1ms in nanoseconds
+const US: u64 = 1_000; // 1us in nanoseconds
+
 struct Component {
     writer: TraceWriter,
 }
@@ -49,8 +53,11 @@ impl Component {
     }
 
     fn begin(&self, ts: u64, name_iid: u64, traceparent: &str) {
-        let ann = perfetto::build_debug_annotation_str("traceparent", traceparent);
-        self.writer.write_slice_begin(ts, name_iid, &[ann]);
+        let anns = vec![
+            perfetto::build_debug_annotation_str("traceparent", traceparent),
+            perfetto::build_debug_annotation_str("dynamo.run_id", RUN_ID),
+        ];
+        self.writer.write_slice_begin(ts, name_iid, &anns);
     }
 
     fn end(&self, ts: u64) {
@@ -58,8 +65,11 @@ impl Component {
     }
 
     fn instant(&self, ts: u64, name_iid: u64, traceparent: &str) {
-        let ann = perfetto::build_debug_annotation_str("traceparent", traceparent);
-        self.writer.write_instant(ts, name_iid, &[ann]);
+        let anns = vec![
+            perfetto::build_debug_annotation_str("traceparent", traceparent),
+            perfetto::build_debug_annotation_str("dynamo.run_id", RUN_ID),
+        ];
+        self.writer.write_instant(ts, name_iid, &anns);
     }
 }
 
@@ -73,136 +83,164 @@ fn main() {
 
     eprintln!("dynamo-sysprofile-demo: generating synthetic traces...");
     eprintln!("  output: {}", output_dir.display());
+    eprintln!("  run_id: {RUN_ID}");
 
-    let host = "node-0";
     let base_ts = now_ns();
 
-    let frontend = Component::new(&output_dir, "frontend", host, 1000, 1);
-    let router = Component::new(&output_dir, "router", host, 1001, 2);
-    let prefill = Component::new(&output_dir, "engine-prefill-0", host, 2000, 3);
-    let decode = Component::new(&output_dir, "engine-decode-0", host, 2001, 4);
+    // Components across two hosts
+    let frontend = Component::new(&output_dir, "frontend", "node-0", 1000, 1);
+    let router = Component::new(&output_dir, "router", "node-0", 1001, 2);
+    let prefill0 = Component::new(&output_dir, "engine-prefill-0", "node-0", 2000, 3);
+    let prefill1 = Component::new(&output_dir, "engine-prefill-1", "node-1", 2100, 5);
+    let decode = Component::new(&output_dir, "engine-decode-0", "node-0", 2001, 4);
 
+    // Intern stage names
     let iid_recv = frontend.intern("dynamo.frontend.recv");
     let iid_preprocess = frontend.intern("dynamo.frontend.preprocess");
     let iid_route = router.intern("dynamo.router.schedule");
     let iid_kv_lookup = router.intern("dynamo.router.kv_lookup");
+    let iid_metrics = router.intern("dynamo.router.metrics");
     let iid_transport_send = router.intern("dynamo.transport.send");
-    let iid_transport_recv = prefill.intern("dynamo.transport.recv");
-    let iid_prefill_compute = prefill.intern("dynamo.prefill.compute");
-    let iid_kv_transfer = prefill.intern("dynamo.prefill.kv_transfer");
+    let iid_transport_recv0 = prefill0.intern("dynamo.transport.recv");
+    let iid_transport_recv1 = prefill1.intern("dynamo.transport.recv");
+    let iid_prefill_compute0 = prefill0.intern("dynamo.prefill.compute");
+    let iid_prefill_compute1 = prefill1.intern("dynamo.prefill.compute");
+    let iid_kv_transfer0 = prefill0.intern("dynamo.prefill.kv_transfer");
+    let iid_kv_transfer1 = prefill1.intern("dynamo.prefill.kv_transfer");
     let iid_decode_recv = decode.intern("dynamo.decode.recv");
     let iid_decode_compute = decode.intern("dynamo.decode.compute");
     let iid_decode_first = decode.intern("dynamo.decode.first_token");
     let iid_decode_send = decode.intern("dynamo.decode.detok_send");
 
-    let num_requests = 20u32;
-    let ms = 1_000_000u64; // 1ms in ns
+    let num_requests = 40u32;
 
-    eprintln!("  simulating {} requests across 4 components", num_requests);
+    eprintln!("  simulating {num_requests} requests across 5 components on 2 hosts");
 
     for req in 0..num_requests {
         let tp = make_traceparent(req);
-        let req_base = base_ts + (req as u64) * 50 * ms;
+        let req_base = base_ts + (req as u64) * 30 * MS;
 
-        // -- Frontend: receive HTTP request --
+        // Route even requests to prefill-0, odd to prefill-1
+        let use_prefill1 = req % 2 == 1;
+        let prefill = if use_prefill1 { &prefill1 } else { &prefill0 };
+        let iid_transport_recv = if use_prefill1 { iid_transport_recv1 } else { iid_transport_recv0 };
+        let iid_prefill_compute = if use_prefill1 { iid_prefill_compute1 } else { iid_prefill_compute0 };
+        let iid_kv_transfer = if use_prefill1 { iid_kv_transfer1 } else { iid_kv_transfer0 };
+
+        // Vary timing to produce diverse critical paths
+        let prompt_factor = 1 + (req % 8) as u64; // 1-8x multiplier
+        let jitter = (req as u64 * 137) % 500; // pseudo-random jitter in us
+
+        // == Frontend: receive HTTP request ==
         let t0 = req_base;
         frontend.begin(t0, iid_recv, &tp);
         {
-            // -- Frontend: preprocess (tokenize) --
-            let t1 = t0 + 200 * (ms / 1000); // 0.2ms
+            let t1 = t0 + 100 * US;
             frontend.begin(t1, iid_preprocess, &tp);
-            let t2 = t1 + 800 * (ms / 1000) + (req as u64 * 100 * (ms / 1000)); // 0.8-2.8ms
-            frontend.end(t2);
+            // Tokenization: 0.3ms - 2.5ms depending on prompt
+            let preprocess_dur = 300 * US + prompt_factor * 280 * US;
+            frontend.end(t1 + preprocess_dur);
         }
-        let t_recv_end = t0 + 2 * ms + (req as u64 * 150 * (ms / 1000));
-        frontend.end(t_recv_end);
+        // Frontend total: 1ms - 4ms
+        let fe_dur = MS + prompt_factor * 400 * US + jitter * US;
+        let t_fe_end = t0 + fe_dur;
+        frontend.end(t_fe_end);
 
-        // -- Router: schedule --
-        let t_route_start = t_recv_end + 100 * (ms / 1000);
+        // == Router: schedule ==
+        let t_route_start = t_fe_end + 80 * US;
         router.begin(t_route_start, iid_route, &tp);
         {
-            // KV lookup
-            let t_kv = t_route_start + 50 * (ms / 1000);
+            // KV cache lookup: 0.1ms - 0.8ms
+            let t_kv = t_route_start + 30 * US;
             router.begin(t_kv, iid_kv_lookup, &tp);
-            let t_kv_end = t_kv + 300 * (ms / 1000) + (req as u64 * 50 * (ms / 1000));
-            router.end(t_kv_end);
+            let kv_dur = 100 * US + (req as u64 % 7) * 100 * US;
+            router.end(t_kv + kv_dur);
+
+            // Metrics recording
+            let t_met = t_kv + kv_dur + 20 * US;
+            router.begin(t_met, iid_metrics, &tp);
+            router.end(t_met + 50 * US);
         }
-        let t_route_end = t_route_start + ms + (req as u64 * 80 * (ms / 1000));
+        // Router total: 0.5ms - 1.5ms
+        let route_dur = 500 * US + (req as u64 % 10) * 100 * US;
+        let t_route_end = t_route_start + route_dur;
         router.end(t_route_end);
 
-        // -- Router: transport send --
-        let t_send = t_route_end + 50 * (ms / 1000);
+        // == Transport: send (router side) ==
+        let t_send = t_route_end + 30 * US;
         router.begin(t_send, iid_transport_send, &tp);
-        let t_send_end = t_send + 500 * (ms / 1000);
+        let send_dur = 200 * US + jitter * US / 3;
+        let t_send_end = t_send + send_dur;
         router.end(t_send_end);
 
-        // -- Prefill engine: transport recv --
-        let t_prefill_recv = t_send_end + 200 * (ms / 1000); // network latency
+        // == Transport: recv (engine side) ==
+        // Cross-host latency: 50-300us
+        let network_latency = 50 * US + if use_prefill1 { 200 * US } else { 30 * US };
+        let t_prefill_recv = t_send_end + network_latency;
         prefill.begin(t_prefill_recv, iid_transport_recv, &tp);
-        let t_prefill_recv_end = t_prefill_recv + 100 * (ms / 1000);
-        prefill.end(t_prefill_recv_end);
+        prefill.end(t_prefill_recv + 80 * US);
 
-        // -- Prefill engine: compute --
-        let t_compute = t_prefill_recv_end + 50 * (ms / 1000);
+        // == Prefill: compute ==
+        let t_compute = t_prefill_recv + 120 * US;
         prefill.begin(t_compute, iid_prefill_compute, &tp);
-        // Prefill time varies with prompt length (5-25ms)
-        let prefill_duration = (5 + req % 20) as u64 * ms;
-        let t_compute_end = t_compute + prefill_duration;
+        // Prefill time: 3ms - 20ms depending on prompt length
+        let prefill_dur = 3 * MS + prompt_factor * 2 * MS + jitter * 3 * US;
+        let t_compute_end = t_compute + prefill_dur;
         prefill.end(t_compute_end);
 
-        // -- Prefill engine: KV transfer to decode --
-        let t_transfer = t_compute_end + 100 * (ms / 1000);
+        // == Prefill: KV transfer to decode ==
+        let t_transfer = t_compute_end + 60 * US;
         prefill.begin(t_transfer, iid_kv_transfer, &tp);
-        let t_transfer_end = t_transfer + 2 * ms;
+        // KV transfer: 1ms - 3ms
+        let transfer_dur = MS + (req as u64 % 4) * 500 * US;
+        let t_transfer_end = t_transfer + transfer_dur;
         prefill.end(t_transfer_end);
 
-        // -- Decode engine: recv from prefill --
-        let t_decode_recv = t_transfer_end + 150 * (ms / 1000);
+        // == Decode: recv ==
+        let t_decode_recv = t_transfer_end + 100 * US;
         decode.begin(t_decode_recv, iid_decode_recv, &tp);
-        let t_decode_recv_end = t_decode_recv + 80 * (ms / 1000);
-        decode.end(t_decode_recv_end);
+        decode.end(t_decode_recv + 60 * US);
 
-        // -- Decode engine: first token --
-        let t_first = t_decode_recv_end + 100 * (ms / 1000);
+        // == Decode: first token instant ==
+        let t_first = t_decode_recv + 120 * US;
         decode.instant(t_first, iid_decode_first, &tp);
 
-        // -- Decode engine: generate tokens (3-8 decode iterations) --
-        let num_tokens = 3 + (req % 6);
+        // == Decode: token generation (3-10 iterations) ==
+        let num_tokens = 3 + (req % 8);
         let mut t_tok = t_first;
         for tok in 0..num_tokens {
-            let t_step = t_tok + ms + (tok as u64 * 200 * (ms / 1000));
-            decode.begin(t_step, iid_decode_compute, &tp);
-            let decode_step_duration = ms + (req as u64 * 30 * (ms / 1000));
-            let t_step_end = t_step + decode_step_duration;
-            decode.end(t_step_end);
-            t_tok = t_step_end;
+            let step_start = t_tok + 500 * US;
+            decode.begin(step_start, iid_decode_compute, &tp);
+            // Each decode step: 0.8ms - 1.5ms
+            let step_dur = 800 * US + (tok as u64 * 70 * US) + (req as u64 % 5) * 50 * US;
+            decode.end(step_start + step_dur);
+            t_tok = step_start + step_dur;
         }
 
-        // -- Decode engine: detokenize + send --
-        let t_detok = t_tok + 50 * (ms / 1000);
+        // == Decode: detokenize + send ==
+        let t_detok = t_tok + 40 * US;
         decode.begin(t_detok, iid_decode_send, &tp);
-        let t_detok_end = t_detok + 300 * (ms / 1000);
-        decode.end(t_detok_end);
+        decode.end(t_detok + 200 * US);
     }
 
     // Finish all writers
     let fe_count = frontend.writer.finish().unwrap();
     let rt_count = router.writer.finish().unwrap();
-    let pf_count = prefill.writer.finish().unwrap();
+    let pf0_count = prefill0.writer.finish().unwrap();
+    let pf1_count = prefill1.writer.finish().unwrap();
     let dc_count = decode.writer.finish().unwrap();
 
     eprintln!();
     eprintln!("  traces written:");
-    eprintln!("    frontend.pftrace.gz        ({fe_count} packets)");
-    eprintln!("    router.pftrace.gz          ({rt_count} packets)");
-    eprintln!("    engine-prefill-0.pftrace.gz ({pf_count} packets)");
-    eprintln!("    engine-decode-0.pftrace.gz  ({dc_count} packets)");
+    eprintln!("    frontend.pftrace.gz           ({fe_count} packets)");
+    eprintln!("    router.pftrace.gz             ({rt_count} packets)");
+    eprintln!("    engine-prefill-0.pftrace.gz   ({pf0_count} packets)");
+    eprintln!("    engine-prefill-1.pftrace.gz   ({pf1_count} packets)");
+    eprintln!("    engine-decode-0.pftrace.gz    ({dc_count} packets)");
     eprintln!();
-    eprintln!("  open in Perfetto UI:");
-    eprintln!("    1. Go to https://ui.perfetto.dev");
-    eprintln!("    2. Click 'Open trace file'");
-    eprintln!("    3. Select one or more .pftrace.gz files from {}", output_dir.display());
+    eprintln!("  merge into report:");
+    eprintln!("    dynamo-sysprofile-merge {}", output_dir.display());
     eprintln!();
-    eprintln!("  tip: Perfetto supports opening multiple traces simultaneously.");
-    eprintln!("       Open all 4 files to see the full cross-component timeline.");
+    eprintln!("  or open individual traces in Perfetto UI:");
+    eprintln!("    https://ui.perfetto.dev");
 }
