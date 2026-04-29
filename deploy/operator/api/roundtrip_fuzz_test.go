@@ -146,9 +146,9 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 			*raw = append((*raw)[:0], data...)
 		},
 		// apiextensionsv1.JSON wraps raw JSON bytes with custom marshal logic.
-		// Keep it valid for marshal-based mutation snapshots.
+		// These fields are admitted as JSON objects, not arbitrary JSON values.
 		func(v *apiextensionsv1.JSON, c randfill.Continue) {
-			data, err := json.Marshal(fuzzJSONValue(c, 0))
+			data, err := json.Marshal(fuzzJSONObject(c, 0))
 			if err != nil {
 				panic(err)
 			}
@@ -230,6 +230,15 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 	default:
 		return float64(c.Uint32()%1000) / 10
 	}
+}
+
+func fuzzJSONObject(c randfill.Continue, depth int) map[string]any {
+	n := int(c.Uint32() % 3)
+	out := make(map[string]any, n)
+	for i := 0; i < n; i++ {
+		out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
+	}
+	return out
 }
 
 func mustJSON(v any) string {
