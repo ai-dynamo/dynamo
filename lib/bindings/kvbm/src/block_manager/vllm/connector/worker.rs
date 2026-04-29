@@ -559,12 +559,30 @@ impl PyKvConnectorWorker {
     }
 }
 
-use cudarc::driver::sys::{
-    CUcontext, CUevent, cuCtxGetCurrent, cuEventSynchronize, cudaError_enum,
-};
+
+// ── CUDA event sync ──────────────────────────────────────────────────
+#[cfg(feature = "cuda")]
+use cudarc::driver::sys::{CUcontext, CUevent, cuCtxGetCurrent, cuEventSynchronize, cudaError_enum};
+#[cfg(feature = "cuda")]
 use std::ptr;
 
+#[cfg(feature = "cuda")]
+pub fn event_sync_blocking(event_handle: u64) -> anyhow::Result<()> {
+    unsafe {
+        let raw_event = event_handle as CUevent;
+        let result = cuEventSynchronize(raw_event);
+        if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            return Err(anyhow::anyhow!(
+                "cuEventSynchronize failed with error: {:?}",
+                result
+            ));
+        }
+    }
+    Ok(())
+}
+
 // todo(ryan): we will need this if we farm off the cuEventSynchronize to another thread
+#[cfg(feature = "cuda")]
 fn _get_current_context() -> CUcontext {
     let mut ctx: CUcontext = ptr::null_mut();
     let status = unsafe { cuCtxGetCurrent(&mut ctx) };
@@ -577,11 +595,20 @@ fn _get_current_context() -> CUcontext {
     ctx
 }
 
-pub fn event_sync_blocking(event: u64) {
-    let status = unsafe { cuEventSynchronize(event as CUevent) };
-    assert_eq!(
-        status,
-        cudaError_enum::CUDA_SUCCESS,
-        "cuEventSynchronize failed"
-    );
+// ── SYCL event sync ─────────────────────────────────────────────────
+#[cfg(feature = "xpu-sycl")]
+pub fn event_sync_blocking(event_handle: u64) -> anyhow::Result<()> {
+    unsafe {
+        let raw_event = event_handle as *const oneapi_rs::sys::sycl_rs_event_t;
+        oneapi_rs::sys::sycl_rs_event_wait(raw_event)
+            .result()
+            .map_err(|e| anyhow::anyhow!("sycl_rs_event_wait failed: {:?}", e))?;
+    }
+    Ok(())
+}
+
+// ── Fallback (no backend) ───────────────────────────────────────────
+#[cfg(not(any(feature = "cuda", feature = "xpu-sycl")))]
+pub fn event_sync_blocking(_event_handle: u64) -> anyhow::Result<()> {
+    anyhow::bail!("event_sync_blocking: no backend enabled (need cuda or xpu-sycl feature)")
 }

@@ -3327,6 +3327,7 @@ dependencies = [
  "dlpark",
  "dynamo-llm",
  "dynamo-runtime",
+ "oneapi-rs",
  "pyo3",
  "pyo3-async-runtimes",
  "serde",
@@ -4348,6 +4349,13 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oneapi-rs"
+version = "0.1.0"
+dependencies = [
+ "sycl-bindings",
+]
 
 [[package]]
 name = "oneshot"
@@ -6403,6 +6411,13 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "sycl-bindings"
+version = "2025.3.0"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "syn"
