@@ -375,8 +375,6 @@ async fn stream_to_tmp(
     Ok(())
 }
 
-/// Copy a local file into `tmp`, rejecting before read if its
-/// metadata size exceeds `cap`.
 async fn copy_to_tmp(src: &Path, tmp: &Path, cap: u64) -> anyhow::Result<()> {
     let metadata = tokio::fs::metadata(src)
         .await
@@ -466,7 +464,6 @@ where
     Ok(())
 }
 
-/// Symlink `link -> target`, overwriting any existing entry.
 /// Concurrent-safe via [`stage_and_rename_sync`].
 fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     stage_and_rename_sync(link, |tmp| {
@@ -497,7 +494,6 @@ fn checked_file_to_uri(cf: &CheckedFile) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
-/// Last path segment of a CheckedFile, whether it's a local path or URL.
 fn filename_from_checked_file(cf: &CheckedFile) -> Option<String> {
     if let Some(path) = cf.path() {
         return path.file_name().and_then(|f| f.to_str()).map(String::from);
@@ -509,8 +505,6 @@ fn filename_from_checked_file(cf: &CheckedFile) -> Option<String> {
         .map(String::from)
 }
 
-/// Extract the `&CheckedFile` from a `PromptFormatterArtifact` slot
-/// regardless of variant (tokenizer-config / chat-template-jinja / chat-template-json).
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
     match p {
         PromptFormatterArtifact::HfTokenizerConfigJson(cf)

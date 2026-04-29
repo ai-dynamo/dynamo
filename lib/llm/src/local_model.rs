@@ -531,12 +531,9 @@ impl LocalModel {
         Ok(())
     }
 
-    /// Walk every typed-enum metadata slot on the MDC. For each slot
-    /// whose CheckedFile is currently a local path on disk, register
-    /// the path in the runtime's metadata-artifact registry and rewrite
-    /// the CheckedFile to a `http://<worker>/v1/metadata/<slug>/<filename>`
-    /// URL. Slots that already carry a URL (e.g. `hf://`) are left alone
-    /// so existing transports continue to work.
+    /// Local-path slots register in the registry and get rewritten to
+    /// `http://<worker>/v1/metadata/<slug>/<filename>`. URL slots
+    /// (`hf://`, etc.) are left alone so existing transports keep working.
     fn move_to_self_host(
         &mut self,
         drt: &dynamo_runtime::DistributedRuntime,
@@ -561,7 +558,6 @@ impl LocalModel {
 
         let mut rewritten = 0usize;
         for cf in self.card.iter_metadata_files_mut() {
-            // Skip slots that have already been rewritten to a URL.
             let Some(local_path) = cf.path().map(Path::to_path_buf) else {
                 continue;
             };
@@ -604,16 +600,8 @@ impl LocalModel {
         Ok(())
     }
 
-    /// Drop all `(slug, filename)` entries this model registered in the
-    /// runtime's metadata-artifact registry. Idempotent.
-    ///
-    /// `self_host_metadata` opts in by stashing on-disk paths in
-    /// `drt.metadata_artifacts()` so the worker's `system_status_server`
-    /// can serve them. Those entries live for the model's registered
-    /// lifetime (typically the full worker process lifetime — Rust
-    /// ownership clears them when the runtime drops). Callers that
-    /// remove a model out-of-band (detach / hot reload) should invoke
-    /// this to drop the entries early.
+    /// Idempotent. Call before detach/hot-reload; otherwise the
+    /// runtime drops the registry entries with the worker process.
     pub fn clear_self_hosted_artifacts(&self, drt: &dynamo_runtime::DistributedRuntime) {
         drt.metadata_artifacts()
             .unregister_model(self.card.slug().as_ref());
@@ -669,16 +657,8 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     }
 }
 
-/// `Some("http://<host>:<port>")` advertising this worker's
-/// `/v1/metadata/...` route, or `None` when the `system_status_server`
-/// isn't running (no `DYN_SYSTEM_PORT`). Returning `None` rather than
-/// erroring lets the default-on behavior degrade gracefully on
-/// deployments that don't run the status server.
-///
-/// Host selection mirrors the request plane: when the bind address is
-/// a wildcard, defer to `ip_resolver::get_local_ip_for_advertise()`,
-/// which enumerates interfaces, picks IPv4 then IPv6, and brackets v6
-/// addresses for URL safety.
+/// `None` when `system_status_server` isn't running (no `DYN_SYSTEM_PORT`)
+/// — lets default-on behavior degrade gracefully without erroring.
 pub(crate) fn self_host_base_url(
     drt: &dynamo_runtime::DistributedRuntime,
 ) -> anyhow::Result<Option<String>> {
