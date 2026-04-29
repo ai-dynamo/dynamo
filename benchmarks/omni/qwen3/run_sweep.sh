@@ -91,6 +91,7 @@ run_chat() {
         --tokenizer gpt2 \
         --url "$URL" \
         --endpoint-type chat \
+        --streaming \
         --synthetic-input-tokens-mean "$prompt_tokens" \
         --synthetic-input-tokens-stddev "$PROMPT_STDDEV" \
         --output-tokens-mean 128 \
@@ -115,6 +116,7 @@ run_audio() {
         --tokenizer gpt2 \
         --url "$URL" \
         --endpoint-type chat \
+        --streaming \
         --synthetic-input-tokens-mean "$prompt_tokens" \
         --synthetic-input-tokens-stddev "$PROMPT_STDDEV" \
         --output-tokens-mean 256 \
