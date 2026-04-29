@@ -408,6 +408,10 @@ impl DeviceStreamOps for SyclStreamWrapper {
             .synchronize()
             .map_err(|e| anyhow::anyhow!("SYCL queue synchronize failed: {}", e))
     }
+
+    fn raw_handle(&self) -> Option<u64> {
+        Some(self.queue.handle() as u64)
+    }
 }
 
 // =====================================================================
@@ -436,6 +440,15 @@ impl DeviceEventOps for SyclEventWrapper {
     fn synchronize(&self) -> Result<()> {
         self.event.wait()
             .map_err(|e| anyhow::anyhow!("SYCL event synchronize failed: {}", e))
+    }
+
+    fn record_on_stream(&self, stream_handle: u64) -> Result<()> {
+        unsafe {
+            oneapi_rs::sys::sycl_rs_event_record_on_queue(
+                self.event.handle,
+                stream_handle as *mut oneapi_rs::sys::sycl_rs_queue_t,
+            ).result()
+        }.map_err(|e| anyhow::anyhow!("SYCL event record_on_queue failed: {}", e))
     }
 }
 

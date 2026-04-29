@@ -263,6 +263,13 @@ impl DeviceEvent {
     pub fn synchronize(&self) -> Result<()> {
         self.ops.synchronize()
     }
+
+    /// Re-record this event on a stream.
+    pub fn record_on(&self, stream: &DeviceStream) -> Result<()> {
+        let handle = stream.ops.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("stream has no raw handle"))?;
+        self.ops.record_on_stream(handle)
+    }
 }
 
 unsafe impl Send for DeviceEvent {}

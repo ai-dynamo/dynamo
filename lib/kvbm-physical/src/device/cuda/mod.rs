@@ -475,6 +475,17 @@ impl DeviceEventOps for CudaEventWrapper {
         Ok(())
     }
 
+
+    fn record_on_stream(&self, stream_handle: u64) -> Result<()> {
+        unsafe {
+            cuda_result::event::record(
+                self.event.cu_event(),
+                stream_handle as cudarc::driver::sys::CUstream,
+            ).context("CUDA cuEventRecord failed")?;
+        }
+        Ok(())
+    }
+
     fn raw_handle(&self) -> Option<u64> {
         Some(self.event.cu_event() as u64)
     }

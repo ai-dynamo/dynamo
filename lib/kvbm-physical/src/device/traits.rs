@@ -148,6 +148,12 @@ pub trait DeviceEventOps: Send + Sync + Debug {
     /// Wait for event to complete (blocking).
     fn synchronize(&self) -> Result<()>;
 
+    /// Re-record this event on a stream.
+    /// The event object is reused — its inner state is overwritten with a new
+    /// marker at the current position on the stream identified by stream_handle.
+    /// Equivalent of cuEventRecord(event, stream).
+    fn record_on_stream(&self, stream_handle: u64) -> Result<()>;
+
     /// Get raw event handle for interop (optional).
     fn raw_handle(&self) -> Option<u64> {
         None
