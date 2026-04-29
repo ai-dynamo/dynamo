@@ -23,6 +23,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
@@ -230,7 +231,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			dst.ObjectMeta.Annotations = map[string]string{}
 		}
 		dst.ObjectMeta.Annotations[annDCDHubSpec] = string(data)
-	} else if preservedSpokeSpec == nil {
+	} else if !hasDCDInternalAnnotations(src.ObjectMeta.Annotations) {
 		if dst.ObjectMeta.Annotations == nil {
 			dst.ObjectMeta.Annotations = map[string]string{}
 		}
@@ -281,6 +282,19 @@ func dcdNeedsHubSpecPreservation(src *v1beta1.DynamoComponentDeploymentSpec, gen
 			src.Experimental.GPUMemoryService == nil &&
 			src.Experimental.Failover == nil &&
 			src.Experimental.Checkpoint == nil)
+}
+
+func hasDCDInternalAnnotations(annotations map[string]string) bool {
+	for key := range annotations {
+		if key == annDCDHubSpec ||
+			key == annDCDSpokeSpec ||
+			key == annDCDSpokeStatus ||
+			key == annDCDSpokeHub ||
+			strings.HasPrefix(key, annDCDPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func convertDCDStatusTo(src *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeploymentStatus) {

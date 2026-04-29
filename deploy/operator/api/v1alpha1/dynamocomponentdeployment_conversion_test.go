@@ -207,6 +207,41 @@ func TestDCD_IntermediateSpokeExtraPodSpecEditsSurvivePreservedHub(t *testing.T)
 	}
 }
 
+func TestDCD_IntermediateHubSharedMemorySizeEditWinsOverPreservedOrigin(t *testing.T) {
+	src := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-memory-edit", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				SharedMemory: &SharedMemorySpec{
+					Disabled: true,
+					Size:     resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+
+	editedSize := resource.MustParse("16Gi")
+	hub.Spec.SharedMemorySize = &editedSize
+
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if got.Spec.SharedMemory == nil {
+		t.Fatal("SharedMemory is nil")
+	}
+	if got.Spec.SharedMemory.Disabled {
+		t.Fatalf("SharedMemory.Disabled = true, want false")
+	}
+	if got.Spec.SharedMemory.Size.Cmp(editedSize) != 0 {
+		t.Fatalf("SharedMemory.Size = %s, want %s", got.Spec.SharedMemory.Size.String(), editedSize.String())
+	}
+}
+
 func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},
@@ -304,6 +339,77 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 	got := dcdRoundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) {
+	alpha := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "alpha-enums", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    GMSModeInterPod,
+				},
+				Failover: &FailoverSpec{
+					Enabled: true,
+					Mode:    GMSModeIntraPod,
+				},
+				Checkpoint: &ServiceCheckpointConfig{
+					Enabled: true,
+					Mode:    CheckpointModeManual,
+					Identity: &DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+			},
+		},
+	}
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := alpha.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if got := hub.Spec.Experimental.GPUMemoryService.Mode; got != v1beta1.GMSModeInterPod {
+		t.Fatalf("hub GMS mode = %q, want %q", got, v1beta1.GMSModeInterPod)
+	}
+	if got := hub.Spec.Experimental.Failover.Mode; got != v1beta1.GMSModeIntraPod {
+		t.Fatalf("hub failover mode = %q, want %q", got, v1beta1.GMSModeIntraPod)
+	}
+	if got := hub.Spec.Experimental.Checkpoint.Mode; got != v1beta1.CheckpointModeManual {
+		t.Fatalf("hub checkpoint mode = %q, want %q", got, v1beta1.CheckpointModeManual)
+	}
+
+	beta := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "beta-enums", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				Experimental: &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod},
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Mode: v1beta1.CheckpointModeAuto,
+						Identity: &v1beta1.DynamoCheckpointIdentity{
+							Model:            "model",
+							BackendFramework: "vllm",
+						},
+					},
+				},
+			},
+		},
+	}
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(beta); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if got := spoke.Spec.GPUMemoryService.Mode; got != GMSModeIntraPod {
+		t.Fatalf("spoke GMS mode = %q, want %q", got, GMSModeIntraPod)
+	}
+	if got := spoke.Spec.Failover.Mode; got != GMSModeInterPod {
+		t.Fatalf("spoke failover mode = %q, want %q", got, GMSModeInterPod)
+	}
+	if got := spoke.Spec.Checkpoint.Mode; got != CheckpointModeAuto {
+		t.Fatalf("spoke checkpoint mode = %q, want %q", got, CheckpointModeAuto)
 	}
 }
 
@@ -452,6 +558,30 @@ func TestDCD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
+	}
+}
+
+func TestDCD_ConvertFrom_DoesNotTagHubOriginWhenInternalAnnotationsExist(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "internal-annotation",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				annDCDSpokeHub: "corrupt",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "internal-annotation",
+			},
+		},
+	}
+	got := &DynamoComponentDeployment{}
+	if err := got.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if _, ok := got.ObjectMeta.Annotations[annDCDHubOrigin]; ok {
+		t.Fatalf("unexpected %q annotation after internal annotation input: %v", annDCDHubOrigin, got.ObjectMeta.Annotations)
 	}
 }
 
