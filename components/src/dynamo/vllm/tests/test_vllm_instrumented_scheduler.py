@@ -30,6 +30,7 @@ from dynamo.vllm.instrumented_scheduler import InstrumentedScheduler  # noqa: E4
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
 
