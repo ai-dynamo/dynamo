@@ -17,7 +17,7 @@ on:
       build_trtllm:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
-        default: false
+        default: true
       trtllm_artifact_url:
         description: 'Optional URL to a prebuilt TensorRT-LLM artifact tarball (e.g. from NVIDIA/TensorRT-LLM PR CI on urm.nvidia.com). When set, the trtllm pipeline downloads and extracts this instead of compiling the fork from source.'
         type: string
