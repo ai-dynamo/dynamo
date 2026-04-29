@@ -124,17 +124,54 @@ Nullable fields are omitted when the serving path did not record them.
     "output_tokens": 512,
     "cached_tokens": 3584,
     "request_received_ms": 1777312800000,
+    "prefill_wait_time_ms": 12.1,
+    "prefill_time_ms": 70.3,
     "ttft_ms": 82.4,
     "total_time_ms": 1000.1,
+    "avg_itl_ms": 1.8,
     "kv_hit_rate": 0.875,
-    "queue_depth": 3
+    "kv_transfer_estimated_latency_ms": 4.2,
+    "queue_depth": 3,
+    "worker": {
+      "prefill_worker_id": 0,
+      "prefill_dp_rank": 0,
+      "decode_worker_id": 1,
+      "decode_dp_rank": 0
+    }
   }
 }
 ```
+
+The `request` object captures Dynamo-owned request performance fields:
+
+| Field | Meaning |
+|-------|---------|
+| `request_id` | Dynamo request ID for the LLM call. |
+| `x_request_id` | Caller-provided logical request ID when present. |
+| `model` | Requested model name. |
+| `input_tokens` | Prompt/input token count when known. |
+| `output_tokens` | Final output token count when known. |
+| `cached_tokens` | Prompt tokens served from prefix/KV cache when known. |
+| `request_received_ms` | Request receive time in Unix epoch milliseconds. |
+| `prefill_wait_time_ms` | Time from request receipt to prefill start. |
+| `prefill_time_ms` | Time from prefill start to first token. |
+| `ttft_ms` | Time from request receipt to first token. |
+| `total_time_ms` | Time from request receipt to request completion. |
+| `avg_itl_ms` | Average inter-token latency after first token. |
+| `kv_hit_rate` | Effective KV-cache hit rate observed by the router. |
+| `kv_transfer_estimated_latency_ms` | Upper-bound estimated disaggregated KV transfer latency. |
+| `queue_depth` | Router queue depth observed when routing the request. |
+| `worker` | Prefill/decode worker IDs and DP ranks when recorded. |
+
+This trace does not include prompt/response content, sampling parameters,
+finish reason, error status, or OpenTelemetry/OpenInference attributes. Use the
+audit sink for request/response payload capture and OTEL export for span-based
+observability.
 
 ## Current Scope
 
 - `agent_context` is passive metadata.
 - Dynamo emits request-end trace records when agent tracing is enabled.
 - `jsonl`, `jsonl_gz`, and `stderr` are local debug/profiling sinks.
+- Trace records are best-effort profiling data, not durable audit records.
 - Future scheduler/profiler consumers should read the normalized trace bus.

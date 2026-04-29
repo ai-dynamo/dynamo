@@ -59,6 +59,7 @@ pub(crate) fn request_metrics(
         prefill_time_ms: timing.as_ref().and_then(|timing| timing.prefill_time_ms),
         ttft_ms: timing.as_ref().and_then(|timing| timing.ttft_ms),
         total_time_ms: timing.as_ref().and_then(|timing| timing.total_time_ms),
+        avg_itl_ms: tracker.and_then(RequestTracker::avg_itl_ms),
         kv_hit_rate: timing.as_ref().and_then(|timing| timing.kv_hit_rate),
         kv_transfer_estimated_latency_ms: timing
             .as_ref()
@@ -113,6 +114,7 @@ mod tests {
         assert!(metrics.prefill_time_ms.is_some());
         assert!(metrics.ttft_ms.is_some());
         assert!(metrics.total_time_ms.is_some());
+        assert!(metrics.avg_itl_ms.is_some());
         assert_eq!(metrics.kv_hit_rate, Some(0.5));
         assert!(metrics.kv_transfer_estimated_latency_ms.is_some());
         assert_eq!(metrics.queue_depth, Some(3));
@@ -143,6 +145,7 @@ mod tests {
         assert_eq!(metrics.prefill_time_ms, None);
         assert_eq!(metrics.ttft_ms, None);
         assert_eq!(metrics.total_time_ms, None);
+        assert_eq!(metrics.avg_itl_ms, None);
         assert_eq!(metrics.kv_hit_rate, None);
         assert_eq!(metrics.kv_transfer_estimated_latency_ms, None);
         assert_eq!(metrics.queue_depth, None);

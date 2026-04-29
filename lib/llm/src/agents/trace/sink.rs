@@ -503,6 +503,7 @@ mod tests {
                 prefill_time_ms: None,
                 ttft_ms: None,
                 total_time_ms: Some(25.0),
+                avg_itl_ms: None,
                 kv_hit_rate: None,
                 kv_transfer_estimated_latency_ms: None,
                 queue_depth: None,

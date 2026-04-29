@@ -57,6 +57,8 @@ pub struct AgentRequestMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_time_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_itl_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hit_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer_estimated_latency_ms: Option<f64>,

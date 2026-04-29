@@ -70,6 +70,7 @@ pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetric
     request.prefill_time_ms = sanitize_finite(request.prefill_time_ms);
     request.ttft_ms = sanitize_finite(request.ttft_ms);
     request.total_time_ms = sanitize_finite(request.total_time_ms);
+    request.avg_itl_ms = sanitize_finite(request.avg_itl_ms);
     request.kv_hit_rate = sanitize_finite(request.kv_hit_rate);
     request.kv_transfer_estimated_latency_ms =
         sanitize_finite(request.kv_transfer_estimated_latency_ms);
@@ -123,6 +124,7 @@ mod tests {
                 prefill_time_ms: Some(f64::INFINITY),
                 ttft_ms: Some(f64::NEG_INFINITY),
                 total_time_ms: Some(f64::NAN),
+                avg_itl_ms: Some(f64::INFINITY),
                 kv_hit_rate: Some(f64::INFINITY),
                 kv_transfer_estimated_latency_ms: Some(f64::NEG_INFINITY),
                 queue_depth: None,
@@ -137,6 +139,7 @@ mod tests {
         assert_eq!(request.prefill_time_ms, None);
         assert_eq!(request.ttft_ms, None);
         assert_eq!(request.total_time_ms, None);
+        assert_eq!(request.avg_itl_ms, None);
         assert_eq!(request.kv_hit_rate, None);
         assert_eq!(request.kv_transfer_estimated_latency_ms, None);
     }
