@@ -280,6 +280,17 @@ def _make_instant_event(
     }
 
 
+def _bounded_stage_duration(
+    value_us: int | None,
+    *,
+    cursor_us: int,
+    boundary_us: int,
+) -> int | None:
+    if value_us is None or value_us <= 0 or cursor_us >= boundary_us:
+        return None
+    return min(value_us, boundary_us - cursor_us)
+
+
 def convert_records(
     records: Iterable[dict[str, Any]],
     *,
@@ -382,20 +393,32 @@ def convert_records(
         if include_stages:
             wait_us = _ms_to_trace_us(request.get("prefill_wait_time_ms"))
             prefill_us = _ms_to_trace_us(request.get("prefill_time_ms"))
+            ttft_boundary_us = dur_us
+            if ttft_us is not None:
+                ttft_boundary_us = min(max(0, ttft_us), dur_us)
+            stage_cursor_us = 0
             common_stage_args = {
                 "request_id": request.get("request_id"),
                 "x_request_id": request.get("x_request_id"),
                 "model": request.get("model"),
             }
-            if wait_us is not None and wait_us > 0:
+            # Chrome trace complete events on the same thread must form a valid
+            # stack. Clamp visualization boundaries to avoid 1us overlaps from
+            # independently rounded metrics while keeping raw values in args.
+            wait_dur_us = _bounded_stage_duration(
+                wait_us,
+                cursor_us=stage_cursor_us,
+                boundary_us=ttft_boundary_us,
+            )
+            if wait_dur_us is not None:
                 trace_events.append(
                     _make_complete_event(
                         name="prefill wait",
                         category="dynamo.llm.stage",
                         pid=stage_pid,
                         tid=stage_tid,
-                        ts_us=ts_us,
-                        dur_us=wait_us,
+                        ts_us=ts_us + stage_cursor_us,
+                        dur_us=wait_dur_us,
                         args={
                             **common_stage_args,
                             "prefill_wait_time_ms": request.get(
@@ -404,30 +427,39 @@ def convert_records(
                         },
                     )
                 )
-            if wait_us is not None and prefill_us is not None and prefill_us > 0:
+                stage_cursor_us += wait_dur_us
+
+            prefill_dur_us = _bounded_stage_duration(
+                prefill_us,
+                cursor_us=stage_cursor_us,
+                boundary_us=ttft_boundary_us,
+            )
+            if prefill_dur_us is not None:
                 trace_events.append(
                     _make_complete_event(
                         name="prefill",
                         category="dynamo.llm.stage",
                         pid=stage_pid,
                         tid=stage_tid,
-                        ts_us=ts_us + wait_us,
-                        dur_us=prefill_us,
+                        ts_us=ts_us + stage_cursor_us,
+                        dur_us=prefill_dur_us,
                         args={
                             **common_stage_args,
                             "prefill_time_ms": request.get("prefill_time_ms"),
                         },
                     )
                 )
-            if ttft_us is not None and dur_us > ttft_us:
+                stage_cursor_us += prefill_dur_us
+
+            if ttft_us is not None and dur_us > ttft_boundary_us:
                 trace_events.append(
                     _make_complete_event(
                         name="decode",
                         category="dynamo.llm.stage",
                         pid=stage_pid,
                         tid=stage_tid,
-                        ts_us=ts_us + ttft_us,
-                        dur_us=dur_us - ttft_us,
+                        ts_us=ts_us + ttft_boundary_us,
+                        dur_us=dur_us - ttft_boundary_us,
                         args={
                             **common_stage_args,
                             "output_tokens": request.get("output_tokens"),

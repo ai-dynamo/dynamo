@@ -132,6 +132,53 @@ def test_convert_records_can_emit_stages_on_separate_tracks():
     ]
 
 
+def test_convert_records_clamps_stage_rounding_overlap():
+    trace, _ = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 49_743.776002,
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "request": {
+                        "request_id": "req-1",
+                        "model": "test-model",
+                        "request_received_ms": 0,
+                        "prefill_wait_time_ms": 230.700717,
+                        "prefill_time_ms": 2144.397696,
+                        "ttft_ms": 2375.098413,
+                        "total_time_ms": 49743.776002,
+                    },
+                },
+            }
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    stages = sorted(
+        [
+            event
+            for event in trace["traceEvents"]
+            if event.get("cat") == "dynamo.llm.stage"
+        ],
+        key=lambda event: event["ts"],
+    )
+    assert [event["name"] for event in stages] == [
+        "prefill wait",
+        "prefill",
+        "decode",
+    ]
+    for current, next_event in zip(stages, stages[1:]):
+        assert current["ts"] + current["dur"] <= next_event["ts"]
+
+    assert stages[1]["ts"] + stages[1]["dur"] == stages[2]["ts"]
+
+
 def test_convert_records_splits_overlapping_program_requests_into_lanes():
     def record(request_id: str, start_ms: int, total_ms: int):
         return {
