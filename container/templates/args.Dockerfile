@@ -144,7 +144,7 @@ ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 ARG SGLANG_GIT_URL=https://github.com/sgl-project/sglang.git
 ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
 ARG SGLANG_KERNEL_GIT_URL=https://github.com/sgl-project/sgl-kernel-xpu.git
-ARG SGLANG_KERNEL_REF=ac2fa3d549948fde822222dc1c259f55519ad021
+ARG SGLANG_KERNEL_REF=c668bb67fca82c59a6dfdbc4df69075ebddc849d
 {%- endif -%}
 
 {% if make_efa == true %}

@@ -90,7 +90,7 @@ sglang:
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image: intel/deep-learning-essentials
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    sglang_ref: aa78564e1a3ab684b7eafa3eba19a8654c90476f
+    sglang_ref: e5c2a9b6cf35e163c606ce2349b4c132d3c2e58c
   # NIXL stack source by device:
   # - CUDA SGLang: comes from the upstream lmsysorg/sglang runtime image
   #   (Dynamo does not build/install its NIXL wheel for CUDA, and SGLang

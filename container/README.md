@@ -544,7 +544,7 @@ The XPU container requires access to Intel GPU devices via `/dev/dri` and the re
 # Find the render group GID on your host
 RENDER_GID=$(getent group render | cut -d: -f3)
 
-# Run with Qwen2-0.5B model
+# Run with Qwen3-0.6B model
 docker run --rm \
   --device /dev/dri \
   --group-add ${RENDER_GID} \
@@ -567,8 +567,8 @@ nats-server -c /tmp/nats.conf &
 sleep 2
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file &
 python3 -m dynamo.sglang \
-  --model-path Qwen/Qwen2-0.5B \
-  --served-model-name Qwen/Qwen2-0.5B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 --tp 1 --trust-remote-code --skip-tokenizer-init \
   --discovery-backend file
 wait
@@ -582,7 +582,7 @@ Once the server is ready, send a request:
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}'
+  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}'
 ```
 
 ### Verified Models
@@ -590,7 +590,7 @@ curl http://localhost:8000/v1/chat/completions \
 | Model | Status | Notes |
 |-------|--------|-------|
 | Qwen/Qwen2-0.5B | ✅ Working | |
-| Qwen/Qwen3-0.6B | ❌ Blocked | Upstream sgl-kernel-xpu rmsnorm 3D tensor bug ([sgl-project/sgl-kernel-xpu#169](https://github.com/sgl-project/sgl-kernel-xpu/issues/169)) |
+| Qwen/Qwen3-0.6B | ✅ Working | Requires sgl-kernel-xpu ≥ c668bb67 (rmsnorm 3D tensor fix) |
 
 ### XPU Requirements
 
