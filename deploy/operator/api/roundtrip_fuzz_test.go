@@ -197,7 +197,7 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 		case 1:
 			return c.Bool()
 		case 2:
-			return int64(c.Int63() % 1024)
+			return c.Int63() % 1024
 		case 3:
 			return fmt.Sprintf("s%d", c.Uint32()%1024)
 		default:
@@ -211,7 +211,7 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 	case 1:
 		return c.Bool()
 	case 2:
-		return int64(c.Int63() % 1024)
+		return c.Int63() % 1024
 	case 3:
 		return fmt.Sprintf("s%d", c.Uint32()%1024)
 	case 4:

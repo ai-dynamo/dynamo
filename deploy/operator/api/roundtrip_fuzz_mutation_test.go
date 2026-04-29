@@ -379,77 +379,97 @@ func sparseMergeValue(dst, patch reflect.Value) {
 
 	switch dst.Kind() {
 	case reflect.Pointer:
-		if patch.IsNil() {
-			return
-		}
-		if dst.IsNil() {
-			if dst.CanSet() {
-				dst.Set(deepCopyValue(patch))
-			}
-			return
-		}
-		sparseMergeValue(dst.Elem(), patch.Elem())
+		sparseMergePointer(dst, patch)
 	case reflect.Interface:
-		if patch.IsNil() {
-			return
-		}
-		if dst.CanSet() {
-			dst.Set(deepCopyValue(patch))
-		}
+		sparseMergeInterface(dst, patch)
 	case reflect.Struct:
-		if isAtomicSparseMergeType(dst.Type()) {
-			if dst.CanSet() && !patch.IsZero() {
-				dst.Set(deepCopyValue(patch))
-			}
-			return
-		}
-		if hasUnexportedFields(dst.Type()) {
-			if dst.CanSet() && !patch.IsZero() {
-				dst.Set(patch)
-			}
-			return
-		}
-		for i := 0; i < dst.NumField(); i++ {
-			field := dst.Field(i)
-			if !field.CanSet() {
-				continue
-			}
-			sparseMergeValue(field, patch.Field(i))
-		}
+		sparseMergeStruct(dst, patch)
 	case reflect.Slice:
-		if patch.IsNil() || patch.Len() == 0 {
-			return
-		}
-		if dst.Type().Elem().Kind() == reflect.Uint8 {
-			if dst.CanSet() {
-				dst.Set(deepCopyValue(patch))
-			}
-			return
-		}
-		if dst.IsNil() || dst.Len() == 0 {
-			if dst.CanSet() {
-				dst.Set(deepCopyValue(patch))
-			}
-			return
-		}
-		for i := 0; i < min(dst.Len(), patch.Len()); i++ {
-			sparseMergeValue(dst.Index(i), patch.Index(i))
-		}
-		if patch.Len() > dst.Len() && dst.CanSet() {
-			for i := dst.Len(); i < patch.Len(); i++ {
-				dst.Set(reflect.Append(dst, deepCopyValue(patch.Index(i))))
-			}
-		}
+		sparseMergeSlice(dst, patch)
 	case reflect.Array:
-		for i := 0; i < min(dst.Len(), patch.Len()); i++ {
-			sparseMergeValue(dst.Index(i), patch.Index(i))
-		}
+		sparseMergeArray(dst, patch)
 	case reflect.Map:
 		sparseMergeMap(dst, patch)
 	default:
 		if dst.CanSet() {
 			dst.Set(patch)
 		}
+	}
+}
+
+func sparseMergePointer(dst, patch reflect.Value) {
+	if patch.IsNil() {
+		return
+	}
+	if dst.IsNil() {
+		if dst.CanSet() {
+			dst.Set(deepCopyValue(patch))
+		}
+		return
+	}
+	sparseMergeValue(dst.Elem(), patch.Elem())
+}
+
+func sparseMergeInterface(dst, patch reflect.Value) {
+	if patch.IsNil() {
+		return
+	}
+	if dst.CanSet() {
+		dst.Set(deepCopyValue(patch))
+	}
+}
+
+func sparseMergeStruct(dst, patch reflect.Value) {
+	if isAtomicSparseMergeType(dst.Type()) {
+		if dst.CanSet() && !patch.IsZero() {
+			dst.Set(deepCopyValue(patch))
+		}
+		return
+	}
+	if hasUnexportedFields(dst.Type()) {
+		if dst.CanSet() && !patch.IsZero() {
+			dst.Set(patch)
+		}
+		return
+	}
+	for i := 0; i < dst.NumField(); i++ {
+		field := dst.Field(i)
+		if !field.CanSet() {
+			continue
+		}
+		sparseMergeValue(field, patch.Field(i))
+	}
+}
+
+func sparseMergeSlice(dst, patch reflect.Value) {
+	if patch.IsNil() || patch.Len() == 0 {
+		return
+	}
+	if dst.Type().Elem().Kind() == reflect.Uint8 {
+		if dst.CanSet() {
+			dst.Set(deepCopyValue(patch))
+		}
+		return
+	}
+	if dst.IsNil() || dst.Len() == 0 {
+		if dst.CanSet() {
+			dst.Set(deepCopyValue(patch))
+		}
+		return
+	}
+	for i := 0; i < min(dst.Len(), patch.Len()); i++ {
+		sparseMergeValue(dst.Index(i), patch.Index(i))
+	}
+	if patch.Len() > dst.Len() && dst.CanSet() {
+		for i := dst.Len(); i < patch.Len(); i++ {
+			dst.Set(reflect.Append(dst, deepCopyValue(patch.Index(i))))
+		}
+	}
+}
+
+func sparseMergeArray(dst, patch reflect.Value) {
+	for i := 0; i < min(dst.Len(), patch.Len()); i++ {
+		sparseMergeValue(dst.Index(i), patch.Index(i))
 	}
 }
 
