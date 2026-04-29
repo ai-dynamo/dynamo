@@ -226,8 +226,9 @@ func scrubAnnotationsByPrefix(obj metav1.Object, prefix string) {
 
 // convertSharedSpecTo converts a v1alpha1 DynamoComponentDeploymentSharedSpec
 // into its v1beta1 counterpart. Lossy-direction fields are preserved on the
-// carrier's annotation bag.
-func convertSharedSpecTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
+// carrier's annotation bag. preserved is the decoded hub-side subtree, used
+// only to restore v1beta1 fields that v1alpha1 cannot represent.
+func convertSharedSpecTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier, preserved *v1beta1.DynamoComponentDeploymentSharedSpec) error {
 	if src == nil || dst == nil {
 		return nil
 	}
@@ -312,7 +313,12 @@ func convertSharedSpecTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.
 	convertExperimentalTo(src, dst, c)
 
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
-	return buildPodTemplateTo(src, dst, c)
+	if err := buildPodTemplateTo(src, dst, c); err != nil {
+		return err
+	}
+
+	restoreSharedHubOnlyFields(dst, preserved, src)
+	return nil
 }
 
 func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
@@ -462,8 +468,10 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 	return src != nil && len(src.Annotations) == 0 && len(src.Labels) == 0
 }
 
-// convertSharedSpecFrom performs the inverse: v1beta1 -> v1alpha1.
-func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
+// convertSharedSpecFrom performs the inverse: v1beta1 -> v1alpha1. preserved
+// is the decoded spoke-side subtree, used only for v1alpha1 fields that
+// v1beta1 cannot represent.
+func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier, preserved *DynamoComponentDeploymentSharedSpec) error {
 	if src == nil || dst == nil {
 		return nil
 	}
@@ -545,7 +553,12 @@ func convertSharedSpecFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
 	// Resources + Envs + Probes (+ FrontendSidecar).
-	return decomposePodTemplate(src, dst, c)
+	if err := decomposePodTemplate(src, dst, c); err != nil {
+		return err
+	}
+
+	fillSharedAlphaOnlyFromPreserved(dst, preserved)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,7 +1239,20 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst 
 	return nil
 }
 
-func overlayPreservedSharedPodTemplate(preserved *v1beta1.DynamoComponentDeploymentSharedSpec, semantic *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
+func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec, src *DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil {
+		return
+	}
+	dst.PodTemplate = restoreSharedPodTemplateHubOnlyFields(preserved, dst.PodTemplate, dst.CompilationCache, src)
+	if dst.FrontendSidecar == nil && preserved.FrontendSidecar != nil {
+		dst.FrontendSidecar = ptr.To(*preserved.FrontendSidecar)
+	}
+	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
+		dst.Experimental = preserved.Experimental.DeepCopy()
+	}
+}
+
+func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDeploymentSharedSpec, semantic *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
 	if preserved == nil || preserved.PodTemplate == nil {
 		if semantic == nil {
 			return nil

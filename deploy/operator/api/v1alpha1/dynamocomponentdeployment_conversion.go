@@ -49,16 +49,15 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	restoredHubSpec := false
+	var preservedHubSpec *v1beta1.DynamoComponentDeploymentSpec
 
 	if raw, ok := dst.ObjectMeta.Annotations[annDCDHubSpec]; ok && raw != "" {
 		if spec, ok := restoreDCDHubSpec(raw); ok {
-			dst.Spec = spec
-			restoredHubSpec = true
+			preservedHubSpec = &spec
 			delAnnFromObj(&dst.ObjectMeta, annDCDHubSpec)
 		}
 	}
-	hubOrigin := restoredHubSpec || dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue
+	hubOrigin := preservedHubSpec != nil || dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue
 	delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
 	if hubOrigin {
 		scrubDCDAnnotations(&dst.ObjectMeta)
@@ -67,11 +66,15 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	var semantic v1beta1.DynamoComponentDeploymentSpec
 	semantic.BackendFramework = src.Spec.BackendFramework
 	carrier := newDCDCarrier(&dst.ObjectMeta)
-	if restoredHubSpec && dst.Spec.PodTemplate != nil {
+	var preservedShared *v1beta1.DynamoComponentDeploymentSharedSpec
+	if preservedHubSpec != nil {
+		preservedShared = &preservedHubSpec.DynamoComponentDeploymentSharedSpec
+	}
+	if preservedShared != nil && preservedShared.PodTemplate != nil {
 		carrier.set(suffixPodTemplateOrig, annotationTrue)
 	}
 	if err := convertSharedSpecTo(&src.Spec.DynamoComponentDeploymentSharedSpec,
-		&semantic.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
+		&semantic.DynamoComponentDeploymentSharedSpec, carrier, preservedShared); err != nil {
 		return err
 	}
 
@@ -84,11 +87,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	if semantic.ComponentName == "" && !hubOrigin {
 		semantic.ComponentName = dst.ObjectMeta.Name
 	}
-	if restoredHubSpec {
-		overlayDCDHubSpec(&dst.Spec, &semantic, &src.Spec.DynamoComponentDeploymentSharedSpec)
-	} else {
-		dst.Spec = semantic
-	}
+	dst.Spec = semantic
 
 	preserveSpoke := !hubOrigin ||
 		hasSharedAlphaOnlyFields(&src.Spec.DynamoComponentDeploymentSharedSpec) ||
@@ -116,27 +115,11 @@ func preserveDCDSpoke(src *DynamoComponentDeployment, dst *v1beta1.DynamoCompone
 	}
 }
 
-func overlayDCDHubSpec(base *v1beta1.DynamoComponentDeploymentSpec, semantic *v1beta1.DynamoComponentDeploymentSpec, src *DynamoComponentDeploymentSharedSpec) {
-	hubSharedSpec := base.DynamoComponentDeploymentSharedSpec.DeepCopy()
-	hubFrontendSidecar := base.FrontendSidecar
-	hubExperimental := base.Experimental
-
-	*base = *semantic.DeepCopy()
-	base.PodTemplate = overlayPreservedSharedPodTemplate(hubSharedSpec, semantic.PodTemplate, semantic.CompilationCache, src)
-	if base.FrontendSidecar == nil {
-		base.FrontendSidecar = hubFrontendSidecar
-	}
-	if base.Experimental == nil && experimentalIsHubOnlyShape(hubExperimental) {
-		base.Experimental = hubExperimental
-	}
-}
-
 func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus *DynamoComponentDeploymentStatus, preservedSpec *DynamoComponentDeploymentSpec, preservedStatus *DynamoComponentDeploymentStatus, objectName string) {
 	if preservedSpec != nil {
 		if preservedSpec.ServiceName == "" && dstSpec.ServiceName == objectName {
 			dstSpec.ServiceName = ""
 		}
-		fillSharedAlphaOnlyFromPreserved(&dstSpec.DynamoComponentDeploymentSharedSpec, &preservedSpec.DynamoComponentDeploymentSharedSpec)
 	}
 	if preservedStatus != nil && len(dstStatus.PodSelector) == 0 && len(preservedStatus.PodSelector) > 0 {
 		dstStatus.PodSelector = maps.Clone(preservedStatus.PodSelector)
@@ -217,8 +200,12 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	spokeHubUnmodified := dcdSpokeHubUnmodified(src)
 	generatedPodTemplate := spokeHubUnmodified && src.ObjectMeta.Annotations[annDCDPrefix+suffixPodTemplateOrig] == "generated"
 	carrier := newDCDCarrier(&dst.ObjectMeta)
+	var preservedShared *DynamoComponentDeploymentSharedSpec
+	if preservedSpokeSpec != nil {
+		preservedShared = &preservedSpokeSpec.DynamoComponentDeploymentSharedSpec
+	}
 	if err := convertSharedSpecFrom(&src.Spec.DynamoComponentDeploymentSharedSpec,
-		&dst.Spec.DynamoComponentDeploymentSharedSpec, carrier); err != nil {
+		&dst.Spec.DynamoComponentDeploymentSharedSpec, carrier, preservedShared); err != nil {
 		return err
 	}
 

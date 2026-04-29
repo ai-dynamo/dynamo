@@ -64,16 +64,15 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	restoredHubSpec := false
+	var preservedHubSpec *v1beta1.DynamoGraphDeploymentSpec
 	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDHubSpec); ok && raw != "" {
 		if spec, ok := restoreDGDHubSpec(raw); ok {
-			dst.Spec = spec
-			restoredHubSpec = true
+			preservedHubSpec = &spec
 			delAnnFromObj(&dst.ObjectMeta, annDGDHubSpec)
 			scrubDGDInternalAnnotations(&dst.ObjectMeta)
 		}
 	}
-	hubOrigin := restoredHubSpec || dst.ObjectMeta.Annotations[annDGDHubOrigin] == annotationTrue
+	hubOrigin := preservedHubSpec != nil || dst.ObjectMeta.Annotations[annDGDHubOrigin] == annotationTrue
 	delAnnFromObj(&dst.ObjectMeta, annDGDHubOrigin)
 	if hubOrigin {
 		scrubDGDInternalAnnotations(&dst.ObjectMeta)
@@ -116,6 +115,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	// emission order; the unordered map cannot faithfully represent the
 	// v1beta1 list order, so round-trip V1 -> A1 -> V2 may reorder entries.
 	// This is called out in the golden-file test fixtures.
+	preservedHubComponents := preservedDGDHubComponentsByName(preservedHubSpec)
 	if len(src.Spec.Services) > 0 {
 		names := slices.Sorted(maps.Keys(src.Spec.Services))
 		semanticSpec.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
@@ -127,11 +127,12 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 				continue
 			}
 			carrier := newDGDComponentCarrier(&dst.ObjectMeta, name)
-			if restoredHubSpec && dgdRestoredComponentHasPodTemplate(&dst.Spec, name) {
+			preservedShared := preservedHubComponents[name]
+			if preservedShared != nil && preservedShared.PodTemplate != nil {
 				carrier.set(suffixPodTemplateOrig, annotationTrue)
 			}
 			var compDst v1beta1.DynamoComponentDeploymentSharedSpec
-			if err := convertSharedSpecTo(compSrc, &compDst, carrier); err != nil {
+			if err := convertSharedSpecTo(compSrc, &compDst, carrier, preservedShared); err != nil {
 				return fmt.Errorf("component %q: %w", name, err)
 			}
 			// In v1alpha1 DGD, the services-map key is the canonical name and
@@ -154,11 +155,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 		}
 	}
 
-	if restoredHubSpec {
-		overlayDGDHubSpec(&dst.Spec, &semanticSpec, src.Spec.Services)
-	} else {
-		dst.Spec = semanticSpec
-	}
+	dst.Spec = semanticSpec
 	convertDGDStatusTo(&src.Status, &dst.Status)
 	if preserveSpoke {
 		preserveDGDSpoke(src, dst)
@@ -176,26 +173,15 @@ func preserveDGDSpoke(src *DynamoGraphDeployment, dst *v1beta1.DynamoGraphDeploy
 	}
 }
 
-func overlayDGDHubSpec(base *v1beta1.DynamoGraphDeploymentSpec, semantic *v1beta1.DynamoGraphDeploymentSpec, srcServices map[string]*DynamoComponentDeploymentSharedSpec) {
-	hubComponents := make(map[string]v1beta1.DynamoComponentDeploymentSharedSpec, len(base.Components))
-	for _, comp := range base.Components {
-		hubComponents[comp.ComponentName] = comp
+func preservedDGDHubComponentsByName(preserved *v1beta1.DynamoGraphDeploymentSpec) map[string]*v1beta1.DynamoComponentDeploymentSharedSpec {
+	if preserved == nil || len(preserved.Components) == 0 {
+		return nil
 	}
-
-	*base = *semantic.DeepCopy()
-	for i := range base.Components {
-		hubComp, ok := hubComponents[base.Components[i].ComponentName]
-		if !ok {
-			continue
-		}
-		base.Components[i].PodTemplate = overlayPreservedSharedPodTemplate(&hubComp, base.Components[i].PodTemplate, base.Components[i].CompilationCache, srcServices[base.Components[i].ComponentName])
-		if base.Components[i].FrontendSidecar == nil && hubComp.FrontendSidecar != nil {
-			base.Components[i].FrontendSidecar = ptr.To(*hubComp.FrontendSidecar)
-		}
-		if base.Components[i].Experimental == nil && experimentalIsHubOnlyShape(hubComp.Experimental) {
-			base.Components[i].Experimental = hubComp.Experimental.DeepCopy()
-		}
+	out := make(map[string]*v1beta1.DynamoComponentDeploymentSharedSpec, len(preserved.Components))
+	for i := range preserved.Components {
+		out[preserved.Components[i].ComponentName] = &preserved.Components[i]
 	}
+	return out
 }
 
 type preservedDGDHubSnapshot struct {
@@ -263,7 +249,6 @@ func fillDGDSpokeFromPreserved(dstSpec *DynamoGraphDeploymentSpec, dstStatus *Dy
 			if dstComp.ServiceName == "" && preservedComp.ServiceName != "" && preservedComp.ServiceName != name {
 				dstComp.ServiceName = preservedComp.ServiceName
 			}
-			fillSharedAlphaOnlyFromPreserved(dstComp, preservedComp)
 		}
 	}
 	if preservedStatus != nil {
@@ -397,7 +382,11 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			}
 			carrier := newDGDComponentCarrier(&dst.ObjectMeta, compSrc.ComponentName)
 			compDst := &DynamoComponentDeploymentSharedSpec{}
-			if err := convertSharedSpecFrom(compSrc, compDst, carrier); err != nil {
+			var preservedShared *DynamoComponentDeploymentSharedSpec
+			if preservedSpokeSpec != nil && preservedSpokeSpec.Services != nil {
+				preservedShared = preservedSpokeSpec.Services[compSrc.ComponentName]
+			}
+			if err := convertSharedSpecFrom(compSrc, compDst, carrier, preservedShared); err != nil {
 				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
 			}
 			// In v1alpha1 the services-map key is the canonical name; the
@@ -518,18 +507,6 @@ func dgdGeneratedPodTemplateUnmodified(src *v1beta1.DynamoGraphDeployment, compo
 	}
 	v, ok := newDGDComponentCarrier(&src.ObjectMeta, componentName).get(suffixPodTemplateOrig)
 	return ok && v == "generated"
-}
-
-func dgdRestoredComponentHasPodTemplate(spec *v1beta1.DynamoGraphDeploymentSpec, componentName string) bool {
-	if spec == nil {
-		return false
-	}
-	for i := range spec.Components {
-		if spec.Components[i].ComponentName == componentName {
-			return spec.Components[i].PodTemplate != nil
-		}
-	}
-	return false
 }
 
 func hasDGDInternalAnnotations(annotations map[string]string) bool {
