@@ -302,6 +302,9 @@ jobs:
       seed_model_names: >-
         models--Qwen--Qwen3-VL-2B-Instruct
         models--Qwen--Qwen3-0.6B
+        models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B
+        models--openai--gpt-oss-20b
+        models--Qwen--Qwen3-Embedding-4B
         models--Wan-AI--Wan2.2-TI2V-5B-Diffusers
         models--TinyLlama--TinyLlama-1.1B-Chat-v1.0
         models--Wan-AI--Wan2.1-T2V-1.3B-Diffusers
@@ -336,7 +339,7 @@ jobs:
         models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B
         models--openai--gpt-oss-20b
         models--Qwen--Qwen3-Embedding-4B
-        models--llava-hf--llava-v1.6-mistral-7b-hf
+        models--llava-hf--llava-1.5-7b-hf
     secrets: inherit
 
   sglang-test:
@@ -475,7 +478,7 @@ jobs:
       test_type: CPU Test
       amd_runner: stg-tester-amd-v2
       container_image_tag: ${{ github.sha }}-dynamo-planner-test
-      cuda_version: '[""]'
+      cuda_version: ''
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true

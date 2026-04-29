@@ -65,7 +65,9 @@ echo "         Phase 1 GPU: CUDA_VISIBLE_DEVICES=0"
 # temporarily disable offline mode for the download.  Phase 2 uses the resolved
 # local path and does not need HF hub access.
 _SAVED_HF_OFFLINE="${HF_HUB_OFFLINE:-}"
+_SAVED_TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-}"
 unset HF_HUB_OFFLINE
+unset TRANSFORMERS_OFFLINE
 
 CUDA_VISIBLE_DEVICES=0 python3 - <<'PYEOF'
 import torch, io, os, urllib.request
@@ -145,6 +147,9 @@ PYEOF
 # Restore offline mode (if it was set by the test framework)
 if [ -n "$_SAVED_HF_OFFLINE" ]; then
     export HF_HUB_OFFLINE="$_SAVED_HF_OFFLINE"
+fi
+if [ -n "$_SAVED_TRANSFORMERS_OFFLINE" ]; then
+    export TRANSFORMERS_OFFLINE="$_SAVED_TRANSFORMERS_OFFLINE"
 fi
 
 if [ ! -f "$EMBEDDINGS_FILE" ]; then

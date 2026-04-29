@@ -160,8 +160,6 @@ runs:
           # This directory exists when the models have been seeded to NVMe.
           if [[ -d "${NVME_HUB}" ]]; then
             export HF_HUB_CACHE="${NVME_HUB}"
-            export HF_HUB_OFFLINE=1
-            export TRANSFORMERS_OFFLINE=1
             export DYNAMO_MODELS_DIR="${NVME_HUB}"
           fi
         fi
