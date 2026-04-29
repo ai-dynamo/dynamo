@@ -393,7 +393,7 @@ sglang_configs = {
         ],
     ),
     "video_e_pd_qwen": SGLangConfig(
-        # Tests E/P/D video inference path using a separate encode worker
+        # Tests E/PD video inference path using a separate encode worker
         # and a multimodal PD worker on a single GPU for CI coverage.
         name="video_e_pd_qwen",
         directory=sglang_dir,
@@ -405,7 +405,7 @@ sglang_configs = {
             # Expected to fail until SGLang release includes the upstream fix:
             # https://github.com/sgl-project/sglang/pull/22431
             pytest.mark.xfail(
-                reason="Known upstream SGLang issue for video_e_pd_qwen E/P/D path; expected failure until next SGLang version bump includes sglang#22431."
+                reason="Known upstream SGLang issue for video_e_pd_qwen E/PD path; expected failure until next SGLang version bump includes sglang#22431."
             ),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
