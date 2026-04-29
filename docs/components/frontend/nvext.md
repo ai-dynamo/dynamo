@@ -78,7 +78,7 @@ behavior.
 }
 ```
 
-For trace configuration and JSONL schema details, see
+For trace sink configuration and JSONL schema details, see
 [Agent Context and Tracing](../../agents/agent-context.md).
 
 ## Agent Hints

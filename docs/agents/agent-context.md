@@ -7,7 +7,7 @@ subtitle: Attach workflow identity to agentic requests
 
 Dynamo supports passive agent request tracing. An agent harness can attach
 identity metadata to each LLM request, and Dynamo can write normalized
-`request_end` records to a local JSONL sink.
+`request_end` records to configured trace sinks.
 
 This is observability only. It does not change routing, scheduling, or cache
 behavior.
@@ -59,14 +59,25 @@ export DYN_AGENT_TRACE_JSONL_PATH=/tmp/dynamo-agent-trace.jsonl
 export DYN_AGENT_TRACE_CAPACITY=1024
 ```
 
-Dynamo writes one recorder JSON object per line:
-`{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The sink is
-best-effort telemetry for debugging and offline profiling. It is not a durable
-audit log.
+| Environment Variable | Required | Default | Description |
+|----------------------|:--------:|---------|-------------|
+| `DYN_AGENT_TRACE_SINKS` | Yes | unset | Enables agent tracing and selects sinks. Supported values: `jsonl`, `stderr`, or a comma-separated list such as `jsonl,stderr`. |
+| `DYN_AGENT_TRACE_JSONL_PATH` | If `jsonl` is selected | unset | Local JSONL output path. |
+| `DYN_AGENT_TRACE_CAPACITY` | No | `1024` | In-process trace bus capacity. |
+| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES` | No | `1048576` | JSONL writer buffer size. |
+| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. |
+
+The JSONL sink writes one recorder JSON object per line:
+`{"timestamp": <elapsed_ms>, "event": <normalized trace event>}`. The `stderr`
+sink logs the normalized trace event as a structured `agent_trace` log record.
+Both sinks are best-effort telemetry for debugging and offline profiling. They
+are not durable audit logs.
 
 ## Operator Notes
 
 - Agent request trace emission is currently wired for `/v1/chat/completions`.
+- `DYN_AGENT_TRACE_SINKS` is the enable switch. Setting
+  `DYN_AGENT_TRACE_JSONL_PATH` alone does not enable tracing.
 - The JSONL sink appends to the configured path and does not rotate or enforce a
   maximum file size. Enable it for bounded debug/profiling runs, not as a
   long-running production sink.
@@ -108,5 +119,5 @@ Nullable fields are omitted when the serving path did not record them.
 
 - `agent_context` is passive metadata.
 - Dynamo emits request-end trace records when agent tracing is enabled.
-- JSONL is a local debug/profiling sink.
+- `jsonl` and `stderr` are local debug/profiling sinks.
 - Future scheduler/profiler consumers should read the normalized trace bus.

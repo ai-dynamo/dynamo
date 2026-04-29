@@ -31,7 +31,7 @@ an agent harness label each request with `workflow_type_id`, `workflow_id`,
 joined with harness-side events. It does not change routing or scheduling.
 
 See [Agent Context and Tracing](../agents/agent-context.md) for the request
-contract and JSONL trace schema.
+contract, trace sink configuration, and JSONL trace schema.
 
 ### Agentic Hints
 
