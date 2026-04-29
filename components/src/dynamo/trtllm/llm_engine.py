@@ -228,4 +228,19 @@ class TrtllmLLMEngine(LLMEngine):
                 structural_tag=guided_decoding.get("structural_tag"),
             )
 
+        n = overrides.get("n")
+        if (
+            isinstance(n, int)
+            and not isinstance(n, bool)
+            and n > 1
+            and hasattr(sampling_params, "best_of")
+        ):
+            # Dynamo does not expose best_of here, but TRT-LLM validates that
+            # its internal best_of is at least n when cloning SamplingParams.
+            # Keep that private field in lockstep so OpenAI n>1 requests do
+            # not fail before generation starts.
+            best_of = getattr(sampling_params, "best_of", None)
+            if best_of is None or best_of < n:
+                overrides["best_of"] = n
+
         return dataclasses.replace(sampling_params, **overrides)
