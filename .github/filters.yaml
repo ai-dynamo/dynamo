@@ -30,6 +30,8 @@ docs:
   - 'LICENSE'
   - 'CODEOWNERS'
   - '.coveragerc'
+  - '.claude/**'
+  - '.agents/**'
 
 examples:
   - 'recipes/**'

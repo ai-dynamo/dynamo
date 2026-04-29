@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prefill-config
+data:
+  prefill.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    tensor_parallel_size: 2
+    moe_tensor_parallel_size: 2
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: false
+    kv_cache_config:
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
+    cache_transceiver_config:
+      backend: DEFAULT
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 2
+    disable_overlap_scheduler: true
+    print_iter_log: false
+    # Required on Blackwell (SM100+): default CUTLASS backend falls through to a
+    # Hopper-specific JIT path on SM100 with TRT-LLM 1.3.x. DEEPGEMM is the workaround.
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: decode-config
+data:
+  decode.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    moe_tensor_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: false
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.95
+      dtype: fp8
+    cache_transceiver_config:
+      backend: DEFAULT
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 512
+    disable_overlap_scheduler: false
+    print_iter_log: false
+    # Required on Blackwell (SM100+): default CUTLASS backend falls through to a
+    # Hopper-specific JIT path on SM100 with TRT-LLM 1.3.x. DEEPGEMM is the workaround.
+    moe_config:
+      backend: DEEPGEMM
+      max_num_tokens: 8192
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-235b-a22b-disagg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        tolerations: []
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                    - qwen3-235b-a22b-disagg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+            - /bin/sh
+            - -c
+    TRTLLMPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      replicas: 6
+      resources:
+        limits:
+          gpu: "2"
+      sharedMemory:
+        size: 256Gi
+      extraPodSpec:
+        tolerations: []
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          env:
+            - name: MODEL_PATH
+              value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
+            - name: ENGINE_ARGS
+              value: /engine_configs/prefill.yaml
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          workingDir: /workspace/components/backends/trtllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+                --model-path "${MODEL_PATH}" \
+                --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+                --max-batch-size 2 \
+                --max-num-tokens 8192 \
+                --max-seq-len 8192 \
+                --extra-engine-args "${ENGINE_ARGS}" \
+                --disaggregation-mode prefill
+          volumeMounts:
+            - name: prefill-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+        volumes:
+          - name: prefill-config
+            configMap:
+              name: prefill-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+    TRTLLMDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      sharedMemory:
+        size: 256Gi
+      extraPodSpec:
+        tolerations: []
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          env:
+            - name: MODEL_PATH
+              value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
+            - name: ENGINE_ARGS
+              value: /engine_configs/decode.yaml
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+          workingDir: /workspace/components/backends/trtllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+                --model-path "${MODEL_PATH}" \
+                --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+                --max-batch-size 512 \
+                --max-num-tokens 1024 \
+                --max-seq-len 8192 \
+                --extra-engine-args "${ENGINE_ARGS}" \
+                --disaggregation-mode decode
+          volumeMounts:
+            - name: decode-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+        volumes:
+          - name: decode-config
+            configMap:
+              name: decode-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
