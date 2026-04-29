@@ -33,12 +33,13 @@ logger = logging.getLogger(__name__)
 
 
 class SglangLLMEngine(LLMEngine):
-    def __init__(self, server_args, *, use_sglang_tokenizer: bool = False):
+    def __init__(self, server_args, dynamo_args):
         self.server_args = server_args
+        self.dynamo_args = dynamo_args
         self.engine = None
         self._input_param_manager = None
         self._skip_tokenizer_init = server_args.skip_tokenizer_init
-        self._use_sglang_tokenizer = use_sglang_tokenizer
+        self._use_sglang_tokenizer = dynamo_args.use_sglang_tokenizer
 
     @classmethod
     async def from_args(
@@ -52,7 +53,7 @@ class SglangLLMEngine(LLMEngine):
             ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
         )
 
-        engine = cls(server_args, use_sglang_tokenizer=dynamo_args.use_sglang_tokenizer)
+        engine = cls(server_args, dynamo_args)
         worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
