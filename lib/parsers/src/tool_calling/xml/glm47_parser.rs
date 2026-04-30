@@ -447,6 +447,45 @@ mod tests {
         assert_eq!(calls.len(), 0);
     }
 
+    // Pin current behavior when the outer `</tool_call>` is absent due to
+    // max_tokens / EOS truncation. GLM 4.7's parser today returns zero calls
+    // and surfaces the unmatched start as normal text — the "silent drop"
+    // failure mode flagged in TEST_CASES.md. Kimi K2
+    // recovers in this scenario (`kimi_k2_parser::test_parse_malformed_no_section_end`);
+    // GLM 4.7 does not. Promoting to recovery is a parser change, not a
+    // test change — these tests catch any drift in either direction.
+    #[test] // CASE.5
+    fn test_parse_no_end_tag_complete_args_silent_drop() {
+        let config = get_test_config();
+        // Args complete, only outer </tool_call> missing.
+        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>";
+
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "GLM 4.7 today drops the in-flight call when </tool_call> is missing"
+        );
+        // Unparsed start surfaces as normal text rather than being silently dropped.
+        assert_eq!(normal_text, Some(message.to_string()));
+    }
+
+    #[test] // CASE.5
+    fn test_parse_no_end_tag_multiple_calls_silent_drop() {
+        let config = get_test_config();
+        // Two complete inner calls, missing only the trailing </tool_call> on the second.
+        let message = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>EST</arg_value>";
+
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        // First call is well-formed and recovered. Second call's missing close drops it.
+        assert_eq!(
+            calls.len(),
+            1,
+            "First call recovers; second call silently drops on missing </tool_call>"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
     #[test] // CASE.4, CASE.13
     fn test_unparseable_block_preserved_as_normal_text() {
         let config = get_test_config();

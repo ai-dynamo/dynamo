@@ -8,6 +8,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 def make_frames(n=3, h=8, w=8) -> np.ndarray:
     """Return a small uint8 frame array (n, h, w, 3)."""
@@ -41,13 +47,12 @@ class TestEncodeToVideoBytes:
         iio = self._mock_iio_v3()
         with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
             "imageio.v3", iio, create=True
-        ):
+        ), patch.dict("sys.modules", {"imageio.v3": iio}):
             buf = MagicMock()
             buf.getvalue.return_value = b"fake-mp4"
             mock_io.BytesIO.return_value = buf
 
-            with patch.dict("sys.modules", {"imageio.v3": iio}):
-                encode_to_video_bytes(make_frames(), fps=8, output_format="mp4")
+            encode_to_video_bytes(make_frames(), fps=8, output_format="mp4")
 
             iio.imwrite.assert_called_once()
             _, kwargs = iio.imwrite.call_args
@@ -58,9 +63,9 @@ class TestEncodeToVideoBytes:
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch.dict(
-            "sys.modules", {"imageio.v3": iio}
-        ):
+        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
+            "imageio.v3", iio, create=True
+        ), patch.dict("sys.modules", {"imageio.v3": iio}):
             buf = MagicMock()
             buf.getvalue.return_value = b"fake-webm"
             mock_io.BytesIO.return_value = buf
@@ -75,9 +80,9 @@ class TestEncodeToVideoBytes:
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch.dict(
-            "sys.modules", {"imageio.v3": iio}
-        ):
+        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
+            "imageio.v3", iio, create=True
+        ), patch.dict("sys.modules", {"imageio.v3": iio}):
             buf = MagicMock()
             buf.getvalue.return_value = b"bytes"
             mock_io.BytesIO.return_value = buf
@@ -91,9 +96,9 @@ class TestEncodeToVideoBytes:
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch.dict(
-            "sys.modules", {"imageio.v3": iio}
-        ):
+        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
+            "imageio.v3", iio, create=True
+        ), patch.dict("sys.modules", {"imageio.v3": iio}):
             buf = MagicMock()
             buf.getvalue.return_value = b"bytes"
             mock_io.BytesIO.return_value = buf
@@ -107,9 +112,9 @@ class TestEncodeToVideoBytes:
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch.dict(
-            "sys.modules", {"imageio.v3": iio}
-        ):
+        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
+            "imageio.v3", iio, create=True
+        ), patch.dict("sys.modules", {"imageio.v3": iio}):
             mock_io.BytesIO.return_value = MagicMock()
 
             # ValueError is wrapped into RuntimeError by the except block
@@ -121,9 +126,9 @@ class TestEncodeToVideoBytes:
 
         expected = b"\x00\x01\x02"
         iio = self._mock_iio_v3()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch.dict(
-            "sys.modules", {"imageio.v3": iio}
-        ):
+        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
+            "imageio.v3", iio, create=True
+        ), patch.dict("sys.modules", {"imageio.v3": iio}):
             buf = MagicMock()
             buf.getvalue.return_value = expected
             mock_io.BytesIO.return_value = buf
@@ -137,9 +142,9 @@ class TestEncodeToVideoBytes:
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio_v2, writer = self._mock_iio_v2()
-        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch.dict(
-            "sys.modules", {"imageio.v3": iio_v2}
-        ):
+        with patch("dynamo.common.utils.video_utils.io") as mock_io, patch(
+            "imageio.v3", iio_v2, create=True
+        ), patch.dict("sys.modules", {"imageio.v3": iio_v2}):
             buf = MagicMock()
             buf.getvalue.return_value = b"v2-bytes"
             mock_io.BytesIO.return_value = buf

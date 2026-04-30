@@ -11,7 +11,7 @@ use dynamo_kv_router::indexer::{
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::kv_router::metrics::RemoteIndexerMetrics;
 
-use super::Indexer;
+use super::{Indexer, TieredMatchDetails};
 
 pub struct RemoteIndexer {
     query_router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
@@ -85,10 +85,11 @@ impl RemoteIndexer {
         })
     }
 
-    pub(super) async fn find_matches(
+    pub(super) async fn find_matches_by_tier(
         &self,
         block_hashes: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores> {
+        device_only: bool,
+    ) -> Result<TieredMatchDetails> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_query_failures();
         })?;
@@ -96,6 +97,7 @@ impl RemoteIndexer {
         let request = IndexerQueryRequest {
             model_name: self.model_name.clone(),
             block_hashes,
+            device_only,
         };
         let mut stream: ManyOut<IndexerQueryResponse> = self
             .query_router
@@ -106,7 +108,7 @@ impl RemoteIndexer {
             })?;
 
         match stream.next().await {
-            Some(IndexerQueryResponse::Scores(scores)) => Ok(scores.into()),
+            Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
             Some(IndexerQueryResponse::Error(msg)) => {
                 self.metrics.increment_query_failures();
                 Err(anyhow::anyhow!("Remote indexer error: {}", msg))
@@ -433,10 +435,25 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
         let indexer = self.bindings.read().get(&request.model_name).cloned();
 
         let response = match indexer {
-            Some(indexer) => match indexer.find_matches(request.block_hashes).await {
-                Ok(scores) => IndexerQueryResponse::Scores(scores.into()),
-                Err(error) => IndexerQueryResponse::Error(error.to_string()),
-            },
+            Some(indexer) => {
+                // Skip the per-tier walk when the caller only needs the device
+                // overlap; saves server-side CPU and wire bytes.
+                let result: Result<TieredMatchDetails, _> = if request.device_only {
+                    indexer
+                        .find_match_details(request.block_hashes)
+                        .await
+                        .map(|device| TieredMatchDetails {
+                            device,
+                            lower_tier: HashMap::new(),
+                        })
+                } else {
+                    indexer.find_matches_by_tier(request.block_hashes).await
+                };
+                match result {
+                    Ok(tiered) => IndexerQueryResponse::TieredScores((&tiered).into()),
+                    Err(error) => IndexerQueryResponse::Error(error.to_string()),
+                }
+            }
             None => IndexerQueryResponse::Error(format!(
                 "served indexer model {} is not registered",
                 request.model_name
@@ -505,6 +522,11 @@ fn service_key(component: &Component) -> ServiceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_router::indexer::LowerTierIndexers;
+    use crate::kv_router::indexer::test_util::store_event;
+    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank};
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn query_engine_supports_multiple_model_bindings() {
@@ -516,13 +538,182 @@ mod tests {
         let request = SingleIn::new(IndexerQueryRequest {
             model_name: "model-b".to_string(),
             block_hashes: vec![LocalBlockHash(1)],
+            device_only: false,
         });
 
         let mut stream = engine.generate(request).await.unwrap();
 
         assert!(matches!(
             stream.next().await,
-            Some(IndexerQueryResponse::Scores(_))
+            Some(IndexerQueryResponse::TieredScores(_))
         ));
+    }
+
+    /// Verifies the served query engine returns a tiered payload with populated
+    /// lower-tier hits, and that the wire value round-trips through the client
+    /// conversion back to native `TieredMatchDetails`.
+    #[tokio::test]
+    async fn query_engine_returns_tiered_scores_with_lower_tier() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+        };
+
+        // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+
+        let Indexer::KvIndexer {
+            primary,
+            lower_tier,
+        } = &indexer
+        else {
+            unreachable!()
+        };
+        let _ = primary.flush().await;
+        for lt in lower_tier.all() {
+            let _ = lt.dump_events().await.unwrap();
+        }
+
+        let bindings = Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerQueryRequest {
+                model_name: "m".to_string(),
+                block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+                device_only: false,
+            }))
+            .await
+            .unwrap();
+
+        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+            panic!("expected TieredScores response");
+        };
+
+        assert_eq!(
+            wire.device
+                .scores
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, s)| *s),
+            Some(2),
+            "device should report 2 overlap blocks"
+        );
+        let (_, host_hits) = wire
+            .lower_tier
+            .iter()
+            .find(|(tier, _)| *tier == StorageTier::HostPinned)
+            .expect("host-pinned tier should be present");
+        assert_eq!(
+            host_hits
+                .hits
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, h)| *h),
+            Some(1),
+            "host-pinned should report 1 hit beyond device"
+        );
+
+        // Round-trip through the client conversion mirrors what RemoteIndexer does.
+        let native: TieredMatchDetails = wire.into();
+        assert_eq!(
+            native.device.overlap_scores.scores.get(&worker).copied(),
+            Some(2)
+        );
+        assert_eq!(
+            native
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|d| d.hits.get(&worker).copied()),
+            Some(1)
+        );
+    }
+
+    /// `device_only=true` must skip the lower-tier walk: the response carries
+    /// the device overlap but no per-tier entries, even when the underlying
+    /// indexer holds host-pinned data.
+    #[tokio::test]
+    async fn query_engine_device_only_skips_lower_tiers() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+        };
+
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+
+        let Indexer::KvIndexer {
+            primary,
+            lower_tier,
+        } = &indexer
+        else {
+            unreachable!()
+        };
+        let _ = primary.flush().await;
+        for lt in lower_tier.all() {
+            let _ = lt.dump_events().await.unwrap();
+        }
+
+        let bindings = Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerQueryRequest {
+                model_name: "m".to_string(),
+                block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+                device_only: true,
+            }))
+            .await
+            .unwrap();
+
+        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+            panic!("expected TieredScores response");
+        };
+
+        assert_eq!(
+            wire.device
+                .scores
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, s)| *s),
+            Some(2),
+            "device should still report 2 overlap blocks"
+        );
+        assert!(
+            wire.lower_tier.is_empty(),
+            "device_only=true must omit lower-tier entries, got {:?}",
+            wire.lower_tier
+        );
     }
 }
