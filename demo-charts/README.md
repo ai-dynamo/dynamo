@@ -40,6 +40,18 @@ Each dot is one request's `output_token_throughput_per_user`; bold lines are the
 
 ![tok_per_user_over_time](demo-failover/tok_per_user_over_time.png)
 
+### TTFT — 30s mean over time
+
+Pre-kill both setups hold ~500-1000 ms (well below 5000 ms SLA). At kill, failover spikes briefly to ~5400 ms mean (peak scatter ~13 s) for requests whose first token landed after the standby promoted, then recovers to ~700 ms within 30 s. Baseline: silent until ~+250 s, then resurfaces with elevated TTFT during cold-start serving.
+
+![ttft_avg_per_window](demo-failover/ttft_avg_per_window.png)
+
+### ITL — 30s mean over time
+
+This chart explains why "error rate" was non-zero pre-kill: ITL drifts steadily upward as concurrency saturates the engine — from ~5 ms early on, crossing the 10 ms SLA around t = -100 s, and sitting at ~10-11 ms at the kill moment. The "errors" we charted earlier are mostly requests with ITL just over the 10 ms threshold (mean 10.9 ms vs 7.5 ms for good requests). The SLA boundary cuts through the natural distribution at this concurrency, not a system fault. At kill, failover spikes to ~21 ms (decode windows interrupted by promotion), then settles to 10-15 ms.
+
+![itl_avg_per_window](demo-failover/itl_avg_per_window.png)
+
 ### Goodput per 30-second window
 
 Successful (SLA-meeting) request count per 30 s. Pre-kill both setups deliver ~10–14 successes per 30 s. Post-kill: baseline holds at zero for the entire ~5-min cold restart window, then surfaces a few late completions; failover dips briefly and re-establishes a steady ~5–7 successes/30 s.
