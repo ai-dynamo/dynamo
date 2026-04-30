@@ -65,6 +65,44 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 
 ## Configuration
 
+### Cache Tier Configuration
+
+Configure KVBM v2 cache tiers using environment variables. The v2 binding maps these env vars through the v1-compat layer onto the resolved cache config, so the user-facing UX matches v1 exactly:
+
+```bash
+# Option 1: CPU cache only (GPU → CPU offloading)
+export DYN_KVBM_CPU_CACHE_GB=4    # 4GB of pinned CPU memory
+
+# Option 2: CPU + Disk cache (GPU → CPU → Disk tiered offloading)
+export DYN_KVBM_CPU_CACHE_GB=4
+export DYN_KVBM_DISK_CACHE_GB=8   # 8GB of disk
+
+# Option 3: Disk cache only — enables host-bypass mode
+#          (GPU ↔ Disk direct via GDS, bypassing CPU memory)
+export DYN_KVBM_DISK_CACHE_GB=8
+```
+
+You can also specify exact block counts instead of GB:
+
+- `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`
+- `DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS`
+
+> [!NOTE]
+> KVBM is a write-through cache; capacities should grow with each enabled tier — `DYN_KVBM_CPU_CACHE_GB ≥ <GPU KV cache size>` and `DYN_KVBM_DISK_CACHE_GB ≥ DYN_KVBM_CPU_CACHE_GB`. Misconfiguring the CPU cache below the GPU cache size causes offload churn rather than a benefit.
+
+#### Host-Bypass Mode (Disk-Only)
+
+Setting `DYN_KVBM_DISK_CACHE_GB` *without* `DYN_KVBM_CPU_CACHE_GB` (or with an explicit `DYN_KVBM_CPU_CACHE_GB=0`) enables host-bypass mode. In this mode:
+
+- **Offload** moves blocks directly **G1 (GPU) → G3 (Disk)** via GDS — no G2 staging.
+- **Onboard** moves disk hits directly **G3 → G1** via GDS — no G3→G2→G1 staging.
+- **GDS support is required.** KVBM probes for GDS at startup; if the probe fails, the first transfer errors loudly so the misconfiguration is visible immediately.
+
+**Current scope limits in host-bypass mode:**
+
+- **Onboard mode must be `Inter`** (the default). `Intra` mode uses a layer-by-layer CudaStream load that expects G2 sources, so it cannot serve directly from disk. Combining `KVBM_ONBOARD_MODE=intra` with bypass is rejected at startup with a clear error — use `Inter` whenever bypass is in effect.
+- **No remote search.** Bypass is local-only. The remote-search protocol assumes G2 destinations for staging; a deployment that engages both falls through to the standard staging path, which will surface a missing-G2-destination error rather than silently misroute disk traffic.
+
 ### Onboard Mode
 
 KVBM v2 supports two onboarding modes that control how KV cache blocks are loaded from host (G2) to device (G1) memory:

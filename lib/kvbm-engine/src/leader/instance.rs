@@ -114,6 +114,11 @@ pub struct InstanceLeader {
     /// Object storage client for G4 search and load operations.
     /// Leader calls has_blocks on S3 directly, coordinates workers for get_blocks.
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+
+    /// When true, host (G2) is bypassed: disk hits are returned directly as
+    /// G3 blocks for G3→G1 transfer instead of staging through G2. Driven by
+    /// `kvbm_config::CacheConfig::bypass_host_cache()` at init time.
+    pub(crate) bypass_host: bool,
 }
 
 /// Builder for InstanceLeader.
@@ -128,6 +133,7 @@ pub struct InstanceLeaderBuilder {
     remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+    bypass_host: bool,
 }
 
 impl InstanceLeaderBuilder {
@@ -210,6 +216,15 @@ impl InstanceLeaderBuilder {
     /// The leader uses this client to:
     /// - Query S3 for block presence via `has_blocks`
     /// - Coordinate workers to load blocks from S3 via `get_blocks`
+    /// Mark this leader as running in host-bypass mode. When set, disk hits
+    /// are returned as G3 blocks for direct G3→G1 onboarding instead of being
+    /// staged through G2. Set this when the cache config has
+    /// `bypass_host_cache() == true`.
+    pub fn bypass_host(mut self, bypass: bool) -> Self {
+        self.bypass_host = bypass;
+        self
+    }
+
     pub fn object_client(mut self, client: Arc<dyn ObjectBlockOps>) -> Self {
         self.object_client = Some(client);
         self
@@ -266,6 +281,7 @@ impl InstanceLeaderBuilder {
             transport,
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
+            bypass_host: self.bypass_host,
         })
     }
 }
@@ -1176,9 +1192,32 @@ impl Leader for InstanceLeader {
         let has_object_client = self.object_client.is_some();
         let needs_remote_search =
             options.search_remote && (has_remote_leaders || has_object_client);
-        let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
+
+        // Host-bypass short-circuit: when G2 is intentionally unconfigured we
+        // never want to take the AsyncSession + stage_g3_to_g2 path. Return
+        // immediately with both G2 (typically empty) and G3 blocks attached
+        // so the caller can issue G3→G1 directly via GDS.
+        //
+        // Bypass mode does not currently support remote search — the staging
+        // protocol owns that path and assumes G2 destinations. If a caller
+        // requests remote search under bypass, fall through to the normal
+        // AsyncSession path which will surface the missing-G2-destination
+        // error loudly rather than silently dropping disk traffic.
+        if self.bypass_host && !needs_remote_search {
+            return Ok(FindMatchesResult::Ready(ReadyResult::new_with_g3(
+                matched_g2_blocks,
+                matched_g3_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: local_g3_count,
+                    object_blocks: 0,
+                },
+            )));
+        }
+
+        let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)

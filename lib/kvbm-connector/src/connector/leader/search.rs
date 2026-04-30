@@ -103,12 +103,17 @@ impl ConnectorLeader {
 
         let outcome = match &session.find_session {
             FindMatchesResult::Ready(ready) => {
-                // Ready result means immediate completion (local only, no async work)
-                let matched_blocks = ready.g2_count();
+                // Ready result means immediate completion (local only, no async work).
+                // In host-bypass mode the Ready may carry G3 blocks alongside G2;
+                // total_count covers both so matched_tokens reflects the full hit
+                // and standard (G2-only) Ready results behave unchanged.
+                let matched_blocks = ready.total_count();
                 let matched_tokens = matched_blocks * block_size;
 
                 tracing::debug!(
                     matched_blocks,
+                    g2_count = ready.g2_count(),
+                    g3_count = ready.g3_count(),
                     matched_tokens,
                     "Find completed immediately (Ready)"
                 );

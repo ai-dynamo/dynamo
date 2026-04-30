@@ -238,10 +238,25 @@ impl ConnectorLeader {
 
         let host_block_count = host_block_count.unwrap_or(0);
 
+        // Host-bypass mode: when disk is configured and host is not, we serve
+        // disk hits to GPU directly via GDS instead of staging through G2.
+        // InstanceLeader still requires a G2 BlockManager, but no G1→G2 /
+        // G2→G3 pipelines are wired and no onboarding routes through G2 —
+        // so we build it with a sentinel block_count of 1 (BlockManager
+        // validation rejects 0). It allocates no physical memory; it's a
+        // logical-only placeholder that will never see registered blocks.
+        let bypass_host = self.runtime.config().cache.bypass_host_cache();
+        let g2_manager_block_count = if bypass_host {
+            host_block_count.max(1)
+        } else {
+            host_block_count
+        };
+
         tracing::info!(
             host_block_count,
             ?disk_block_count,
             bytes_per_block,
+            bypass_host,
             "Computed block counts for G2/G3 tiers"
         );
 
@@ -349,14 +364,15 @@ impl ConnectorLeader {
         tracing::debug!("Block registry created");
 
         tracing::debug!(
-            host_block_count,
+            block_count = g2_manager_block_count,
             page_size = reference_config.page_size,
+            bypass_host,
             "Building G2 manager"
         );
         let logical_metrics = self.runtime.observability().logical_aggregator();
         let g2_manager = Arc::new(
             BlockManager::<G2>::builder()
-                .block_count(host_block_count)
+                .block_count(g2_manager_block_count)
                 .block_size(reference_config.page_size)
                 .registry(registry.clone())
                 .with_lineage_backend()
@@ -417,6 +433,7 @@ impl ConnectorLeader {
             .messenger(self.runtime.messenger().clone())
             .registry(registry)
             .g2_manager(g2_manager)
+            .bypass_host(bypass_host)
             .workers(
                 worker_clients
                     .into_iter()
@@ -458,70 +475,108 @@ impl ConnectorLeader {
         let offload_config = &self.runtime.config().offload;
         let runtime_handle = self.runtime.tokio();
 
-        // Build G1→G2 policy from config (or defaults if not configured)
-        // G1 is externally owned by vLLM (GPU KV cache), accessed via ExternalBlock<G1>
-        // Default: Presence filter to prevent duplicate transfers (pending auto-wired)
-        let g1_to_g2_config = if offload_config.g1_to_g2.policies.is_empty() {
-            tracing::debug!("No G1→G2 policies configured, using default: [Presence]");
-            kvbm_config::TierOffloadConfig {
-                policies: vec![kvbm_config::PolicyType::Presence],
-                ..Default::default()
-            }
-        } else {
-            offload_config.g1_to_g2.clone()
-        };
-        let g1_to_g2_pending = Arc::new(PendingTracker::new());
-        let g1_to_g2_policy = create_policy_from_config::<G1, G2>(
-            &g1_to_g2_config,
-            registry_for_offload.clone(),
-            Some(g1_to_g2_pending.clone()),
-        );
-        // Auto-chain G1→G2 completions to downstream tiers (G3 and/or G4)
-        let has_downstream_tier =
-            g3_manager_for_offload.is_some() || self.runtime.config().object.is_some();
-        let g1_to_g2_pipeline = PipelineBuilder::<G1, G2>::new()
-            .policy(g1_to_g2_policy)
-            .pending_tracker(g1_to_g2_pending)
-            .auto_chain(has_downstream_tier)
-            .build();
-
-        // Build G2→G3 policy from config (or defaults if not configured).
-        // Default: Presence — symmetric with G1→G2. Offload any block not already
-        // on disk and not already in flight; let G3's eviction backend handle
-        // cold-block churn under pressure. Opt into LFU-on-admission for
-        // workloads where disk write amplification matters by setting
-        // KVBM_OFFLOAD_G2_TO_G3_POLICIES='["presence_lfu"]'.
-        let g2_to_g3_config = if offload_config.g2_to_g3.policies.is_empty() {
-            tracing::debug!("No G2→G3 policies configured, using default: [Presence]");
-            kvbm_config::TierOffloadConfig {
-                policies: vec![kvbm_config::PolicyType::Presence],
-                ..Default::default()
-            }
-        } else {
-            offload_config.g2_to_g3.clone()
-        };
-        let g2_to_g3_pending = Arc::new(PendingTracker::new());
-        let g2_to_g3_policy = create_policy_from_config::<G2, G3>(
-            &g2_to_g3_config,
-            registry_for_offload.clone(),
-            Some(g2_to_g3_pending.clone()),
-        );
-        let g2_to_g3_pipeline = PipelineBuilder::<G2, G3>::new()
-            .policy(g2_to_g3_policy)
-            .pending_tracker(g2_to_g3_pending)
-            .build();
-
         let mut engine_builder = OffloadEngine::builder(leader.clone())
-            .with_registry(registry_for_offload)
+            .with_registry(registry_for_offload.clone())
             .with_g2_manager(g2_manager_for_offload)
-            .with_runtime(runtime_handle)
-            .with_g1_to_g2_pipeline(g1_to_g2_pipeline);
+            .with_runtime(runtime_handle);
 
-        // Conditionally add G3 pipeline if G3 manager exists
-        if let Some(g3_mgr) = g3_manager_for_offload {
+        if bypass_host {
+            // Host-bypass mode: single G1→G3 pipeline, no G2 staging.
+            // Default policy is Presence (symmetric with the non-bypass
+            // G1→G2 default). G3 manager must exist — guaranteed by the
+            // earlier disk_ok check.
+            let g1_to_g3_config = if offload_config.g1_to_g3.policies.is_empty() {
+                tracing::debug!("No G1→G3 policies configured, using default: [Presence]");
+                kvbm_config::TierOffloadConfig {
+                    policies: vec![kvbm_config::PolicyType::Presence],
+                    ..Default::default()
+                }
+            } else {
+                offload_config.g1_to_g3.clone()
+            };
+            let g1_to_g3_pending = Arc::new(PendingTracker::new());
+            let g1_to_g3_policy = create_policy_from_config::<G1, G3>(
+                &g1_to_g3_config,
+                registry_for_offload.clone(),
+                Some(g1_to_g3_pending.clone()),
+            );
+            let g1_to_g3_pipeline = PipelineBuilder::<G1, G3>::new()
+                .policy(g1_to_g3_policy)
+                .pending_tracker(g1_to_g3_pending)
+                .build();
+
+            let g3_mgr = g3_manager_for_offload.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Host-bypass mode requires a configured G3 (disk) cache; got none"
+                )
+            })?;
             engine_builder = engine_builder
                 .with_g3_manager(g3_mgr)
-                .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
+                .with_g1_to_g3_pipeline(g1_to_g3_pipeline);
+        } else {
+            // Standard mode: G1→G2 (with auto-chain) and G2→G3.
+            //
+            // Build G1→G2 policy from config (or defaults if not configured).
+            // G1 is externally owned by vLLM (GPU KV cache), accessed via ExternalBlock<G1>.
+            // Default: Presence filter to prevent duplicate transfers (pending auto-wired).
+            let g1_to_g2_config = if offload_config.g1_to_g2.policies.is_empty() {
+                tracing::debug!("No G1→G2 policies configured, using default: [Presence]");
+                kvbm_config::TierOffloadConfig {
+                    policies: vec![kvbm_config::PolicyType::Presence],
+                    ..Default::default()
+                }
+            } else {
+                offload_config.g1_to_g2.clone()
+            };
+            let g1_to_g2_pending = Arc::new(PendingTracker::new());
+            let g1_to_g2_policy = create_policy_from_config::<G1, G2>(
+                &g1_to_g2_config,
+                registry_for_offload.clone(),
+                Some(g1_to_g2_pending.clone()),
+            );
+            // Auto-chain G1→G2 completions to downstream tiers (G3 and/or G4)
+            let has_downstream_tier =
+                g3_manager_for_offload.is_some() || self.runtime.config().object.is_some();
+            let g1_to_g2_pipeline = PipelineBuilder::<G1, G2>::new()
+                .policy(g1_to_g2_policy)
+                .pending_tracker(g1_to_g2_pending)
+                .auto_chain(has_downstream_tier)
+                .build();
+
+            // Build G2→G3 policy from config (or defaults if not configured).
+            // Default: Presence — symmetric with G1→G2. Offload any block not already
+            // on disk and not already in flight; let G3's eviction backend handle
+            // cold-block churn under pressure. Opt into LFU-on-admission for
+            // workloads where disk write amplification matters by setting
+            // KVBM_OFFLOAD_G2_TO_G3_POLICIES='["presence_lfu"]'.
+            let g2_to_g3_config = if offload_config.g2_to_g3.policies.is_empty() {
+                tracing::debug!("No G2→G3 policies configured, using default: [Presence]");
+                kvbm_config::TierOffloadConfig {
+                    policies: vec![kvbm_config::PolicyType::Presence],
+                    ..Default::default()
+                }
+            } else {
+                offload_config.g2_to_g3.clone()
+            };
+            let g2_to_g3_pending = Arc::new(PendingTracker::new());
+            let g2_to_g3_policy = create_policy_from_config::<G2, G3>(
+                &g2_to_g3_config,
+                registry_for_offload.clone(),
+                Some(g2_to_g3_pending.clone()),
+            );
+            let g2_to_g3_pipeline = PipelineBuilder::<G2, G3>::new()
+                .policy(g2_to_g3_policy)
+                .pending_tracker(g2_to_g3_pending)
+                .build();
+
+            engine_builder = engine_builder.with_g1_to_g2_pipeline(g1_to_g2_pipeline);
+
+            // Conditionally add G3 pipeline if G3 manager exists
+            if let Some(g3_mgr) = g3_manager_for_offload {
+                engine_builder = engine_builder
+                    .with_g3_manager(g3_mgr)
+                    .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
+            }
         }
 
         // Build G2→G4 object storage pipeline if configured

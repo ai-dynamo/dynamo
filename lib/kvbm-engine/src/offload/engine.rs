@@ -55,13 +55,17 @@ use super::source::SourceBlocks;
 
 /// Central coordinator for offload pipelines.
 ///
-/// The engine manages multiple pipelines (G1→G2, G2→G3, G2→G4) and provides
-/// a unified interface for enqueueing blocks for offload.
+/// The engine manages multiple pipelines (G1→G2, G2→G3, G1→G3, G2→G4) and
+/// provides a unified interface for enqueueing blocks for offload.
 ///
 /// # Storage Tier Model
 ///
 /// - G1→G2: `BlockManager<G2>` destination (host memory)
 /// - G2→G3: `BlockManager<G3>` destination (disk/NVMe)
+/// - G1→G3: `BlockManager<G3>` destination (disk, bypass-host) — used when
+///   G2 is intentionally unconfigured (`cache.bypass_host_cache() == true`).
+///   Requires GDS support for direct GPU↔disk transfers; the strategy layer
+///   selects the direct path when `TransferCapabilities::allow_gds` is set.
 /// - G2→G4: ObjectBlockOps destination (object storage like S3)
 ///
 /// # Distributed G2→G4 Offloading
@@ -80,6 +84,8 @@ pub struct OffloadEngine {
     g1_to_g2: Option<Pipeline<G1, G2>>,
     /// G2→G3 pipeline (BlockManager destination)
     g2_to_g3: Option<Pipeline<G2, G3>>,
+    /// G1→G3 pipeline (BlockManager destination, host-bypass mode)
+    g1_to_g3: Option<Pipeline<G1, G3>>,
     /// G2→G4 pipeline (Object storage destination) - for local mode only
     g2_to_g4: Option<ObjectPipeline<G2>>,
     /// Active transfer tracking
@@ -137,6 +143,38 @@ impl OffloadEngine {
             .ok_or_else(|| anyhow::anyhow!("G2→G3 pipeline not configured"))?;
 
         self.enqueue_to_pipeline(pipeline, blocks.into())
+    }
+
+    /// Enqueue blocks for G1→G3 direct offload (host-bypass mode).
+    ///
+    /// Used when `cache.bypass_host_cache()` is true: blocks are written
+    /// directly to disk via GDS without staging through host memory.
+    ///
+    /// Returns a `TransferHandle` for tracking progress and cancellation.
+    pub fn enqueue_g1_to_g3(&self, blocks: impl Into<SourceBlocks<G1>>) -> Result<TransferHandle> {
+        let pipeline = self
+            .g1_to_g3
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G1→G3 pipeline not configured"))?;
+
+        self.enqueue_to_pipeline(pipeline, blocks.into())
+    }
+
+    /// Enqueue blocks for G1→G3 direct offload with a precondition event.
+    ///
+    /// Host-bypass equivalent of `enqueue_g1_to_g2_with_precondition` — used
+    /// in scheduler offload when G2 is bypassed.
+    pub fn enqueue_g1_to_g3_with_precondition(
+        &self,
+        blocks: impl Into<SourceBlocks<G1>>,
+        precondition: Option<velo::EventHandle>,
+    ) -> Result<TransferHandle> {
+        let pipeline = self
+            .g1_to_g3
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G1→G3 pipeline not configured"))?;
+
+        self.enqueue_to_pipeline_with_precondition(pipeline, blocks.into(), precondition)
     }
 
     /// Enqueue blocks for G2→G4 offload (object storage).
@@ -244,6 +282,11 @@ impl OffloadEngine {
         self.g2_to_g3.is_some()
     }
 
+    /// Check if G1→G3 pipeline is configured (host-bypass mode).
+    pub fn has_g1_to_g3(&self) -> bool {
+        self.g1_to_g3.is_some()
+    }
+
     /// Check if G2→G4 pipeline is configured.
     pub fn has_g2_to_g4(&self) -> bool {
         self.g2_to_g4.is_some()
@@ -263,6 +306,7 @@ pub struct OffloadEngineBuilder {
     g2_physical_layout: Option<PhysicalLayout>,
     g1_to_g2_config: Option<PipelineConfig<G1, G2>>,
     g2_to_g3_config: Option<PipelineConfig<G2, G3>>,
+    g1_to_g3_config: Option<PipelineConfig<G1, G3>>,
     /// G2→G4 uses ObjectPipelineConfig (no destination BlockManager)
     g2_to_g4_config: Option<ObjectPipelineConfig<G2>>,
     /// Optional runtime handle override (defaults to leader.runtime())
@@ -284,6 +328,7 @@ impl OffloadEngineBuilder {
             g2_physical_layout: None,
             g1_to_g2_config: None,
             g2_to_g3_config: None,
+            g1_to_g3_config: None,
             g2_to_g4_config: None,
             runtime: None,
             enable_remote_g4: false,
@@ -353,6 +398,16 @@ impl OffloadEngineBuilder {
         self
     }
 
+    /// Configure G1→G3 pipeline (host-bypass mode).
+    ///
+    /// Use this when G2 is intentionally unconfigured. Requires a G3 manager
+    /// (`with_g3_manager`) and GDS-capable transfer capabilities at the worker
+    /// side for the direct path to fire.
+    pub fn with_g1_to_g3_pipeline(mut self, config: PipelineConfig<G1, G3>) -> Self {
+        self.g1_to_g3_config = Some(config);
+        self
+    }
+
     /// Configure G2→G4 pipeline (object storage).
     ///
     /// Uses `ObjectPipelineConfig` instead of `PipelineConfig` since G4
@@ -416,6 +471,7 @@ impl OffloadEngineBuilder {
         let g2_to_g3 = if let Some(config) = self.g2_to_g3_config {
             let g3_manager = self
                 .g3_manager
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("G3 manager required for G2→G3 pipeline"))?;
 
             Some(Pipeline::new(
@@ -424,6 +480,27 @@ impl OffloadEngineBuilder {
                 g3_manager,
                 self.leader.clone(),
                 LogicalLayoutHandle::G2,
+                LogicalLayoutHandle::G3,
+                runtime.clone(),
+            ))
+        } else {
+            None
+        };
+
+        // Build G1→G3 pipeline (host-bypass) if configured.
+        // Standalone — no chain-router needed since G3 is the terminal tier.
+        let g1_to_g3 = if let Some(config) = self.g1_to_g3_config {
+            let g3_manager = self
+                .g3_manager
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("G3 manager required for G1→G3 pipeline"))?;
+
+            Some(Pipeline::new(
+                config,
+                registry.clone(),
+                g3_manager,
+                self.leader.clone(),
+                LogicalLayoutHandle::G1,
                 LogicalLayoutHandle::G3,
                 runtime.clone(),
             ))
@@ -514,6 +591,7 @@ impl OffloadEngineBuilder {
             registry,
             g1_to_g2,
             g2_to_g3,
+            g1_to_g3,
             g2_to_g4,
             transfers: Arc::new(DashMap::new()),
             _chain_router_handle: chain_router_handle,

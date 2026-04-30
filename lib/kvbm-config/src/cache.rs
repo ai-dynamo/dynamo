@@ -101,6 +101,17 @@ impl HostCacheConfig {
     pub fn is_enabled(&self) -> bool {
         self.num_blocks.is_some() || self.cache_size_gb.is_some()
     }
+
+    /// Check if host cache is configured with a positive size.
+    ///
+    /// Treats `Some(0)` and `Some(0.0)` as "not configured" — matching v1's
+    /// `should_bypass_cpu_cache()` behavior so an explicit zero env var
+    /// (e.g. `DYN_KVBM_CPU_CACHE_GB=0`) enables bypass instead of allocating
+    /// an empty G2 tier.
+    pub fn has_positive_size(&self) -> bool {
+        self.cache_size_gb.is_some_and(|gb| gb > 0.0)
+            || self.num_blocks.is_some_and(|n| n > 0)
+    }
 }
 
 /// Disk cache configuration (G3 tier - persistent storage).
@@ -166,6 +177,15 @@ impl DiskCacheConfig {
     pub fn is_enabled(&self) -> bool {
         self.num_blocks.is_some() || self.cache_size_gb.is_some()
     }
+
+    /// Check if disk cache is configured with a positive size.
+    ///
+    /// See [`HostCacheConfig::has_positive_size`] for the rationale on
+    /// treating `Some(0)` / `Some(0.0)` as not configured.
+    pub fn has_positive_size(&self) -> bool {
+        self.cache_size_gb.is_some_and(|gb| gb > 0.0)
+            || self.num_blocks.is_some_and(|n| n > 0)
+    }
 }
 
 /// Top-level cache configuration.
@@ -194,6 +214,29 @@ pub struct CacheConfig {
     /// Can be set via env var: `KVBM_CACHE_PARALLELISM=tensor_parallel|replicated_data`
     #[serde(default)]
     pub parallelism: ParallelismMode,
+}
+
+impl CacheConfig {
+    /// Whether the G2 (host) tier should be bypassed for direct G1↔G3 transfers.
+    ///
+    /// Returns `true` when:
+    /// - Disk (G3) is configured with a positive size, AND
+    /// - Host (G2) is unconfigured or has zero size.
+    ///
+    /// This mirrors the v1 behavior of [`should_bypass_cpu_cache`] in
+    /// `lib/llm/src/block_manager/config.rs`: setting only `DYN_KVBM_DISK_CACHE_GB`
+    /// (without `DYN_KVBM_CPU_CACHE_GB`) enables direct G1↔G3 paths via GDS.
+    /// The env vars flow through `v1_compat.rs` into the resolved config, so
+    /// the user-facing UX is identical to v1.
+    pub fn bypass_host_cache(&self) -> bool {
+        let host_sized = self.host.has_positive_size();
+        let disk_sized = self
+            .disk
+            .as_ref()
+            .map(|d| d.has_positive_size())
+            .unwrap_or(false);
+        disk_sized && !host_sized
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +429,74 @@ mod tests {
     fn test_cache_config_default_parallelism() {
         let config = CacheConfig::default();
         assert_eq!(config.parallelism, ParallelismMode::TensorParallel);
+    }
+
+    #[test]
+    fn test_bypass_host_cache_disk_only() {
+        let config = CacheConfig {
+            host: HostCacheConfig::default(),
+            disk: Some(DiskCacheConfig {
+                cache_size_gb: Some(30.0),
+                ..Default::default()
+            }),
+            parallelism: ParallelismMode::TensorParallel,
+        };
+        assert!(config.bypass_host_cache());
+    }
+
+    #[test]
+    fn test_bypass_host_cache_both_set() {
+        let config = CacheConfig {
+            host: HostCacheConfig {
+                cache_size_gb: Some(10.0),
+                ..Default::default()
+            },
+            disk: Some(DiskCacheConfig {
+                cache_size_gb: Some(30.0),
+                ..Default::default()
+            }),
+            parallelism: ParallelismMode::TensorParallel,
+        };
+        assert!(!config.bypass_host_cache());
+    }
+
+    #[test]
+    fn test_bypass_host_cache_disk_only_no_host() {
+        let config = CacheConfig {
+            host: HostCacheConfig::default(),
+            disk: None,
+            parallelism: ParallelismMode::TensorParallel,
+        };
+        assert!(!config.bypass_host_cache());
+    }
+
+    #[test]
+    fn test_bypass_host_cache_explicit_zero_host_treated_as_not_set() {
+        // Mirrors v1: DYN_KVBM_CPU_CACHE_GB=0 → bypass enabled.
+        let config = CacheConfig {
+            host: HostCacheConfig {
+                cache_size_gb: Some(0.0),
+                num_blocks: Some(0),
+            },
+            disk: Some(DiskCacheConfig {
+                cache_size_gb: Some(30.0),
+                ..Default::default()
+            }),
+            parallelism: ParallelismMode::TensorParallel,
+        };
+        assert!(config.bypass_host_cache());
+    }
+
+    #[test]
+    fn test_bypass_host_cache_zero_disk_does_not_trigger() {
+        let config = CacheConfig {
+            host: HostCacheConfig::default(),
+            disk: Some(DiskCacheConfig {
+                cache_size_gb: Some(0.0),
+                ..Default::default()
+            }),
+            parallelism: ParallelismMode::TensorParallel,
+        };
+        assert!(!config.bypass_host_cache());
     }
 }

@@ -689,12 +689,17 @@ impl ConnectorLeader {
             return Ok(OffloadAction::NoAction);
         }
 
-        // Enqueue with precondition
-        let handle = self
+        // Enqueue with precondition. In host-bypass mode we skip the G1→G2
+        // hop entirely and use the standalone G1→G3 pipeline (GDS direct).
+        let engine = self
             .offload_engine
             .get()
-            .expect("offload engine initialized")
-            .enqueue_g1_to_g2_with_precondition(source_blocks, precondition)?;
+            .expect("offload engine initialized");
+        let handle = if self.runtime.config().cache.bypass_host_cache() {
+            engine.enqueue_g1_to_g3_with_precondition(source_blocks, precondition)?
+        } else {
+            engine.enqueue_g1_to_g2_with_precondition(source_blocks, precondition)?
+        };
 
         // Record offload in slot state
         slot.record_offload(block_mappings, handle)?;
