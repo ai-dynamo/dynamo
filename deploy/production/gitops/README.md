@@ -25,6 +25,6 @@ kubectl apply -f deploy/production/gitops/optional/volcano.yaml
 kubectl apply -f deploy/production/gitops/optional/lws.yaml
 ```
 
-The manifests default to `targetRevision: main` for `https://github.com/ai-blaise/k8s-playground.git`. Change that revision when validating a feature branch.
+The manifests default to `targetRevision: main` for `https://github.com/ai-blaise/dynamo-prod-k8s.git`. Change that revision when validating a feature branch.
 
 For k3s clusters, add `deploy/production/addons/gpu-operator/values-k3s.yaml` to the `gpu-operator` application value files before syncing. NVIDIA GPU Operator needs the k3s containerd socket and config-template paths to configure the NVIDIA runtime.

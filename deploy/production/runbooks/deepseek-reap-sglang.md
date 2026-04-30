@@ -5,20 +5,65 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek REAP SGLang
 
-This runbook validates `cerebras/DeepSeek-V3.2-REAP-345B-A37B` on a Dynamo Kubernetes cluster with the SGLang backend. It assumes the production profile is installed and the target node has eight H200 or B200 GPUs available through the NVIDIA device plugin.
+This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
-The deployment example is opt-in:
+The first supported topology is a single aggregated `a4-us-001-rl9` worker. The deployment keeps the full IndexCache + target dense TurboQuant + SMC-SD stack enabled:
+
+- target checkpoint: W4A4KV4 NVFP4 via `--quantization modelopt_fp4`
+- target KV exception: dense TurboQuant 2.5-bit via `--enable-turboquant-dense-kv-cache`
+- target IndexCache via `--nsa-indexer-mode indexcache`
+- SMC-SD draft: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
+
+Do not enable prefill/decode disaggregation for this manifest yet. The current dense TurboQuant implementation rejects PD disaggregation, so P/D requires a later kernel/runtime change.
+
+## Production Profile
+
+Use the production profile in this repository as the Kubernetes layer. The infrastructure entry point wraps these steps and should be preferred:
 
 ```bash
-kubectl apply -n dynamo-system -f deploy/production/examples/deepseek-v32-reap-sglang.yaml
+scripts/dynamo-reap/deploy-a4-production.sh
 ```
 
-## Download the Model
+The script applies the full `deploy/production` GitOps stack, including baseline add-ons and optional production integrations, then renders and applies the REAP `DynamoGraphDeployment`.
 
-Run the download on every node that can schedule the worker pod. The manifest mounts the model from `/models/cerebras/DeepSeek-V3.2-REAP-345B-A37B` and sets `HF_HUB_OFFLINE=1` in the pod.
+Manual bootstrap is:
 
 ```bash
-sudo mkdir -p /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+kubectl apply -f deploy/production/gitops/project.yaml
+kubectl apply -f deploy/production/gitops/root-app.yaml
+kubectl apply -f deploy/production/gitops/optional/keda.yaml
+kubectl apply -f deploy/production/gitops/optional/opentelemetry.yaml
+kubectl apply -f deploy/production/gitops/optional/actions-runner-controller.yaml
+kubectl apply -f deploy/production/gitops/optional/parca.yaml
+kubectl apply -f deploy/production/gitops/optional/volcano.yaml
+kubectl apply -f deploy/production/gitops/optional/lws.yaml
+deploy/pre-deployment/pre-deployment-check.sh --profile production
+deploy/pre-deployment/pre-deployment-check.sh --require dynamo-crds,dynamo-webhooks,kai-queue
+```
+
+The GitOps manifests read from `https://github.com/ai-blaise/dynamo-prod-k8s.git` on `main`.
+
+## Model Cache
+
+Run the download on every node that can schedule the worker pod. The default manifest mounts the model from:
+
+```text
+/models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+```
+
+and the SMC draft from:
+
+```text
+/models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+```
+
+The target model is private in the `BlaiseAI` organization, so the host environment must have an authenticated Hugging Face token.
+
+```bash
+export HF_TOKEN=...
+export HF_XET_HIGH_PERFORMANCE=1
+
+sudo mkdir -p /models/BlaiseAI /models/smcsd
 sudo chown -R "$USER:$USER" /models
 
 python3 -m venv ~/hf-download
@@ -26,40 +71,53 @@ source ~/hf-download/bin/activate
 python -m pip install --upgrade pip
 python -m pip install "huggingface_hub[hf_xet]>=0.36"
 
-export HF_XET_HIGH_PERFORMANCE=1
-python - <<'PY'
-from huggingface_hub import snapshot_download
+hf download \
+  BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
+  --local-dir /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
 
-snapshot_download(
-    "cerebras/DeepSeek-V3.2-REAP-345B-A37B",
-    revision="4fd8e8c3e08442c4a6dde6dd3fa3dac481a0205b",
-    local_dir="/models/cerebras/DeepSeek-V3.2-REAP-345B-A37B",
-)
-PY
+hf download \
+  BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP \
+  --local-dir /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
 ```
 
-Use a Hugging Face token in the shell environment if the repository requires authentication.
+The pod sets `HF_HUB_OFFLINE=1`; model access failures should be fixed during host-side download, not at runtime.
+
+## Engine Image
+
+Build the runtime image from `ai-blaise/optimization-playground` after the remaining custom kernels are added. The manifest defaults to:
+
+```text
+ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
+```
+
+Override this image from the infrastructure script with `DYNAMO_REAP_IMAGE` when testing a candidate image.
 
 ## Deploy
 
 ```bash
 kubectl apply -n dynamo-system -f deploy/production/examples/deepseek-v32-reap-sglang.yaml
-kubectl get dgd,dcd,pods -n dynamo-system
+kubectl get dgd,dgdr,dgdsa,dm,pods -n dynamo-system
 kubectl logs -n dynamo-system -l app.kubernetes.io/name=deepseek-v32-reap-sglang --all-containers --tail=200
 ```
 
-The worker launches SGLang with TP + DP on one eight-GPU node:
+The worker launches SGLang through Dynamo with the core stack enabled:
 
 ```bash
 python3 -m dynamo.sglang \
-  --model-path /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B \
-  --served-model-name cerebras/DeepSeek-V3.2-REAP-345B-A37B \
+  --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
+  --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
+  --quantization modelopt_fp4 \
+  --kv-cache-dtype bfloat16 \
   --tp 8 \
   --dp 8 \
-  --enable-dp-attention
+  --enable-dp-attention \
+  --nsa-indexer-mode indexcache \
+  --enable-turboquant-dense-kv-cache \
+  --turboquant-dense-kv-preset latent_2p5bit_nc \
+  --speculative-algorithm SMC
 ```
 
-The full manifest also passes the DeepSeek V3 reasoning/tool parser flags and the REAP benchmark environment used by the `ai-blaise/infrastructure` SGLang REAP harness.
+The `bfloat16` KV dtype is intentional: the checkpoint is W4A4KV4 NVFP4, but target KV is the configured exception. Dense TurboQuant currently uses BF16 as the target KV pool dtype and stores compressed 2.5-bit dense MLA KV internally.
 
 ## Smoke Test
 
@@ -73,7 +131,7 @@ kubectl port-forward -n dynamo-system svc/deepseek-v32-reap-sglang-frontend 8000
 curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
-    "model": "cerebras/DeepSeek-V3.2-REAP-345B-A37B",
+    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1",
     "messages": [{"role": "user", "content": "Say: dynamo-ready"}],
     "temperature": 0,
     "max_tokens": 64

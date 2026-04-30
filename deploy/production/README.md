@@ -78,6 +78,14 @@ These projects remain useful in adjacent platform designs but are not part of th
 
 ## Install Flow
 
+For the active A4 REAP lane, use the `ai-blaise/infrastructure` wrapper:
+
+```bash
+scripts/dynamo-reap/deploy-a4-production.sh
+```
+
+That wrapper applies this production profile, optional production integrations, the private Hugging Face model cache setup, and the REAP SGLang `DynamoGraphDeployment`.
+
 1. Install Argo CD in the target cluster.
 2. Register this repository with Argo CD.
 3. Apply `gitops/project.yaml`.
@@ -96,7 +104,7 @@ deploy/pre-deployment/pre-deployment-check.sh --profile production
 deploy/pre-deployment/pre-deployment-check.sh --require dynamo-crds,dynamo-webhooks,kai-queue
 ```
 
-The root app assumes this repository is available at `https://github.com/ai-blaise/k8s-playground.git` and reads the `main` branch. Override `spec.source.targetRevision` when validating a feature branch.
+The root app assumes this repository is available at `https://github.com/ai-blaise/dynamo-prod-k8s.git` and reads the `main` branch. Override `spec.source.targetRevision` when validating a feature branch.
 
 Optional integrations are stored under `gitops/optional` and are not deployed by the root app.
 

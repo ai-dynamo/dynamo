@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# DeepSeek V3.2 REAP W4A4KV4 NVFP4 on the Dynamo production profile.
+#
+# This manifest is the first aggregated A4 deployment target for the
+# ai-blaise/optimization-playground engine. It intentionally keeps the full
+# IndexCache + target dense TurboQuant + SMC-SD stack enabled. The checkpoint is
+# W4A4KV4 NVFP4; target KV is the explicit exception and is compressed through
+# dense TurboQuant 2.5-bit. It does not use prefill/decode disaggregation yet
+# because the current dense TurboQuant path rejects PD disaggregation; add that
+# only after the custom kernels/runtime support are in place.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -8,9 +17,12 @@ metadata:
   labels:
     app.kubernetes.io/name: deepseek-v32-reap-sglang
     app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: optimization-playground
 spec:
   backendFramework: sglang
   envs:
+    - name: HF_HOME
+      value: /models
     - name: HF_HUB_OFFLINE
       value: "1"
     - name: HF_XET_HIGH_PERFORMANCE
@@ -19,11 +31,19 @@ spec:
       value: "1"
     - name: PYTORCH_ALLOC_CONF
       value: expandable_segments:True,max_split_size_mb:512
-    - name: SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD
-      value: "2048"
+    - name: SGLANG_ENABLE_SPEC_V2
+      value: "1"
     - name: SGLANG_ENABLE_JIT_DEEPGEMM
       value: "0"
-    - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+    - name: SGLANG_DISABLE_FLASHINFER_FUSED_TOPK_DEEPSEEK
+      value: "0"
+    - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+      value: "1"
+    - name: SGLANG_MOE_NVFP4_DISPATCH
+      value: "1"
+    - name: SGLANG_SMC_DRAFT_FP8_GEMM_BACKEND
+      value: cutlass
+    - name: SGLANG_SMC_TARGET_VERIFY_GRAPH
       value: "0"
     - name: NCCL_IB_DISABLE
       value: "1"
@@ -31,80 +51,181 @@ spec:
       value: "0"
     - name: NCCL_P2P_LEVEL
       value: NVL
+    - name: NCCL_P2P_DISABLE
+      value: "0"
+    - name: NCCL_CUMEM_ENABLE
+      value: "0"
+    - name: NCCL_ALGO
+      value: Ring
   services:
     Frontend:
       componentType: frontend
       replicas: 1
       extraPodSpec:
-        volumes:
-          - name: deepseek-v32-reap-model
-            hostPath:
-              path: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
-              type: Directory
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations:
+          - operator: Exists
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
-          volumeMounts:
-            - name: deepseek-v32-reap-model
-              mountPath: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
-              readOnly: true
+          image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-mode
+            - kv
+            - --no-kv-events
+            - --http-port
+            - "8000"
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
     decode:
       componentType: worker
       replicas: 1
+      envFromSecret: hf-token-secret
       resources:
         limits:
           gpu: "8"
+        requests:
+          gpu: "8"
       sharedMemory:
-        size: 64Gi
+        size: 200Gi
       extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations:
+          - operator: Exists
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              type: Directory
+          - name: smcsd-draft-model
+            hostPath:
+              path: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
               type: Directory
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
-          workingDir: /workspace/examples/backends/sglang
+          image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
           command:
             - python3
             - -m
             - dynamo.sglang
           args:
             - --model-path
-            - /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
             - --served-model-name
-            - cerebras/DeepSeek-V3.2-REAP-345B-A37B
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
             - --host
             - 0.0.0.0
-            - --page-size
-            - "16"
+            - --trust-remote-code
+            - --quantization
+            - modelopt_fp4
+            - --fp4-gemm-backend
+            - auto
+            - --fp8-gemm-backend
+            - auto
+            - --kv-cache-dtype
+            - bfloat16
             - --tp
             - "8"
             - --dp
             - "8"
             - --enable-dp-attention
-            - --trust-remote-code
-            - --kv-cache-dtype
-            - bfloat16
             - --mem-fraction-static
             - "0.80"
-            - --fp8-gemm-backend
-            - auto
-            - --moe-runner-backend
-            - auto
-            - --nsa-prefill-backend
-            - flashmla_sparse
-            - --nsa-decode-backend
-            - flashmla_sparse
-            - --disable-cuda-graph
-            - --disable-flashinfer-autotune
-            - --skip-server-warmup
+            - --max-running-requests
+            - "8"
+            - --context-length
+            - "73728"
+            - --max-total-tokens
+            - "1048576"
             - --cuda-graph-max-bs
-            - "32"
+            - "8"
+            - --disable-custom-all-reduce
+            - --disable-flashinfer-autotune
+            - --watchdog-timeout
+            - "1800"
+            - --page-size
+            - "64"
+            - --nsa-indexer-mode
+            - indexcache
+            - --nsa-indexcache-pattern
+            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+            - --nsa-prefill-backend
+            - flashmla_kv
+            - --nsa-decode-backend
+            - flashmla_kv
+            - --enable-turboquant-dense-kv-cache
+            - --turboquant-dense-kv-preset
+            - latent_2p5bit_nc
+            - --turboquant-residual-window-size
+            - "128"
+            - --turboquant-execution-mode
+            - fused_decode
+            - --turboquant-mla-decode-num-splits
+            - "16"
+            - --speculative-algorithm
+            - SMC
+            - --speculative-draft-model-path
+            - /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+            - --speculative-draft-model-quantization
+            - fp8
+            - --speculative-draft-attention-backend
+            - triton
+            - --smc-draft-kv-cache-dtype
+            - fp8_e4m3
+            - --smc-n-particles
+            - "4"
+            - --smc-gamma
+            - "6"
+            - --smc-draft-temperature
+            - "0.7"
+            - --smc-target-temperature
+            - "1.0"
+            - --smc-resample-threshold
+            - "0.5"
+            - --smc-resample-method
+            - systematic
             - --tool-call-parser
             - deepseekv32
             - --reasoning-parser
             - deepseek-v3
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3,4,5,6,7"
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/cerebras/DeepSeek-V3.2-REAP-345B-A37B
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              readOnly: true
+            - name: smcsd-draft-model
+              mountPath: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
               readOnly: true

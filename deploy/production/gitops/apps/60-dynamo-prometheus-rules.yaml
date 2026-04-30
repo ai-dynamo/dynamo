@@ -11,7 +11,7 @@ metadata:
 spec:
   project: dynamo-production
   source:
-    repoURL: https://github.com/ai-blaise/k8s-playground.git
+    repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
     targetRevision: main
     path: deploy/production/policies/prometheus
   destination:

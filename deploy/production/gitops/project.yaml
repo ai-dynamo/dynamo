@@ -9,7 +9,7 @@ metadata:
 spec:
   description: Production Dynamo stack and externally managed Kubernetes add-ons.
   sourceRepos:
-    - https://github.com/ai-blaise/k8s-playground.git
+    - https://github.com/ai-blaise/dynamo-prod-k8s.git
     - https://prometheus-community.github.io/helm-charts
     - https://grafana.github.io/helm-charts
     - https://fluent.github.io/helm-charts

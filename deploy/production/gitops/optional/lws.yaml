@@ -18,7 +18,7 @@ spec:
         releaseName: lws
         valueFiles:
           - $values/deploy/production/addons/lws/values.yaml
-    - repoURL: https://github.com/ai-blaise/k8s-playground.git
+    - repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
       targetRevision: main
       ref: values
   destination:
