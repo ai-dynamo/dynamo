@@ -456,4 +456,38 @@ mod tests {
         assert!(r.normal_text.contains("answer1"));
         assert!(r.normal_text.contains("answer2"));
     }
+
+    #[test] // CASE.9 — paired reasoning + tool call. The reasoning parser
+    // must extract the channel content as `reasoning_text` and leave the
+    // following `<|tool_call>...<tool_call|>` markers intact in
+    // `normal_text` for the tool-call parser to consume downstream.
+    fn paired_reasoning_then_tool_call_non_streaming() {
+        let mut p = Gemma4ReasoningParser::new();
+        let input = concat!(
+            "<|channel>thought\nthinking about the request<channel|>",
+            "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>",
+        );
+        let r = p.detect_and_parse_reasoning(input, &[]);
+        assert_eq!(r.reasoning_text, "thinking about the request");
+        assert_eq!(
+            r.normal_text, r#"<|tool_call>call:get_weather{location:<|"|>Tokyo<|"|>}<tool_call|>"#,
+            "tool-call markers must survive reasoning extraction",
+        );
+    }
+
+    // ----- Explicit N/A coverage notes (per lib/parsers/TEST_CASES.md) -----
+    //
+    // CASE.1, CASE.4, CASE.6, CASE.7  — Tool-call-only categories. N/A for
+    //          a reasoning parser.
+    // CASE.11, CASE.12 — `tool_choice` and `finish_reason`: tool-call concerns,
+    //          N/A for reasoning. (Universal cross-parser gap regardless;
+    //          see notes in `tool_calling/gemma4/parser.rs`.)
+    // CASE.14 — Empty / null content: empty input is covered implicitly
+    //          via the no-markers passthrough cases (`detect_no_markers_*`,
+    //          `streaming_no_markers`).
+    // CASE.15 — Duplicate calls: tool-call concept; N/A. Multi-span
+    //          reasoning is the analog and is covered by
+    //          `streaming_multiple_reasoning_spans`.
+    // CASE.xml1 / CASE.xml2 — XML-family only. N/A.
+    // CASE.harmony1 — Harmony only. N/A.
 }

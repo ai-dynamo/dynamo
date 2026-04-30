@@ -725,4 +725,83 @@ mod tests {
         let pos = find_tool_call_end_position_gemma4(input).unwrap();
         assert_eq!(&input[pos..], " trailing");
     }
+
+    #[test] // CASE.9 — paired reasoning span + tool call in the same emission
+    // (in production the reasoning parser runs first and strips `<|channel>`,
+    // but the tool-call parser must remain correct if it sees the full
+    // emission, e.g. when reasoning parsing is disabled).
+    fn paired_reasoning_and_tool_call_in_same_emission() {
+        let input = concat!(
+            "<|channel>thought\nthinking about the request<channel|>",
+            "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>",
+        );
+        let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["location"], "Tokyo");
+        // The reasoning span is preserved as normal_text — the tool-call parser
+        // doesn't try to interpret `<|channel>` markers itself.
+        assert!(normal.unwrap().contains("<|channel>thought"));
+    }
+
+    #[test] // CASE.14 — empty input, no tool calls
+    fn empty_input_yields_zero_calls_empty_content() {
+        let (calls, normal) = try_tool_call_parse_gemma4("", None).unwrap();
+        assert_eq!(calls.len(), 0);
+        assert_eq!(normal, Some(String::new()));
+    }
+
+    #[test] // CASE.14 — `null` argument values round-trip as JSON null
+    fn null_argument_values_preserved() {
+        let input = "<|tool_call>call:f{x:null,y:none,z:nil}<tool_call|>";
+        let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["x"], Value::Null);
+        assert_eq!(args["y"], Value::Null);
+        assert_eq!(args["z"], Value::Null);
+    }
+
+    #[test] // CASE.15 — duplicate calls to the same function name. Both must
+    // appear with distinct IDs; client decides whether duplicate invocation
+    // is intended.
+    fn duplicate_tool_call_same_name() {
+        let input = concat!(
+            "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>",
+            "<|tool_call>call:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+        );
+        let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "duplicate calls need distinct IDs"
+        );
+        let args0: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0["location"], "Tokyo");
+        assert_eq!(args1["location"], "NYC");
+    }
+
+    // ----- Explicit N/A coverage notes (per lib/parsers/TEST_CASES.md) -----
+    //
+    // CASE.8  — Streaming token-by-token assembly: indirect. The Gemma 4
+    //           parser exposes only the synchronous extraction path; the
+    //           streaming jail (`tools.rs::try_tool_call_parse_stream`) drives
+    //           it via `detect_tool_call_start_gemma4` and
+    //           `find_tool_call_end_position_gemma4`, both covered by CASE.20
+    //           tests above. Same pattern as kimi_k2.
+    // CASE.11 — `tool_choice` (auto / required / named / none): universal gap
+    //           in the repo as of 2026-04 — the cross-parser suites at
+    //           `lib/llm/tests/{tool_choice.rs,parallel_tool_call_integration.rs,
+    //           tool_choice_finish_reasons.rs}` run `hermes` only. Adding
+    //           Gemma 4 to those suites is a separate parametrization PR.
+    // CASE.12 — `finish_reason` semantics: same universal gap; lives in
+    //           `lib/llm/tests/tool_choice_finish_reasons.rs`, hermes-only
+    //           today.
+    // CASE.xml1 / CASE.xml2 — XML-family only. N/A — Gemma 4 uses a custom
+    //           non-JSON, non-XML grammar.
+    // CASE.harmony1 — Harmony only. N/A.
 }
