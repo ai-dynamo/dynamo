@@ -506,11 +506,9 @@ func restoreDGDRHubSpecAnnotation(src *DynamoGraphDeploymentRequest) *dgdrHubSpe
 	if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
 		return nil
 	}
-	envelope.Spec = legacy
+	envelope.Spec = sparseDGDRLegacyHubSpecSave(&legacy)
 	if dgdrLegacyHubSpecMarksNilAutoApply(&legacy) {
 		envelope.AutoApplyNil = true
-		envelope.Spec.AutoApply = nil
-		envelope.Spec.Features = nil
 	}
 	if dgdrHubSpecSaveIsZero(&envelope) {
 		return nil
@@ -539,12 +537,19 @@ func restoreDGDRHubStatusAnnotation(src *DynamoGraphDeploymentRequest) *dgdrHubS
 	return &envelope
 }
 
+func sparseDGDRLegacyHubSpecSave(legacy *v1beta1.DynamoGraphDeploymentRequestSpec) v1beta1.DynamoGraphDeploymentRequestSpec {
+	if legacy == nil {
+		return v1beta1.DynamoGraphDeploymentRequestSpec{}
+	}
+	var save dgdrHubSpecSave
+	saveDGDRHubOnlySpec(legacy, &save)
+	save.AutoApplyNil = false
+	return save.Spec
+}
+
 func dgdrLegacyHubSpecMarksNilAutoApply(legacy *v1beta1.DynamoGraphDeploymentRequestSpec) bool {
 	if legacy == nil {
 		return false
-	}
-	if legacy.AutoApply != nil && !*legacy.AutoApply {
-		return true
 	}
 	return legacy.Features != nil &&
 		apiequality.Semantic.DeepEqual(legacy.Features, &v1beta1.FeaturesSpec{})

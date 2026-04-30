@@ -1194,6 +1194,36 @@ func TestDGDR_LegacyHubSpecEmptyFeaturesMarkerRestoresNilAutoApply(t *testing.T)
 	}
 }
 
+func TestDGDR_LegacyHubSpecDropsRepresentableContextFields(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "legacy-context-fields",
+			Annotations: map[string]string{
+				annDGDRHubSpec: `{"autoApply":false,"modelCache":{"pvcName":"old-pvc"},"searchStrategy":"thorough"}`,
+			},
+		},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:     "llama",
+			Backend:   "vllm",
+			AutoApply: true,
+		},
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.AutoApply == nil || !*restored.Spec.AutoApply {
+		t.Fatalf("AutoApply = %v, want live true", restored.Spec.AutoApply)
+	}
+	if restored.Spec.ModelCache != nil {
+		t.Fatalf("ModelCache = %#v, want nil after live alpha cleared it", restored.Spec.ModelCache)
+	}
+	if restored.Spec.SearchStrategy != v1beta1.SearchStrategyThorough {
+		t.Fatalf("SearchStrategy = %q, want %q", restored.Spec.SearchStrategy, v1beta1.SearchStrategyThorough)
+	}
+}
+
 func TestDGDR_HubNilAutoApplyWithOtherHubSavesRoundTrips(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "nil-autoapply-with-mocker"},
