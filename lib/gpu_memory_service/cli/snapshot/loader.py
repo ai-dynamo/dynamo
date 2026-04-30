@@ -20,6 +20,7 @@ from pathlib import Path
 from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
+from gpu_memory_service.snapshot.transfer import DEFAULT_TRANSFER_BACKEND
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,21 +30,35 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GMS_LOAD_COMPLETE_FILE = "gms-load-complete"
 GMS_LOAD_COMPLETE_FILE_ENV = "GMS_LOAD_COMPLETE_FILE"
+GMS_TRANSFER_BACKEND_ENV = "GMS_TRANSFER_BACKEND"
 GMS_POD_UID_ENV = "GMS_POD_UID"
 
 
-def _load_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
+def _load_device(
+    checkpoint_dir: str,
+    device: int,
+    max_workers: int,
+    transfer_backend: str,
+) -> None:
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
-    logger.info("Loading GMS checkpoint: device=%d input_dir=%s", device, input_dir)
+    logger.info(
+        "Loading GMS checkpoint: device=%d input_dir=%s transfer_backend=%s max_workers=%d",
+        device,
+        input_dir,
+        transfer_backend,
+        max_workers,
+    )
     t0 = time.monotonic()
     client = GMSStorageClient(
         socket_path=get_socket_path(device),
         device=device,
+        transfer_backend=transfer_backend,
     )
     client.load_to_gms(
         input_dir,
         max_workers=max_workers,
         clear_existing=True,
+        wait_for_socket=True,
     )
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
@@ -82,13 +97,23 @@ def _write_completion_sentinel(checkpoint_dir: str) -> None:
 def main() -> None:
     checkpoint_dir = os.environ["GMS_CHECKPOINT_DIR"]
     max_workers = int(os.environ.get("GMS_LOAD_WORKERS", "8"))
+    transfer_backend = os.environ.get(
+        GMS_TRANSFER_BACKEND_ENV,
+        DEFAULT_TRANSFER_BACKEND,
+    )
     _clear_completion_sentinel(checkpoint_dir)
     devices = list_devices()
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
         futures = {
-            pool.submit(_load_device, checkpoint_dir, dev, max_workers): dev
+            pool.submit(
+                _load_device,
+                checkpoint_dir,
+                dev,
+                max_workers,
+                transfer_backend,
+            ): dev
             for dev in devices
         }
         for future in as_completed(futures):

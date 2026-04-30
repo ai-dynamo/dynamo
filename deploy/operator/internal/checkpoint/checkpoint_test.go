@@ -313,6 +313,11 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
 		podSpec := testPodSpec()
 		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		podSpec.Containers[0].Env = append(
+			podSpec.Containers[0].Env,
+			corev1.EnvVar{Name: EnvTransferBackend, Value: "nixl-gds"},
+			corev1.EnvVar{Name: EnvLoadWorkers, Value: "32"},
+		)
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
@@ -343,6 +348,8 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			env[item.Name] = item.Value
 		}
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, "nixl-gds", env["GMS_TRANSFER_BACKEND"])
+		assert.Equal(t, "32", env["GMS_LOAD_WORKERS"])
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", info.GMSArtifactDir)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)

@@ -27,6 +27,10 @@ const (
 	// EnvPodUID exposes metadata.uid to GMS saver/loader sidecars so their
 	// completion files are unique per pod attempt.
 	EnvPodUID = "GMS_POD_UID"
+	// EnvTransferBackend selects the GMS loader byte-transfer backend.
+	EnvTransferBackend = "GMS_TRANSFER_BACKEND"
+	// EnvLoadWorkers controls the GMS loader's per-device transfer concurrency.
+	EnvLoadWorkers = "GMS_LOAD_WORKERS"
 )
 
 // EnsureGMSRestoreSidecars adds the GMS server init sidecar and restore loader.
@@ -51,6 +55,7 @@ func EnsureGMSRestoreSidecars(
 		corev1.EnvVar{Name: EnvCheckpointDir, Value: ResolveGMSArtifactDir(storage)},
 		PodUIDEnvVar(),
 	)
+	loader.Env = append(loader.Env, loaderPassThroughEnvVars(mainContainer)...)
 
 	podSpec.Containers = removeGMSManagedContainers(podSpec.Containers, gms.ServerContainerName, GMSLoaderContainer)
 	podSpec.Containers = append(podSpec.Containers, loader)
@@ -99,6 +104,17 @@ func PodUIDEnvVar() corev1.EnvVar {
 			},
 		},
 	}
+}
+
+func loaderPassThroughEnvVars(mainContainer *corev1.Container) []corev1.EnvVar {
+	var result []corev1.EnvVar
+	for _, env := range mainContainer.Env {
+		switch env.Name {
+		case EnvTransferBackend, EnvLoadWorkers:
+			result = append(result, env)
+		}
+	}
+	return result
 }
 
 func ResolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
