@@ -67,15 +67,15 @@ Dynamo exposes metrics in Prometheus Exposition Format text at the `/metrics` HT
 ```
 # HELP dynamo_component_requests_total Total requests processed
 # TYPE dynamo_component_requests_total counter
-dynamo_component_requests_total{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate"} 42
+dynamo_component_requests_total{dynamo_namespace="default",dynamo_component="backend",dynamo_endpoint="generate"} 42
 
 # HELP dynamo_component_request_duration_seconds Request processing time
 # TYPE dynamo_component_request_duration_seconds histogram
-dynamo_component_request_duration_seconds_bucket{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate",le="0.005"} 10
-dynamo_component_request_duration_seconds_bucket{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate",le="0.01"} 15
-dynamo_component_request_duration_seconds_bucket{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate",le="+Inf"} 42
-dynamo_component_request_duration_seconds_sum{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate"} 2.5
-dynamo_component_request_duration_seconds_count{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate"} 42
+dynamo_component_request_duration_seconds_bucket{dynamo_namespace="default",dynamo_component="backend",dynamo_endpoint="generate",le="0.005"} 10
+dynamo_component_request_duration_seconds_bucket{dynamo_namespace="default",dynamo_component="backend",dynamo_endpoint="generate",le="0.01"} 15
+dynamo_component_request_duration_seconds_bucket{dynamo_namespace="default",dynamo_component="backend",dynamo_endpoint="generate",le="+Inf"} 42
+dynamo_component_request_duration_seconds_sum{dynamo_namespace="default",dynamo_component="backend",dynamo_endpoint="generate"} 2.5
+dynamo_component_request_duration_seconds_count{dynamo_namespace="default",dynamo_component="backend",dynamo_endpoint="generate"} 42
 ```
 
 ### Metric Categories
