@@ -230,6 +230,10 @@ func injectCheckpointIntoPodSpec(
 		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
 			return nil
 		}
+		// GMS today is wired to a single main container. Multi-target
+		// (failover) support for GMS is tracked separately; stick to
+		// the legacy main-container path so single-engine GMS restore
+		// continues to work.
 		mainContainer, err := RequireMainContainer(podSpec)
 		if err != nil {
 			return fmt.Errorf("gpuMemoryService enabled: %w", err)
