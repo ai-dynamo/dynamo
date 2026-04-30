@@ -80,11 +80,11 @@ class WorkerConfig:
 
 
 class _LifecycleState(enum.Enum):
-    INIT = "init"          # _start_engine has not been called
+    INIT = "init"  # _start_engine has not been called
     STARTING = "starting"  # engine.start() in flight (lock held)
-    RUNNING = "running"    # engine.start() returned successfully
+    RUNNING = "running"  # engine.start() returned successfully
     STOPPING = "stopping"  # engine.cleanup() in flight (lock held)
-    STOPPED = "stopped"    # cleanup done, never started, or start failed
+    STOPPED = "stopped"  # cleanup done, never started, or start failed
 
 
 class Worker:
@@ -137,9 +137,9 @@ class Worker:
                 # produced anything to clean up.
                 self._state = _LifecycleState.STOPPED
                 return
-            assert self._state == _LifecycleState.RUNNING, (
-                f"_cleanup_once invoked in unexpected state: {self._state.value}"
-            )
+            assert (
+                self._state == _LifecycleState.RUNNING
+            ), f"_cleanup_once invoked in unexpected state: {self._state.value}"
             self._state = _LifecycleState.STOPPING
             try:
                 await self.engine.cleanup()
