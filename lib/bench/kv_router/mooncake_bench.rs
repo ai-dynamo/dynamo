@@ -10,7 +10,7 @@ mod mooncake_shared;
 
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
-use mooncake_shared::{MooncakeBenchmarkConfig, MooncakeIndexerConfig, run_benchmark};
+use mooncake_shared::{run_benchmark, MooncakeBenchmarkConfig, MooncakeIndexerConfig};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -124,6 +124,11 @@ struct Args {
     /// trace-replay workers.  Set to 0 (default) to disable.
     #[clap(long, default_value = "0")]
     find_matches_concurrency: usize,
+
+    /// Optional threshold (in blocks) for reporting shallow overlaps where
+    /// `0 < overlap < threshold`.
+    #[clap(long)]
+    overlap_threshold_blocks: Option<u32>,
 
     /// Output path for the shard-size CSV produced when `shard-metrics` feature
     /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
@@ -428,6 +433,7 @@ async fn main() -> anyhow::Result<()> {
                             .inference_worker_duplication_factor,
                         count_events: config.supports_remove(),
                         find_matches_concurrency: args.find_matches_concurrency,
+                        overlap_threshold_blocks: args.overlap_threshold_blocks,
                     },
                 )
                 .await?;
@@ -529,6 +535,7 @@ async fn main() -> anyhow::Result<()> {
                         .inference_worker_duplication_factor,
                     count_events: config.supports_remove(),
                     find_matches_concurrency: args.find_matches_concurrency,
+                    overlap_threshold_blocks: args.overlap_threshold_blocks,
                 },
             )
             .await?;
