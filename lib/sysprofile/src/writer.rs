@@ -20,6 +20,8 @@ use flate2::Compression;
 
 use crate::perfetto;
 
+const FLUSH_INTERVAL_PACKETS: u64 = 64;
+
 struct WriterInner {
     encoder: GzEncoder<File>,
     seq_id: u32,
@@ -30,6 +32,7 @@ struct WriterInner {
     thread_tracks: HashMap<u64, u64>,
     named_tracks: HashMap<String, u64>,
     packets_written: u64,
+    packets_since_flush: u64,
 }
 
 pub struct TraceWriter {
@@ -83,8 +86,17 @@ impl TraceWriter {
                 thread_tracks: HashMap::new(),
                 named_tracks: HashMap::new(),
                 packets_written: 2,
+                packets_since_flush: 0,
             }),
         })
+    }
+
+    fn maybe_flush(inner: &mut WriterInner) {
+        inner.packets_since_flush += 1;
+        if inner.packets_since_flush >= FLUSH_INTERVAL_PACKETS {
+            let _ = inner.encoder.flush();
+            inner.packets_since_flush = 0;
+        }
     }
 
     pub fn intern_name(&self, name: &str) -> u64 {
@@ -148,6 +160,7 @@ impl TraceWriter {
         let trace_bytes = perfetto::wrap_as_trace_packet(&pkt);
         let _ = inner.encoder.write_all(&trace_bytes);
         inner.packets_written += 1;
+        Self::maybe_flush(&mut inner);
     }
 
     pub fn write_slice_end(&self, timestamp_ns: u64) {
@@ -165,6 +178,7 @@ impl TraceWriter {
         let trace_bytes = perfetto::wrap_as_trace_packet(&pkt);
         let _ = inner.encoder.write_all(&trace_bytes);
         inner.packets_written += 1;
+        Self::maybe_flush(&mut inner);
     }
 
     pub fn write_instant(&self, timestamp_ns: u64, name_iid: u64, annotations: &[Vec<u8>]) {

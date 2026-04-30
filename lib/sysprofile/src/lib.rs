@@ -39,4 +39,4 @@ pub mod writer;
 pub use adapter::EngineProfilerAdapter;
 pub use config::SysprofileConfig;
 pub use lockfile::CaptureLock;
-pub use range::{RangeGuard, range, range_with};
+pub use range::{RangeGuard, range, range_with, with_traceparent};

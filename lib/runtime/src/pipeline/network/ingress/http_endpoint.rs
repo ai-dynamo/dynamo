@@ -247,7 +247,8 @@ async fn handle_shared_request(
     let endpoint_name = handler.endpoint_name.clone();
     let instance_id = handler.instance_id;
 
-    tokio::spawn(async move {
+    let sysprofile_tp = traceparent.trace_id.clone().unwrap_or_default();
+    tokio::spawn(dynamo_sysprofile::with_traceparent(sysprofile_tp, async move {
         let _sysprofile = match traceparent.trace_id.as_deref() {
             Some(tid) => dynamo_sysprofile::range_with("dynamo.frontend.recv", tid),
             None => dynamo_sysprofile::range("dynamo.frontend.recv"),
@@ -280,7 +281,7 @@ async fn handle_shared_request(
         // Decrease inflight counter
         inflight.fetch_sub(1, Ordering::SeqCst);
         notify.notify_one();
-    });
+    }));
 
     // Return 202 Accepted immediately (like NATS ack)
     (StatusCode::ACCEPTED, "")

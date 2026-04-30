@@ -17,6 +17,20 @@ use crate::writer::TraceWriter;
 
 static WRITER: OnceLock<TraceWriter> = OnceLock::new();
 
+tokio::task_local! {
+    static TASK_TRACEPARENT: String;
+}
+
+/// Run a future with the given traceparent set as the task-local context.
+/// All `range()` calls inside `f` will automatically annotate slices with this traceparent.
+pub async fn with_traceparent<F: std::future::Future>(traceparent: String, f: F) -> F::Output {
+    TASK_TRACEPARENT.scope(traceparent, f).await
+}
+
+pub fn current_traceparent() -> Option<String> {
+    TASK_TRACEPARENT.try_with(|tp| tp.clone()).ok()
+}
+
 pub fn init_writer(writer: TraceWriter) {
     let _ = WRITER.set(writer);
 }
@@ -97,9 +111,11 @@ impl Drop for RangeGuard {
     }
 }
 
-/// Open a sysprofile range (no traceparent correlation).
+/// Open a sysprofile range. Automatically uses the task-local traceparent
+/// if one was set via `with_traceparent()`.
 pub fn range(stage: &str) -> RangeGuard {
-    RangeGuard::new_inner(stage, None)
+    let tp = current_traceparent();
+    RangeGuard::new_inner(stage, tp.as_deref())
 }
 
 /// Open a sysprofile range with W3C traceparent for per-request correlation.

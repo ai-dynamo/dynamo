@@ -416,7 +416,8 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
+    let sysprofile_tp = headers.get("traceparent").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let response = tokio::spawn(dynamo_sysprofile::with_traceparent(sysprofile_tp, completions(state, request, stream_handle)).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -894,8 +895,9 @@ async fn handler_chat_completions(
     )
     .await;
 
+    let sysprofile_tp = headers.get("traceparent").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let response =
-        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
+        tokio::spawn(dynamo_sysprofile::with_traceparent(sysprofile_tp, chat_completions(state, template, request, stream_handle)).in_current_span())
             .await
             .map_err(|e| {
                 ErrorMessage::internal_server_error(&format!(
@@ -1510,8 +1512,9 @@ async fn handler_responses(
     )
     .await;
 
+    let sysprofile_tp = headers.get("traceparent").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let response =
-        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
+        tokio::spawn(dynamo_sysprofile::with_traceparent(sysprofile_tp, responses(state, template, request, stream_handle)).in_current_span())
             .await
             .map_err(|e| {
                 ErrorMessage::internal_server_error(&format!(

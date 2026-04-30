@@ -293,10 +293,11 @@ struct RequestControlMessage {
     response_type: ResponseType,
     connection_info: ConnectionInfo,
     /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frontend_send_ts_ns: Option<u64>,
+    /// W3C traceparent for sysprofile per-request correlation across components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    traceparent: Option<String>,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {

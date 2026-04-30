@@ -67,7 +67,13 @@ pub fn read_trace(path: &Path) -> anyhow::Result<ParsedTrace> {
     let file = std::fs::File::open(path)?;
     let mut decoder = flate2::read::GzDecoder::new(file);
     let mut buf = Vec::new();
-    decoder.read_to_end(&mut buf)?;
+    match decoder.read_to_end(&mut buf) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            // Truncated gzip stream (writer never called finish()) — use whatever was decoded
+        }
+        Err(e) => return Err(e.into()),
+    }
 
     let source = path
         .file_name()

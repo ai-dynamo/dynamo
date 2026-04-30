@@ -399,9 +399,14 @@ fn section_view_b(result: &MergeResult) -> String {
         .component_utilization
         .iter()
         .filter(|c| {
-            c.component.contains("prefill")
-                || c.component.contains("decode")
-                || c.component.starts_with("engine")
+            let comp = c.component.as_str();
+            let host = c.host.as_str();
+            comp.contains("prefill")
+                || comp.contains("decode")
+                || comp.starts_with("engine")
+                || comp == "transport"
+                || host.contains("prefill")
+                || host.contains("decode")
         })
         .collect();
 
@@ -469,23 +474,26 @@ fn section_view_c(_result: &MergeResult, trace_url: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str("<div class=\"section\"><div class=\"section-h\">View C &mdash; Full Trace in Perfetto</div><div class=\"section-body\">\n");
 
-    let url = trace_url.unwrap_or("merged.pftrace.gz");
+    let has_remote_url = trace_url
+        .map(|u| u.starts_with("http://") || u.starts_with("https://"))
+        .unwrap_or(false);
 
-    // Build Perfetto deep-link with startup commands
-    let startup_commands = serde_json::json!([
-        {"id": "dev.perfetto.PinTracksByRegex", "regex": "dynamo\\..+"},
-    ]);
-    let commands_str = startup_commands.to_string();
-    let encoded_commands = urlencoding::encode(&commands_str);
+    if has_remote_url {
+        let url = trace_url.unwrap();
+        let startup_commands = serde_json::json!([
+            {"id": "dev.perfetto.PinTracksByRegex", "regex": "dynamo\\..+"},
+        ]);
+        let commands_str = startup_commands.to_string();
+        let encoded_commands = urlencoding::encode(&commands_str);
 
-    let perfetto_url = format!(
-        "https://ui.perfetto.dev/#!/?url={}&startupCommands={}",
-        urlencoding::encode(url),
-        encoded_commands,
-    );
+        let perfetto_url = format!(
+            "https://ui.perfetto.dev/#!/?url={}&startupCommands={}",
+            urlencoding::encode(url),
+            encoded_commands,
+        );
 
-    s.push_str(&format!(
-        r#"<div style="display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px">
+        s.push_str(&format!(
+            r#"<div style="display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px">
   <a href="{perfetto_url}" target="_blank" class="perf-link" style="font-size:14px;padding:12px 24px;border-radius:8px">
     Open merged trace in Perfetto UI
   </a>
@@ -497,7 +505,28 @@ fn section_view_c(_result: &MergeResult, trace_url: Option<&str>) -> String {
   <p style="font-size:11px;color:var(--text3)">Then open <code>http://localhost:9001</code> in the Perfetto UI.</p>
 </div>
 "#,
-    ));
+        ));
+    } else {
+        let local_file = trace_url.unwrap_or("merged.pftrace.gz");
+        s.push_str(&format!(
+            r#"<div style="display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px">
+  <a href="https://ui.perfetto.dev" target="_blank" class="perf-link" style="font-size:14px;padding:12px 24px;border-radius:8px">
+    Open Perfetto UI
+  </a>
+  <p style="font-size:12px;color:var(--text3);max-width:600px;text-align:center">
+    Drag and drop <code>{local_file}</code> (or individual <code>.pftrace.gz</code> files from the run
+    directory) into the Perfetto UI to view the full trace.
+  </p>
+  <p style="font-size:12px;color:var(--text3);max-width:600px;text-align:center">
+    To generate a direct deep-link, re-run merge with <code>--trace-url</code> pointing to an HTTP-accessible
+    location for the merged trace file:
+  </p>
+  <pre class="mono" style="background:var(--bg3);padding:12px 16px;border-radius:6px;font-size:12px;color:var(--text2);overflow-x:auto;max-width:100%">dynamo-sysprofile-merge ./run-dir --trace-url https://your-host/traces/{local_file}</pre>
+  <p style="font-size:11px;color:var(--text3)">For large traces (&gt;2 GB), use <code>trace_processor --httpd {local_file}</code> and open <code>http://localhost:9001</code>.</p>
+</div>
+"#,
+        ));
+    }
 
     s.push_str("</div></div>\n");
     s

@@ -55,10 +55,11 @@ struct RequestControlMessage {
     response_type: ResponseType,
     connection_info: ConnectionInfo,
     /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frontend_send_ts_ns: Option<u64>,
+    /// W3C traceparent for sysprofile per-request correlation across components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    traceparent: Option<String>,
 }
 
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
@@ -193,12 +194,19 @@ where
         // used to issue the request on the
         // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
         // calls. all the information here is provided by the [`StreamOptions`] object and/or the dataplane object
+        let sysprofile_tp = dynamo_sysprofile::range::current_traceparent();
         let control_message = RequestControlMessage {
             id: engine_ctx.id().to_string(),
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
             connection_info,
-            frontend_send_ts_ns: None,
+            frontend_send_ts_ns: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+            ),
+            traceparent: sysprofile_tp,
         };
 
         // next build the two part message where we package the connection info and the request into

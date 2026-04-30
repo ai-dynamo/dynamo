@@ -167,7 +167,6 @@ where
         payload: Bytes,
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
-        let _sysprofile = dynamo_sysprofile::range("dynamo.transport.recv");
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -231,6 +230,12 @@ where
                     "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
                 )));
             }
+        };
+
+        // Set up sysprofile tracing with traceparent from the control message
+        let _sysprofile = match control_msg.traceparent.as_deref() {
+            Some(tp) => dynamo_sysprofile::range_with("dynamo.transport.recv", tp),
+            None => dynamo_sysprofile::range("dynamo.transport.recv"),
         };
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
