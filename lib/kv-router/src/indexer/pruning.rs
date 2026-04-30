@@ -78,23 +78,18 @@ pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// An entry in this heap is "stale" if the instant does not match the one in the `timers` map.
     expirations: BinaryHeap<(Reverse<Instant>, K)>,
 
-    /// Threshold for rebuilding the heap.
-    /// The heap will be rebuilt from scratch to remove stale entries.
-    threshold: usize,
-
     /// The expiration duration of the timers.
     ttl: Duration,
 }
 
 impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     /// Creates a new, empty PruneManager.
-    pub fn new(threshold: usize, prune_config: PruneConfig) -> Self {
+    pub fn new(prune_config: PruneConfig) -> Self {
         let ttl = prune_config.ttl;
         PruneManager {
             timers: FxHashMap::default(),
             expirations: BinaryHeap::new(),
             ttl,
-            threshold,
         }
     }
 
@@ -133,7 +128,9 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         }
 
         // Check if we should rebuild the heap to remove stale entries
-        if !self.timers.is_empty() && self.expirations.len() > self.timers.len() * self.threshold {
+        if !self.timers.is_empty()
+            && self.expirations.len() > self.timers.len() * HEAP_REBUILD_THRESHOLD
+        {
             self.rebuild_heap();
         }
     }
@@ -195,7 +192,7 @@ struct WorkerPruneState {
 impl WorkerPruneState {
     fn new(config: PruneConfig) -> Self {
         Self {
-            timers: PruneManager::new(HEAP_REBUILD_THRESHOLD, config),
+            timers: PruneManager::new(config),
         }
     }
 
@@ -632,7 +629,7 @@ mod tests {
     async fn test_prune_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
         let prune_config = PruneConfig { ttl: TTL };
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
 
         pm.insert(vec![1, 2, 3]);
         assert!(pm.get_expiry(&1).is_some());
@@ -654,7 +651,7 @@ mod tests {
         // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
         const TTL: Duration = Duration::from_millis(50);
         let prune_config = PruneConfig { ttl: TTL };
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
 
         // Initial insert and capture the original expiry.
         pm.insert(vec![42]);
