@@ -18,17 +18,22 @@ worker placement.
 This is passive observability. Agent context does not change routing,
 scheduling, or cache behavior.
 
-```text
-LLM request:
-  harness -> OpenAI-compatible request with nvext.agent_context
-          -> Dynamo request_end record
-          -> trace bus -> jsonl/jsonl_gz/stderr
+```mermaid
+sequenceDiagram
+    participant Harness as Agent harness
+    participant Dynamo as Dynamo frontend
+    participant Relay as Tool-event relay
+    participant Bus as Agent trace bus
+    participant Sink as Trace sinks
 
-Tool event:
-  harness -> local ZMQ PUB
-          -> Dynamo tool relay
-          -> internal event-plane hop
-          -> trace bus -> jsonl/jsonl_gz/stderr
+    Harness->>Dynamo: LLM request + nvext.agent_context + x-request-id
+    Dynamo->>Bus: request_end record with Dynamo metrics
+    Bus->>Sink: jsonl / jsonl_gz / stderr
+
+    Harness->>Relay: ZMQ tool_start / tool_end / tool_error
+    Relay->>Relay: validate harness AgentTraceRecord
+    Relay->>Bus: tool record
+    Bus->>Sink: same trace stream
 ```
 
 ## Step 1: Enable Dynamo Trace Output
@@ -167,7 +172,11 @@ class ZmqToolEventPublisher:
         )
 ```
 
-The record should use the same `agent_context` as the surrounding LLM calls:
+The record must include `agent_context`. Tool events should use the same
+`workflow_type_id`, `workflow_id`, and `program_id` as the surrounding LLM calls;
+include `parent_program_id` for subagent tools when it is available. Dynamo uses
+these fields to group request and tool records into the same workflow/program
+lanes.
 
 ```json
 {
