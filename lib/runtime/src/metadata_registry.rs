@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process-local `(slug, suffix, filename) -> PathBuf` registry backing
-//! the system_status_server's `/v1/metadata/{slug}/{suffix}/{*filename}`
-//! handler.
+//! Worker-side index from a model metadata file's identity to its
+//! on-disk path. When a worker self-hosts metadata, it registers each
+//! file here and rewrites the MDC's `CheckedFile.path` to a
+//! `/v1/metadata/{slug}/{suffix}/{filename}` URL on its own
+//! `system_status_server`. The route handler reads paths back out by
+//! the same key and streams the bytes to the frontend, which
+//! blake3-verifies them against the MDC.
 //!
-//! `suffix` partitions registrations that share a slug — typically a
-//! LoRA slug, or `"_base"` for the base model. Without it, detaching
-//! one registration would wipe entries another still serves.
+//! `suffix` is the LoRA slug (or `"_base"` for non-LoRA). It scopes
+//! each registration so detaching a LoRA doesn't unregister the base
+//! model's files (or vice versa).
 
 use std::collections::HashMap;
 use std::path::PathBuf;

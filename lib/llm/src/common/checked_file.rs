@@ -17,7 +17,6 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct CheckedFile {
-    /// Either a path on local disk or a remote URL.
     path: Either<PathBuf, Url>,
 
     /// Checksum of the contents of path

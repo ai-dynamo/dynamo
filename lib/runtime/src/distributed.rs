@@ -81,7 +81,7 @@ pub struct DistributedRuntime {
     // Registry for /engine/* route callbacks
     engine_routes: crate::engine_routes::EngineRouteRegistry,
 
-    // Backs `/v1/metadata/{model_slug}/{filename}`.
+    // Backs `/v1/metadata/{model_slug}/{model_suffix}/{filename}`.
     metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
 
     // Resolved event transport kind — set once at construction time from

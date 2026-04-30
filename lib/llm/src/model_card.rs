@@ -538,31 +538,35 @@ impl ModelDeploymentCard {
         matches!(self.model_input, ModelInput::Tokens)
     }
 
-    /// Iterate every populated metadata `CheckedFile` on this MDC, in
-    /// deterministic slot order: model_info, tokenizer, prompt_formatter,
+    /// Walk populated metadata `CheckedFile` slots in deterministic
+    /// order: model_info, tokenizer, prompt_formatter,
     /// chat_template_file, gen_config.
-    pub fn iter_metadata_files(&self) -> impl Iterator<Item = &CheckedFile> {
-        let model_info = self.model_info.as_ref().map(|m| match m {
-            ModelInfoType::HfConfigJson(cf) => cf,
-        });
-        let tokenizer = self.tokenizer.as_ref().map(|t| match t {
-            TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => cf,
-        });
-        let prompt_formatter = self.prompt_formatter.as_ref().map(pf_checked_file);
-        let chat_template_file = self.chat_template_file.as_ref().map(pf_checked_file);
-        let gen_config = self.gen_config.as_ref().map(|g| match g {
-            GenerationConfig::HfGenerationConfigJson(cf) => cf,
-        });
-
-        [
-            model_info,
-            tokenizer,
-            prompt_formatter,
-            chat_template_file,
-            gen_config,
-        ]
-        .into_iter()
-        .flatten()
+    pub fn iter_metadata_files(&self) -> Vec<&CheckedFile> {
+        let mut out: Vec<&CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_ref() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_ref() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_ref() {
+            out.push(pf_checked_file(p));
+        }
+        if let Some(c) = self.chat_template_file.as_ref() {
+            out.push(pf_checked_file(c));
+        }
+        if let Some(g) = self.gen_config.as_ref() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
     }
 
     /// Mutable variant of [`Self::iter_metadata_files`].
